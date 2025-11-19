@@ -1,11 +1,21 @@
 import numpy as np
 from numpy.typing import NDArray
-from typing import Union
+from typing import Union, overload
 
 Numeric = Union[float, np.number, NDArray]
 
 
-def GetIntervalIndex(pos: Numeric, interval_points: NDArray):
+@overload
+def GetIntervalIndex(pos: float | np.number, interval_points: NDArray) -> np.intp: ...
+
+
+@overload
+def GetIntervalIndex(pos: NDArray, interval_points: NDArray) -> NDArray[np.intp]: ...
+
+
+def GetIntervalIndex(
+    pos: Numeric, interval_points: NDArray
+) -> np.intp | NDArray[np.intp]:
     """
     获得当前位置所处区间的索引
     Args:
@@ -23,7 +33,7 @@ def FindSpeedRiseEntryAndFallExit(
     interval_points,
     start_idx: int | None = None,
     end_idx: int | None = None,
-):
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
     """
     返回所有限速开始上升的入口点列表和所有限速下降的出口点列表。
     """

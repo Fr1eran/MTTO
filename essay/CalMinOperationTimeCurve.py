@@ -36,13 +36,16 @@ with open("data/rail/safeguard/levi_curves_part.pkl", "rb") as f:
     levi_curves_part = pickle.load(f)
 with open("data/rail/safeguard/brake_curves_part.pkl", "rb") as f:
     brake_curves_part = pickle.load(f)
+
+
+gamma: float = 0.99
 sgu = SafeGuardUtility(
     speed_limits=speed_limits,
     speed_limit_intervals=speed_limit_intervals,
     idp_points=idp_points,
     levi_curves_part_list=levi_curves_part,
     brake_curves_part_list=brake_curves_part,
-    gamma=0.99,
+    gamma=gamma,
 )
 
 track = Track(slopes, slope_intervals, speed_limits.tolist(), speed_limit_intervals)
@@ -63,7 +66,7 @@ task = Task(
     max_arr_time_error=120.0,
     max_stop_error=0.3,
 )
-ors = ORS(vehicle=vehicle, track=track, task=task, gamma=0.99)
+ors = ORS(vehicle=vehicle, track=track, task=task, gamma=gamma)
 
 # 初始化位置和速度
 begin_pos = ly_zp
@@ -106,7 +109,6 @@ ax.legend(loc="upper right")
 # 初始化动态元素的引用（起点和运行曲线）
 start_point = None
 curve_line = None
-info_text = None
 
 # 添加说明文本
 instructions = (
@@ -128,16 +130,16 @@ fig.text(
 
 # 更新标题显示命令提示
 ax.set_title(
-    "极限操作模式下的最小运行时间曲线\n(请在图形窗口中按 Y/I/P/Q 键操作)", fontsize=12
+    "极限操作模式下的最短运行时间曲线\n(请在图形窗口中按 Y/I/P/Q 键操作)", fontsize=12
 )
 
 
 # 绘制曲线的通用函数
-def draw_curve(pos, speed):
+def draw_curve(pos, speed) -> bool:
     global start_point, curve_line, info_text
 
     try:
-        # 计算最小运行时间曲线
+        # 计算最短运行时间曲线
         min_curve_pos_array, min_curve_speed_array = ors.CalMinRuntimeCurve(
             begin_pos=pos, begin_speed=speed
         )
@@ -147,8 +149,6 @@ def draw_curve(pos, speed):
             start_point.remove()
         if curve_line is not None:
             curve_line.remove()
-        if info_text is not None:
-            info_text.remove()
 
         # 绘制新的起点
         start_point = ax.scatter(
@@ -164,11 +164,11 @@ def draw_curve(pos, speed):
             linewidths=1.5,
         )
 
-        # 绘制新的最小运行时间曲线
+        # 绘制新的最短运行时间曲线
         (curve_line,) = ax.plot(
             min_curve_pos_array,
             min_curve_speed_array * 3.6,
-            label="最小运行时间曲线",
+            label="最短运行时间曲线",
             color="blue",
             alpha=0.7,
             linewidth=2,
@@ -176,7 +176,7 @@ def draw_curve(pos, speed):
 
         # 更新标题
         ax.set_title(
-            f"极限操作模式下的最小运行时间曲线\n起点: ({pos:.2f}m, {speed:.2f}m/s) | 按 Y/I/P/Q 操作",
+            f"极限操作模式下的最短运行时间曲线\n起点: ({pos:.2f}m, {speed:.2f}m/s) | 按 Y/I/P/Q 操作",
             fontsize=12,
         )
 
@@ -207,6 +207,9 @@ def on_key(event):
         while sgu.DetectDanger(pos=begin_pos, speed=begin_speed):
             begin_pos = float(np.random.uniform(ly_zp, pa_zp))
             begin_speed = float(np.random.uniform(0.0, max_speed))
+
+        if not draw_curve(begin_pos, begin_speed):
+            print("[I] 曲线绘制失败！")
 
     elif key == "i":
         # 手动输入起点位置和速度

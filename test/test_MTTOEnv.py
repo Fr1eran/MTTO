@@ -64,7 +64,7 @@ def mttoenv():
     maglevttoenv = MTTOEnv(
         vehicle=vehicle,
         trackprofile=trackprofile,
-        safeguard=guard,
+        safeguardutil=guard,
         ds=100,
         render_mode="human",
     )

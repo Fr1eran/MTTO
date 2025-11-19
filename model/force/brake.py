@@ -2,7 +2,7 @@ import numpy as np
 from numpy.typing import NDArray
 from typing import Union
 
-Numeric = Union[float, np.number, NDArray]
+Numeric = Union[float, np.floating, NDArray]
 
 
 def SledgeFrictionalBrake(

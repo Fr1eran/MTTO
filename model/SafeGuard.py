@@ -1,7 +1,7 @@
 import numpy as np
 from numpy.typing import NDArray
 from matplotlib.axes import Axes
-from typing import Sequence
+from typing import Sequence, overload
 
 from utils.misc import GetIntervalIndex
 from utils.curve import Padding2CurvesList, ConcatenateCurvesWithNaN, DrawRegion
@@ -23,7 +23,9 @@ class SafeGuardCurves:
     def __init__(self, trackprofile: TrackProfile):
         self.trackprofile = trackprofile
 
-    def _calculate_curves_backward(self, begins, ds, acc_func) -> list[NDArray]:
+    def _calculate_curves_backward(
+        self, begins: NDArray[np.floating], ds: float, acc_func
+    ) -> list[NDArray]:
         """
         通用防护曲线计算方法
         Args:
@@ -59,24 +61,28 @@ class SafeGuardCurves:
             curve_list.append(np.stack([s_list[::-1], v_arr[:idx][::-1]], axis=0))
         return curve_list
 
-    def CalLeviCurves(self, apoffsets, vehicle: Vehicle, ds):
+    def CalcLeviCurves(
+        self, apoffsets: NDArray[np.floating], vehicle: Vehicle, ds: float
+    ):
         """
         根据车辆计算辅助停车区安全悬浮曲线
         """
         return self._calculate_curves_backward(
             apoffsets,
             ds,
-            lambda v, slope: VehicleDynamic.CalLeviDacc(vehicle, v, slope),
+            lambda v, slope: VehicleDynamic.CalcLeviDacc(vehicle, v, slope),
         )
 
-    def CalBrakeCurves(self, dpoffsets, vehicle: Vehicle, ds):
+    def CalcBrakeCurves(
+        self, dpoffsets: NDArray[np.floating], vehicle: Vehicle, ds: float
+    ):
         """
         根据车辆计算辅助停车区安全制动曲线
         """
         return self._calculate_curves_backward(
             dpoffsets,
             ds,
-            lambda v, slope: VehicleDynamic.CalBrakeDacc(vehicle, v, slope, 0),
+            lambda v, slope: VehicleDynamic.CalcBrakeDacc(vehicle, v, slope, 0),
         )
 
 
@@ -98,12 +104,13 @@ class SafeGuardUtility:
 
     def __init__(
         self,
+        *,
         speed_limits: Sequence[float] | NDArray[np.floating],
         speed_limit_intervals: Sequence[float] | NDArray[np.floating],
         idp_points: NDArray[np.floating],
         levi_curves_part_list: list[NDArray[np.floating]],
         brake_curves_part_list: list[NDArray[np.floating]],
-        gamma: float = 0.95,
+        gamma: float,
     ):
         self.speed_limits = np.asarray(speed_limits)
         self.speed_limit_intervals = np.asarray(speed_limit_intervals)
@@ -129,21 +136,35 @@ class SafeGuardUtility:
         self.numofregions = idp_points.shape[1]
         self.gamma = gamma
 
+    @overload
     def DetectDanger(
-        self, pos: float | np.number | NDArray, speed: float | np.number | NDArray
-    ):
+        self, pos: float | np.number, speed: float | np.number
+    ) -> np.bool_: ...
+
+    @overload
+    def DetectDanger(
+        self, pos: NDArray[np.floating], speed: NDArray[np.floating]
+    ) -> NDArray[np.bool_]: ...
+
+    def DetectDanger(
+        self,
+        pos: float | np.number | NDArray[np.floating],
+        speed: float | np.number | NDArray[np.floating],
+    ) -> np.bool_ | NDArray[np.bool_]:
         """检查速度是否超出限速或落入危险速度域
         Args:
-            pos : 磁浮列车当前位置，单位：m
-            speed : 磁浮列车当前速度，单位：m/s
+            pos : 磁浮列车当前位置, 单位: m
+            speed : 磁浮列车当前速度, 单位: m/s
         Returns:
             当前磁浮列车状态是否危险
         """
-        return self._DetectSpeedExceed(pos, speed) | self._DetectDangerousRegionEnter(
-            pos, speed
-        )
+        result1 = self._DetectSpeedExceed(pos, speed)
+        result2 = self._DetectDangerousRegionEnter(pos, speed)
+        return result1 | result2  # type: ignore
 
-    def _DetectSpeedExceed(self, pos, speed):
+    def _DetectSpeedExceed(
+        self, pos: float | np.number | NDArray, speed: float | np.number | NDArray
+    ) -> np.bool_ | NDArray[np.bool_]:
         speed_limit = self.speed_limits[
             np.clip(
                 GetIntervalIndex(pos, self.speed_limit_intervals),
@@ -153,7 +174,9 @@ class SafeGuardUtility:
         ]
         return speed >= speed_limit * self.gamma
 
-    def _DetectDangerousRegionEnter(self, pos, speed):
+    def _DetectDangerousRegionEnter(
+        self, pos: float | np.number | NDArray, speed: float | np.number | NDArray
+    ) -> bool | NDArray[np.bool_]:
         result = np.zeros_like(pos, dtype=bool)
         for i in range(self.numofregions):
             # 区间判断
@@ -162,12 +185,12 @@ class SafeGuardUtility:
             )
             # 上下界插值
             above_v = np.interp(
-                pos,
+                pos,  # type: ignore[arg-type]
                 self.levi_curves_part_x_padded[i],
                 self.levi_curves_part_y_padded[i],
             )
             below_v = np.interp(
-                pos,
+                pos,  # type: ignore[arg-type]
                 self.brake_curves_part_x_padded[i],
                 self.brake_curves_part_y_padded[i],
             )
@@ -179,7 +202,7 @@ class SafeGuardUtility:
         else:
             return result
 
-    def render(self, ax: Axes):
+    def render(self, ax: Axes) -> None:
         """绘制区间限速、危险交叉点、部分安全防护曲线和围成的危险速度域"""
         ax.step(
             self.speed_limit_intervals[:-1],

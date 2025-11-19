@@ -64,8 +64,8 @@ dps = np.append(dps, pa_end)
 # 加速区需要计算安全制动曲线
 dps = np.insert(dps, 0, az_end)
 
-levi_curves_list = cal_SGC.CalLeviCurves(aps, vehicle, 1)
-brake_curves_list = cal_SGC.CalBrakeCurves(dps, vehicle, 1)
+levi_curves_list = cal_SGC.CalcLeviCurves(aps, vehicle, 1)
+brake_curves_list = cal_SGC.CalcBrakeCurves(dps, vehicle, 1)
 
 
 plt.rcParams["font.sans-serif"] = ["SimHei"]
@@ -189,6 +189,7 @@ safeguard = SafeGuardUtility(
     idp_points=idp_points,
     levi_curves_part_list=levi_curves_part,
     brake_curves_part_list=brake_curves_part,
+    gamma=0.99,
 )
 
 # 绘制区间限速、危险交叉点、部分安全防护曲线和围成的危险速度域

@@ -8,7 +8,7 @@ import pandas as pd
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from model.Vehicle import Vehicle
-from utils.CalEnergyConsumption import CalEnergyConsumption
+from utils.CalcEnergy import CalcEnergyCumul
 from model.Track import Track, TrackProfile
 
 # 绘制龙阳路到浦东国际机场的实际运行速度-里程曲线
@@ -59,13 +59,13 @@ trackprofile = TrackProfile(track=track)
 
 vehicle = Vehicle(mass=317.5, numoftrainsets=5, length=128.5)
 
-mechanic_energy_consumption, levi_energy_consumption = CalEnergyConsumption(
-    pos=distance,
-    speed=v_km / 3.6,
-    acc=accelerate,
+mechanic_energy_consumption, levi_energy_consumption = CalcEnergyCumul(
+    pos_arr=distance.to_numpy(dtype=np.float64),
+    speed_arr=v_km.to_numpy(dtype=np.float64) / 3.6,
+    acc_arr=accelerate.to_numpy(dtype=np.float64),
     vehicle=vehicle,
     trackprofile=trackprofile,
-    travel_time=travel_time,
+    travel_time_arr=travel_time.to_numpy(dtype=np.float64),
 )
 # 绘制列车能耗随里程变化曲线
 fig3, ax3 = plt.subplots(figsize=(10, 6))

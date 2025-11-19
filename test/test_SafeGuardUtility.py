@@ -14,6 +14,7 @@ def safeguard():
     with open("data/rail/raw/speed_limits.json", "r", encoding="utf-8") as f:
         sl_data = json.load(f)
         s_limits = sl_data["speed_limits"]
+        s_limits = np.asarray(s_limits, dtype=np.float64) / 3.6
         s_intervals = sl_data["intervals"]
     idp_points = np.load(file="data/rail/safeguard/idp_points.npy")
     with open("data/rail/safeguard/levi_curves_part.pkl", "rb") as f:
@@ -47,9 +48,15 @@ def test_detect_danger(safeguard):
             20060,
             6189.5,
             8548,
-        ]
+        ],
+        dtype=np.float64,
     )
-    v = np.array([42, 8, 16, 9.5, 10, 15, 61, 45, 66, 74, 92, 90, 378, 372])
+    speed = (
+        np.array(
+            [42, 8, 16, 9.5, 10, 15, 61, 45, 66, 74, 92, 90, 378, 372], dtype=np.float64
+        )
+        / 3.6
+    )
     expected_result = np.array(
         [
             False,
@@ -68,5 +75,5 @@ def test_detect_danger(safeguard):
             False,
         ]
     )
-    result = safeguard.DetectDanger(pos, v)
+    result = safeguard.DetectDanger(pos, speed)
     np.testing.assert_array_equal(result, expected_result)

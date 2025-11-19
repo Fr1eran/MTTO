@@ -1,10 +1,15 @@
 from dataclasses import dataclass
+import numpy as np
+from typing import Union
+from numpy.typing import NDArray
 from model.force.resis import AirResis, GuidewayVortexResis, LinearGeneResis, SlopeResis
 from model.force.brake import (
     SledgeFrictionalBrake,
     VortexBrake,
     WearPlateFrictionalBrake,
 )
+
+Numeric = Union[float, np.floating, NDArray[np.floating]]
 
 
 @dataclass
@@ -19,7 +24,7 @@ class Vehicle:
 
 class VehicleDynamic:
     @staticmethod
-    def CalLeviDacc(vehicle: Vehicle, speed, slope):
+    def CalcLeviDacc(vehicle: Vehicle, speed: Numeric, slope: Numeric):
         """
         计算列车在给定速度、坡度下受到的悬浮减速度
 
@@ -51,7 +56,7 @@ class VehicleDynamic:
         return f_total / vehicle.mass
 
     @staticmethod
-    def CalBrakeDacc(vehicle: Vehicle, speed, slope, level):
+    def CalcBrakeDacc(vehicle: Vehicle, speed: Numeric, slope: Numeric, level: int):
         """
         计算列车在给定速度、坡度、制动等级下的安全制动减速度
 
@@ -95,7 +100,9 @@ class VehicleDynamic:
         return f_total / vehicle.mass
 
     @staticmethod
-    def CalLongitudinalForce(vehicle: Vehicle, acc, speed, slope):
+    def CalcLongitudinalForce(
+        vehicle: Vehicle, acc: Numeric, speed: Numeric, slope: Numeric
+    ):
         """
         计算列车在给定加速度、速度、坡度下受到牵引系统施加的纵向力
 

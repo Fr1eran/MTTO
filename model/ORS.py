@@ -4,6 +4,7 @@ from typing import NamedTuple, TypedDict
 from model.Vehicle import Vehicle
 from model.Track import Track, TrackProfile
 from model.Task import Task
+from utils.CalcEnergy import CalcEnergy
 
 
 class GeneralOperation(NamedTuple):
@@ -45,7 +46,7 @@ class ORS:
     """Operation Reference System"""
 
     def __init__(
-        self, vehicle: Vehicle, track: Track, task: Task, gamma: float
+        self, *, vehicle: Vehicle, track: Track, task: Task, gamma: float
     ) -> None:
         self.vehicle = vehicle
         self.track = track
@@ -240,6 +241,7 @@ class ORS:
     def _cal_withnocruise_scenario(
         self, begin_pos: float, begin_speed: float, end_pos: float, end_speed: float
     ) -> tuple[list[GeneralOperation], float | None]:
+        """计算限速区间内不存在巡航阶段的操作模式序列"""
         operation = []
         min_brake_distance = (begin_speed**2 - end_speed**2) / (
             2 * self.vehicle.max_dacc
@@ -289,6 +291,7 @@ class ORS:
         ma_time: float,
         mb_time: float,
     ) -> list[GeneralOperation]:
+        """计算限速区间内存在巡航阶段的操作模式序列"""
         operation = []
         cruise_speed = self.track.speed_limits[cruise_interval] * self.gamma
         cruise_time = (cruise_end_pos - cruise_begin_pos) / cruise_speed
@@ -299,7 +302,7 @@ class ORS:
 
     def _cal_min_runtime_operation(self, current_pos: float, current_speed: float):
         """
-        计算列车在给定线路条件和约束下的最小运行时间操作序列
+        计算列车在给定线路条件和约束下的最短运行时间操作序列
         """
         tow_begin_speed = current_speed
         tow_begin_pos = current_pos
@@ -561,6 +564,7 @@ class ORS:
     def CalMinRuntimeCurve(
         self, begin_pos: float | np.number, begin_speed: float | np.number
     ) -> tuple[NDArray, NDArray]:
+        """计算在给定当前位置、速度下的最小运行速度曲线"""
         current_pos = float(begin_pos)
         current_speed = float(begin_speed)
         operations = self._cal_min_runtime_operation(
@@ -594,3 +598,97 @@ class ORS:
             current_speed = curve_speed_array[-1]
 
         return curve_pos_array.astype(np.float32), curve_speed_array.astype(np.float32)
+
+    def CalRefEnergyAndOperationTime(
+        self,
+        begin_pos: float | np.floating,
+        begin_speed: float | np.floating,
+        displacement: float | np.floating,
+    ) -> tuple[float, float, float]:
+        """
+        计算在给定当前位置、速度、目标位移量
+        和当前参考操作模式下的能耗和运行时间
+
+        Args:
+            begin_pos: 起始位置(m)
+            begin_speed: 起始速度(m/s)
+            displacement: 目标位移量(m)
+
+        Returns:
+            ref_mechanic_energy_consumption: 参考机械能耗(J)
+            ref_leviated_energy_consumption: 参考悬浮能耗(J)
+            ref_operation_time: 参考运行时间(s)
+        """
+        ref_operations: list[GeneralOperation] = self._cal_min_runtime_operation(
+            current_pos=float(begin_pos), current_speed=float(begin_speed)
+        )
+
+        ref_mec = 0.0
+        ref_lec = 0.0
+        ref_operation_time = 0.0
+        accumulated_displacement = 0.0
+
+        current_pos_i = float(begin_pos)
+        current_speed_i = float(begin_speed)
+
+        # 遍历每个操作段，累计能耗和时间直到达到目标位移
+        for acc, operation_time in ref_operations:
+            # 计算该操作段的位移
+            segment_displacement = (
+                current_speed_i * operation_time + 0.5 * acc * operation_time**2
+            )
+
+            # 判断是否超过目标位移
+            if accumulated_displacement + segment_displacement >= float(displacement):
+                # 计算到达目标位移所需的实际时间
+                remaining_displacement = float(displacement) - accumulated_displacement
+
+                # 求解运动学方程: s = v0*t + 0.5*a*t^2
+                if np.abs(acc) < 1e-9:
+                    # 匀速运动
+                    actual_time = remaining_displacement / np.maximum(
+                        np.abs(current_speed_i), 1e-6
+                    )
+                else:
+                    # 变速运动，求解二次方程
+                    # 0.5*a*t^2 + v0*t - s = 0
+                    discriminant = current_speed_i**2 + 2 * acc * remaining_displacement
+                    actual_time = (-current_speed_i + np.sqrt(discriminant)) / acc
+
+                # 计算该段的能耗
+                MEC, LEC = CalcEnergy(
+                    begin_pos=current_pos_i,
+                    begin_velocity=current_speed_i,
+                    acc=acc,
+                    displacement=remaining_displacement,
+                    operation_time=actual_time,
+                    vehicle=self.vehicle,
+                    trackprofile=self.trackprofile,
+                )
+
+                ref_mec += MEC
+                ref_lec += LEC
+                ref_operation_time += actual_time
+                break
+            else:
+                # 该段未达到目标位移，计算完整段的能耗
+                MEC, LEC = CalcEnergy(
+                    begin_pos=current_pos_i,
+                    begin_velocity=current_speed_i,
+                    acc=acc,
+                    displacement=segment_displacement,
+                    operation_time=operation_time,
+                    vehicle=self.vehicle,
+                    trackprofile=self.trackprofile,
+                )
+
+                ref_mec += MEC
+                ref_lec += LEC
+                ref_operation_time += operation_time
+                accumulated_displacement += segment_displacement
+
+                # 更新当前状态
+                current_pos_i += segment_displacement
+                current_speed_i += acc * operation_time
+
+        return float(ref_mec), float(ref_lec), float(ref_operation_time)

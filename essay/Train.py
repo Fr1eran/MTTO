@@ -9,8 +9,9 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from rl.MTTOEnv import MTTOEnv
 from model.Vehicle import Vehicle
 from model.SafeGuard import SafeGuardUtility
-from model.Track import TrackProfile
-from gymnasium.wrappers import FlattenObservation, TimeLimit
+from model.Track import Track
+from model.Task import Task
+from gymnasium.wrappers import FlattenObservation
 from stable_baselines3 import PPO
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.monitor import Monitor
@@ -23,6 +24,7 @@ with open("data/rail/raw/slopes.json", "r", encoding="utf-8") as f:
 with open("data/rail/raw/speed_limits.json", "r", encoding="utf-8") as f:
     sl_data = json.load(f)
     s_limits = sl_data["speed_limits"]
+    s_limits = np.asarray(s_limits, dtype=np.float64) / 3.6
     s_intervals = sl_data["intervals"]
 # 读取车站数据
 with open("data/rail/raw/stations.json", "r", encoding="utf-8") as f:
@@ -48,44 +50,44 @@ guard = SafeGuardUtility(
     brake_curves_part_list=brake_curves_part,
     gamma=0.95,
 )
-trackprofile = TrackProfile(
+track = Track(
     slopes=slopes,
-    slopeintervals=slope_intervals,
+    slope_intervals=slope_intervals,
     speed_limits=s_limits,
     speed_limit_intervals=s_intervals,
 )
 vehicle = Vehicle(mass=317.5, numoftrainsets=5, length=128.5)
-vehicle.SetStartingPosition(ly_zp)
-vehicle.SetStartingSpeed(0.0)
-vehicle.SetDestination(pa_zp)
-vehicle.SetScheduleTime(500.0)
+task = Task(
+    starting_position=ly_zp,
+    starting_velocity=0.0,
+    destination=pa_zp,
+    schedule_time=440.0,
+    max_acc_change=0.75,
+    max_arr_time_error=120,
+    max_stop_error=0.3,
+)
+
 ds = 100.0
 
 maglevttoenv_train = MTTOEnv(
     vehicle=vehicle,
-    trackprofile=trackprofile,
-    safeguard=guard,
+    track=track,
+    safeguardutil=guard,
+    task=task,
     ds=ds,
-    render_mode=None,
 )
 
 maglevttoenv_eval = MTTOEnv(
     vehicle=vehicle,
-    trackprofile=trackprofile,
-    safeguard=guard,
+    track=track,
+    safeguardutil=guard,
+    task=task,
     ds=ds,
     render_mode="human",
 )
 
-max_episode_steps = int(abs(vehicle.destination - vehicle.starting_position) / ds) + 5
-maglevttoenv_train = FlattenObservation(
-    TimeLimit(maglevttoenv_train, max_episode_steps=max_episode_steps)
-)
-maglevttoenv_eval = Monitor(
-    FlattenObservation(
-        TimeLimit(maglevttoenv_eval, max_episode_steps=max_episode_steps)
-    )
-)
+maglevttoenv_train = FlattenObservation(maglevttoenv_train)
+maglevttoenv_eval = Monitor(FlattenObservation(maglevttoenv_eval))
 
 
 model = PPO(
@@ -105,9 +107,9 @@ model = PPO(
     ent_coef=0.08,  # 增加探索
     vf_coef=1.0,  # 增加价值函数权重
     max_grad_norm=0.5,
-    policy_kwargs=dict(
-        net_arch=dict(pi=[512, 256, 128], vf=[512, 256, 128]),  # 改进网络结构
-    ),
+    # policy_kwargs=dict(
+    #     net_arch=dict(pi=[512, 256, 128], vf=[512, 256, 128]),  # 改进网络结构
+    # ),
 )
 
 # Evaluate before train

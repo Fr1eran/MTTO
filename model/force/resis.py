@@ -2,7 +2,7 @@ import numpy as np
 from numpy.typing import NDArray
 from typing import Union
 
-Numeric = Union[float, np.number, NDArray]
+Numeric = Union[float, np.floating, NDArray]
 
 
 def AddedResis(
@@ -22,7 +22,7 @@ def AddedResis(
         列车收到的附加阻力(单位: kN)
     """
 
-    speed_km = 3.6 * np.asarray(speed, dtype=np.float32)
+    speed_km = 3.6 * np.asarray(speed, dtype=np.float64)
     added_resis_force = np.piecewise(
         speed_km,
         [

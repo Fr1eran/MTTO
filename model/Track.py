@@ -1,13 +1,13 @@
 import numpy as np
 from numpy.typing import DTypeLike, NDArray
-from typing import Union
+from typing import Union, overload
 from scipy.interpolate import CubicSpline
 from dataclasses import dataclass
 
 from utils.misc import GetIntervalIndex
 
 
-Numeric = Union[float, np.number, NDArray]
+Numeric = Union[float, np.floating, NDArray[np.floating]]
 
 
 @dataclass
@@ -58,13 +58,31 @@ class TrackProfile:
             self.slope_intervals, self.z, bc_type="not-a-knot"
         )
 
+    @overload
+    def GetSlope(
+        self,
+        pos: float | np.floating,
+        interpolate: bool = False,
+        *,
+        dtype: DTypeLike = np.float32,
+    ) -> np.floating: ...
+
+    @overload
+    def GetSlope(
+        self,
+        pos: NDArray[np.floating],
+        interpolate: bool = False,
+        *,
+        dtype: DTypeLike = np.float32,
+    ) -> NDArray[np.floating]: ...
+
     def GetSlope(
         self,
         pos: Numeric,
         interpolate: bool = False,
         *,
         dtype: DTypeLike = np.float32,
-    ) -> DTypeLike | NDArray:
+    ) -> np.floating | NDArray[np.floating]:
         """
         根据当前位置计算相应的坡度值。
 
@@ -85,9 +103,26 @@ class TrackProfile:
             ]
         return slope.astype(dtype=dtype)
 
+    @overload
+    def GetNextSlopeAndDistance(
+        self, pos: float | np.floating, direction: int, *, dtype: DTypeLike = np.float32
+    ) -> tuple[np.floating, np.floating]: ...
+
+    @overload
+    def GetNextSlopeAndDistance(
+        self,
+        pos: NDArray[np.floating],
+        direction: int,
+        *,
+        dtype: DTypeLike = np.float32,
+    ) -> tuple[NDArray[np.floating], NDArray[np.floating]]: ...
+
     def GetNextSlopeAndDistance(
         self, pos: Numeric, direction: int, *, dtype: DTypeLike = np.float32
-    ) -> tuple[DTypeLike, DTypeLike] | tuple[NDArray, NDArray]:
+    ) -> (
+        tuple[np.floating, np.floating]
+        | tuple[NDArray[np.floating], NDArray[np.floating]]
+    ):
         """
         根据当前位置和运动方向返回当前坡度和下一区间坡度的变化量和当前位置与下一坡度区间的距离
 
@@ -117,9 +152,19 @@ class TrackProfile:
 
         return next_slope.astype(dtype=dtype), distance.astype(dtype=dtype)
 
+    @overload
+    def GetSpeedlimit(
+        self, pos: float | np.floating, *, dtype: DTypeLike = np.float32
+    ) -> np.floating: ...
+
+    @overload
+    def GetSpeedlimit(
+        self, pos: NDArray[np.floating], *, dtype: DTypeLike = np.float32
+    ) -> NDArray[np.floating]: ...
+
     def GetSpeedlimit(
         self, pos: Numeric, *, dtype: DTypeLike = np.float32
-    ) -> DTypeLike | NDArray:
+    ) -> np.floating | NDArray[np.floating]:
         """
         根据当前位置返回对应的限速值。
         Args:
@@ -136,9 +181,26 @@ class TrackProfile:
         ]
         return speed_limit.astype(dtype=dtype)
 
+    @overload
+    def GetNextSpeedlimitAndDistance(
+        self, pos: float | np.floating, direction: int, *, dtype: DTypeLike = np.float32
+    ) -> tuple[np.floating, np.floating]: ...
+
+    @overload
+    def GetNextSpeedlimitAndDistance(
+        self,
+        pos: NDArray[np.floating],
+        direction: int,
+        *,
+        dtype: DTypeLike = np.float32,
+    ) -> tuple[NDArray[np.floating], NDArray[np.floating]]: ...
+
     def GetNextSpeedlimitAndDistance(
         self, pos: Numeric, direction: int, *, dtype: DTypeLike = np.float32
-    ) -> tuple[DTypeLike, DTypeLike] | tuple[NDArray, NDArray]:
+    ) -> (
+        tuple[np.floating, np.floating]
+        | tuple[NDArray[np.floating], NDArray[np.floating]]
+    ):
         """
         根据当前位置和运动方向返回对应的限速值变化量和当前位置与下一限速区间的距离
 
