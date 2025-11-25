@@ -31,20 +31,18 @@ with open("data/rail/raw/stations.json", "r", encoding="utf-8") as f:
     ly_zp = stations_data["LY"]["zp"]
     pa_zp = stations_data["PA"]["zp"]
 
-idp_points = np.load(file="data/rail/safeguard/idp_points.npy")
-with open("data/rail/safeguard/levi_curves_part.pkl", "rb") as f:
-    levi_curves_part = pickle.load(f)
-with open("data/rail/safeguard/brake_curves_part.pkl", "rb") as f:
-    brake_curves_part = pickle.load(f)
+with open("data/rail/safeguard/levi_curves_list.pkl", "rb") as f:
+    levi_curves_list = pickle.load(f)
+with open("data/rail/safeguard/brake_curves_list.pkl", "rb") as f:
+    brake_curves_list = pickle.load(f)
 
 
 gamma: float = 0.99
 sgu = SafeGuardUtility(
     speed_limits=speed_limits,
     speed_limit_intervals=speed_limit_intervals,
-    idp_points=idp_points,
-    levi_curves_part_list=levi_curves_part,
-    brake_curves_part_list=brake_curves_part,
+    levi_curves_list=levi_curves_list,
+    brake_curves_list=brake_curves_list,
     gamma=gamma,
 )
 
@@ -144,6 +142,12 @@ def draw_curve(pos, speed) -> bool:
             begin_pos=pos, begin_speed=speed
         )
 
+        # 计算最速操作模式下的总运行时间和能耗
+        mec, lec, total_operation_time = ors.CalRefEnergyAndOperationTime(
+            begin_pos=pos, begin_speed=speed, displacement=end_pos - pos
+        )
+        total_energy = mec + lec
+
         # 移除旧的起点和曲线（如果存在）
         if start_point is not None:
             start_point.remove()
@@ -176,7 +180,7 @@ def draw_curve(pos, speed) -> bool:
 
         # 更新标题
         ax.set_title(
-            f"极限操作模式下的最短运行时间曲线\n起点: ({pos:.2f}m, {speed:.2f}m/s) | 按 Y/I/P/Q 操作",
+            f"极限操作模式下的最短运行时间曲线\n起点: ({pos:.2f}m, {speed:.2f}m/s) 运行能耗: {total_energy:.2f} 运行时间: {total_operation_time:.2f}\n按 Y/I/P/Q 操作",
             fontsize=12,
         )
 

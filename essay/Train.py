@@ -35,19 +35,17 @@ with open("data/rail/raw/stations.json", "r", encoding="utf-8") as f:
     pa_begin = stations_data["PA"]["begin"]
     pa_zp = stations_data["PA"]["zp"]
     pa_end = stations_data["PA"]["end"]
-# 读取危险速度域数据
-idp_points = np.load(file="data/rail/safeguard/idp_points.npy")
-with open("data/rail/safeguard/levi_curves_part.pkl", "rb") as f:
-    levi_curves_part = pickle.load(f)
-with open("data/rail/safeguard/brake_curves_part.pkl", "rb") as f:
-    brake_curves_part = pickle.load(f)
+# 读取安全防护曲线
+with open("data/rail/safeguard/levi_curves_list.pkl", "rb") as f:
+    levi_curves_list = pickle.load(f)
+with open("data/rail/safeguard/brake_curves_list.pkl", "rb") as f:
+    brake_curves_list = pickle.load(f)
 
-guard = SafeGuardUtility(
+sgu = SafeGuardUtility(
     speed_limits=s_limits,
     speed_limit_intervals=s_intervals,
-    idp_points=idp_points,
-    levi_curves_part_list=levi_curves_part,
-    brake_curves_part_list=brake_curves_part,
+    levi_curves_list=levi_curves_list,
+    brake_curves_list=brake_curves_list,
     gamma=0.95,
 )
 track = Track(
@@ -67,21 +65,24 @@ task = Task(
     max_stop_error=0.3,
 )
 
+reward_discount = 0.99
 ds = 100.0
 
 maglevttoenv_train = MTTOEnv(
     vehicle=vehicle,
     track=track,
-    safeguardutil=guard,
+    safeguardutil=sgu,
     task=task,
+    gamma=reward_discount,
     ds=ds,
 )
 
 maglevttoenv_eval = MTTOEnv(
     vehicle=vehicle,
     track=track,
-    safeguardutil=guard,
+    safeguardutil=sgu,
     task=task,
+    gamma=reward_discount,
     ds=ds,
     render_mode="human",
 )
@@ -95,11 +96,11 @@ model = PPO(
     maglevttoenv_train,
     device="cpu",
     verbose=1,
-    learning_rate=1e-3,  # 提高学习率
+    learning_rate=1e-3,
     n_steps=2048,
-    batch_size=64,  # 增加批次大小
+    batch_size=64,
     n_epochs=10,
-    gamma=0.995,  # 提高折扣因子
+    gamma=reward_discount,  # 提高折扣因子
     gae_lambda=0.95,
     clip_range=0.3,
     clip_range_vf=None,
@@ -107,9 +108,9 @@ model = PPO(
     ent_coef=0.08,  # 增加探索
     vf_coef=1.0,  # 增加价值函数权重
     max_grad_norm=0.5,
-    # policy_kwargs=dict(
-    #     net_arch=dict(pi=[512, 256, 128], vf=[512, 256, 128]),  # 改进网络结构
-    # ),
+    policy_kwargs=dict(
+        net_arch=dict(pi=[512, 256, 128], vf=[512, 256, 128]),  # 改进网络结构
+    ),
 )
 
 # Evaluate before train

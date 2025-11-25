@@ -11,7 +11,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from model.SafeGuard import SafeGuardCurves
 from model.Vehicle import Vehicle
 from model.SafeGuard import SafeGuardUtility
-from utils.curve import CalRegions, ConcatenateCurvesWithNaN
+from utils.curve import ConcatenateCurvesWithNaN
 from model.Track import Track, TrackProfile
 
 # 上海磁浮线数据
@@ -64,8 +64,15 @@ dps = np.append(dps, pa_end)
 # 加速区需要计算安全制动曲线
 dps = np.insert(dps, 0, az_end)
 
-levi_curves_list = cal_SGC.CalcLeviCurves(aps, vehicle, 1)
-brake_curves_list = cal_SGC.CalcBrakeCurves(dps, vehicle, 1)
+# 计算安全悬浮曲线和安全制动曲线
+levi_curves_list = cal_SGC.CalcLeviCurves(aps, vehicle, 1.0)
+brake_curves_list = cal_SGC.CalcBrakeCurves(dps, vehicle, 1.0)
+
+with open("data/rail/safeguard/levi_curves_list.pkl", "wb") as f:
+    pickle.dump(levi_curves_list, f)
+
+with open("data/rail/safeguard/brake_curves_list.pkl", "wb") as f:
+    pickle.dump(brake_curves_list, f)
 
 
 plt.rcParams["font.sans-serif"] = ["SimHei"]
@@ -140,16 +147,16 @@ ax1.legend()
 
 
 # 计算危险交叉点和危险交叉点之后的部分防护曲线
-idp_points, levi_curves_part, brake_curves_part = CalRegions(
-    levi_curves_list, brake_curves_list[:-1]
-)
-np.save(file="data/rail/safeguard/idp_points.npy", arr=idp_points)
+# idp_points, levi_curves_part, brake_curves_part = CalRegions(
+#     levi_curves_list, brake_curves_list[:-1]
+# )
+# np.save(file="data/rail/safeguard/idp_points.npy", arr=idp_points)
 
-with open("data/rail/safeguard/levi_curves_part.pkl", "wb") as f:
-    pickle.dump(levi_curves_part, f)
+# with open("data/rail/safeguard/levi_curves_part.pkl", "wb") as f:
+#     pickle.dump(levi_curves_part, f)
 
-with open("data/rail/safeguard/brake_curves_part.pkl", "wb") as f:
-    pickle.dump(brake_curves_part, f)
+# with open("data/rail/safeguard/brake_curves_part.pkl", "wb") as f:
+#     pickle.dump(brake_curves_part, f)
 
 # 读取危险交叉点和危险交叉点之后的部分防护曲线
 # idp_points = np.load(file='data/rail/safeguard/idp_points.npy')
@@ -186,9 +193,11 @@ ax2 = fig2.add_subplot()
 safeguard = SafeGuardUtility(
     speed_limits=speed_limits,
     speed_limit_intervals=speed_limit_intervals,
-    idp_points=idp_points,
-    levi_curves_part_list=levi_curves_part,
-    brake_curves_part_list=brake_curves_part,
+    # idp_points=idp_points,
+    # levi_curves_part_list=levi_curves_part,
+    # brake_curves_part_list=brake_curves_part,
+    levi_curves_list=levi_curves_list,
+    brake_curves_list=brake_curves_list,
     gamma=0.99,
 )
 

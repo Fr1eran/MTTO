@@ -121,7 +121,7 @@ def ConcatenateCurvesWithNaN(curves_set: list):
     return curves_x_con_with_nan, curves_y_con_with_nan
 
 
-def DrawRegion(ax: Axes, above_curves_list, below_curves_list, label, color, alpha):
+def DrawRegions(ax: Axes, above_curves_list, below_curves_list, label, color, alpha):
     """
     绘制由安全悬浮曲线、安全制动曲线和横坐标轴围成的图形
 

@@ -563,8 +563,8 @@ class ORS:
 
     def CalMinRuntimeCurve(
         self, begin_pos: float | np.number, begin_speed: float | np.number
-    ) -> tuple[NDArray, NDArray]:
-        """计算在给定当前位置、速度下的最小运行速度曲线"""
+    ) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
+        """计算在给定当前位置、速度下的最小运行速度曲线及其运行时间"""
         current_pos = float(begin_pos)
         current_speed = float(begin_speed)
         operations = self._cal_min_runtime_operation(
@@ -597,7 +597,10 @@ class ORS:
             current_pos = curve_pos_array[-1]
             current_speed = curve_speed_array[-1]
 
-        return curve_pos_array.astype(np.float32), curve_speed_array.astype(np.float32)
+        return (
+            curve_pos_array.astype(np.float32),
+            curve_speed_array.astype(np.float32),
+        )
 
     def CalRefEnergyAndOperationTime(
         self,

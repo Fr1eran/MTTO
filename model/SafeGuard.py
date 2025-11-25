@@ -4,7 +4,12 @@ from matplotlib.axes import Axes
 from typing import Sequence, overload
 
 from utils.misc import GetIntervalIndex
-from utils.curve import Padding2CurvesList, ConcatenateCurvesWithNaN, DrawRegion
+from utils.curve import (
+    Padding2CurvesList,
+    ConcatenateCurvesWithNaN,
+    CalRegions,
+    DrawRegions,
+)
 from model.Vehicle import Vehicle, VehicleDynamic
 from model.Track import TrackProfile
 
@@ -25,11 +30,11 @@ class SafeGuardCurves:
 
     def _calculate_curves_backward(
         self, begins: NDArray[np.floating], ds: float, acc_func
-    ) -> list[NDArray]:
+    ) -> list[NDArray[np.float64]]:
         """
         通用防护曲线计算方法
         Args:
-            begins: 起点数组（apoffsets或dpoffsets）
+            begins: 起点数组(apoffsets或dpoffsets)
             ds: 步长
             acc_func: 加速度函数，签名为 acc_func(v, slope, *args)
         Returns:
@@ -37,28 +42,32 @@ class SafeGuardCurves:
         """
         curve_list = []
         for i in range(len(begins)):
-            v = 0.0  # 初速度
-            s = begins[i]  # 初位置
-            max_steps = int(s // ds)
-            v_arr = np.empty(max_steps + 1)
+            speed = 0.0  # 初速度
+            pos = begins[i]  # 初位置
+            max_steps = int(pos // ds)
+            speed_arr = np.empty(max_steps + 1)
             slopes = self.trackprofile.GetSlope(
-                pos=np.arange(s, 0.0, -ds), interpolate=True
+                pos=np.arange(pos, 0.0, -ds), interpolate=True
             )
-            speed_limits = self.trackprofile.GetSpeedlimit(pos=np.arange(s, 0.0, -ds))
+            speed_limits = self.trackprofile.GetSpeedlimit(pos=np.arange(pos, 0.0, -ds))
             idx = 0
-            v_arr[0] = 0.0
+            speed_arr[0] = 0.0
             for j in range(max_steps):
-                a = acc_func(v, slopes[j])  # type: ignore
-                next_speed_2 = v**2 + 2 * a * ds
+                acc = acc_func(speed, slopes[j])
+                next_speed_2 = speed**2 + 2 * acc * ds
                 next_speed = np.sqrt(next_speed_2)
-                if next_speed >= speed_limits[j]:  # type: ignore
+                if next_speed >= speed_limits[j]:
                     break
-                s = s - ds
-                v = next_speed
+                pos = pos - ds
+                speed = next_speed
                 idx += 1
-                v_arr[idx] = next_speed
-            s_list = np.arange(begins[i], s, -ds)
-            curve_list.append(np.stack([s_list[::-1], v_arr[:idx][::-1]], axis=0))
+                speed_arr[idx] = next_speed
+            pos_arr = np.arange(begins[i], pos, -ds)
+            curve_list.append(
+                np.stack(
+                    [pos_arr[::-1], speed_arr[:idx][::-1]], axis=0, dtype=np.float64
+                )
+            )
         return curve_list
 
     def CalcLeviCurves(
@@ -107,17 +116,25 @@ class SafeGuardUtility:
         *,
         speed_limits: Sequence[float] | NDArray[np.floating],
         speed_limit_intervals: Sequence[float] | NDArray[np.floating],
-        idp_points: NDArray[np.floating],
-        levi_curves_part_list: list[NDArray[np.floating]],
-        brake_curves_part_list: list[NDArray[np.floating]],
+        levi_curves_list: list[NDArray[np.floating]],
+        brake_curves_list: list[NDArray[np.floating]],
+        # idp_points: NDArray[np.floating],
+        # levi_curves_part_list: list[NDArray[np.floating]],
+        # brake_curves_part_list: list[NDArray[np.floating]],
         gamma: float,
     ):
         self.speed_limits = np.asarray(speed_limits)
         self.speed_limit_intervals = np.asarray(speed_limit_intervals)
+        self.levi_curves_list = levi_curves_list
+        self.brake_curves_list = brake_curves_list
+
+        # 计算危险交叉点和危险交叉点之后的部分防护曲线
+        idp_points, self.levi_curves_part_list, self.brake_curves_part_list = (
+            CalRegions(levi_curves_list, brake_curves_list[:-1])
+        )
         self.idp_points_x = idp_points[0, :]
         self.idp_points_y = idp_points[1, :]
-        self.levi_curves_part_list = levi_curves_part_list
-        self.brake_curves_part_list = brake_curves_part_list
+
         self.levi_curves_part_list_padded, self.brake_curves_part_list_padded = (
             Padding2CurvesList(self.levi_curves_part_list, self.brake_curves_part_list)
         )
@@ -135,6 +152,21 @@ class SafeGuardUtility:
         ]
         self.numofregions = idp_points.shape[1]
         self.gamma = gamma
+
+    # def GetLeviSpeed(
+    #     self,
+    #     current_pos: float | np.floating,
+    #     current_speed: float | np.floating,
+    #     current_asa: int | None,
+    # ) -> tuple[float, int]:
+    #     if current_asa is not None:
+    #         current_levi_speed = np.interp(
+    #             current_pos,
+    #             self.levi_curves_list[current_asa][0, :],
+    #             self.levi_curves_list[current_asa][1, :],
+    #         )
+    #         next
+    #     else:
 
     @overload
     def DetectDanger(
@@ -232,7 +264,7 @@ class SafeGuardUtility:
             color="red",
             alpha=0.7,
         )
-        DrawRegion(
+        DrawRegions(
             ax=ax,
             above_curves_list=self.levi_curves_part_list_padded,
             below_curves_list=self.brake_curves_part_list_padded,

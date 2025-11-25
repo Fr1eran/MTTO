@@ -16,17 +16,15 @@ def safeguard():
         s_limits = sl_data["speed_limits"]
         s_limits = np.asarray(s_limits, dtype=np.float64) / 3.6
         s_intervals = sl_data["intervals"]
-    idp_points = np.load(file="data/rail/safeguard/idp_points.npy")
-    with open("data/rail/safeguard/levi_curves_part.pkl", "rb") as f:
-        levi_curves_part = pickle.load(f)
-    with open("data/rail/safeguard/brake_curves_part.pkl", "rb") as f:
-        brake_curves_part = pickle.load(f)
+    with open("data/rail/safeguard/levi_curves_list.pkl", "rb") as f:
+        levi_curves_list = pickle.load(f)
+    with open("data/rail/safeguard/brake_curves_list.pkl", "rb") as f:
+        brake_curves_list = pickle.load(f)
     return SafeGuardUtility(
         speed_limits=s_limits,
         speed_limit_intervals=s_intervals,
-        idp_points=idp_points,
-        levi_curves_part_list=levi_curves_part,
-        brake_curves_part_list=brake_curves_part,
+        levi_curves_list=levi_curves_list,
+        brake_curves_list=brake_curves_list,
         gamma=0.95,
     )
 

@@ -1,5 +1,6 @@
 from typing import Any
-
+import logging
+import structlog
 import gymnasium as gym
 import numpy as np
 import matplotlib.pyplot as plt
@@ -15,6 +16,28 @@ from model.ORS import ORS
 from utils.CalcEnergy import CalcEnergy
 
 
+def setup_logger(logfile: str):
+    logging.basicConfig(
+        format="%(message)s",
+        level=logging.INFO,
+        handlers=[
+            logging.FileHandler(logfile, mode="w", encoding="utf-8"),
+        ],
+    )
+
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.JSONRenderer(),
+        ],
+        logger_factory=structlog.WriteLoggerFactory(
+            file=open(logfile, "a", encoding="utf-8")
+        ),
+    )
+    return structlog.getLogger()
+
+
 class MTTOEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"]}
 
@@ -24,11 +47,14 @@ class MTTOEnv(gym.Env):
         track: Track,
         safeguardutil: SafeGuardUtility,
         task: Task,
+        gamma: float,
         ds: float,
         render_mode: str | None = None,
         use_animation=False,
     ):
         super().__init__()
+
+        self.logger = setup_logger("rl_training.jsonl")
 
         self.render_mode = render_mode
         self.use_animation = use_animation
@@ -55,6 +81,9 @@ class MTTOEnv(gym.Env):
         # 运行任务约束
         self.task = task
 
+        # 回报折扣因子
+        self.gamma = gamma
+
         # 一个时间步仿真步长
         self.ds = ds
 
@@ -66,17 +95,34 @@ class MTTOEnv(gym.Env):
             gamma=self.safeguard.gamma,
         )
 
-        self.total_steps: int = 0
+        # 计算最短运行时间参考曲线
+        self.ref_curve_pos, self.ref_curve_speed = self.ors.CalMinRuntimeCurve(
+            begin_pos=self.task.starting_position,
+            begin_speed=abs(self.task.starting_velocity),
+        )
+        # 计算最大能耗和最短运行时间
+        mec, lec, self.min_operation_time = self.ors.CalRefEnergyAndOperationTime(
+            begin_pos=self.task.starting_position,
+            begin_speed=abs(self.task.starting_velocity),
+            displacement=self.task.destination - self.task.starting_position,
+        )
+        self.max_total_energy = mec + lec
+
+        # 当前训练步数
+        self.current_steps: int = 0
+
+        self.q_init: float = 0.0
 
         # 最大仿真时间步
         self.max_episode_steps: int = (
             int(abs(self.task.destination - self.task.starting_position) / self.ds) + 5
         )
 
-        # 列车历史状态
+        # 训练历史
         self.history_pos: list[float] = [self.task.starting_position]
         self.history_velocity: list[float] = [self.task.starting_velocity]
         self.history_acc: list[float] = [0.0]
+        self.dense_rewards: list[float] = [0.0]
 
         # 列车运行轨迹
         self.trajectory_pos: list[float] = [self.task.starting_position]
@@ -111,7 +157,7 @@ class MTTOEnv(gym.Env):
             1 if self.current_pos < self.task.destination else -1
         )  # 常量
         self.current_velocity: float = self.task.starting_velocity
-        self.goal_velocity: float = 0.0
+        self.goal_speed: float = 0.0
         self.current_operation_time: float = 0.0
         self.remainning_schedule_time: float = self.task.schedule_time
         # self.mass = self.vehicle.mass
@@ -138,7 +184,7 @@ class MTTOEnv(gym.Env):
 
         self.starting_eculi_distance_pow2 = (
             self.task.destination - self.task.starting_position
-        ) ** 2 + (self.goal_velocity - self.task.starting_velocity) ** 2
+        ) ** 2 + (self.goal_speed - self.task.starting_velocity) ** 2
 
         # 定义智能体能够观测的状态信息
         self.observation_space = gym.spaces.Dict(
@@ -348,7 +394,7 @@ class MTTOEnv(gym.Env):
         if self.render_mode is not None:
             self._reset_trajectory()
 
-        self.total_steps = 0
+        self.current_steps = 0
 
         observation = self._get_obs()
         info = self._get_info()
@@ -369,18 +415,19 @@ class MTTOEnv(gym.Env):
         prev_velocity = self.current_velocity
         current_acc = self._get_action_denormalized(action[0])
 
-        self.total_steps += 1
+        self.current_steps += 1
 
-        # 根据当前时刻速度、加速度、步长计算下一时刻速度、位移量和消耗时间
-        v_next, displacement, operation_time = self._update_motion(current_acc)
+        # 根据当前时刻速度、加速度、步长计算位移量和运行时间
+        # 内部更新了位置和速度
+        displacement, operation_time = self._update_motion(current_acc)
 
         # 计算当前列车在参考运行模式下的能耗和运行时间
-        ref_mec, ref_lec, ref_operation_time = self.ors.CalRefEnergyAndOperationTime(
-            begin_pos=self.current_pos,
-            begin_speed=self.current_velocity,
-            displacement=displacement,
-        )
-        ref_energy_consumption = ref_mec + ref_lec
+        # ref_mec, ref_lec, ref_operation_time = self.ors.CalRefEnergyAndOperationTime(
+        #     begin_pos=prev_pos,
+        #     begin_speed=prev_velocity,
+        #     displacement=displacement,
+        # )
+        # ref_energy_consumption = ref_mec + ref_lec
 
         # 计算当前能耗
         current_mec, current_lec = CalcEnergy(
@@ -395,8 +442,6 @@ class MTTOEnv(gym.Env):
         energy_consumption = current_mec + current_lec
 
         # 更新智能体状态
-        self.current_pos = self.current_pos + displacement
-        self.current_velocity = v_next
         self.remainning_displacement = self.task.destination - self.current_pos
         self.current_operation_time += operation_time
         self.remainning_schedule_time -= operation_time
@@ -426,14 +471,16 @@ class MTTOEnv(gym.Env):
         terminated = abs(self.remainning_displacement) <= self.task.max_stop_error
 
         # 判断智能体是否达到仿真步数上限
-        truncated = True if self.total_steps >= self.max_episode_steps else False
+        truncated = True if self.current_steps >= self.max_episode_steps else False
 
         # 计算奖励
         reward = self._get_reward(
+            prev_pos=prev_pos,
+            prev_speed=abs(prev_velocity),
+            current_pos=self.current_pos,
+            current_speed=abs(self.current_velocity),
             energy_consumption=energy_consumption,
             operation_time=operation_time,
-            ref_energy_consumption=ref_energy_consumption,
-            ref_operation_time=ref_operation_time,
             current_acc=current_acc,
             terminated=terminated | truncated,
         )
@@ -457,7 +504,7 @@ class MTTOEnv(gym.Env):
 
         return (observation, reward, terminated, truncated, info)
 
-    def _update_motion(self, acc: float) -> tuple[float, float, float]:
+    def _update_motion(self, acc: float) -> tuple[float, float]:
         """
         磁浮列车匀变速直线运动仿真
 
@@ -465,7 +512,7 @@ class MTTOEnv(gym.Env):
             acc(float): 加速度(m/s^2)
 
         Returns:
-            tuple: (v_next, displacement, time_consumption)
+            tuple: (v_next, displacement, operation_time)
         """
 
         displacement = self.ds * self.direction
@@ -475,24 +522,30 @@ class MTTOEnv(gym.Env):
             v_next = self.current_velocity
             if abs(v_next) < 1e-6:
                 displacement = 0.0  # 无法运动
-                travel_time = 0.0
+                operation_time = 0.0
                 v_next = 0.0
             else:
-                travel_time = displacement / v_next
-            return v_next, displacement, travel_time
+                operation_time = displacement / v_next
 
-        # 一般情况下，列车做匀变速直线运动
-        v_next_2 = self.current_velocity**2 + 2 * acc * displacement  # 速度大小的平方
-
-        # 边界情况：减速为0
-        if v_next_2 <= 0.0:
-            v_next = 0.0
-            displacement = -(self.current_velocity**2) / (2 * acc)
         else:
-            v_next = np.sqrt(v_next_2) * self.direction
+            # 一般情况下，列车做匀变速直线运动
+            v_next_squared = (
+                self.current_velocity**2 + 2 * acc * displacement
+            )  # 速度大小的平方
 
-        travel_time = (v_next - self.current_velocity) / acc
-        return v_next, displacement, travel_time
+            # 边界情况：减速为0
+            if v_next_squared <= 0.0:
+                v_next = 0.0
+                displacement = -(self.current_velocity**2) / (2 * acc)
+            else:
+                v_next = np.sqrt(v_next_squared) * self.direction
+
+            operation_time = (v_next - self.current_velocity) / acc
+
+            self.current_pos += displacement
+            self.current_velocity = v_next
+
+        return displacement, operation_time
 
     def cal_energy_consumption(
         self, acc: float, displacement: float, travel_time: float | None
@@ -522,7 +575,7 @@ class MTTOEnv(gym.Env):
                     ),
                 )
             )
-            MEC = abs(force * displacement)
+            MEC = abs(float(force) * displacement)
         else:
             # 磁浮列车纵向力模型存在不光滑的区域
             # 故使用离散采样进行数值积分
@@ -554,84 +607,126 @@ class MTTOEnv(gym.Env):
         LEC = travel_time * self.vehicle.levi_power_per_mass * self.vehicle.mass
 
         # 总能耗
-        energy_consumption = MEC + LEC
+        energy_consumption = float(MEC) + LEC
         return energy_consumption
 
     def _get_reward(
         self,
         *,
+        prev_pos: float,
+        prev_speed: float,
+        current_pos: float,
+        current_speed: float,
         energy_consumption: float,
         operation_time: float,
-        ref_energy_consumption: float,
-        ref_operation_time: float,
         current_acc: float,
         terminated,
     ) -> float:
-        reward = 0.0
+        self.logger.info(
+            "train",
+            current_steps=self.current_steps,
+            current_pos=current_pos,
+            current_speed=current_speed,
+            current_acc=current_acc,
+        )
+        if terminated:
+            reward = self._get_goal_reward(
+                current_pos=current_pos, current_speed=current_speed
+            )
+        else:
+            dense_reward = self._get_dense_reward(
+                current_pos=current_pos,
+                current_speed=current_speed,
+                energy_consumption=energy_consumption,
+                operation_time=operation_time,
+                current_acc=current_acc,
+            )
+            reward = dense_reward + self._get_PBRS_reward(
+                prev_pos=prev_pos,
+                prev_speed=prev_speed,
+                current_pos=current_pos,
+                current_speed=current_speed,
+                prev_dense_reward=self.dense_rewards[-1],
+                current_dense_reward=dense_reward,
+            )
+            self.dense_rewards.append(dense_reward)
 
-        # 安全奖励 (每步，非安全时负奖励为-1.0，安全时无奖励)
-        safety_reward = self._get_safety_reward()
+        # 奖励归一化
+        # return np.clip(reward, -1.0, 1.0)
+        return reward
 
-        # 能耗奖励 (每步，范围为[0, 1])
-        energy_reward = self._get_energy_reward(
-            energy_consumption, ref_energy_consumption
+    def _get_dense_reward(
+        self,
+        current_pos: float,
+        current_speed: float,
+        energy_consumption: float,
+        operation_time: float,
+        current_acc: float,
+    ) -> float:
+        # 安全奖励 (非安全时负奖励为-1.0，安全时无奖励)
+        safety_reward = self._get_safety_reward(
+            current_pos=current_pos, current_speed=current_speed
         )
 
-        # 舒适度奖励
+        # 能耗奖励 (范围为[-1, 0])
+        energy_reward = self._get_energy_reward(energy_consumption)
+
+        # 舒适度奖励 (范围为[-1, 1])
         comfort_reward = self._get_comfort_reward(
             current_acc=current_acc, previous_acc=self.history_acc[-1]
         )
 
-        if terminated:
-            # 终止时的额外奖励
-            docking_position_reward = self._get_docking_position_reward()
-            docking_speed_reward = self._get_docking_speed_reward()
-            punctuality_reward = self._get_punctuality_reward()
+        # 运行时间奖励 (范围为[-1, 0])
+        operation_time_reward = self._get_operation_time_reward(
+            operation_time=operation_time
+        )
 
-            reward = (
-                safety_reward  # 安全最重要
-                + energy_reward * 0.01
-                + docking_position_reward * 0.33  # 停车位置
-                + docking_speed_reward * 0.33  # 停车速度
-                + punctuality_reward * 0.33  # 准点性
-                + comfort_reward * 0.001  # 舒适度
-            )
-        else:
-            # 目标接近奖励 (每步，范围为[0, 1])
-            # goal_approach_reward = self._get_goal_approach_reward()
-            operation_time_reward = self._get_operation_time_reward(
-                operation_time=operation_time, ref_operation_time=ref_operation_time
-            )
-            reward = (
-                safety_reward  # 安全最重要
-                + energy_reward * 0.1  # 能耗
-                + operation_time_reward * 0.01  # 运行时间
-                + comfort_reward * 0.001  # 舒适度
-                # + goal_approach_reward
-            )
+        self.logger.info(
+            "train",
+            safety_reward=safety_reward,
+            energy_reward=energy_reward,
+            operation_time_reward=operation_time_reward,
+            comfort_reward=comfort_reward * 0.005,
+        )
 
-        # 奖励归一化
-        return np.clip(reward, -1.0, 1.0)
+        return (
+            safety_reward
+            + energy_reward
+            + operation_time_reward
+            + comfort_reward * 0.005
+        )
 
-    def _get_safety_reward(self) -> float:
-        if self.safeguard.DetectDanger(
-            pos=self.current_pos, speed=abs(self.current_velocity)
-        ):
+    def _get_goal_reward(
+        self,
+        current_pos: float,
+        current_speed: float,
+    ) -> float:
+        docking_position_reward = self._get_docking_position_reward(
+            current_pos=current_pos
+        )
+        docking_speed_reward = self._get_docking_speed_reward(
+            current_speed=current_speed
+        )
+        operation_time_reward = self._get_punctuality_reward()
+        return docking_position_reward + docking_speed_reward + operation_time_reward
+
+    def _get_safety_reward(self, current_pos, current_speed) -> float:
+        if self.safeguard.DetectDanger(pos=current_pos, speed=current_speed):
             return -1.0  # 减少惩罚幅度
         else:
             return 0.0
 
-    def _get_docking_position_reward(self) -> float:
+    def _get_docking_position_reward(self, current_pos) -> float:
         # 停站位置误差不超过0.3m
-        docking_pos_error = abs(self.task.destination - self.current_pos)
+        docking_pos_error = abs(self.task.destination - current_pos)
         A = 2
         B = -1
         k_D = 2.310490602
         return float(A * np.exp(-k_D * docking_pos_error**2) + B)
 
-    def _get_docking_speed_reward(self) -> float:
+    def _get_docking_speed_reward(self, current_speed) -> float:
         # 到站时因减速到10km/h(2.778m/s)内，
-        docking_speed_error = abs(self.goal_velocity - self.current_velocity)
+        docking_speed_error = abs(self.goal_speed - current_speed)
         return 2.0 * np.exp(-0.173286795 * docking_speed_error**2) - 1.0
 
     def _get_punctuality_reward(self) -> float:
@@ -642,47 +737,62 @@ class MTTOEnv(gym.Env):
         k_T = 0.005776227
         return float(A * np.exp(-k_T * ontime_error) + B)
 
-    def _get_energy_reward(self, energy_consumption, ref_energy_consumption) -> float:
+    # def _get_energy_reward(self, energy_consumption, ref_energy_consumption) -> float:
+    #     """基于能耗给予奖励"""
+    #     if ref_energy_consumption > 1e-6:
+    #         return (
+    #             ref_energy_consumption - energy_consumption
+    #         ) / ref_energy_consumption
+    #     else:
+    #         return 0.0
+    def _get_energy_reward(self, energy_consumption: float) -> float:
         """基于能耗给予奖励"""
-        if ref_energy_consumption > 1e-6:
-            return (
-                ref_energy_consumption - energy_consumption
-            ) / ref_energy_consumption
-        else:
-            return 0.0
+        return -(energy_consumption / self.max_total_energy) * 10
+
+    # def _get_operation_time_reward(
+    #     self, operation_time: float, ref_operation_time: float
+    # ) -> float:
+    #     """基于运行时间给予奖励
+
+    #     设计原则：
+    #     1. 运行时间 >= 参考时间：给予正奖励（安全保守策略）
+    #     2. 运行时间越长，奖励越小（鼓励效率）
+    #     3. 运行时间 < 参考时间：给予负奖励（过于激进，可能不安全）
+
+    #     Returns:
+    #         奖励值，范围约为 [-1, 1]
+    #     """
+    #     if ref_operation_time > 1e-6:
+    #         # 计算时间比率
+    #         time_ratio = operation_time / ref_operation_time
+
+    #         if time_ratio > 1.0 or math.isclose(time_ratio, 1.0, rel_tol=1e-6):
+    #             # 运行时间大于等于参考时间，给予正奖励
+    #             # 使用指数衰减函数，运行时间越长奖励越小
+    #             # reward = exp(-k * (time_ratio - 1))
+    #             # 当 time_ratio = 1.0 时，reward = 1.0
+    #             # 当 time_ratio = 1.5 时，reward ≈ 0.37
+    #             # 当 time_ratio = 2.0 时，reward ≈ 0.14
+    #             k = 1.0  # 衰减系数，控制奖励下降速度
+    #             return float(np.exp(-k * (time_ratio - 1.0)))
+    #         else:
+    #             # 运行时间小于参考时间，给予负奖励（线性惩罚）
+    #             # time_ratio 越小（越快），惩罚越大
+    #             return time_ratio - 1.0  # 范围: [-1, 0)
+
+    #     else:
+    #         return 0.0
 
     def _get_operation_time_reward(
-        self, operation_time: float, ref_operation_time: float
+        self,
+        operation_time: float,
     ) -> float:
         """基于运行时间给予奖励
 
-        设计原则：
-        1. 运行时间 >= 参考时间：给予正奖励（安全保守策略）
-        2. 运行时间越长，奖励越小（鼓励效率）
-        3. 运行时间 < 参考时间：给予负奖励（过于激进，可能不安全）
-
         Returns:
-            奖励值，范围约为 [-1, 1]
+            奖励值，范围约为 [-1, 0]
         """
-        if ref_operation_time > 1e-6:
-            # 计算时间比率
-            time_ratio = operation_time / ref_operation_time
-
-            if time_ratio < 1.0:
-                # 运行时间小于参考时间，给予负奖励（线性惩罚）
-                # time_ratio 越小（越快），惩罚越大
-                return time_ratio - 1.0  # 范围: [-1, 0)
-            else:
-                # 运行时间大于等于参考时间，给予正奖励
-                # 使用指数衰减函数，运行时间越长奖励越小
-                # reward = exp(-k * (time_ratio - 1))
-                # 当 time_ratio = 1.0 时，reward = 1.0
-                # 当 time_ratio = 1.5 时，reward ≈ 0.37
-                # 当 time_ratio = 2.0 时，reward ≈ 0.14
-                k = 1.0  # 衰减系数，控制奖励下降速度
-                return float(np.exp(-k * (time_ratio - 1.0)))
-        else:
-            return 0.0
+        return -(operation_time / self.min_operation_time)
 
     def _get_comfort_reward(self, current_acc: float, previous_acc: float) -> float:
         # 加速度变化不得大于0.75m/s^2
@@ -692,24 +802,34 @@ class MTTOEnv(gym.Env):
         k_C = 0.924196241
         return float(A * np.exp(-k_C * delta_acc) + B)
 
-    def _get_goal_approach_reward(self) -> float:
-        """基于当前状态给予目标接近奖励"""
-        pos_reward = np.exp(
-            -((self.remainning_displacement / self.whole_distance) ** 2)
+    def _get_PBRS_reward(
+        self,
+        prev_pos: float,
+        prev_speed: float,
+        current_pos: float,
+        current_speed: float,
+        prev_dense_reward: float,
+        current_dense_reward: float,
+    ) -> float:
+        Phi_c = (
+            self._potential(prev_pos, prev_speed)
+            # + (1 - self.gamma) * self.q_init
+            # - current_dense_reward
         )
-        target_velocity = self._get_target_velocity_by_displacement()
-        vel_reward = np.exp(
-            -(((self.current_velocity - target_velocity) / (600.0 / 3.6)) ** 2)
+        Phi_p = (
+            self._potential(current_pos, current_speed)
+            # + (1 - self.gamma) * self.q_init
+            # - prev_dense_reward
         )
+        Phi_c = np.exp(Phi_c)
+        Phi_p = np.exp(Phi_p)
+        self.logger.info("train", Phi_c=Phi_c, Phi_p=Phi_p)
+        self.logger.info("train", PBRS_reward=self.gamma * Phi_c - Phi_p)
+        return self.gamma * Phi_c - Phi_p
 
-        return 0.01 * pos_reward + 0.99 * vel_reward
-
-    def _get_target_velocity_by_displacement(self):
-        """根据剩余位移和时间计算目标速度"""
-        if abs(self.remainning_schedule_time) < 1e-6:
-            return 0.0
-        else:
-            return self.remainning_displacement / self.remainning_schedule_time
+    def _potential(self, pos: float, speed: float) -> float:
+        ref_speed = np.interp(pos, self.ref_curve_pos, self.ref_curve_speed)
+        return float(-0.007 * np.abs(ref_speed - speed))
 
     def _record_history(
         self, prev_pos: float, prev_velocity: float, acc: float
@@ -722,6 +842,7 @@ class MTTOEnv(gym.Env):
         self.history_pos = [self.task.starting_position]
         self.history_velocity = [self.task.starting_velocity]
         self.history_acc = [0.0]
+        self.dense_rewards = [0.0]
 
     def _record_trajectory(
         self,
