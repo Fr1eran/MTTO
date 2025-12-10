@@ -116,11 +116,8 @@ class SafeGuardUtility:
         *,
         speed_limits: Sequence[float] | NDArray[np.floating],
         speed_limit_intervals: Sequence[float] | NDArray[np.floating],
-        levi_curves_list: list[NDArray[np.floating]],
-        brake_curves_list: list[NDArray[np.floating]],
-        # idp_points: NDArray[np.floating],
-        # levi_curves_part_list: list[NDArray[np.floating]],
-        # brake_curves_part_list: list[NDArray[np.floating]],
+        levi_curves_list: list[NDArray],
+        brake_curves_list: list[NDArray],
         gamma: float,
     ):
         self.speed_limits = np.asarray(speed_limits)

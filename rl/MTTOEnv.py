@@ -14,6 +14,7 @@ from model.Track import Track, TrackProfile
 from model.Task import Task
 from model.ORS import ORS
 from utils.CalcEnergy import CalcEnergy
+from utils.misc import SetChineseFont
 
 
 def setup_logger(logfile: str):
@@ -919,8 +920,7 @@ class MTTOEnv(gym.Env):
 
     def _setup_figure(self):
         """初始化绘图对象"""
-        plt.rcParams["font.sans-serif"] = ["SimHei"]
-        plt.rcParams["axes.unicode_minus"] = False
+        SetChineseFont()
         plt.ion()
 
         # 创建图形窗口

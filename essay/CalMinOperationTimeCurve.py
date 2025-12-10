@@ -11,6 +11,7 @@ from model.SafeGuard import SafeGuardUtility
 from model.Vehicle import Vehicle
 from model.Task import Task
 from model.ORS import ORS
+from utils.misc import SetChineseFont
 
 # 坡度，百分位
 with open("data/rail/raw/slopes.json", "r", encoding="utf-8") as f:
@@ -75,8 +76,7 @@ end_pos = task.destination
 end_speed = 0.0
 
 # 设置matplotlib
-plt.rcParams["font.sans-serif"] = ["SimHei"]
-plt.rcParams["axes.unicode_minus"] = False
+SetChineseFont()
 
 # 创建初始图形（只创建一次）
 fig, ax = plt.subplots(figsize=(12, 7))

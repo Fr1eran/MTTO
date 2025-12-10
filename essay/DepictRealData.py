@@ -10,6 +10,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from model.Vehicle import Vehicle
 from utils.CalcEnergy import CalcEnergyCumul
 from model.Track import Track, TrackProfile
+from utils.misc import SetChineseFont
 
 # 绘制龙阳路到浦东国际机场的实际运行速度-里程曲线
 raw_data = pd.read_excel(
@@ -24,8 +25,7 @@ v_km = raw_data["速度(km/h)"][1:]
 accelerate = raw_data["加速度(m/s2)"][1:]
 travel_time = raw_data["时间(s)"][1:]
 
-plt.rcParams["font.sans-serif"] = ["SimHei"]
-plt.rcParams["axes.unicode_minus"] = False
+SetChineseFont()
 
 fig1, ax1 = plt.subplots(figsize=(10, 6))
 ax1.plot(distance, v_km, label="实际运行速度随里程变化曲线", color="blue")

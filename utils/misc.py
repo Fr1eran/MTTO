@@ -1,6 +1,9 @@
 import numpy as np
 from numpy.typing import NDArray
 from typing import Union, overload
+from matplotlib.font_manager import fontManager
+import matplotlib.pyplot as plt
+
 
 Numeric = Union[float, np.number, NDArray]
 
@@ -67,6 +70,22 @@ def FindSpeedRiseEntryAndFallExit(
     ]
 
     return ascend_begin_pos, descend_end_pos
+
+
+def SetChineseFont():
+    candidates = [
+        "SimHei",  # common on Windows
+        "Microsoft YaHei",
+        "Noto Sans CJK JP",  # common on many Linux distros
+        "WenQuanYi Zen Hei",
+        "Source Han Sans SC",
+        "STHeiti",  # macOS fallback
+    ]
+    available = {f.name for f in fontManager.ttflist}
+    for name in candidates:
+        if name in available:
+            plt.rcParams["font.sans-serif"] = [name]
+            break
 
 
 if __name__ == "__main__":

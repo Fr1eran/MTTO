@@ -13,6 +13,7 @@ from model.Vehicle import Vehicle
 from model.SafeGuard import SafeGuardUtility
 from utils.curve import ConcatenateCurvesWithNaN
 from model.Track import Track, TrackProfile
+from utils.misc import SetChineseFont
 
 # 上海磁浮线数据
 
@@ -74,15 +75,14 @@ with open("data/rail/safeguard/levi_curves_list.pkl", "wb") as f:
 with open("data/rail/safeguard/brake_curves_list.pkl", "wb") as f:
     pickle.dump(brake_curves_list, f)
 
-
-plt.rcParams["font.sans-serif"] = ["SimHei"]
-plt.rcParams["axes.unicode_minus"] = False
-
 # 将所有的坐标值数组列表合并为一个数组并在相邻段之间插入np.nan
 levi_curves_pos_con, levi_curves_speed_con = ConcatenateCurvesWithNaN(levi_curves_list)
 brake_curves_pos_con, brake_curves_speed_con = ConcatenateCurvesWithNaN(
     brake_curves_list
 )
+
+SetChineseFont()
+
 # 绘制区间限速、安全悬浮曲线、安全制动曲线、辅助停车区、车站、加速区
 fig1 = plt.figure(dpi=100)
 ax1 = fig1.add_subplot(111)
