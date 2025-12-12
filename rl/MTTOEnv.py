@@ -651,6 +651,7 @@ class MTTOEnv(gym.Env):
                 current_dense_reward=dense_reward,
             )
             self.dense_rewards.append(dense_reward)
+            # reward = dense_reward
 
         # 奖励归一化
         # return np.clip(reward, -1.0, 1.0)
@@ -673,28 +674,27 @@ class MTTOEnv(gym.Env):
         energy_reward = self._get_energy_reward(energy_consumption)
 
         # 舒适度奖励 (范围为[-1, 1])
-        comfort_reward = self._get_comfort_reward(
-            current_acc=current_acc, previous_acc=self.history_acc[-1]
-        )
+        # comfort_reward = self._get_comfort_reward(
+        #     current_acc=current_acc, previous_acc=self.history_acc[-1]
+        # )
 
         # 运行时间奖励 (范围为[-1, 0])
-        operation_time_reward = self._get_operation_time_reward(
-            operation_time=operation_time
-        )
+        # operation_time_reward = self._get_operation_time_reward(
+        #     operation_time=operation_time
+        # )
 
         self.logger.info(
-            "train",
+            "dense_reward",
             safety_reward=safety_reward,
             energy_reward=energy_reward,
-            operation_time_reward=operation_time_reward,
-            comfort_reward=comfort_reward * 0.005,
+            # operation_time_reward=operation_time_reward,
+            # comfort_reward=comfort_reward * 0.005,
         )
 
         return (
-            safety_reward
-            + energy_reward
-            + operation_time_reward
-            + comfort_reward * 0.005
+            safety_reward + energy_reward
+            # + operation_time_reward
+            # + comfort_reward * 0.005
         )
 
     def _get_goal_reward(
@@ -708,14 +708,39 @@ class MTTOEnv(gym.Env):
         docking_speed_reward = self._get_docking_speed_reward(
             current_speed=current_speed
         )
-        operation_time_reward = self._get_punctuality_reward()
-        return docking_position_reward + docking_speed_reward + operation_time_reward
+        punctuality_reward = self._get_punctuality_reward()
+        # energy_reward = self._get_total_energy_reward()
+
+        self.logger.info(
+            "goal_reward",
+            docking_position_reward=docking_position_reward,
+            docking_speed_reward=docking_speed_reward,
+            punctuality_reward=punctuality_reward,
+            # energy_reward=energy_reward,
+        )
+
+        return (
+            docking_position_reward + docking_speed_reward + punctuality_reward
+            # + energy_reward
+        )
 
     def _get_safety_reward(self, current_pos, current_speed) -> float:
-        if self.safeguard.DetectDanger(pos=current_pos, speed=current_speed):
+        if self.safeguard.DetectDanger(
+            pos=current_pos, speed=current_speed
+        ) or self._detect_ref_speed_exceed(pos=current_pos, speed=current_speed):
             return -1.0  # 减少惩罚幅度
         else:
-            return 0.0
+            return 0
+
+    def _get_ref_speed(self, pos: float | np.floating):
+        return np.interp(pos, self.ref_curve_pos, self.ref_curve_speed)
+
+    def _detect_ref_speed_exceed(
+        self, pos: float | np.floating, speed: float | np.floating
+    ):
+        speed_limit = self._get_ref_speed(pos=pos)
+
+        return speed > speed_limit
 
     def _get_docking_position_reward(self, current_pos) -> float:
         # 停站位置误差不超过0.3m
@@ -726,7 +751,7 @@ class MTTOEnv(gym.Env):
         return float(A * np.exp(-k_D * docking_pos_error**2) + B)
 
     def _get_docking_speed_reward(self, current_speed) -> float:
-        # 到站时因减速到10km/h(2.778m/s)内，
+        # 到站时减速到10km/h(2.778m/s)内，
         docking_speed_error = abs(self.goal_speed - current_speed)
         return 2.0 * np.exp(-0.173286795 * docking_speed_error**2) - 1.0
 
@@ -746,9 +771,15 @@ class MTTOEnv(gym.Env):
     #         ) / ref_energy_consumption
     #     else:
     #         return 0.0
+
     def _get_energy_reward(self, energy_consumption: float) -> float:
         """基于能耗给予奖励"""
         return -(energy_consumption / self.max_total_energy) * 10
+
+    # def _get_total_energy_reward(self) -> float:
+    #     return (
+    #         self.max_total_energy - self.current_energy_consumption
+    #     ) / self.max_total_energy
 
     # def _get_operation_time_reward(
     #     self, operation_time: float, ref_operation_time: float
@@ -814,23 +845,23 @@ class MTTOEnv(gym.Env):
     ) -> float:
         Phi_c = (
             self._potential(prev_pos, prev_speed)
-            # + (1 - self.gamma) * self.q_init
-            # - current_dense_reward
+            + (1 - self.gamma) * self.q_init
+            - current_dense_reward
         )
         Phi_p = (
             self._potential(current_pos, current_speed)
-            # + (1 - self.gamma) * self.q_init
-            # - prev_dense_reward
+            + (1 - self.gamma) * self.q_init
+            - prev_dense_reward
         )
         Phi_c = np.exp(Phi_c)
         Phi_p = np.exp(Phi_p)
-        self.logger.info("train", Phi_c=Phi_c, Phi_p=Phi_p)
-        self.logger.info("train", PBRS_reward=self.gamma * Phi_c - Phi_p)
+        self.logger.info("PBRS", Phi_c=Phi_c, Phi_p=Phi_p)
+        self.logger.info("PBRS", PBRS_reward=self.gamma * Phi_c - Phi_p)
         return self.gamma * Phi_c - Phi_p
 
     def _potential(self, pos: float, speed: float) -> float:
-        ref_speed = np.interp(pos, self.ref_curve_pos, self.ref_curve_speed)
-        return float(-0.007 * np.abs(ref_speed - speed))
+        ref_speed = self._get_ref_speed(pos=pos)
+        return float(-0.01 * (ref_speed - speed))
 
     def _record_history(
         self, prev_pos: float, prev_velocity: float, acc: float

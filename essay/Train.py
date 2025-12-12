@@ -90,40 +90,28 @@ maglevttoenv_eval = MTTOEnv(
 maglevttoenv_train = FlattenObservation(maglevttoenv_train)
 maglevttoenv_eval = Monitor(FlattenObservation(maglevttoenv_eval))
 
-
 model = PPO(
     "MlpPolicy",
     maglevttoenv_train,
     device="cpu",
     verbose=1,
     learning_rate=1e-3,
-    n_steps=2048,
-    batch_size=64,
-    n_epochs=10,
-    gamma=reward_discount,  # 提高折扣因子
-    gae_lambda=0.95,
-    clip_range=0.3,
-    clip_range_vf=None,
-    normalize_advantage=True,
-    ent_coef=0.08,  # 增加探索
-    vf_coef=1.0,  # 增加价值函数权重
-    max_grad_norm=0.5,
-    policy_kwargs=dict(
-        net_arch=dict(pi=[512, 256, 128], vf=[512, 256, 128]),  # 改进网络结构
-    ),
+    # n_steps=2048,
+    # batch_size=64,
+    # n_epochs=10,
+    # gamma=reward_discount,  # 提高折扣因子
+    # gae_lambda=0.95,
+    # clip_range=0.3,
+    # clip_range_vf=None,
+    # normalize_advantage=True,
+    # ent_coef=0.08,  # 增加探索
+    # vf_coef=1.0,  # 增加价值函数权重
+    # max_grad_norm=0.5,
+    # policy_kwargs=dict(
+    #     net_arch=dict(pi=[512, 256, 128], vf=[512, 256, 128]),  # 改进网络结构
+    # ),
 )
 
-# Evaluate before train
-# mean_reward_before, std_reward_before = evaluate_policy(
-#     model, maglevttoenv_eval, n_eval_episodes=10, render=False
-# )
-
-# print(r"Evaluate before train:")
-# print(
-#     r"mean_reward_before: {}, std_reward_before: {}",
-#     mean_reward_before,
-#     std_reward_before,
-# )
 
 # Train
 model.learn(total_timesteps=50_000)
