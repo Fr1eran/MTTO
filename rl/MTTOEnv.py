@@ -343,8 +343,8 @@ class MTTOEnv(gym.Env):
     def _get_action_denormalized(self, action: float | np.floating) -> float:
         """将动作反归一化为列车加速度"""
         return float(
-            action * (self.vehicle.max_acc + self.vehicle.max_dacc) / 2
-            + (self.vehicle.max_acc - self.vehicle.max_dacc) / 2
+            action * (self.vehicle.max_acc + self.vehicle.max_dec) / 2
+            + (self.vehicle.max_acc - self.vehicle.max_dec) / 2
         )
 
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
@@ -989,7 +989,7 @@ class MTTOEnv(gym.Env):
         )
 
         # 绘制限速和危险速度域
-        self.safeguard.render(ax=self.ax)
+        self.safeguard.Render(ax=self.ax)
 
         # 初始化动态绘制对象
         (self.vehicle_dot,) = self.ax.plot(

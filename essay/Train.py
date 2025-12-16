@@ -44,8 +44,8 @@ with open("data/rail/safeguard/brake_curves_list.pkl", "rb") as f:
 sgu = SafeGuardUtility(
     speed_limits=s_limits,
     speed_limit_intervals=s_intervals,
-    levi_curves_list=levi_curves_list,
-    brake_curves_list=brake_curves_list,
+    min_curves_list=levi_curves_list,
+    max_curves_list=brake_curves_list,
     gamma=0.95,
 )
 track = Track(

@@ -30,7 +30,7 @@ def AddedResis(
             (kind == 1) & (speed_km > 10),
             (speed_km <= 10),
         ],
-        [lambda v: 0.08 * mass, lambda v: -0.2 * mass, lambda v: 0],
+        [lambda speed: 0.08 * mass, lambda speed: -0.2 * mass, lambda speed: 0],
     )
 
     return added_resis_force
@@ -75,9 +75,9 @@ def GuidewayVortexResis(
 
     # 参考文献：《高速磁浮与高速轮轨交通系统比较》
 
-    v_km = 3.6 * np.asarray(speed, dtype=np.float64)
+    speed_km = 3.6 * np.asarray(speed, dtype=np.float64)
     guideway_vortex_resis_force = numoftrainsets * (
-        0.1 * np.power(v_km, 0.5) + 0.02 * np.power(v_km, 0.7)
+        0.1 * np.power(speed_km, 0.5) + 0.02 * np.power(speed_km, 0.7)
     )
 
     return guideway_vortex_resis_force
@@ -108,9 +108,9 @@ def LinearGeneResis(
             (speed_km >= 70) & (speed_km < 600),
         ],
         [
-            lambda v: 0.0,
-            lambda v: 7.3 * numoftrainsets,
-            lambda v: 146 * 3.6 * numoftrainsets / v - 0.2,
+            lambda speed: 0.0,
+            lambda speed: 7.3 * numoftrainsets,
+            lambda speed: 146 * 3.6 * numoftrainsets / speed - 0.2,
         ],
     )
     return lineargene_resis_force

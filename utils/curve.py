@@ -80,16 +80,12 @@ def Padding2CurvesList(curves_list1, curves_list2):
 def Padding2Curves(curve1_x, curve1_y, curve2_x, curve2_y):
     pad_width = len(curve1_x) - len(curve2_x)
     if pad_width > 0:
-        curve2_y = np.pad(
-            curve2_y, (0, pad_width), mode="constant", constant_values=0.0
-        )
+        curve2_y = np.pad(curve2_y, (0, pad_width), mode="edge")
         curve2_x = np.pad(
             curve2_x, (0, pad_width), mode="linear_ramp", end_values=curve1_x[-1]
         )
     elif pad_width < 0:
-        curve1_y = np.pad(
-            curve1_y, (0, -pad_width), mode="constant", constant_values=0.0
-        )
+        curve1_y = np.pad(curve1_y, (0, -pad_width), mode="edge")
         curve1_x = np.pad(
             curve1_x, (0, -pad_width), mode="linear_ramp", end_values=curve2_x[-1]
         )
@@ -123,7 +119,7 @@ def ConcatenateCurvesWithNaN(curves_set: list):
 
 def DrawRegions(ax: Axes, above_curves_list, below_curves_list, label, color, alpha):
     """
-    绘制由安全悬浮曲线、安全制动曲线和横坐标轴围成的图形
+    绘制由最小速度曲线、最大速度曲线和横坐标轴围成的图形
 
     Args:
         ax: 绘图轴
@@ -136,11 +132,16 @@ def DrawRegions(ax: Axes, above_curves_list, below_curves_list, label, color, al
     above_curves_x_con, above_curves_y_con = ConcatenateCurves(above_curves_list)
     below_curves_x_con, below_curves_y_con = ConcatenateCurves(below_curves_list)
 
+    above_curves_y_con *= 3.6
+    below_curves_y_con *= 3.6
+
     ax.fill_between(
         above_curves_x_con,
-        above_curves_y_con * 3.6,
-        below_curves_y_con * 3.6,
+        above_curves_y_con,
+        below_curves_y_con,
         where=(above_curves_y_con > below_curves_y_con).tolist(),
+        interpolate=False,
+        step="pre",
         label=label,
         color=color,
         alpha=alpha,
@@ -151,7 +152,7 @@ def ConcatenateCurves(curves: list):
     curves_x = [data[0, :] for data in curves]
     curves_y = [data[1, :] for data in curves]
 
-    curves_x_con = np.concatenate(curves_x)
-    curves_y_con = np.concatenate(curves_y)
+    curves_x_con = np.concatenate(curves_x, dtype=np.float64)
+    curves_y_con = np.concatenate(curves_y, dtype=np.float64)
 
     return curves_x_con, curves_y_con

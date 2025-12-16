@@ -10,7 +10,8 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from rl.MTTOEnv import MTTOEnv
 from model.Vehicle import Vehicle
 from model.SafeGuard import SafeGuardUtility
-from model.Track import TrackProfile
+from model.Track import Track
+from model.Task import Task
 
 from gymnasium.utils.env_checker import check_env
 
@@ -35,38 +36,45 @@ def mttoenv():
         # pa_begin = stations_data["PA"]["begin"]
         pa_zp = stations_data["PA"]["zp"]
         # pa_end = stations_data["PA"]["end"]
-    # 读取危险速度域数据
-    idp_points = np.load(file="data/rail/safeguard/idp_points.npy")
-    with open("data/rail/safeguard/levi_curves_part.pkl", "rb") as f:
-        levi_curves_part = pickle.load(f)
-    with open("data/rail/safeguard/brake_curves_part.pkl", "rb") as f:
-        brake_curves_part = pickle.load(f)
+    # 读取防护曲线
+    with open("data/rail/safeguard/min_curves_list.pkl", "rb") as f:
+        min_curves_list = pickle.load(f)
+    with open("data/rail/safeguard/max_curves_list.pkl", "rb") as f:
+        max_curves_list = pickle.load(f)
 
-    guard = SafeGuardUtility(
+    sgu = SafeGuardUtility(
         speed_limits=s_limits,
         speed_limit_intervals=s_intervals,
-        idp_points=idp_points,
-        levi_curves_part_list=levi_curves_part,
-        brake_curves_part_list=brake_curves_part,
+        min_curves_list=min_curves_list,
+        max_curves_list=max_curves_list,
         gamma=0.95,
     )
-    trackprofile = TrackProfile(
+
+    track = Track(
         slopes=slopes,
-        slopeintervals=slope_intervals,
+        slope_intervals=slope_intervals,
         speed_limits=s_limits,
         speed_limit_intervals=s_intervals,
     )
+
     vehicle = Vehicle(mass=317.5, numoftrainsets=5, length=128.5)
-    vehicle.starting_position = ly_zp
-    vehicle.starting_velocity = 0.0
-    vehicle.destination = pa_zp
-    vehicle.schedule_time = 440.0
+    task = Task(
+        starting_position=ly_zp,
+        starting_velocity=0.0,
+        destination=pa_zp,
+        schedule_time=440.0,
+        max_acc_change=0.75,
+        max_arr_time_error=120,
+        max_stop_error=0.3,
+    )
+
     maglevttoenv = MTTOEnv(
         vehicle=vehicle,
-        trackprofile=trackprofile,
-        safeguardutil=guard,
-        ds=100,
-        render_mode="human",
+        track=track,
+        safeguardutil=sgu,
+        task=task,
+        gamma=0.995,
+        ds=10.0,
     )
     return maglevttoenv
 

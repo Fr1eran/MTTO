@@ -65,25 +65,41 @@ dps = np.append(dps, pa_end)
 # 加速区需要计算安全制动曲线
 dps = np.insert(dps, 0, az_end)
 
-# 计算安全悬浮曲线和安全制动曲线
-levi_curves_list = cal_SGC.CalcLeviCurves(aps, vehicle, 1.0)
-brake_curves_list = cal_SGC.CalcBrakeCurves(dps, vehicle, 1.0)
+# 计算安全悬浮曲线、安全制动曲线和最小速度曲线和最大速度曲线
+levi_curves_list, min_curves_list = cal_SGC.CalcLeviAndMinCurves(
+    apoffsets=aps,
+    vehicle=vehicle,
+    ds=1.0,
+)
+brake_curves_list, max_curves_list = cal_SGC.CalcBrakeAndMaxCurves(
+    dpoffsets=dps, vehicle=vehicle, ds=1.0
+)
 
+# 保存计算后的防护曲线
 with open("data/rail/safeguard/levi_curves_list.pkl", "wb") as f:
     pickle.dump(levi_curves_list, f)
 
 with open("data/rail/safeguard/brake_curves_list.pkl", "wb") as f:
     pickle.dump(brake_curves_list, f)
 
+with open("data/rail/safeguard/min_curves_list.pkl", "wb") as f:
+    pickle.dump(min_curves_list, f)
+
+with open("data/rail/safeguard/max_curves_list.pkl", "wb") as f:
+    pickle.dump(max_curves_list, f)
+
 # 将所有的坐标值数组列表合并为一个数组并在相邻段之间插入np.nan
 levi_curves_pos_con, levi_curves_speed_con = ConcatenateCurvesWithNaN(levi_curves_list)
 brake_curves_pos_con, brake_curves_speed_con = ConcatenateCurvesWithNaN(
     brake_curves_list
 )
+min_curves_pos_con, min_curves_speed_con = ConcatenateCurvesWithNaN(min_curves_list)
+max_curves_pos_con, max_curves_speed_con = ConcatenateCurvesWithNaN(max_curves_list)
 
 SetChineseFont()
 
-# 绘制区间限速、安全悬浮曲线、安全制动曲线、辅助停车区、车站、加速区
+# 绘制区间限速、安全悬浮曲线、安全制动曲线、最小速度曲线
+# 最大速度曲线、辅助停车区、车站、加速区
 fig1 = plt.figure(dpi=100)
 ax1 = fig1.add_subplot(111)
 ax1.step(
@@ -129,6 +145,7 @@ ax1.plot(
     levi_curves_speed_con * 3.6,
     label="安全悬浮曲线",
     color="blue",
+    linestyle="dashed",
     alpha=0.7,
 )
 ax1.plot(
@@ -136,6 +153,23 @@ ax1.plot(
     brake_curves_speed_con * 3.6,
     label="安全制动曲线",
     color="red",
+    linestyle="dashed",
+    alpha=0.7,
+)
+ax1.plot(
+    min_curves_pos_con,
+    min_curves_speed_con * 3.6,
+    label="最小速度曲线",
+    color="blue",
+    linestyle="solid",
+    alpha=0.7,
+)
+ax1.plot(
+    max_curves_pos_con,
+    max_curves_speed_con * 3.6,
+    label="最大速度曲线",
+    color="red",
+    linestyle="solid",
     alpha=0.7,
 )
 ax1.set_xlim((0.0, 30000.0))
@@ -146,46 +180,6 @@ ax1.set_title("区间限速与安全防护曲线")
 ax1.legend()
 
 
-# 计算危险交叉点和危险交叉点之后的部分防护曲线
-# idp_points, levi_curves_part, brake_curves_part = CalRegions(
-#     levi_curves_list, brake_curves_list[:-1]
-# )
-# np.save(file="data/rail/safeguard/idp_points.npy", arr=idp_points)
-
-# with open("data/rail/safeguard/levi_curves_part.pkl", "wb") as f:
-#     pickle.dump(levi_curves_part, f)
-
-# with open("data/rail/safeguard/brake_curves_part.pkl", "wb") as f:
-#     pickle.dump(brake_curves_part, f)
-
-# 读取危险交叉点和危险交叉点之后的部分防护曲线
-# idp_points = np.load(file='data/rail/safeguard/idp_points.npy')
-
-# with open('data/rail/safeguard/levi_curves_part.pkl', 'rb') as f:
-#     levi_curves_part = pickle.load(f)
-
-# with open('data/rail/safeguard/brake_curves_part.pkl', 'rb') as f:
-#     brake_curves_part = pickle.load(f)
-
-# 将组成危险速度域曲线对的数据点个数对齐并保存
-# levi_curves_part_padded, brake_curves_part_padded = Padding2CurvesList(
-#     levi_curves_part, brake_curves_part
-# )
-
-# with open("data/rail/safeguard/levi_curves_part_padded.pkl", "wb") as f:
-#     pickle.dump(levi_curves_part_padded, f)
-
-# with open("data/rail/safeguard/brake_curves_part_padded.pkl", "wb") as f:
-#     pickle.dump(brake_curves_part_padded, f)
-
-
-# 读取对齐后的防护曲线
-# with open('data/rail/safeguard/levi_curves_part_padded.pkl', 'rb') as f:
-#     levi_curves_part_padded = pickle.load(f)
-
-# with open('data/rail/safeguard/brake_curves_part_padded.pkl', 'rb') as f:
-#     brake_curves_part_padded = pickle.load(f)
-
 # 绘制危险交叉点后的安全防护曲线和围成的危险速度域
 fig2 = plt.figure(dpi=100)
 ax2 = fig2.add_subplot()
@@ -193,16 +187,13 @@ ax2 = fig2.add_subplot()
 safeguard = SafeGuardUtility(
     speed_limits=speed_limits,
     speed_limit_intervals=speed_limit_intervals,
-    # idp_points=idp_points,
-    # levi_curves_part_list=levi_curves_part,
-    # brake_curves_part_list=brake_curves_part,
-    levi_curves_list=levi_curves_list,
-    brake_curves_list=brake_curves_list,
+    min_curves_list=min_curves_list,
+    max_curves_list=max_curves_list,
     gamma=0.99,
 )
 
 # 绘制区间限速、危险交叉点、部分安全防护曲线和围成的危险速度域
-safeguard.render(ax=ax2)
+safeguard.Render(ax=ax2)
 
 # 绘制辅助停车区、车站
 ax2.hlines(
@@ -242,30 +233,5 @@ ax2.set_xlabel(r"位置$s\left( m \right)$")
 ax2.set_ylabel(r"速度$v\left( km/h \right)$")
 ax2.set_title("区间限速与危险速度域")
 ax2.legend()
-
-# 在危险速度域图像中显示光标的坐标
-# 定义一个文本对象，用于显示坐标
-# coord_text = ax2.text(
-#     0.02,
-#     0.98,
-#     "",
-#     transform=ax2.transAxes,
-#     verticalalignment="top",
-#     fontsize=12,
-#     bbox=dict(facecolor="white", alpha=0.7),
-# )
-
-# def on_mouse_move(event):
-#     # 检查使劲按是否发生在当前坐标轴内
-#     if event.inaxes == ax2:
-#         x_val = event.xdata
-#         y_val = event.ydata
-#         coord_text.set_text(f"x = {x_val:.2f}, y = {y_val:.2f}")
-#     else:
-#         coord_text.set_text("")
-#     fig2.canvas.draw_idle()  # 刷新画布
-
-# 绑定鼠标移动事件
-# fig2.canvas.mpl_connect("motion_notify_event", on_mouse_move)
 
 plt.show()

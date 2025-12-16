@@ -29,11 +29,11 @@ def SledgeFrictionalBrake(
     # 系数
     MIN_V_KM = 10
 
-    v_km = 3.6 * np.asarray(speed, dtype=np.float64)
+    speed_km = 3.6 * np.asarray(speed, dtype=np.float64)
 
-    u = -0.003 * v_km + 0.27
+    u = -0.003 * speed_km + 0.27
     sledge_frictional_resis_force = np.where(
-        v_km <= MIN_V_KM, k * u * mass * 100 / np.sqrt(100**2 + slope**2) * 9.8, 0.0
+        speed_km <= MIN_V_KM, k * u * mass * 100 / np.sqrt(100**2 + slope**2) * 9.8, 0.0
     )
     return sledge_frictional_resis_force
 
@@ -61,16 +61,16 @@ def VortexBrake(
     DENOM = 200.0
     MIN_V_KM = 10
 
-    v_km = 3.6 * np.asarray(speed, dtype=np.float64)
+    speed_km = 3.6 * np.asarray(speed, dtype=np.float64)
     vortex_break_force = np.where(
-        v_km > MIN_V_KM,
+        speed_km > MIN_V_KM,
         (7 - level)
         / 7
         * 2
         * numoftrainsets
         * COEFF
-        * np.sqrt(v_km / DENOM)
-        / (v_km / DENOM + (1 + np.sqrt(v_km / DENOM)) ** 2),
+        * np.sqrt(speed_km / DENOM)
+        / (speed_km / DENOM + (1 + np.sqrt(speed_km / DENOM)) ** 2),
         0.0,
     )
     return vortex_break_force
@@ -102,33 +102,33 @@ def WearPlateFrictionalBrake(
     MIN_V_KM = 10
     MAX_V_KM = 150
 
-    v_km = 3.6 * np.asarray(speed, dtype=np.float64)
+    speed_km = 3.6 * np.asarray(speed, dtype=np.float64)
 
     mu = np.piecewise(
-        v_km,
+        speed_km,
         [
-            (v_km >= 0) & (v_km <= 20),
-            (v_km > 20) & (v_km <= 30),
-            (v_km > 30) & (v_km <= 50),
-            (v_km > 50) & (v_km <= 100),
-            (v_km > 100) & (v_km <= 200),
-            (v_km > 200),
+            (speed_km >= 0) & (speed_km <= 20),
+            (speed_km > 20) & (speed_km <= 30),
+            (speed_km > 30) & (speed_km <= 50),
+            (speed_km > 50) & (speed_km <= 100),
+            (speed_km > 100) & (speed_km <= 200),
+            (speed_km > 200),
         ],
         [
-            lambda v: -0.003 * v + 0.28,
-            lambda v: -0.002 * v + 0.26,
-            lambda v: -0.001 * v + 0.23,
-            lambda v: -0.0008 * v + 0.22,
-            lambda v: -0.0002 * v + 0.16,
-            lambda v: 0.3,
+            lambda speed: -0.003 * speed + 0.28,
+            lambda speed: -0.002 * speed + 0.26,
+            lambda speed: -0.001 * speed + 0.23,
+            lambda speed: -0.0008 * speed + 0.22,
+            lambda speed: -0.0002 * speed + 0.16,
+            lambda speed: 0.3,
         ],
     )
 
-    wearplate_frictional_resis_force = np.zeros_like(v_km, dtype=np.float64)
-    mask = (v_km > MIN_V_KM) & (v_km <= MAX_V_KM)
+    wearplate_frictional_resis_force = np.zeros_like(speed_km, dtype=np.float64)
+    mask = (speed_km > MIN_V_KM) & (speed_km <= MAX_V_KM)
     # 只对满足条件的点计算，防止根号内表达式求值为负抛出异常
     tmp = mu[mask] * (
-        2 * numoftrainsets * (A - np.sqrt(B - C * (v_km[mask] - D) ** 2)) - E
+        2 * numoftrainsets * (A - np.sqrt(B - C * (speed_km[mask] - D) ** 2)) - E
     )
     wearplate_frictional_resis_force[mask] = tmp
     return wearplate_frictional_resis_force

@@ -145,13 +145,13 @@ class ORS:
                 begin_interval
             ]  # 限速区间左端点
             begin_speed = self.track.speed_limits[begin_interval] * self.gamma
-            operation_time = (begin_speed - end_speed) / self.vehicle.max_dacc
+            operation_time = (begin_speed - end_speed) / self.vehicle.max_dec
             begin_pos = end_pos - (begin_speed**2 - end_speed**2) / (
-                2 * self.vehicle.max_dacc
+                2 * self.vehicle.max_dec
             )
             # begin_pos = end_pos - (begin_speed + end_speed) * (
             #     begin_speed - end_speed
-            # ) / (2 * self.vehicle.max_dacc)
+            # ) / (2 * self.vehicle.max_dec)
 
             # if begin_pos >= mark_pos:  # 达到顶棚速度的位置在当前限速区间内
             if (begin_pos > mark_pos) or np.isclose(
@@ -160,7 +160,7 @@ class ORS:
                 break
             else:
                 distance = end_pos - mark_pos
-                edge_speed_2 = end_speed**2 + 2 * self.vehicle.max_dacc * distance
+                edge_speed_2 = end_speed**2 + 2 * self.vehicle.max_dec * distance
                 edge_speed = np.sqrt(edge_speed_2)
                 next_interval_speed_limit = (
                     self.track.speed_limits[
@@ -244,42 +244,42 @@ class ORS:
         """计算限速区间内不存在巡航阶段的操作模式序列"""
         operation = []
         min_brake_distance = (begin_speed**2 - end_speed**2) / (
-            2 * self.vehicle.max_dacc
+            2 * self.vehicle.max_dec
         )
         sceptical_pos: float | None = None
         # min_brake_distance = (
         #     (begin_speed + end_speed)
         #     * (begin_speed - end_speed)
-        #     / (2 * self.vehicle.max_dacc)
+        #     / (2 * self.vehicle.max_dec)
         # )
         if min_brake_distance > (end_pos - begin_pos):
             # 此时即使施加最大制动也无法停靠
             # 减速到目标速度
             sceptical_pos = begin_pos - (begin_speed**2 - end_speed**2) / (
-                2 * self.vehicle.max_dacc
+                2 * self.vehicle.max_dec
             )
-            operation_time = (begin_speed - end_speed) / self.vehicle.max_dacc
-            operation.append(GeneralOperation(-self.vehicle.max_dacc, operation_time))
+            operation_time = (begin_speed - end_speed) / self.vehicle.max_dec
+            operation.append(GeneralOperation(-self.vehicle.max_dec, operation_time))
         else:
             # 先以最大加速度牵引再以最大减速度制动到目标位置
             speed_peak_2 = (
                 (
                     2
                     * self.vehicle.max_acc
-                    * self.vehicle.max_dacc
+                    * self.vehicle.max_dec
                     * (end_pos - begin_pos)
                 )
-                + self.vehicle.max_dacc * begin_speed**2
+                + self.vehicle.max_dec * begin_speed**2
                 + self.vehicle.max_acc * end_speed**2
-            ) / (self.vehicle.max_acc + self.vehicle.max_dacc)  # 计算工况切换的顶棚速度
+            ) / (self.vehicle.max_acc + self.vehicle.max_dec)  # 计算工况切换的顶棚速度
             speed_peak = np.sqrt(speed_peak_2)
             forward_operation_time = (speed_peak - begin_speed) / self.vehicle.max_acc
-            backward_operation_time = (speed_peak - end_speed) / self.vehicle.max_dacc
+            backward_operation_time = (speed_peak - end_speed) / self.vehicle.max_dec
             operation.append(
                 GeneralOperation(self.vehicle.max_acc, forward_operation_time)
             )
             operation.append(
-                GeneralOperation(-self.vehicle.max_dacc, backward_operation_time)
+                GeneralOperation(-self.vehicle.max_dec, backward_operation_time)
             )
         return operation, sceptical_pos
 
@@ -297,7 +297,7 @@ class ORS:
         cruise_time = (cruise_end_pos - cruise_begin_pos) / cruise_speed
         operation.append(GeneralOperation(self.vehicle.max_acc, ma_time))
         operation.append(GeneralOperation(0.0, cruise_time))
-        operation.append(GeneralOperation(-self.vehicle.max_dacc, mb_time))
+        operation.append(GeneralOperation(-self.vehicle.max_dec, mb_time))
         return operation
 
     def _cal_min_runtime_operation(self, current_pos: float, current_speed: float):
@@ -503,13 +503,13 @@ class ORS:
                         # 此时只有最大制动工况
                         operations.append(
                             GeneralOperation(
-                                -self.vehicle.max_dacc,
+                                -self.vehicle.max_dec,
                                 dot,
                             )
                         )
                         sceptical_pos += (
                             self.track.speed_limits[current_interval] * self.gamma * dot
-                            - 0.5 * self.vehicle.max_dacc * dot**2
+                            - 0.5 * self.vehicle.max_dec * dot**2
                         )
                     else:
                         # 先巡航后最大制动
@@ -520,7 +520,7 @@ class ORS:
                         operations.append(GeneralOperation(0.0, cruise_time))
                         operations.append(
                             GeneralOperation(
-                                -self.vehicle.max_dacc,
+                                -self.vehicle.max_dec,
                                 dot,
                             )
                         )

@@ -10,26 +10,26 @@ from model.SafeGuard import SafeGuardUtility
 
 
 @pytest.fixture(scope="module")
-def safeguard():
+def safeguardutil():
     with open("data/rail/raw/speed_limits.json", "r", encoding="utf-8") as f:
         sl_data = json.load(f)
         s_limits = sl_data["speed_limits"]
         s_limits = np.asarray(s_limits, dtype=np.float64) / 3.6
         s_intervals = sl_data["intervals"]
-    with open("data/rail/safeguard/levi_curves_list.pkl", "rb") as f:
-        levi_curves_list = pickle.load(f)
-    with open("data/rail/safeguard/brake_curves_list.pkl", "rb") as f:
-        brake_curves_list = pickle.load(f)
+    with open("data/rail/safeguard/min_curves_list.pkl", "rb") as f:
+        min_curves_list = pickle.load(f)
+    with open("data/rail/safeguard/max_curves_list.pkl", "rb") as f:
+        max_curves_list = pickle.load(f)
     return SafeGuardUtility(
         speed_limits=s_limits,
         speed_limit_intervals=s_intervals,
-        levi_curves_list=levi_curves_list,
-        brake_curves_list=brake_curves_list,
+        min_curves_list=min_curves_list,
+        max_curves_list=max_curves_list,
         gamma=0.95,
     )
 
 
-def test_detect_danger(safeguard):
+def test_detect_danger(safeguardutil):
     pos = np.array(
         [
             725,
@@ -73,5 +73,159 @@ def test_detect_danger(safeguard):
             False,
         ]
     )
-    result = safeguard.DetectDanger(pos, speed)
+    result = safeguardutil.DetectDanger(pos, speed)
     np.testing.assert_array_equal(result, expected_result)
+
+
+def test_GetMinAndMaxSpeed_with_currentspisNone(safeguardutil):
+    pos: list[float] = [
+        200.0,
+        530.0,
+        800.0,
+        300.0,
+        1250.0,
+        1200.0,
+        1800.0,
+        3500.0,
+        4500.0,
+        8800.0,
+        17000.0,
+        22000.0,
+        26500.0,
+        29000.0,
+    ]
+    speed: list[float] = [
+        8.8 / 3.6,
+        9.0 / 3.6,
+        5.0 / 3.6,
+        15.0 / 3.6,
+        20.0 / 3.6,
+        45.0 / 3.6,
+        60.0 / 3.6,
+        60.0 / 3.6,
+        60.0 / 3.6,
+        25.0 / 3.6,
+        50.0 / 3.6,
+        130.0 / 3.6,
+        60.0 / 3.6,
+        60.0 / 3.6,
+    ]
+    expected_sp: list[int] = [-1, -1, -1, 0, 0, 1, 2, 3, 4, 5, 6, 7, 7, 8]
+    expected_IsCurrentSpeedBigger: list[bool] = [
+        False,
+        True,
+        True,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+    ]
+    result_min_speed: list[float] = []
+    result_max_speed: list[float] = []
+    result_sp: list[int] = []
+    for i in range(len(pos)):
+        min_speed, max_speed, current_sp = safeguardutil.GetMinAndMaxSpeed(
+            current_pos=pos[i], current_speed=speed[i], current_sp=None
+        )
+        result_min_speed.append(min_speed)
+        result_max_speed.append(max_speed)
+        result_sp.append(current_sp)
+    result_IsCurrentSpeedBigger = np.asarray(speed) > np.asarray(result_max_speed)
+    np.testing.assert_array_equal(result_sp, expected_sp)
+    np.testing.assert_array_equal(
+        result_IsCurrentSpeedBigger, expected_IsCurrentSpeedBigger
+    )
+
+
+def test_GetMinAndMaxSpeed_with_currentspisNotNone(safeguardutil):
+    pos: list[float] = [
+        200.0,
+        530.0,
+        800.0,
+        300.0,
+        1300.0,
+        800.0,
+        2000.0,
+        2600.0,
+        5230.0,
+        28600.0,
+        29312.0,
+    ]
+    speed: list[float] = [
+        8.8 / 3.6,
+        9.0 / 3.6,
+        5.0 / 3.6,
+        15.0 / 3.6,
+        10.0 / 3.6,
+        65.0 / 3.6,
+        50.0 / 3.6,
+        50.0 / 3.6,
+        8.0 / 3.6,
+        70.0 / 3.6,
+        40.0 / 3.6,
+    ]
+    sp: list[int] = [
+        -1,
+        -1,
+        -1,
+        -1,
+        0,
+        0,
+        1,
+        2,
+        3,
+        8,
+        8,
+    ]
+    expected_sp: list[int] = [-1, -1, -1, 0, 0, 1, 2, 3, 3, 8, 8]
+    expected_IsMinSpeedEqualToZero: list[bool] = [
+        True,
+        True,
+        True,
+        True,
+        True,
+        False,
+        True,
+        False,
+        True,
+        False,
+        True,
+    ]
+    expected_IsMaxSpeedBigger: list[bool] = [
+        True,
+        False,
+        False,
+        True,
+        True,
+        True,
+        True,
+        True,
+        False,
+        True,
+        False,
+    ]
+    result_min_speed: list[float] = []
+    result_max_speed: list[float] = []
+    result_sp: list[int] = []
+    for i in range(len(pos)):
+        current_sp = sp[i]
+        min_speed, max_speed, current_sp = safeguardutil.GetMinAndMaxSpeed(
+            current_pos=pos[i], current_speed=speed[i], current_sp=current_sp
+        )
+        result_min_speed.append(min_speed)
+        result_max_speed.append(max_speed)
+        result_sp.append(current_sp)
+    result_IsMinSpeedEqualToZero = np.isclose(result_min_speed, 0.0)
+    result_IsMaxSpeedBigger = np.asarray(result_max_speed) > np.asarray(speed)
+    np.testing.assert_array_equal(
+        result_IsMinSpeedEqualToZero, expected_IsMinSpeedEqualToZero
+    )
+    np.testing.assert_array_equal(result_IsMaxSpeedBigger, expected_IsMaxSpeedBigger)
+    np.testing.assert_array_equal(result_sp, expected_sp)

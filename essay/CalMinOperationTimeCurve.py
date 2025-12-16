@@ -42,8 +42,8 @@ gamma: float = 0.99
 sgu = SafeGuardUtility(
     speed_limits=speed_limits,
     speed_limit_intervals=speed_limit_intervals,
-    levi_curves_list=levi_curves_list,
-    brake_curves_list=brake_curves_list,
+    min_curves_list=levi_curves_list,
+    max_curves_list=brake_curves_list,
     gamma=gamma,
 )
 
@@ -53,7 +53,7 @@ vehicle = Vehicle(
     numoftrainsets=5,
     length=128.5,
     max_acc=1.0,
-    max_dacc=1.0,
+    max_dec=1.0,
     levi_power_per_mass=1.7,
 )
 task = Task(
@@ -82,7 +82,7 @@ SetChineseFont()
 fig, ax = plt.subplots(figsize=(12, 7))
 
 # 绘制静态元素（区间限速、危险速度域和终点等）
-sgu.render(ax=ax)
+sgu.Render(ax=ax)
 
 ax.scatter(
     end_pos,

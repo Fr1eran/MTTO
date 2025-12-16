@@ -18,15 +18,15 @@ class Vehicle:
     numoftrainsets: int
     length: float  # 单位: m
     max_acc: float = 1.0  # 单位: m/s^2
-    max_dacc: float = 1.0  # 单位: m/s^2
+    max_dec: float = 1.0  # 单位: m/s^2
     levi_power_per_mass: float = 1.7  # 单位 kW/T
 
 
 class VehicleDynamic:
     @staticmethod
-    def CalcLeviDacc(vehicle: Vehicle, speed: Numeric, slope: Numeric):
+    def CalcLeviDec(vehicle: Vehicle, speed: Numeric, slope: Numeric):
         """
-        计算列车在给定速度、坡度下受到的悬浮减速度
+        计算列车悬浮减速度大小
 
         磁浮列车在无牵引情况下受到的阻力包含：
          - 滑橇摩擦制动力
@@ -56,9 +56,9 @@ class VehicleDynamic:
         return f_total / vehicle.mass
 
     @staticmethod
-    def CalcBrakeDacc(vehicle: Vehicle, speed: Numeric, slope: Numeric, level: int):
+    def CalcBrakeDec(vehicle: Vehicle, speed: Numeric, slope: Numeric, level: int):
         """
-        计算列车在给定速度、坡度、制动等级下的安全制动减速度
+        计算列车安全制动减速度大小
 
         磁浮列车在安全制动情形下受到的力包含：
          - 涡流制动力
@@ -104,7 +104,7 @@ class VehicleDynamic:
         vehicle: Vehicle, acc: Numeric, speed: Numeric, slope: Numeric
     ):
         """
-        计算列车在给定加速度、速度、坡度下受到牵引系统施加的纵向力
+        计算列车受到牵引系统施加的纵向力大小
 
         磁浮列车在正常运行时受到的阻力包含：
         - 空气阻力
