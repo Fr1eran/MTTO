@@ -606,7 +606,7 @@ class SafeGuardUtility:
         self, current_pos: float, current_speed: float, current_sp: int | None
     ) -> tuple[float, float, int]:
         """
-        获得当前位置的最小防护速度和最大仿防护速度
+        获得当前位置的最小防护速度和最大防护速度
 
         Args:
             current_pos: 当前位置
@@ -614,8 +614,10 @@ class SafeGuardUtility:
             current_sp: 当前目标停车点编号, 从 -1 开始
 
         Returns:
-            min_speed, max_speed, current_sp
+            tuple(current_min_speed, current_max_speed, current_sp)
         """
+        current_min_speed = 0.0
+        current_max_speed = 0.0
         if current_sp is None:
             # 没有给定当前目标停车点编号，需要遍历确定
             # 设置初始停车点编号为-1
@@ -625,7 +627,7 @@ class SafeGuardUtility:
                 if current_pos > current_min_curve[0, -1]:
                     # 当前位置大于最小速度曲线的右端点
                     # 设置最小速度为0
-                    min_speed = 0.0
+                    current_min_speed = 0.0
                 else:
                     # 当前位置小于最小速度曲线的右端点
                     # 设置最小速度为最小速度曲线在当前位置的插值
@@ -635,6 +637,8 @@ class SafeGuardUtility:
                     # 未步进到当前停车点
                     if current_speed < min_speed:
                         break
+                    else:
+                        current_min_speed = min_speed
                 current_sp += 1
             current_max_curve = self.max_curves_list[current_sp + 1]
             if current_pos > current_max_curve[0, 0]:
@@ -653,6 +657,7 @@ class SafeGuardUtility:
                         len(self.speed_limits) - 1,
                     )
                 ]
+            current_max_speed = max_speed
         else:
             # 已给定当前目标停车点编号
             if current_sp == -1:
@@ -671,6 +676,7 @@ class SafeGuardUtility:
                     min_speed = np.interp(
                         current_pos, current_min_curve[0, :], current_min_curve[1, :]
                     )
+            current_min_speed = min_speed
             current_max_curve = self.max_curves_list[current_sp + 1]
             if current_pos > current_max_curve[0, 0]:
                 # 当前位置大于最大速度曲线的左端点
@@ -688,6 +694,7 @@ class SafeGuardUtility:
                         len(self.speed_limits) - 1,
                     )
                 ]
+            current_max_speed = max_speed
             next_sp = current_sp + 1
             if next_sp != len(self.min_curves_list):
                 # 未步进到最后一个停车点
@@ -699,7 +706,7 @@ class SafeGuardUtility:
                     # 可以步进到下一个停车点，且立即执行
                     current_sp = next_sp
 
-        return float(min_speed), float(max_speed), current_sp
+        return float(current_min_speed), float(current_max_speed), current_sp
 
     @overload
     def DetectDanger(

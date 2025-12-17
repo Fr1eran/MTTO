@@ -111,7 +111,23 @@ def test_GetMinAndMaxSpeed_with_currentspisNone(safeguardutil):
         60.0 / 3.6,
     ]
     expected_sp: list[int] = [-1, -1, -1, 0, 0, 1, 2, 3, 4, 5, 6, 7, 7, 8]
-    expected_IsCurrentSpeedBigger: list[bool] = [
+    expected_IsCurrentMinSpeedEqualToZero: list[bool] = [
+        True,
+        True,
+        True,
+        False,
+        True,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+    ]
+    expected_IsCurrentSpeedBiggerThanCurrentMaxSpeed: list[bool] = [
         False,
         True,
         True,
@@ -127,20 +143,27 @@ def test_GetMinAndMaxSpeed_with_currentspisNone(safeguardutil):
         False,
         False,
     ]
-    result_min_speed: list[float] = []
-    result_max_speed: list[float] = []
-    result_sp: list[int] = []
+    result_CurrentMinSpeed: list[float] = []
+    result_CurrentMaxSpeed: list[float] = []
+    result_Currentsp: list[int] = []
     for i in range(len(pos)):
-        min_speed, max_speed, current_sp = safeguardutil.GetMinAndMaxSpeed(
-            current_pos=pos[i], current_speed=speed[i], current_sp=None
+        current_min_speed, current_max_speed, current_sp = (
+            safeguardutil.GetMinAndMaxSpeed(
+                current_pos=pos[i], current_speed=speed[i], current_sp=None
+            )
         )
-        result_min_speed.append(min_speed)
-        result_max_speed.append(max_speed)
-        result_sp.append(current_sp)
-    result_IsCurrentSpeedBigger = np.asarray(speed) > np.asarray(result_max_speed)
-    np.testing.assert_array_equal(result_sp, expected_sp)
+        result_CurrentMinSpeed.append(current_min_speed)
+        result_CurrentMaxSpeed.append(current_max_speed)
+        result_Currentsp.append(current_sp)
+    result_IsCurrentMinSpeedEqualToZero = np.isclose(result_CurrentMinSpeed, 0.0)
+    result_IsCurrentSpeedBigger = np.asarray(speed) > np.asarray(result_CurrentMaxSpeed)
     np.testing.assert_array_equal(
-        result_IsCurrentSpeedBigger, expected_IsCurrentSpeedBigger
+        result_IsCurrentMinSpeedEqualToZero, expected_IsCurrentMinSpeedEqualToZero
+    )
+    np.testing.assert_array_equal(result_Currentsp, expected_sp)
+    np.testing.assert_array_equal(
+        result_IsCurrentSpeedBigger,
+        expected_IsCurrentSpeedBiggerThanCurrentMaxSpeed,
     )
 
 
@@ -184,8 +207,8 @@ def test_GetMinAndMaxSpeed_with_currentspisNotNone(safeguardutil):
         8,
         8,
     ]
-    expected_sp: list[int] = [-1, -1, -1, 0, 0, 1, 2, 3, 3, 8, 8]
-    expected_IsMinSpeedEqualToZero: list[bool] = [
+    expected_Currentsp: list[int] = [-1, -1, -1, 0, 0, 1, 2, 3, 3, 8, 8]
+    expected_IsCurrentMinSpeedEqualToZero: list[bool] = [
         True,
         True,
         True,
@@ -198,7 +221,7 @@ def test_GetMinAndMaxSpeed_with_currentspisNotNone(safeguardutil):
         False,
         True,
     ]
-    expected_IsMaxSpeedBigger: list[bool] = [
+    expected_IsCurrentMaxSpeedBigger: list[bool] = [
         True,
         False,
         False,
@@ -211,21 +234,27 @@ def test_GetMinAndMaxSpeed_with_currentspisNotNone(safeguardutil):
         True,
         False,
     ]
-    result_min_speed: list[float] = []
-    result_max_speed: list[float] = []
-    result_sp: list[int] = []
+    result_CurrentMinSpeed: list[float] = []
+    result_CurrentMaxSpeed: list[float] = []
+    result_Currentsp: list[int] = []
     for i in range(len(pos)):
         current_sp = sp[i]
-        min_speed, max_speed, current_sp = safeguardutil.GetMinAndMaxSpeed(
-            current_pos=pos[i], current_speed=speed[i], current_sp=current_sp
+        current_min_speed, current_max_speed, current_sp = (
+            safeguardutil.GetMinAndMaxSpeed(
+                current_pos=pos[i], current_speed=speed[i], current_sp=current_sp
+            )
         )
-        result_min_speed.append(min_speed)
-        result_max_speed.append(max_speed)
-        result_sp.append(current_sp)
-    result_IsMinSpeedEqualToZero = np.isclose(result_min_speed, 0.0)
-    result_IsMaxSpeedBigger = np.asarray(result_max_speed) > np.asarray(speed)
+        result_CurrentMinSpeed.append(current_min_speed)
+        result_CurrentMaxSpeed.append(current_max_speed)
+        result_Currentsp.append(current_sp)
+    result_IsCurrentMinSpeedEqualToZero = np.isclose(result_CurrentMinSpeed, 0.0)
+    result_IsCurrentMaxSpeedBiggerThanCurrentSpeed = np.asarray(
+        result_CurrentMaxSpeed
+    ) > np.asarray(speed)
     np.testing.assert_array_equal(
-        result_IsMinSpeedEqualToZero, expected_IsMinSpeedEqualToZero
+        result_IsCurrentMinSpeedEqualToZero, expected_IsCurrentMinSpeedEqualToZero
     )
-    np.testing.assert_array_equal(result_IsMaxSpeedBigger, expected_IsMaxSpeedBigger)
-    np.testing.assert_array_equal(result_sp, expected_sp)
+    np.testing.assert_array_equal(
+        result_IsCurrentMaxSpeedBiggerThanCurrentSpeed, expected_IsCurrentMaxSpeedBigger
+    )
+    np.testing.assert_array_equal(result_Currentsp, expected_Currentsp)
