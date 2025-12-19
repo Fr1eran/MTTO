@@ -95,7 +95,7 @@ model = PPO(
     maglevttoenv_train,
     device="cpu",
     verbose=1,
-    learning_rate=1e-3,
+    # learning_rate=1e-3,
     # n_steps=2048,
     # batch_size=64,
     # n_epochs=10,
@@ -114,7 +114,7 @@ model = PPO(
 
 
 # Train
-model.learn(total_timesteps=50_000)
+model.learn(total_timesteps=400_000)
 
 user_input = (
     input("Training finished. Do you want to continue to evaluation? (y/n): ")

@@ -52,11 +52,11 @@ def CalcEnergyCumul(
 
 
 def CalcEnergy(
-    begin_pos: float | np.floating,
-    begin_velocity: float | np.floating,
-    acc: float | np.floating,
-    displacement: float | np.floating,
-    operation_time: float | np.floating | None,
+    begin_pos: float,
+    begin_velocity: float,
+    acc: float,
+    displacement: float,
+    operation_time: float | None,
     vehicle: Vehicle,
     trackprofile: TrackProfile,
 ) -> tuple[float, float]:

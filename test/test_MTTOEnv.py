@@ -123,10 +123,10 @@ def test_reset(mttoenv: MTTOEnv):
 
 def test_cal_energy_consumption(mttoenv: MTTOEnv):
     obs, info = mttoenv.reset()
-    energy_consumption1 = mttoenv.cal_energy_consumption(
+    energy_consumption1 = mttoenv._cal_energy_consumption(
         acc=0.0, displacement=0.0, travel_time=0.0
     )
-    energy_consumption2 = mttoenv.cal_energy_consumption(
+    energy_consumption2 = mttoenv._cal_energy_consumption(
         acc=1.0, displacement=100.0, travel_time=14.142
     )
     print(f"acc=0.0 step energy consumption is {energy_consumption1}")
