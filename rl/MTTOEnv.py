@@ -1,5 +1,6 @@
 from typing import Any
 import logging
+import math
 import structlog
 import gymnasium as gym
 import numpy as np
@@ -49,26 +50,13 @@ class MTTOEnv(gym.Env):
         safeguardutil: SafeGuardUtility,
         task: Task,
         gamma: float,
-        ds: float,
+        max_step_distance: float,
         render_mode: str | None = None,
         use_animation=False,
     ):
         super().__init__()
         # 初始化日志记录器
         self.logger = setup_logger("rl_training.jsonl")
-        # 渲染模式
-        self.render_mode = render_mode
-        # 是否启用动画
-        self.use_animation = use_animation
-        # 可视化时需要的绘图实例
-        self.fig = None
-        self.ax = None
-        self.vehicle_dot, self.traj_line = None, None
-        self.animation = None
-        self.animation_running = False
-
-        # 动画配置
-        self.animation_interval = 50  # 动画更新间隔(ms)
 
         # 磁浮列车运行优化车辆实例
         self.vehicle = vehicle
@@ -86,8 +74,21 @@ class MTTOEnv(gym.Env):
         # 回报折扣因子
         self.gamma = gamma
 
-        # 一个时间步仿真距离步长
-        self.ds = ds
+        # 单步状态转移容许的最大位移量
+        self.max_step_distance: float = max_step_distance
+
+        # 定义常量
+        # 包含：
+        # - 运行总距离, 单位: m
+        # - 运动方向
+        # - 目标速度, 单位: m/s
+        self.whole_distance: float = abs(
+            self.task.target_position - self.task.start_position
+        )
+        self.direction: int = (
+            1 if self.task.start_position < self.task.target_position else -1
+        )
+        self.goal_speed: float = 0.0
 
         # 参考运行系统
         self.ors = ORS(
@@ -99,106 +100,87 @@ class MTTOEnv(gym.Env):
 
         # 计算最短运行时间参考曲线
         self.ref_curve_pos, self.ref_curve_speed = self.ors.CalMinRuntimeCurve(
-            begin_pos=self.task.starting_position,
-            begin_speed=abs(self.task.starting_velocity),
+            begin_pos=self.task.start_position,
+            begin_speed=self.task.start_speed,
         )
         # 计算最大能耗和最短运行时间
         mec, lec, self.min_operation_time = self.ors.CalRefEnergyAndOperationTime(
-            begin_pos=self.task.starting_position,
-            begin_speed=abs(self.task.starting_velocity),
-            displacement=self.task.destination - self.task.starting_position,
+            begin_pos=self.task.start_position,
+            begin_speed=self.task.start_speed,
+            displacement=self.task.target_position - self.task.start_position,
         )
         self.max_total_energy = mec + lec
 
-        # 当前训练步数
-        self.current_steps: int = 0
-
-        # 当前步进停车点编号
-        self.current_sp: int | None = None
-
-        # Q初始值
-        self.q_init: float = 0.0
-
-        # 最大仿真时间步
-        self.max_episode_steps: int = (
-            int(abs(self.task.destination - self.task.starting_position) / self.ds) + 5
-        )
-
-        # 训练历史
-        self.history_pos: list[float] = [self.task.starting_position]
-        self.history_velocity: list[float] = [self.task.starting_velocity]
-        self.history_acc: list[float] = [0.0]
-        self.dense_rewards: list[float] = [0.0]
-
-        # 列车运行轨迹
-        self.trajectory_pos: list[float] = [self.task.starting_position]
-        self.trajectory_speed_km_h: list[float] = [
-            abs(self.task.starting_velocity * 3.6)
-        ]
-
-        # 初始化智能体
+        # 初始化运行状态
         # 包含:
-        # - 当前位置, 单位:m
-        # - 剩余位移, 单位: m
-        # - 规划运行总距离, 单位: m
-        # - 运动方向
-        # - 当前车辆速度, 单位: m/s
-        # - 目标速度, 单位: m/s
-        # - 当前运行时间, 单位: s
+        # - 当前位置, 单位: m
+        # - 当前列车运行总时间
+        # - 当前列车消耗总能量, 单位: J
+        self.current_pos: float = self.task.start_position
+        self.current_operation_time: float = 0.0
+        self.current_energy_consumption: float = 0.0
+
+        # 初始化智能体可观测状态
+        # 包含:
+        # - 当前位置到目标位置的总距离, 单位: m
+        # - 当前运行速度大小, 单位: m/s
         # - 剩余规划运行时间, 单位: s
         # - 列车质量（对智能体决策似乎不起作用）, 单位: t
-        # - 当前坡度, 百分位
-        # - 下一坡度区间的坡度变化量, 百分位
-        # - 与下一坡度变化区间的距离, 单位: m
-        # - 当前限速, 单位: m/s
-        # - 下一限速区间的速度变化量, 单位: m/s
-        # - 与下一限速区间的距离, 单位: m
-        # - 当前时刻列车消耗总能量, 单位: J
-        self.current_pos: float = self.task.starting_position
-        self.remainning_displacement: float = self.task.destination - self.current_pos
-        self.whole_distance: float = abs(
-            self.task.destination - self.current_pos
-        )  # 常量
-        self.direction: int = (
-            1 if self.current_pos < self.task.destination else -1
-        )  # 常量
-        self.current_velocity: float = self.task.starting_velocity
-        self.goal_speed: float = 0.0
-        self.current_operation_time: float = 0.0
+        # - 当前位置对应的坡度, 百分比制
+        # - 当前位置对应的最大运行速度大小, 单位: m/s
+        # - 当前位置对应的最小运行速度大小, 单位: m/s
+        # - 下步状态转移后可能位置对应的坡度, 百分比制
+        # - 下步状态转移后可能位置对应的最大运行速度大小, 单位: m/s
+        # - 下步状态转移后可能位置对应的最小运行速度大小, 单位: m/s
+        self.remainning_distance: float = abs(
+            self.task.target_position - self.current_pos
+        )
+        self.current_speed: float = self.task.start_speed
         self.remainning_schedule_time: float = self.task.schedule_time
         # self.mass = self.vehicle.mass
         self.current_slope = self.trackprofile.GetSlope(
-            pos=self.current_pos, interpolate=True
+            pos=self.current_pos, interpolate=False
         )
-
-        self.next_slope, self.displacement_between_next_slope = (
-            self.trackprofile.GetNextSlopeAndDistance(
-                pos=self.current_pos, direction=self.direction
+        self.current_min_speed, self.current_max_speed, self.current_sp = (
+            self.safeguardutil.GetMinAndMaxSpeed(
+                current_pos=self.current_pos,
+                current_speed=self.current_speed,
+                current_sp=None,
             )
         )
-        self.current_speed_limit = (
-            self.trackprofile.GetSpeedlimit(pos=self.current_pos) * self.direction
+        self.current_max_speed = min(
+            self._get_ref_speed(self.current_pos),
+            self.current_max_speed,
         )
-
-        self.next_speed_limit, self.displacement_between_next_speed_limit = (
-            self.trackprofile.GetNextSpeedlimitAndDistance(
-                pos=self.current_pos, direction=self.direction
+        self.next_slope = self.trackprofile.GetSlope(
+            pos=self.current_pos + self.max_step_distance * self.direction,
+            interpolate=False,
+        )
+        self.next_min_speed, self.next_max_speed, _ = (
+            self.safeguardutil.GetMinAndMaxSpeed(
+                current_pos=self.current_pos + self.max_step_distance * self.direction,
+                current_speed=self.current_speed,
+                current_sp=self.current_sp,
             )
         )
-        self.next_speed_limit = self.next_speed_limit * self.direction
-        self.current_energy_consumption: float = 0.0
+        self.next_max_speed = min(
+            self._get_ref_speed(
+                self.current_pos + self.max_step_distance * self.direction
+            ),
+            self.next_max_speed,
+        )
 
         # 定义智能体能够观测的状态信息
         self.observation_space = gym.spaces.Dict(
             {
-                "agent_remainning_displacement": gym.spaces.Box(
-                    -self.whole_distance,
+                "agent_remainning_distance": gym.spaces.Box(
+                    0.0,
                     self.whole_distance,
                     shape=(1,),
                     dtype=np.float32,
                 ),
-                "agent_current_velocity": gym.spaces.Box(
-                    -600.0 / 3.6, 600.0 / 3.6, shape=(1,), dtype=np.float32
+                "agent_current_speed": gym.spaces.Box(
+                    0.0, 600.0 / 3.6, shape=(1,), dtype=np.float32
                 ),
                 "agent_remainning_schedule_time": gym.spaces.Box(
                     -600.0,  # 最多超时10分钟
@@ -209,24 +191,62 @@ class MTTOEnv(gym.Env):
                 "current_slope": gym.spaces.Box(
                     -4.0, 4.0, shape=(1,), dtype=np.float32
                 ),
+                "current_max_speed": gym.spaces.Box(
+                    0.0, 600 / 3.6, shape=(1,), dtype=np.float32
+                ),
+                "current_min_speed": gym.spaces.Box(
+                    0.0, 600 / 3.6, shape=(1,), dtype=np.float32
+                ),
                 "next_slope": gym.spaces.Box(-4.0, 4.0, shape=(1,), dtype=np.float32),
-                "displacement_between_next_slope": gym.spaces.Box(
-                    -100000.0, 100000.0, shape=(1,), dtype=np.float32
+                "next_max_speed": gym.spaces.Box(
+                    0.0, 600 / 3.6, shape=(1,), dtype=np.float32
                 ),
-                "current_speed_limit": gym.spaces.Box(
-                    -600.0 / 3.6, 600 / 3.6, shape=(1,), dtype=np.float32
-                ),
-                "next_speed_limit": gym.spaces.Box(
-                    -600.0 / 3.6, 600.0 / 3.6, shape=(1,), dtype=np.float32
-                ),
-                "displacement_between_next_speed_limit": gym.spaces.Box(
-                    -100000.0, 100000.0, shape=(1,), dtype=np.float32
+                "next_min_speed": gym.spaces.Box(
+                    0.0, 600 / 3.6, shape=(1,), dtype=np.float32
                 ),
             }
         )
 
         # 定义智能体的动作空间, 归一化
         self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
+
+        # 当前训练步数
+        self.current_steps: int = 0
+
+        # 当前步进停车点编号
+        self.current_sp: int = -1
+
+        # Q初始值
+        self.q_init: float = 0.0
+
+        # 最大转移步数
+        self.max_episode_steps: int = math.ceil(
+            abs(self.task.target_position - self.current_pos) / self.max_step_distance
+        )
+
+        # 训练历史
+        self.history_pos: list[float] = [self.current_pos]
+        self.history_speed: list[float] = [self.current_speed]
+        self.history_acc: list[float] = [0.0]
+        self.dense_rewards: list[float] = [0.0]
+
+        # 列车运行轨迹
+        self.trajectory_pos: list[float] = [self.current_pos]
+        self.trajectory_speed_km_h: list[float] = [self.current_speed * 3.6]
+
+        # 渲染模式
+        self.render_mode = render_mode
+        # 是否启用动画
+        self.use_animation = use_animation
+        # 可视化时需要的绘图实例
+        self.fig = None
+        self.ax = None
+        self.vehicle_dot, self.traj_line = None, None
+        self.animation = None
+        self.animation_running = False
+
+        # 动画配置
+        self.animation_interval = 50  # 动画更新间隔(ms)
 
     def _get_obs(self):
         """
@@ -238,27 +258,19 @@ class MTTOEnv(gym.Env):
         """
 
         return {
-            "agent_remainning_displacement": np.array(
-                [self.remainning_displacement], dtype=np.float32
+            "agent_remainning_distance": np.array(
+                [self.remainning_distance], dtype=np.float32
             ),
-            "agent_current_velocity": np.array(
-                [self.current_velocity], dtype=np.float32
-            ),
+            "agent_current_speed": np.array([self.current_speed], dtype=np.float32),
             "agent_remainning_schedule_time": np.array(
                 [self.remainning_schedule_time], dtype=np.float32
             ),
             "current_slope": np.array([self.current_slope], dtype=np.float32),
+            "current_max_speed": np.array([self.current_max_speed], dtype=np.float32),
+            "current_min_speed": np.array([self.current_min_speed], dtype=np.float32),
             "next_slope": np.array([self.next_slope], dtype=np.float32),
-            "displacement_between_next_slope": np.array(
-                [self.displacement_between_next_slope], dtype=np.float32
-            ),
-            "current_speed_limit": np.array(
-                [self.current_speed_limit], dtype=np.float32
-            ),
-            "next_speed_limit": np.array([self.next_speed_limit], dtype=np.float32),
-            "displacement_between_next_speed_limit": np.array(
-                [self.displacement_between_next_speed_limit], dtype=np.float32
-            ),
+            "next_max_speed": np.array([self.next_max_speed], dtype=np.float32),
+            "next_min_speed": np.array([self.next_min_speed], dtype=np.float32),
         }
 
     def _get_info(self):
@@ -269,6 +281,7 @@ class MTTOEnv(gym.Env):
             dict: 智能体当前消耗的总能量和当前运行时间
         """
         return {
+            "current_pos": self.current_pos,
             "current_energy_consumption": self.current_energy_consumption,
             "current_operation_time": self.current_operation_time,
         }
@@ -295,32 +308,44 @@ class MTTOEnv(gym.Env):
         # 首先调用此超类方法设置随机数生成器
         super().reset(seed=seed, options=options)
 
-        # 将智能体的状态重设为初始状态
-        self.current_pos = self.task.starting_position
-        self.current_velocity = self.task.starting_velocity
-        self.remainning_displacement = self.task.destination - self.current_pos
+        # 重新初始化运行状态
+        self.current_pos = self.task.start_position
         self.current_operation_time = 0.0
-        self.remainning_schedule_time = self.task.schedule_time
+        self.current_energy_consumption = 0.0
 
+        # 重新初始化智能体可观测状态
+        self.remainning_distance = abs(self.task.target_position - self.current_pos)
+        self.current_speed = self.task.start_speed
+        self.remainning_schedule_time = self.task.schedule_time
         # self.mass = self.vehicle.mass
         self.current_slope = self.trackprofile.GetSlope(
             pos=self.current_pos, interpolate=False
         )
-        self.next_slope, self.displacement_between_next_slope = (
-            self.trackprofile.GetNextSlopeAndDistance(
-                pos=self.current_pos, direction=self.direction
+        self.current_min_speed, self.current_max_speed, self.current_sp = (
+            self.safeguardutil.GetMinAndMaxSpeed(
+                current_pos=self.current_pos,
+                current_speed=self.current_speed,
+                current_sp=None,
             )
         )
-        self.current_speed_limit = (
-            self.trackprofile.GetSpeedlimit(self.current_pos) * self.direction
+        self.current_max_speed = min(
+            self._get_ref_speed(self.current_pos),
+            self.current_max_speed,
         )
-        self.next_speed_limit, self.displacement_between_next_speed_limit = (
-            self.trackprofile.GetNextSpeedlimitAndDistance(
-                self.current_pos, self.direction
+        self.next_slope = self.trackprofile.GetSlope(
+            pos=self.current_pos + self.max_step_distance, interpolate=False
+        )
+        self.next_min_speed, self.next_max_speed, _ = (
+            self.safeguardutil.GetMinAndMaxSpeed(
+                current_pos=self.current_pos + self.max_step_distance,
+                current_speed=self.current_speed,
+                current_sp=self.current_sp,
             )
         )
-        self.next_speed_limit = self.next_speed_limit * self.direction
-        self.current_energy_consumption = 0.0
+        self.next_max_speed = min(
+            self._get_ref_speed(self.current_pos + self.max_step_distance),
+            self.next_max_speed,
+        )
 
         # 重置历史数据
         self._reset_history()
@@ -328,8 +353,8 @@ class MTTOEnv(gym.Env):
         if self.render_mode is not None:
             self._reset_trajectory()
 
+        # 重置仿真步数
         self.current_steps = 0
-        self.current_sp = None
 
         observation = self._get_obs()
         info = self._get_info()
@@ -347,26 +372,26 @@ class MTTOEnv(gym.Env):
             tuple: (observation, reward, terminated, truncated, info)
         """
         prev_pos = self.current_pos
-        prev_velocity = self.current_velocity
+        prev_speed = self.current_speed
         current_acc = self._get_action_denormalized(action[0])
 
+        # 根据当前速度大小、加速度、状态转移最大位移量
+        # 计算转移至下一状态的速度大小、位移量和运行时间
+        next_speed, displacement, operation_time = self._update_motion(current_acc)
         self.current_steps += 1
-
-        # 根据当前时刻速度、加速度、步长计算位移量和运行时间
-        next_velocity, displacement, operation_time = self._update_motion(current_acc)
 
         # 计算当前列车在参考运行模式下的能耗和运行时间
         # ref_mec, ref_lec, ref_operation_time = self.ors.CalRefEnergyAndOperationTime(
         #     begin_pos=prev_pos,
-        #     begin_speed=prev_velocity,
+        #     begin_speed=prev_speed,
         #     displacement=displacement,
         # )
         # ref_energy_consumption = ref_mec + ref_lec
 
         # 计算当前能耗
         current_mec, current_lec = CalcEnergy(
-            begin_pos=self.current_pos,
-            begin_velocity=self.current_velocity,
+            begin_pos=prev_pos,
+            begin_speed=prev_speed,
             acc=current_acc,
             displacement=displacement,
             operation_time=operation_time,
@@ -375,58 +400,68 @@ class MTTOEnv(gym.Env):
         )
         energy_consumption = current_mec + current_lec
 
-        # 更新智能体状态
+        # 更新运行状态
         self.current_pos += displacement
-        self.current_velocity = next_velocity
-        self.remainning_displacement -= displacement
         self.current_operation_time += operation_time
-        self.remainning_schedule_time -= operation_time
+        self.current_energy_consumption += energy_consumption
 
+        # 更新智能体可观测状态
+        self.remainning_distance -= displacement * self.direction
+        self.current_speed = next_speed
+        self.remainning_schedule_time -= operation_time
+        # self.mass = self.vehicle.mass
         self.current_slope = self.trackprofile.GetSlope(
             pos=self.current_pos, interpolate=True
         )
-        self.next_slope, self.displacement_between_next_slope = (
-            self.trackprofile.GetNextSlopeAndDistance(
-                pos=self.current_pos, direction=self.direction
+        self.current_min_speed, self.current_max_speed, self.current_sp = (
+            self.safeguardutil.GetMinAndMaxSpeed(
+                current_pos=self.current_pos,
+                current_speed=self.current_speed,
+                current_sp=self.current_sp,
             )
         )
-        self.current_speed_limit = (
-            self.trackprofile.GetSpeedlimit(pos=self.current_pos) * self.direction
+        self.current_max_speed = min(
+            self._get_ref_speed(self.current_pos),
+            self.current_max_speed,
         )
-        self.next_speed_limit, self.displacement_between_next_speed_limit = (
-            self.trackprofile.GetNextSpeedlimitAndDistance(
-                pos=self.current_pos, direction=self.direction
+        self.next_slope = self.trackprofile.GetSlope(
+            pos=self.current_pos + self.max_step_distance * self.direction,
+            interpolate=False,
+        )
+        self.next_min_speed, self.next_max_speed, _ = (
+            self.safeguardutil.GetMinAndMaxSpeed(
+                current_pos=self.current_pos + self.max_step_distance * self.direction,
+                current_speed=self.current_speed,
+                current_sp=self.current_sp,
             )
         )
-        self.next_speed_limit = self.next_speed_limit * self.direction
-        self.current_energy_consumption += energy_consumption
+        self.next_max_speed = min(
+            self._get_ref_speed(
+                self.current_pos + self.max_step_distance * self.direction
+            ),
+            self.next_max_speed,
+        )
 
         # 判断智能体是否到达目标区域
         terminated = (
-            abs(self.remainning_displacement) <= self.task.max_stop_error
-            or self.current_steps >= self.max_episode_steps
+            self.remainning_distance <= self.task.max_stop_error
+            or self.current_steps == self.max_episode_steps
         )
 
         # 若智能体违反安全约束，则截断训练进程
-        min_speed, max_speed, self.current_sp = self.safeguardutil.GetMinAndMaxSpeed(
-            current_pos=self.current_pos,
-            current_speed=abs(self.current_velocity),
-            current_sp=self.current_sp,
-        )
-        max_speed = min(max_speed, self._get_ref_speed(self.current_pos))
         truncated = (
             True
-            if abs(self.current_velocity) < min_speed
-            or abs(self.current_velocity) > max_speed
+            if self.current_speed < self.current_min_speed
+            or self.current_speed > self.current_max_speed
             else False
         )
 
         # 计算奖励
         reward = self._get_reward(
             prev_pos=prev_pos,
-            prev_speed=abs(prev_velocity),
+            prev_speed=prev_speed,
             current_pos=self.current_pos,
-            current_speed=abs(self.current_velocity),
+            current_speed=self.current_speed,
             energy_consumption=energy_consumption,
             operation_time=operation_time,
             current_acc=current_acc,
@@ -434,14 +469,12 @@ class MTTOEnv(gym.Env):
             truncated=truncated,
         )
 
-        self._record_history(
-            prev_pos=prev_pos, prev_velocity=prev_velocity, acc=current_acc
-        )
+        self._record_history(prev_pos=prev_pos, prev_speed=prev_speed, acc=current_acc)
         if self.render_mode is not None:
             # 记录轨迹数据
             self._record_trajectory(
                 prev_pos=prev_pos,
-                prev_velocity=prev_velocity,
+                prev_speed=prev_speed,
                 acc=current_acc,
                 displacement=displacement,
                 operation_time=operation_time,
@@ -461,37 +494,39 @@ class MTTOEnv(gym.Env):
             acc(float): 加速度(m/s^2)
 
         Returns:
-            tuple: (next_velocity, displacement, operation_time)
+            tuple: (next_speed, displacement, operation_time)
         """
 
-        displacement = self.ds * self.direction
+        distance = self.max_step_distance
 
         # 当加速度极小时，认为列车做匀速运动
         if abs(acc) < 1e-6:
-            next_velocity = self.current_velocity
-            if abs(next_velocity) < 1e-6:
-                displacement = 0.0  # 无法运动
+            next_speed = self.current_speed
+            if next_speed < 1e-6:
+                distance = 0.0  # 无法运动
                 operation_time = 0.0
-                next_velocity = 0.0
+                next_speed = 0.0
             else:
-                operation_time = displacement / next_velocity
+                operation_time = distance / next_speed
 
         else:
             # 一般情况下，列车做匀变速直线运动
-            next_velocity_squared = (
-                self.current_velocity**2 + 2 * acc * displacement
+            next_speed_squared = (
+                self.current_speed**2 + 2 * acc * distance
             )  # 速度大小的平方
 
-            # 边界情况：减速为0
-            if next_velocity_squared <= 0.0:
-                next_velocity = 0.0
-                displacement = -(self.current_velocity**2) / (2 * acc)
+            if next_speed_squared < 1e-6:
+                # 边界情况：减速为0
+                next_speed = 0.0
+                distance = -(self.current_speed**2) / (2 * acc)
             else:
-                next_velocity = np.sqrt(next_velocity_squared) * self.direction
+                next_speed = np.sqrt(next_speed_squared)
 
-            operation_time = (next_velocity - self.current_velocity) / acc
+            operation_time = (next_speed - self.current_speed) / acc
 
-        return next_velocity, displacement, operation_time
+        displacement = distance * self.direction
+
+        return next_speed, displacement, operation_time
 
     def _cal_energy_consumption(
         self, acc: float, displacement: float, travel_time: float | None
@@ -515,7 +550,7 @@ class MTTOEnv(gym.Env):
                 VehicleDynamic.CalcLongitudinalForce(
                     vehicle=self.vehicle,
                     acc=acc,
-                    speed=self.current_velocity,
+                    speed=self.current_speed,
                     slope=self.trackprofile.GetSlope(
                         self.current_pos, interpolate=True
                     ),
@@ -529,7 +564,7 @@ class MTTOEnv(gym.Env):
             d_sample = np.linspace(0, displacement, n_samples, endpoint=False)
             s_sample = self.current_pos + d_sample
 
-            speed_squared_sample = self.current_velocity**2 + 2 * acc * d_sample
+            speed_squared_sample = self.current_speed**2 + 2 * acc * d_sample
             speed_sample = np.sqrt(speed_squared_sample)
 
             # 计算每个采样点的纵向力
@@ -544,9 +579,9 @@ class MTTOEnv(gym.Env):
             MEC = trapezoid(y=np.abs(f_longitudinal), x=np.abs(d_sample))
 
         if travel_time is None:
-            v_next_2 = self.current_velocity**2 + 2 * acc * displacement
+            v_next_2 = self.current_speed**2 + 2 * acc * displacement
             v_next = np.sqrt(v_next_2) * self.direction
-            travel_time = (v_next - self.current_velocity) / acc
+            travel_time = (v_next - self.current_speed) / acc
 
         assert travel_time is not None
         # 悬浮能耗
@@ -676,7 +711,7 @@ class MTTOEnv(gym.Env):
             return 0
 
     def _get_ref_speed(self, pos: float | np.floating):
-        return np.interp(pos, self.ref_curve_pos, self.ref_curve_speed)
+        return max(0.0, np.interp(pos, self.ref_curve_pos, self.ref_curve_speed))
 
     def _detect_ref_speed_exceed(
         self, pos: float | np.floating, speed: float | np.floating
@@ -687,7 +722,7 @@ class MTTOEnv(gym.Env):
 
     def _get_docking_position_reward(self, current_pos) -> float:
         # 停站位置误差不超过0.3m
-        docking_pos_error = abs(self.task.destination - current_pos)
+        docking_pos_error = abs(self.task.target_position - current_pos)
         A = 2
         B = -1
         k_D = 2.310490602
@@ -807,23 +842,21 @@ class MTTOEnv(gym.Env):
         ref_speed = self._get_ref_speed(pos=pos)
         return float(0.1 * (ref_speed - speed))
 
-    def _record_history(
-        self, prev_pos: float, prev_velocity: float, acc: float
-    ) -> None:
+    def _record_history(self, prev_pos: float, prev_speed: float, acc: float) -> None:
         self.history_pos.append(prev_pos)
-        self.history_velocity.append(prev_velocity)
+        self.history_speed.append(prev_speed)
         self.history_acc.append(acc)
 
     def _reset_history(self) -> None:
-        self.history_pos = [self.task.starting_position]
-        self.history_velocity = [self.task.starting_velocity]
+        self.history_pos = [self.task.start_position]
+        self.history_speed = [self.task.start_speed]
         self.history_acc = [0.0]
         self.dense_rewards = [0.0]
 
     def _record_trajectory(
         self,
         prev_pos: float,
-        prev_velocity: float,
+        prev_speed: float,
         acc: float = 0.0,
         displacement: float = 0.0,
         operation_time: float = 0.0,
@@ -832,7 +865,7 @@ class MTTOEnv(gym.Env):
         # 如果是初始状态或者没有运动，只记录当前点
         if abs(operation_time) < 1e-6 or abs(displacement) < 1e-6:
             self.trajectory_pos.append(prev_pos)
-            self.trajectory_speed_km_h.append(abs(prev_velocity * 3.6))
+            self.trajectory_speed_km_h.append(abs(prev_speed * 3.6))
             return
 
         # 生成中间轨迹点数量（基于运动时间动态调整）
@@ -844,9 +877,9 @@ class MTTOEnv(gym.Env):
 
         # 向量化计算所有时间点的位置和速度（匀变速运动公式）
         # 位置：s = s0 + v0*t + 0.5*a*t^2
-        pos_array = prev_pos + prev_velocity * time_steps + 0.5 * acc * time_steps**2
+        pos_array = prev_pos + prev_speed * time_steps + 0.5 * acc * time_steps**2
         # 速度：v = v0 + a*t
-        vel_array = prev_velocity + acc * time_steps
+        vel_array = prev_speed + acc * time_steps
 
         # 批量添加到历史记录中
         self.trajectory_pos.extend(pos_array.tolist())
@@ -854,8 +887,8 @@ class MTTOEnv(gym.Env):
 
     def _reset_trajectory(self):
         """重置轨迹历史数据并记录初始状态"""
-        self.trajectory_pos = [self.task.starting_position]
-        self.trajectory_speed_km_h = [abs(self.task.starting_velocity * 3.6)]
+        self.trajectory_pos = [self.task.start_position]
+        self.trajectory_speed_km_h = [abs(self.task.start_speed * 3.6)]
 
     def render(self):
         if self.render_mode is None:
@@ -903,17 +936,17 @@ class MTTOEnv(gym.Env):
         self.fig.suptitle("磁悬浮列车智能体训练过程", fontsize=14)
 
         # 设置坐标轴范围
-        pos_margin = abs(self.task.destination - self.current_pos) * 0.1
+        pos_margin = abs(self.task.target_position - self.current_pos) * 0.1
         self.ax.set_xlim(
-            min(self.current_pos, self.task.destination) - pos_margin,
-            max(self.current_pos, self.task.destination) + pos_margin,
+            min(self.current_pos, self.task.target_position) - pos_margin,
+            max(self.current_pos, self.task.target_position) + pos_margin,
         )
         self.ax.set_ylim(0, 600.0)  # 速度范围，单位：km/h
 
         # 绘制起点和终点
         self.ax.scatter(
-            self.task.starting_position,
-            abs(self.task.starting_velocity * 3.6),
+            self.task.start_position,
+            abs(self.task.start_speed * 3.6),
             marker="o",
             color="blue",
             s=60,
@@ -922,7 +955,7 @@ class MTTOEnv(gym.Env):
             zorder=5,
         )
         self.ax.scatter(
-            x=self.task.destination,
+            x=self.task.target_position,
             y=0.0,
             marker="o",
             color="red",
@@ -977,9 +1010,7 @@ class MTTOEnv(gym.Env):
         assert self.vehicle_dot is not None
         assert self.traj_line is not None
         # 更新列车位置
-        self.vehicle_dot.set_data(
-            [self.current_pos], [abs(self.current_velocity * 3.6)]
-        )
+        self.vehicle_dot.set_data([self.current_pos], [self.current_speed * 3.6])
         # 更新轨迹
         if len(self.trajectory_pos) > 1:
             self.traj_line.set_data(self.trajectory_pos, self.trajectory_speed_km_h)

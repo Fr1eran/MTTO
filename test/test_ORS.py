@@ -32,9 +32,9 @@ def ors():
     track = Track(slopes, slope_intervals, speed_limits.tolist(), speed_limit_intervals)
     vehicle = Vehicle(mass=317.5, numoftrainsets=5, length=128.5)
     task = Task(
-        starting_position=ly_zp,
-        starting_velocity=0.0,
-        destination=pa_zp,
+        start_position=ly_zp,
+        start_speed=0.0,
+        target_position=pa_zp,
         schedule_time=440.0,
         max_acc_change=0.75,
         max_arr_time_error=120.0,

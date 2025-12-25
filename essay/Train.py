@@ -56,9 +56,9 @@ track = Track(
 )
 vehicle = Vehicle(mass=317.5, numoftrainsets=5, length=128.5)
 task = Task(
-    starting_position=ly_zp,
-    starting_velocity=0.0,
-    destination=pa_zp,
+    start_position=ly_zp,
+    start_speed=0.0,
+    target_position=pa_zp,
     schedule_time=440.0,
     max_acc_change=0.75,
     max_arr_time_error=120,
@@ -74,7 +74,7 @@ maglevttoenv_train = MTTOEnv(
     safeguardutil=sgu,
     task=task,
     gamma=reward_discount,
-    ds=ds,
+    max_step_distance=ds,
 )
 
 maglevttoenv_eval = MTTOEnv(
@@ -83,7 +83,7 @@ maglevttoenv_eval = MTTOEnv(
     safeguardutil=sgu,
     task=task,
     gamma=reward_discount,
-    ds=ds,
+    max_step_distance=ds,
     render_mode="human",
 )
 
@@ -114,7 +114,7 @@ model = PPO(
 
 
 # Train
-model.learn(total_timesteps=400_000)
+model.learn(total_timesteps=50_000)
 
 user_input = (
     input("Training finished. Do you want to continue to evaluation? (y/n): ")

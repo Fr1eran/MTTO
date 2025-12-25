@@ -162,7 +162,7 @@ class SafeGuardCurves:
 
     def CalcMinCurves(
         self,
-        levi_curves_list: list[NDArray[np.floating]],
+        levi_curves_list: list[NDArray[np.float64]],
         vehicle: Vehicle,
         pos_error: float = 1.0,
         speed_error: float = 0.1,
@@ -231,7 +231,7 @@ class SafeGuardCurves:
 
     def CalcMaxCurves(
         self,
-        brake_curves_list: list[NDArray[np.floating]],
+        brake_curves_list: list[NDArray[np.float64]],
         vehicle: Vehicle,
         pos_error: float = -1.0,
         speed_error: float = -0.1,
@@ -681,8 +681,11 @@ class SafeGuardUtility:
             if current_pos > current_max_curve[0, 0]:
                 # 当前位置大于最大速度曲线的左端点
                 # 设置最大速度为最大速度曲线在当前位置的插值
-                max_speed = np.interp(
-                    current_pos, current_max_curve[0, :], current_max_curve[1, :]
+                max_speed = max(
+                    0.0,
+                    np.interp(
+                        current_pos, current_max_curve[0, :], current_max_curve[1, :]
+                    ),
                 )
             else:
                 # 当前位置小于最大速度曲线的左端点

@@ -57,9 +57,9 @@ vehicle = Vehicle(
     levi_power_per_mass=1.7,
 )
 task = Task(
-    starting_position=ly_zp,
-    starting_velocity=0.0,
-    destination=pa_zp,
+    start_position=ly_zp,
+    start_speed=0.0,
+    target_position=pa_zp,
     schedule_time=440.0,
     max_acc_change=0.75,
     max_arr_time_error=120.0,
@@ -72,7 +72,7 @@ begin_pos = ly_zp
 begin_speed = 0.0
 max_speed = float(np.max(speed_limits))
 
-end_pos = task.destination
+end_pos = task.target_position
 end_speed = 0.0
 
 # 设置matplotlib

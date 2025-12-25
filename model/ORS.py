@@ -52,7 +52,7 @@ class ORS:
         self.track = track
         self.trackprofile = TrackProfile(track=track)
         self.end_speed: float = 0.0
-        self.destination: float = task.destination
+        self.destination: float = task.target_position
         self.schedule_time: float = task.schedule_time
         self.gamma: float = gamma
 
@@ -661,7 +661,7 @@ class ORS:
                 # 计算该段的能耗
                 MEC, LEC = CalcEnergy(
                     begin_pos=current_pos_i,
-                    begin_velocity=current_speed_i,
+                    begin_speed=current_speed_i,
                     acc=acc,
                     displacement=remaining_displacement,
                     operation_time=actual_time,
@@ -677,7 +677,7 @@ class ORS:
                 # 该段未达到目标位移，计算完整段的能耗
                 MEC, LEC = CalcEnergy(
                     begin_pos=current_pos_i,
-                    begin_velocity=current_speed_i,
+                    begin_speed=current_speed_i,
                     acc=acc,
                     displacement=segment_displacement,
                     operation_time=operation_time,

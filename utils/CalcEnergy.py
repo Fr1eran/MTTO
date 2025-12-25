@@ -53,7 +53,7 @@ def CalcEnergyCumul(
 
 def CalcEnergy(
     begin_pos: float,
-    begin_velocity: float,
+    begin_speed: float,
     acc: float,
     displacement: float,
     operation_time: float | None,
@@ -61,12 +61,12 @@ def CalcEnergy(
     trackprofile: TrackProfile,
 ) -> tuple[float, float]:
     """
-    计算列车在当前位置和速度下以某加速度连续位移一段距离消耗的能量,
+    计算列车从起始位置和速度以某恒定加速度连续位移一段距离消耗的能量,
     包括纵向驱动力做的总功和悬浮能耗。
 
     Args:
-        current_pos: 列车当前位置(m)
-        current_velocity: 列车当前速度(m/s)
+        begin_pos: 起始位置(m)
+        begin_speed: 起始速度(m/s)
         acc(float): 加速度(m/s^2)
         displacement(float): 位移(m)
         travel_time(float | None): 运行时间(s)
@@ -84,7 +84,7 @@ def CalcEnergy(
         F_longitudinal = VehicleDynamic.CalcLongitudinalForce(
             vehicle=vehicle,
             acc=acc,
-            speed=np.abs(begin_velocity),
+            speed=begin_speed,
             slope=trackprofile.GetSlope(pos=begin_pos, interpolate=True),
         )
         MEC = np.abs(F_longitudinal * displacement)
@@ -94,7 +94,7 @@ def CalcEnergy(
         d_samples = np.linspace(0, displacement, n_samples, endpoint=False)
         p_samples = begin_pos + d_samples
 
-        speed_squared = begin_velocity**2 + 2 * acc * d_samples
+        speed_squared = begin_speed**2 + 2 * acc * d_samples
         speed_samples = np.sqrt(np.maximum(speed_squared, 0))
 
         F_longitudinal = VehicleDynamic.CalcLongitudinalForce(
@@ -110,12 +110,12 @@ def CalcEnergy(
         # 根据运动学计算时间
         if np.abs(acc) < 1e-9:
             # 匀速运动
-            time = np.abs(displacement) / np.maximum(np.abs(begin_velocity), 1e-6)
+            time = np.abs(displacement) / np.maximum(np.abs(begin_speed), 1e-6)
         else:
             # 变速运动
-            v_next_squared = begin_velocity**2 + 2 * acc * displacement
+            v_next_squared = begin_speed**2 + 2 * acc * displacement
             v_next = np.sqrt(np.maximum(v_next_squared, 0)) * np.sign(displacement)
-            time = (v_next - begin_velocity) / acc
+            time = (v_next - begin_speed) / acc
     else:
         time = operation_time
 
