@@ -1,11 +1,13 @@
 from typing import Any
 import logging
 import math
+import typing
 import structlog
 import gymnasium as gym
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 
 from scipy.integrate import trapezoid
 
@@ -246,7 +248,7 @@ class MTTOEnv(gym.Env):
         self.animation_running = False
 
         # 动画配置
-        self.animation_interval = 50  # 动画更新间隔(ms)
+        self.animation_interval = 15  # 动画更新间隔(ms)
 
     def _get_obs(self):
         """
@@ -460,11 +462,12 @@ class MTTOEnv(gym.Env):
         reward = self._get_reward(
             prev_pos=prev_pos,
             prev_speed=prev_speed,
+            prev_acc=self.history_acc[-1],
             current_pos=self.current_pos,
             current_speed=self.current_speed,
+            current_acc=current_acc,
             energy_consumption=energy_consumption,
             operation_time=operation_time,
-            current_acc=current_acc,
             terminated=terminated,
             truncated=truncated,
         )
@@ -596,11 +599,12 @@ class MTTOEnv(gym.Env):
         *,
         prev_pos: float,
         prev_speed: float,
+        prev_acc: float,
         current_pos: float,
         current_speed: float,
+        current_acc: float,
         energy_consumption: float,
         operation_time: float,
-        current_acc: float,
         terminated: bool,
         truncated: bool,
     ) -> float:
@@ -611,30 +615,30 @@ class MTTOEnv(gym.Env):
             current_speed=current_speed,
             current_acc=current_acc,
         )
-        if truncated and not terminated:
-            return -10.0
-        if terminated:
-            reward = self._get_goal_reward(
-                current_pos=current_pos, current_speed=current_speed
-            )
-        else:
-            dense_reward = self._get_dense_reward(
-                current_pos=current_pos,
-                current_speed=current_speed,
-                energy_consumption=energy_consumption,
-                operation_time=operation_time,
-                current_acc=current_acc,
-            )
-            # reward = dense_reward + self._get_PBRS_reward(
-            #     prev_pos=prev_pos,
-            #     prev_speed=prev_speed,
-            #     current_pos=current_pos,
-            #     current_speed=current_speed,
-            #     prev_dense_reward=self.dense_rewards[-1],
-            #     current_dense_reward=dense_reward,
-            # )
-            self.dense_rewards.append(dense_reward)
-            reward = dense_reward
+        reward = 0.0
+        if not truncated:
+            if terminated:
+                reward = self._get_goal_reward(
+                    current_pos=current_pos, current_speed=current_speed
+                )
+            else:
+                dense_reward = self._get_dense_reward(
+                    current_pos=current_pos,
+                    current_speed=current_speed,
+                    energy_consumption=energy_consumption,
+                    operation_time=operation_time,
+                    current_acc=current_acc,
+                )
+                # reward = dense_reward + self._get_PBRS_reward(
+                #     prev_pos=prev_pos,
+                #     prev_speed=prev_speed,
+                #     current_pos=current_pos,
+                #     current_speed=current_speed,
+                #     prev_dense_reward=self.dense_rewards[-1],
+                #     current_dense_reward=dense_reward,
+                # )
+                self.dense_rewards.append(dense_reward)
+                reward = dense_reward
 
         return reward
 
@@ -647,10 +651,10 @@ class MTTOEnv(gym.Env):
         current_acc: float,
     ) -> float:
         # 安全奖励 (只要智能体训练没被截断，则持续获得小的正奖励)
-        safety_reward = 0.1
+        safety_reward = 10 / self.max_episode_steps
 
         # 能耗奖励 (范围为[-1, 0])
-        energy_reward = self._get_energy_reward(energy_consumption)
+        # energy_reward = self._get_energy_reward_per_step(energy_consumption)
 
         # 舒适度奖励 (范围为[-1, 1])
         # comfort_reward = self._get_comfort_reward(
@@ -658,20 +662,21 @@ class MTTOEnv(gym.Env):
         # )
 
         # 运行时间奖励 (范围为[-1, 0])
-        operation_time_reward = self._get_operation_time_reward(
-            operation_time=operation_time
-        )
+        # operation_time_reward = self._get_operation_time_reward_per_step(
+        #     operation_time=operation_time
+        # )
 
         self.logger.info(
             "dense_reward",
             safety_reward=safety_reward,
-            energy_reward=energy_reward,
-            operation_time_reward=operation_time_reward,
+            # energy_reward=energy_reward,
+            # operation_time_reward=operation_time_reward,
             # comfort_reward=comfort_reward * 0.005,
         )
 
         return (
-            safety_reward + energy_reward + operation_time_reward
+            safety_reward
+            # + energy_reward + operation_time_reward
             # + comfort_reward * 0.005
         )
 
@@ -683,24 +688,17 @@ class MTTOEnv(gym.Env):
         docking_position_reward = self._get_docking_position_reward(
             current_pos=current_pos
         )
-        docking_speed_reward = self._get_docking_speed_reward(
-            current_speed=current_speed
-        )
         punctuality_reward = self._get_punctuality_reward()
-        # energy_reward = self._get_total_energy_reward()
+        energy_reward = self._get_total_energy_reward()
 
         self.logger.info(
             "goal_reward",
             docking_position_reward=docking_position_reward,
-            docking_speed_reward=docking_speed_reward,
-            punctuality_reward=punctuality_reward,
-            # energy_reward=energy_reward,
+            punctuality_reward=punctuality_reward * 10,
+            energy_reward=energy_reward * 10,
         )
 
-        return (
-            docking_position_reward + docking_speed_reward + punctuality_reward
-            # + energy_reward
-        )
+        return docking_position_reward + punctuality_reward * 10 + energy_reward * 10
 
     def _get_safety_reward(self, current_pos, current_speed) -> float:
         if self.safeguardutil.DetectDanger(
@@ -722,24 +720,21 @@ class MTTOEnv(gym.Env):
 
     def _get_docking_position_reward(self, current_pos) -> float:
         # 停站位置误差不超过0.3m
-        docking_pos_error = abs(self.task.target_position - current_pos)
-        A = 2
-        B = -1
-        k_D = 2.310490602
-        return float(A * np.exp(-k_D * docking_pos_error**2) + B)
-
-    def _get_docking_speed_reward(self, current_speed) -> float:
-        # 到站时减速到10km/h(2.778m/s)内，
-        docking_speed_error = abs(self.goal_speed - current_speed)
-        return 2.0 * np.exp(-0.173286795 * docking_speed_error**2) - 1.0
+        # docking_pos_error = abs(self.task.target_position - current_pos)
+        # A = 2
+        # B = -1
+        # k_D = 2.310490602
+        # return float(A * np.exp(-k_D * docking_pos_error**2) + B)
+        return current_pos - self.task.target_position
 
     def _get_punctuality_reward(self) -> float:
         # 列车到站时刻误差不超过2min
-        ontime_error = abs(self.remainning_schedule_time)
-        A = 2
-        B = -1
-        k_T = 0.005776227
-        return float(A * np.exp(-k_T * ontime_error) + B)
+        # ontime_error = abs(self.remainning_schedule_time)
+        # A = 2
+        # B = -1
+        # k_T = 0.005776227
+        # return float(A * np.exp(-k_T * ontime_error) + B)
+        return abs(self.remainning_schedule_time) / self.task.schedule_time
 
     # def _get_energy_reward(self, energy_consumption, ref_energy_consumption) -> float:
     #     """基于能耗给予奖励"""
@@ -750,14 +745,14 @@ class MTTOEnv(gym.Env):
     #     else:
     #         return 0.0
 
-    def _get_energy_reward(self, energy_consumption: float) -> float:
+    def _get_energy_reward_per_step(self, energy_consumption: float) -> float:
         """基于能耗给予奖励"""
         return -(energy_consumption / self.max_total_energy) * 10
 
-    # def _get_total_energy_reward(self) -> float:
-    #     return (
-    #         self.max_total_energy - self.current_energy_consumption
-    #     ) / self.max_total_energy
+    def _get_total_energy_reward(self) -> float:
+        return (
+            self.max_total_energy - self.current_energy_consumption
+        ) / self.max_total_energy
 
     # def _get_operation_time_reward(
     #     self, operation_time: float, ref_operation_time: float
@@ -793,7 +788,7 @@ class MTTOEnv(gym.Env):
     #     else:
     #         return 0.0
 
-    def _get_operation_time_reward(
+    def _get_operation_time_reward_per_step(
         self,
         operation_time: float,
     ) -> float:
@@ -805,13 +800,23 @@ class MTTOEnv(gym.Env):
         """
         return -(operation_time / self.min_operation_time)
 
-    def _get_comfort_reward(self, current_acc: float, previous_acc: float) -> float:
+    def _get_comfort_reward(
+        self, prev_acc: float, current_acc: float, operation_time: float
+    ) -> float:
         # 加速度变化不得大于0.75m/s^2
-        delta_acc = abs(current_acc - previous_acc)
-        A = 2
-        B = -1
-        k_C = 0.924196241
-        return float(A * np.exp(-k_C * delta_acc) + B)
+        # delta_acc = abs(current_acc - prev_acc)
+        # A = 2
+        # B = -1
+        # k_C = 0.924196241
+        # return float(A * np.exp(-k_C * delta_acc) + B)
+        if math.isclose(operation_time, 0.0):
+            return 0.0
+        else:
+            delta_acc = abs(current_acc - prev_acc) / operation_time
+            if delta_acc > 0.75:
+                return -0.1
+            else:
+                return 0.1
 
     def _get_PBRS_reward(
         self,
@@ -905,7 +910,7 @@ class MTTOEnv(gym.Env):
         assert mode in self.metadata["render_modes"]
 
         if self.fig is None:
-            self._setup_figure()
+            self._setup_figure(mode)
 
         if mode == "human":
             if self.use_animation and not self.animation_running:
@@ -919,17 +924,19 @@ class MTTOEnv(gym.Env):
         elif mode == "rgb_array":
             self._update_figure_data()
             assert self.fig is not None
-            self.fig.canvas.draw()
-            w, h = self.fig.canvas.get_width_height()
-            img = np.frombuffer(self.fig.canvas.tostring_rgb(), dtype=np.uint8).reshape(  # type: ignore
-                (h, w, 3)
-            )
-            return img
+            canvas = typing.cast(FigureCanvasAgg, self.fig.canvas)
+            canvas.draw()
+            w, h = canvas.get_width_height()
+            buf = np.frombuffer(canvas.buffer_rgba(), dtype=np.uint8)
+            img = buf.reshape((h, w, 4))[:, :, :3]  # 提取 RGB 通道，去掉 Alpha 通道
+            return img.copy()
 
-    def _setup_figure(self):
+    def _setup_figure(self, mode: str):
         """初始化绘图对象"""
         SetChineseFont()
-        plt.ion()
+        # 仅在human模式下启用交互模式
+        if mode == "human":
+            plt.ion()
 
         # 创建图形窗口
         self.fig, self.ax = plt.subplots(figsize=(10, 6))
@@ -1019,6 +1026,7 @@ class MTTOEnv(gym.Env):
         """清理资源"""
         self._stop_animation()
         if self.fig is not None:
-            plt.ioff()
+            if self.render_mode == "human":
+                plt.ioff()
             plt.close(self.fig)
             self.fig = None

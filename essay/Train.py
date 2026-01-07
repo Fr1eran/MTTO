@@ -2,7 +2,6 @@ import json
 import os
 import sys
 import pickle
-
 import numpy as np
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -11,10 +10,9 @@ from model.Vehicle import Vehicle
 from model.SafeGuard import SafeGuardUtility
 from model.Track import Track
 from model.Task import Task
-from gymnasium.wrappers import FlattenObservation
+from gymnasium.wrappers import FlattenObservation, RecordVideo
 from stable_baselines3 import PPO
-from stable_baselines3.common.evaluation import evaluate_policy
-from stable_baselines3.common.monitor import Monitor
+
 
 # 读取线路数据
 with open("data/rail/raw/slopes.json", "r", encoding="utf-8") as f:
@@ -84,27 +82,33 @@ maglevttoenv_eval = MTTOEnv(
     task=task,
     gamma=reward_discount,
     max_step_distance=ds,
-    render_mode="human",
+    render_mode="rgb_array",
 )
 
 maglevttoenv_train = FlattenObservation(maglevttoenv_train)
-maglevttoenv_eval = Monitor(FlattenObservation(maglevttoenv_eval))
+maglevttoenv_eval = RecordVideo(
+    FlattenObservation(maglevttoenv_eval),
+    video_folder="mtto_eval_video",
+    name_prefix="eval",
+    episode_trigger=lambda x: True,
+    fps=10,
+)
 
 model = PPO(
     "MlpPolicy",
     maglevttoenv_train,
     device="cpu",
     verbose=1,
-    # learning_rate=1e-3,
+    learning_rate=1e-3,
     # n_steps=2048,
     # batch_size=64,
     # n_epochs=10,
     # gamma=reward_discount,  # 提高折扣因子
     # gae_lambda=0.95,
-    # clip_range=0.3,
+    clip_range=0.3,
     # clip_range_vf=None,
     # normalize_advantage=True,
-    # ent_coef=0.08,  # 增加探索
+    ent_coef=0.001,  # 增加探索
     # vf_coef=1.0,  # 增加价值函数权重
     # max_grad_norm=0.5,
     # policy_kwargs=dict(
@@ -114,7 +118,7 @@ model = PPO(
 
 
 # Train
-model.learn(total_timesteps=50_000)
+model.learn(total_timesteps=500_000)
 
 user_input = (
     input("Training finished. Do you want to continue to evaluation? (y/n): ")
@@ -126,9 +130,20 @@ if user_input != "y":
     sys.exit(0)
 
 # Evaluate
-mean_reward_after, std_reward_after = evaluate_policy(
-    model, maglevttoenv_eval, n_eval_episodes=1, deterministic=True, render=True
-)
+# mean_reward_after, std_reward_after = evaluate_policy(
+#     model, maglevttoenv_eval, n_eval_episodes=1, deterministic=True, render=True
+# )
 
+reward_after = 0.0
+obs, info = maglevttoenv_eval.reset()
+episode_over = False
+
+while not episode_over:
+    action, _ = model.predict(obs, deterministic=True)
+    obs, reward, terminated, truncated, info = maglevttoenv_eval.step(action)
+    reward_after += float(reward)
+    episode_over = terminated or truncated
+
+maglevttoenv_eval.close()
 print("Evaluate after train:")
-print(f"mean_reward_after: {mean_reward_after}, std_reward_after: {std_reward_after}")
+print(f"reward_after: {reward_after}")
