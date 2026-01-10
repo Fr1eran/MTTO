@@ -3,14 +3,16 @@ import os
 import sys
 import pickle
 import numpy as np
+import matplotlib.pyplot as plt
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from rl.Callbacks import TensorboardCallback
 from rl.MTTOEnv import MTTOEnv
 from model.Vehicle import Vehicle
 from model.SafeGuard import SafeGuardUtility
 from model.Track import Track
 from model.Task import Task
-from gymnasium.wrappers import FlattenObservation, RecordVideo
+from gymnasium.wrappers import FlattenObservation, RecordVideo, RecordEpisodeStatistics
 from stable_baselines3 import PPO
 
 
@@ -66,7 +68,8 @@ task = Task(
 reward_discount = 0.99
 ds = 100.0
 
-maglevttoenv_train = MTTOEnv(
+# 创建训练环境
+mttoenv_train = MTTOEnv(
     vehicle=vehicle,
     track=track,
     safeguardutil=sgu,
@@ -75,7 +78,8 @@ maglevttoenv_train = MTTOEnv(
     max_step_distance=ds,
 )
 
-maglevttoenv_eval = MTTOEnv(
+# 创建评估环境
+mttoenv_eval = MTTOEnv(
     vehicle=vehicle,
     track=track,
     safeguardutil=sgu,
@@ -85,9 +89,22 @@ maglevttoenv_eval = MTTOEnv(
     render_mode="rgb_array",
 )
 
-maglevttoenv_train = FlattenObservation(maglevttoenv_train)
-maglevttoenv_eval = RecordVideo(
-    FlattenObservation(maglevttoenv_eval),
+# 记录训练过程的性能数据
+num_eval_episodes_during_train = 1000
+
+mttoenv_train = RecordEpisodeStatistics(
+    FlattenObservation(mttoenv_train),
+    buffer_length=num_eval_episodes_during_train,
+)
+
+# mttoenv_train = Monitor(
+#     FlattenObservation(mttoenv_train),
+# )
+
+
+# 记录训练后的运行轨迹
+mttoenv_eval = RecordVideo(
+    FlattenObservation(mttoenv_eval),
     video_folder="mtto_eval_video",
     name_prefix="eval",
     episode_trigger=lambda x: True,
@@ -96,7 +113,7 @@ maglevttoenv_eval = RecordVideo(
 
 model = PPO(
     "MlpPolicy",
-    maglevttoenv_train,
+    mttoenv_train,
     device="cpu",
     verbose=1,
     learning_rate=1e-3,
@@ -111,14 +128,44 @@ model = PPO(
     ent_coef=0.001,  # 增加探索
     # vf_coef=1.0,  # 增加价值函数权重
     # max_grad_norm=0.5,
+    tensorboard_log="./mtto_ppo_tensorboard_logs/",  # TensorBoard日志存放目录
     # policy_kwargs=dict(
     #     net_arch=dict(pi=[512, 256, 128], vf=[512, 256, 128]),  # 改进网络结构
     # ),
 )
 
 
-# Train
-model.learn(total_timesteps=500_000)
+# 训练，并使用tensorboard记录回报和网络损失变化
+model.learn(
+    total_timesteps=50_000,
+    callback=TensorboardCallback(),
+    log_interval=1,
+    tb_log_name="first_log",
+)
+
+# 打印训练过程的性能数据
+print("\nTrain Evaluation Summary:")
+
+# 绘制训练过程的性能数据
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+# 总回报变化曲线
+axes[0].plot(list(mttoenv_train.return_queue), linewidth=1.5)
+axes[0].set_xlabel("Episode")
+axes[0].set_ylabel("Reward")
+axes[0].set_title("Episode Reward Over Training")
+axes[0].grid(True, alpha=0.3)
+
+# 回合长度变化曲线
+axes[1].plot(list(mttoenv_train.length_queue), linewidth=1.5, color="orange")
+axes[1].set_xlabel("Episode")
+axes[1].set_ylabel("Episode Length")
+axes[1].set_title("Episode Length Over Training")
+axes[1].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
 
 user_input = (
     input("Training finished. Do you want to continue to evaluation? (y/n): ")
@@ -135,15 +182,16 @@ if user_input != "y":
 # )
 
 reward_after = 0.0
-obs, info = maglevttoenv_eval.reset()
+obs, info = mttoenv_eval.reset()
 episode_over = False
 
 while not episode_over:
     action, _ = model.predict(obs, deterministic=True)
-    obs, reward, terminated, truncated, info = maglevttoenv_eval.step(action)
+    obs, reward, terminated, truncated, info = mttoenv_eval.step(action)
     reward_after += float(reward)
     episode_over = terminated or truncated
 
-maglevttoenv_eval.close()
+mttoenv_eval.close()  # 必须调用，否则无法保存视频
+
 print("Evaluate after train:")
 print(f"reward_after: {reward_after}")

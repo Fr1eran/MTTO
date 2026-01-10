@@ -1,8 +1,6 @@
 from typing import Any
-import logging
 import math
 import typing
-import structlog
 import gymnasium as gym
 import numpy as np
 import matplotlib.pyplot as plt
@@ -20,26 +18,15 @@ from utils.CalcEnergy import CalcEnergy
 from utils.misc import SetChineseFont
 
 
-def setup_logger(logfile: str):
-    logging.basicConfig(
-        format="%(message)s",
-        level=logging.INFO,
-        handlers=[
-            logging.FileHandler(logfile, mode="w", encoding="utf-8"),
-        ],
-    )
-
-    structlog.configure(
-        processors=[
-            structlog.contextvars.merge_contextvars,
-            structlog.processors.add_log_level,
-            structlog.processors.JSONRenderer(),
-        ],
-        logger_factory=structlog.WriteLoggerFactory(
-            file=open(logfile, "a", encoding="utf-8")
-        ),
-    )
-    return structlog.getLogger()
+class RewardsInfoForTB(typing.TypedDict, total=False):
+    reward_safety: float
+    reward_docking: float
+    reward_punctuality: float
+    reward_energy_total: float
+    reward_total: float
+    # reward_energy: float
+    # reward_comfort: float
+    # reward_time: float
 
 
 class MTTOEnv(gym.Env):
@@ -57,8 +44,6 @@ class MTTOEnv(gym.Env):
         use_animation=False,
     ):
         super().__init__()
-        # 初始化日志记录器
-        self.logger = setup_logger("rl_training.jsonl")
 
         # 磁浮列车运行优化车辆实例
         self.vehicle = vehicle
@@ -226,11 +211,12 @@ class MTTOEnv(gym.Env):
             abs(self.task.target_position - self.current_pos) / self.max_step_distance
         )
 
+        self.rewards_info: RewardsInfoForTB = {}
+
         # 训练历史
         self.history_pos: list[float] = [self.current_pos]
         self.history_speed: list[float] = [self.current_speed]
         self.history_acc: list[float] = [0.0]
-        self.dense_rewards: list[float] = [0.0]
 
         # 列车运行轨迹
         self.trajectory_pos: list[float] = [self.current_pos]
@@ -608,21 +594,12 @@ class MTTOEnv(gym.Env):
         terminated: bool,
         truncated: bool,
     ) -> float:
-        self.logger.info(
-            "train",
-            current_steps=self.current_steps,
-            current_pos=current_pos,
-            current_speed=current_speed,
-            current_acc=current_acc,
-        )
-        reward = 0.0
+        reward_total = 0.0
         if not truncated:
             if terminated:
-                reward = self._get_goal_reward(
-                    current_pos=current_pos, current_speed=current_speed
-                )
+                reward_total = self._get_goal_reward(current_pos=current_pos)
             else:
-                dense_reward = self._get_dense_reward(
+                reward_dense = self._get_dense_reward(
                     current_pos=current_pos,
                     current_speed=current_speed,
                     energy_consumption=energy_consumption,
@@ -637,10 +614,10 @@ class MTTOEnv(gym.Env):
                 #     prev_dense_reward=self.dense_rewards[-1],
                 #     current_dense_reward=dense_reward,
                 # )
-                self.dense_rewards.append(dense_reward)
-                reward = dense_reward
+                reward_total = reward_dense
 
-        return reward
+        self.rewards_info["reward_total"] = reward_total
+        return reward_total
 
     def _get_dense_reward(
         self,
@@ -651,54 +628,31 @@ class MTTOEnv(gym.Env):
         current_acc: float,
     ) -> float:
         # 安全奖励 (只要智能体训练没被截断，则持续获得小的正奖励)
-        safety_reward = 10 / self.max_episode_steps
+        reward_safety = 10 / self.max_episode_steps
 
         # 能耗奖励 (范围为[-1, 0])
-        # energy_reward = self._get_energy_reward_per_step(energy_consumption)
 
         # 舒适度奖励 (范围为[-1, 1])
-        # comfort_reward = self._get_comfort_reward(
-        #     current_acc=current_acc, previous_acc=self.history_acc[-1]
-        # )
 
         # 运行时间奖励 (范围为[-1, 0])
-        # operation_time_reward = self._get_operation_time_reward_per_step(
-        #     operation_time=operation_time
-        # )
 
-        self.logger.info(
-            "dense_reward",
-            safety_reward=safety_reward,
-            # energy_reward=energy_reward,
-            # operation_time_reward=operation_time_reward,
-            # comfort_reward=comfort_reward * 0.005,
-        )
+        self.rewards_info["reward_safety"] = reward_safety
 
-        return (
-            safety_reward
-            # + energy_reward + operation_time_reward
-            # + comfort_reward * 0.005
-        )
+        return reward_safety
 
     def _get_goal_reward(
         self,
         current_pos: float,
-        current_speed: float,
     ) -> float:
-        docking_position_reward = self._get_docking_position_reward(
-            current_pos=current_pos
-        )
-        punctuality_reward = self._get_punctuality_reward()
-        energy_reward = self._get_total_energy_reward()
+        reward_docking = self._get_docking_position_reward(current_pos=current_pos)
+        reward_punctuality = self._get_punctuality_reward() * 10
+        reward_energy_total = self._get_total_energy_reward() * 10
 
-        self.logger.info(
-            "goal_reward",
-            docking_position_reward=docking_position_reward,
-            punctuality_reward=punctuality_reward * 10,
-            energy_reward=energy_reward * 10,
-        )
+        self.rewards_info["reward_docking"] = reward_docking
+        self.rewards_info["reward_punctuality"] = reward_punctuality
+        self.rewards_info["reward_energy_total"] = reward_energy_total
 
-        return docking_position_reward + punctuality_reward * 10 + energy_reward * 10
+        return reward_docking + reward_punctuality + reward_energy_total
 
     def _get_safety_reward(self, current_pos, current_speed) -> float:
         if self.safeguardutil.DetectDanger(
@@ -839,8 +793,7 @@ class MTTOEnv(gym.Env):
         )
         # Phi_c = np.exp(Phi_c)
         # Phi_p = np.exp(Phi_p)
-        self.logger.info("PBRS", Phi_c=Phi_c, Phi_p=Phi_p)
-        self.logger.info("PBRS", PBRS_reward=self.gamma * Phi_c - Phi_p)
+
         return self.gamma * Phi_c - Phi_p
 
     def _potential(self, pos: float, speed: float) -> float:
@@ -856,7 +809,6 @@ class MTTOEnv(gym.Env):
         self.history_pos = [self.task.start_position]
         self.history_speed = [self.task.start_speed]
         self.history_acc = [0.0]
-        self.dense_rewards = [0.0]
 
     def _record_trajectory(
         self,

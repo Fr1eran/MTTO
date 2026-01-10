@@ -22,11 +22,15 @@ ENV/
 .mypy_cache/
 .pytest_cache/
 # Others
-*.log
 *.sqlite3
 
 # 排除所有 data/rail/safeguard 下的文件
 /data/rail/safeguard/**/*
 
 # 排除存放智能体评估视频的文件夹
-*video/
+*/**/*video*/
+**/*video*/
+
+# 排除存放智能体训练日志的文件夹
+*/**/*log*/
+**/*log*/
