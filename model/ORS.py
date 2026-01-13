@@ -4,7 +4,7 @@ from typing import NamedTuple, TypedDict
 from model.Vehicle import Vehicle
 from model.Track import Track, TrackProfile
 from model.Task import Task
-from utils.CalcEnergy import CalcEnergy
+from model.ECC import ECC
 
 
 class GeneralOperation(NamedTuple):
@@ -606,7 +606,8 @@ class ORS:
         self,
         begin_pos: float | np.floating,
         begin_speed: float | np.floating,
-        displacement: float | np.floating,
+        distance: float | np.floating,
+        ecc: ECC,
     ) -> tuple[float, float, float]:
         """
         计算在给定当前位置、速度、目标位移量
@@ -629,7 +630,7 @@ class ORS:
         ref_mec = 0.0
         ref_lec = 0.0
         ref_operation_time = 0.0
-        accumulated_displacement = 0.0
+        accumulated_distance = 0.0
 
         current_pos_i = float(begin_pos)
         current_speed_i = float(begin_speed)
@@ -637,61 +638,63 @@ class ORS:
         # 遍历每个操作段，累计能耗和时间直到达到目标位移
         for acc, operation_time in ref_operations:
             # 计算该操作段的位移
-            segment_displacement = (
+            segment_distance = (
                 current_speed_i * operation_time + 0.5 * acc * operation_time**2
             )
 
             # 判断是否超过目标位移
-            if accumulated_displacement + segment_displacement >= float(displacement):
+            if accumulated_distance + segment_distance >= float(distance):
                 # 计算到达目标位移所需的实际时间
-                remaining_displacement = float(displacement) - accumulated_displacement
+                remaining_displacement = float(distance) - accumulated_distance
 
                 # 求解运动学方程: s = v0*t + 0.5*a*t^2
                 if np.abs(acc) < 1e-9:
                     # 匀速运动
                     actual_time = remaining_displacement / np.maximum(
-                        np.abs(current_speed_i), 1e-6
+                        current_speed_i, 1e-6
                     )
                 else:
                     # 变速运动，求解二次方程
-                    # 0.5*a*t^2 + v0*t - s = 0
                     discriminant = current_speed_i**2 + 2 * acc * remaining_displacement
-                    actual_time = (-current_speed_i + np.sqrt(discriminant)) / acc
+                    discriminant = max(discriminant, 0)
+                    actual_time = (np.sqrt(discriminant) - current_speed_i) / acc
 
                 # 计算该段的能耗
-                MEC, LEC = CalcEnergy(
+                PEC, LEC = ecc.CalcEnergy(
                     begin_pos=current_pos_i,
                     begin_speed=current_speed_i,
                     acc=acc,
-                    displacement=remaining_displacement,
+                    distance=remaining_displacement,
+                    direction=1,
                     operation_time=actual_time,
                     vehicle=self.vehicle,
                     trackprofile=self.trackprofile,
                 )
 
-                ref_mec += MEC
+                ref_mec += PEC
                 ref_lec += LEC
                 ref_operation_time += actual_time
                 break
             else:
                 # 该段未达到目标位移，计算完整段的能耗
-                MEC, LEC = CalcEnergy(
+                PEC, LEC = ecc.CalcEnergy(
                     begin_pos=current_pos_i,
                     begin_speed=current_speed_i,
                     acc=acc,
-                    displacement=segment_displacement,
+                    distance=segment_distance,
+                    direction=1,
                     operation_time=operation_time,
                     vehicle=self.vehicle,
                     trackprofile=self.trackprofile,
                 )
 
-                ref_mec += MEC
+                ref_mec += PEC
                 ref_lec += LEC
                 ref_operation_time += operation_time
-                accumulated_displacement += segment_displacement
+                accumulated_distance += segment_distance
 
                 # 更新当前状态
-                current_pos_i += segment_displacement
+                current_pos_i += segment_distance
                 current_speed_i += acc * operation_time
 
         return float(ref_mec), float(ref_lec), float(ref_operation_time)

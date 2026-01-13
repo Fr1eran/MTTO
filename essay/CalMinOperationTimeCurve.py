@@ -11,6 +11,7 @@ from model.SafeGuard import SafeGuardUtility
 from model.Vehicle import Vehicle
 from model.Task import Task
 from model.ORS import ORS
+from model.ECC import ECC
 from utils.misc import SetChineseFont
 
 # 坡度，百分位
@@ -66,6 +67,15 @@ task = Task(
     max_stop_error=0.3,
 )
 ors = ORS(vehicle=vehicle, track=track, task=task, gamma=gamma)
+ecc = ECC(
+    R_m=0.2796,
+    L_d=0.0002,
+    R_k=50.0,
+    L_k=0.000142,
+    Tau=0.258,
+    Psi_fd=3.9629,
+    k_c=0.8,
+)
 
 # 初始化位置和速度
 begin_pos = ly_zp
@@ -143,10 +153,10 @@ def draw_curve(pos, speed) -> bool:
         )
 
         # 计算最速操作模式下的总运行时间和能耗
-        mec, lec, total_operation_time = ors.CalRefEnergyAndOperationTime(
-            begin_pos=pos, begin_speed=speed, displacement=end_pos - pos
+        PEC, LEC, total_operation_time = ors.CalRefEnergyAndOperationTime(
+            begin_pos=pos, begin_speed=speed, distance=end_pos - pos, ecc=ecc
         )
-        total_energy = mec + lec
+        total_energy = PEC + LEC
 
         # 移除旧的起点和曲线（如果存在）
         if start_point is not None:

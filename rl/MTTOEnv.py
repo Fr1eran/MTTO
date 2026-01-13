@@ -14,7 +14,7 @@ from model.Vehicle import Vehicle, VehicleDynamic
 from model.Track import Track, TrackProfile
 from model.Task import Task
 from model.ORS import ORS
-from utils.CalcEnergy import CalcEnergy
+from model.ECC import ECC
 from utils.misc import SetChineseFont
 
 
@@ -77,6 +77,17 @@ class MTTOEnv(gym.Env):
         )
         self.goal_speed: float = 0.0
 
+        # 能耗计算类
+        self.ecc = ECC(
+            R_m=0.2796,
+            L_d=0.0002,
+            R_k=50.0,
+            L_k=0.000142,
+            Tau=0.258,
+            Psi_fd=3.9629,
+            k_c=0.8,
+        )
+
         # 参考运行系统
         self.ors = ORS(
             vehicle=self.vehicle,
@@ -94,7 +105,8 @@ class MTTOEnv(gym.Env):
         mec, lec, self.min_operation_time = self.ors.CalRefEnergyAndOperationTime(
             begin_pos=self.task.start_position,
             begin_speed=self.task.start_speed,
-            displacement=self.task.target_position - self.task.start_position,
+            distance=self.task.target_position - self.task.start_position,
+            ecc=self.ecc,
         )
         self.max_total_energy = mec + lec
 
@@ -365,7 +377,7 @@ class MTTOEnv(gym.Env):
 
         # 根据当前速度大小、加速度、状态转移最大位移量
         # 计算转移至下一状态的速度大小、位移量和运行时间
-        next_speed, displacement, operation_time = self._update_motion(current_acc)
+        next_speed, distance, operation_time = self._update_motion(current_acc)
         self.current_steps += 1
 
         # 计算当前列车在参考运行模式下的能耗和运行时间
@@ -377,11 +389,12 @@ class MTTOEnv(gym.Env):
         # ref_energy_consumption = ref_mec + ref_lec
 
         # 计算当前能耗
-        current_mec, current_lec = CalcEnergy(
+        current_mec, current_lec = self.ecc.CalcEnergy(
             begin_pos=prev_pos,
             begin_speed=prev_speed,
             acc=current_acc,
-            displacement=displacement,
+            distance=distance,
+            direction=self.direction,
             operation_time=operation_time,
             vehicle=self.vehicle,
             trackprofile=self.trackprofile,
@@ -389,12 +402,12 @@ class MTTOEnv(gym.Env):
         energy_consumption = current_mec + current_lec
 
         # 更新运行状态
-        self.current_pos += displacement
+        self.current_pos += distance * self.direction
         self.current_operation_time += operation_time
         self.current_energy_consumption += energy_consumption
 
         # 更新智能体可观测状态
-        self.remainning_distance -= displacement * self.direction
+        self.remainning_distance -= distance
         self.current_speed = next_speed
         self.remainning_schedule_time -= operation_time
         # self.mass = self.vehicle.mass
@@ -465,7 +478,7 @@ class MTTOEnv(gym.Env):
                 prev_pos=prev_pos,
                 prev_speed=prev_speed,
                 acc=current_acc,
-                displacement=displacement,
+                displacement=distance,
                 operation_time=operation_time,
             )
 
@@ -483,7 +496,7 @@ class MTTOEnv(gym.Env):
             acc(float): 加速度(m/s^2)
 
         Returns:
-            tuple: (next_speed, displacement, operation_time)
+            tuple: (next_speed, distance, operation_time)
         """
 
         distance = self.max_step_distance
@@ -513,9 +526,7 @@ class MTTOEnv(gym.Env):
 
             operation_time = (next_speed - self.current_speed) / acc
 
-        displacement = distance * self.direction
-
-        return next_speed, displacement, operation_time
+        return next_speed, distance, operation_time
 
     def _cal_energy_consumption(
         self, acc: float, displacement: float, travel_time: float | None

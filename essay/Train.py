@@ -140,7 +140,7 @@ model.learn(
     total_timesteps=50_000,
     callback=TensorboardCallback(),
     log_interval=1,
-    tb_log_name="first_log",
+    tb_log_name="trainning_log",
 )
 
 # 打印训练过程的性能数据

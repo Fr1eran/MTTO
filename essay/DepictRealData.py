@@ -8,7 +8,7 @@ import pandas as pd
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from model.Vehicle import Vehicle
-from utils.CalcEnergy import CalcEnergyCumul
+from model.ECC import ECC
 from model.Track import Track, TrackProfile
 from utils.misc import SetChineseFont
 
@@ -59,7 +59,11 @@ trackprofile = TrackProfile(track=track)
 
 vehicle = Vehicle(mass=317.5, numoftrainsets=5, length=128.5)
 
-mechanic_energy_consumption, levi_energy_consumption = CalcEnergyCumul(
+tec = ECC(
+    R_m=0.2796, L_d=0.0002, R_k=50.0, L_k=0.000142, Tau=0.258, Psi_fd=3.9629, k_c=0.8
+)
+
+propulsion_energy_consumption, leviation_energy_consumption = tec.CalcEnergyCumul(
     pos_arr=distance.to_numpy(dtype=np.float64),
     speed_arr=v_km.to_numpy(dtype=np.float64) / 3.6,
     acc_arr=accelerate.to_numpy(dtype=np.float64),
@@ -71,15 +75,15 @@ mechanic_energy_consumption, levi_energy_consumption = CalcEnergyCumul(
 fig3, ax3 = plt.subplots(figsize=(10, 6))
 ax3.plot(
     distance,
-    mechanic_energy_consumption,
-    label="实际机械能耗随里程变化曲线",
+    propulsion_energy_consumption,
+    label="实际牵引能耗随里程变化曲线",
     color="red",
 )
 ax3.plot(
     distance,
-    levi_energy_consumption,
+    leviation_energy_consumption,
     label="实际悬浮能耗随里程变化曲线",
-    color="yellow",
+    color="green",
 )
 ax3.set_xlabel(r"里程($km$)")
 ax3.set_ylabel(r"能耗($kJ$)")
