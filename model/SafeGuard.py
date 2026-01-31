@@ -538,75 +538,100 @@ class SafeGuardUtility:
         self.numofregions = idp_points.shape[1]
         self.gamma = gamma
 
-    # def GetMinAndMaxSpeed(
-    #     self, current_pos: float, current_speed: float, current_sp: int | None
-    # ):
-    #     """
-    #     获得当前位置的最小防护速度和最大仿防护速度
+    def GetCurrentSP(self, current_pos: float, current_speed: float):
+        """
+        根据当前状态获得列车的目标停车点编号
 
-    #     Args:
-    #         current_pos: 当前位置
-    #         current_speed: 当前速度
-    #         current_sp: 当前步进的停车点编号, 从0开始
+        Args:
+            current_pos: 当前位置
+            current_speed: 当前速度
 
-    #     Returns:
-    #         min_speed, max_speed, current_sp
-    #     """
-    #     if current_sp is None:
-    #         min_speed = 0.0
-    #         current_max_curve = self.max_curves_list[0]
-    #         if current_pos > current_max_curve[0, 0]:
-    #             max_speed = np.interp(
-    #                 current_pos, current_max_curve[0, :], current_max_curve[1, :]
-    #             )
-    #         else:
-    #             max_speed = self.speed_limits[
-    #                 np.clip(
-    #                     GetIntervalIndex(current_pos, self.speed_limit_intervals),
-    #                     0,
-    #                     len(self.speed_limits) - 1,
-    #                 )
-    #             ]
-    #         next_min_curve = self.min_curves_list[0]
-    #         if current_speed > np.interp(
-    #             current_pos, next_min_curve[0, :], next_min_curve[1, :]
-    #         ):
-    #             current_sp = 0
-    #     else:
-    #         current_min_curve = self.min_curves_list[current_sp]
-    #         current_max_curve = self.max_curves_list[current_sp + 1]
-    #         if current_pos < current_min_curve[0, -1]:
-    #             min_speed = np.interp(
-    #                 current_pos, current_min_curve[0, :], current_min_curve[1, :]
-    #             )
-    #         else:
-    #             min_speed = 0.0
-    #         if current_pos > current_max_curve[0, 0]:
-    #             max_speed = np.interp(
-    #                 current_pos, current_max_curve[0, :], current_max_curve[1, :]
-    #             )
-    #         else:
-    #             max_speed = self.speed_limits[
-    #                 np.clip(
-    #                     GetIntervalIndex(current_pos, self.speed_limit_intervals),
-    #                     0,
-    #                     len(self.speed_limits) - 1,
-    #                 )
-    #             ]
-    #         if (current_sp + 1) != len(self.min_curves_list):
-    #             next_min_curve = self.min_curves_list[current_sp]
-    #             if current_speed > np.interp(
-    #                 current_pos, next_min_curve[0, :], next_min_curve[1, :]
-    #             ):
-    #                 current_sp += 1
+        Returns:
+            目标停车点编号
 
-    #     return min_speed, max_speed, current_sp
+        """
+        # 设置初始停车点编号为-1
+        current_sp = -1
+        # 遍历所有停车点对应的最小速度曲线
+        for current_min_curve in self.min_curves_list:
+            if current_pos <= current_min_curve[0, -1]:
+                # 当前位置小于最小速度曲线的右端点
+                # 设置最小速度为最小速度曲线在当前位置的插值
+                min_speed = np.interp(
+                    current_pos, current_min_curve[0, :], current_min_curve[1, :]
+                )
+                # 未步进到当前停车点
+                if current_speed <= min_speed:
+                    break
+
+            current_sp += 1
+
+    def GetCurrentMinAndMaxSpeed(
+        self, current_pos: float, current_sp: int
+    ) -> tuple[float, float]:
+        """
+        获得当前位置在目标辅助停车区下的最小防护速度和最大防护速度
+
+        Args:
+            current_pos: 当前位置
+            current_sp: 当前目标停车点编号
+
+        Returns:
+            current_min_speed, current_max_speed
+        """
+
+        # 根据当前状态计算最小防护速度
+        if current_sp == -1:
+            # 还在加速区，尚未步进到第一个辅助停车区
+            current_min_speed = 0.0
+        else:
+            # 已开始停车点步进
+            # 根据当前状态计算最小防护速度
+            current_min_curve = self.min_curves_list[current_sp]
+            if current_pos > current_min_curve[0, -1]:
+                # 当前位置大于最小速度曲线的右端点
+                # 设置当前最小防护速度为0
+                current_min_speed = 0.0
+            else:
+                # 当前位置小于最小速度曲线的右端点
+                # 设置最小防护速度为最小速度曲线在当前位置的插值
+                current_min_speed = np.interp(
+                    current_pos, current_min_curve[0, :], current_min_curve[1, :]
+                )
+
+        # 根据当前状态计算最大防护速度
+        current_max_curve = self.max_curves_list[current_sp + 1]
+        if current_pos > current_max_curve[0, 0]:
+            # 当前位置大于最大速度曲线左端点
+            # 设置最大速度为最大速度曲线在当前位置的插值
+            current_max_speed = max(
+                0.0,
+                np.interp(
+                    current_pos, current_max_curve[0, :], current_max_curve[1, :]
+                ),
+            )
+        else:
+            # 当前位置小于最大速度曲线的左端点
+            # 设置最大速度为当前位置区间限速
+            current_max_speed = (
+                self.speed_limits[
+                    np.clip(
+                        GetIntervalIndex(current_pos, self.speed_limit_intervals),
+                        0,
+                        len(self.speed_limits) - 1,
+                    )
+                ]
+                * self.gamma
+            )
+
+        return float(current_min_speed), float(current_max_speed)
 
     def GetMinAndMaxSpeed(
         self, current_pos: float, current_speed: float, current_sp: int | None
     ) -> tuple[float, float, int]:
         """
-        获得当前位置的最小防护速度和最大防护速度
+        获得当前位置在目标辅助停车区下的最小防护速度和最大防护速度,
+        并尝试步进到下一个辅助停车区
 
         Args:
             current_pos: 当前位置
@@ -635,7 +660,7 @@ class SafeGuardUtility:
                         current_pos, current_min_curve[0, :], current_min_curve[1, :]
                     )
                     # 未步进到当前停车点
-                    if current_speed < min_speed:
+                    if current_speed <= min_speed:
                         break
                     else:
                         current_min_speed = min_speed

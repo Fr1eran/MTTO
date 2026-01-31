@@ -3,7 +3,6 @@ from numpy.typing import NDArray
 from typing import NamedTuple, TypedDict
 from model.Vehicle import Vehicle
 from model.Track import Track, TrackProfile
-from model.Task import Task
 from model.ECC import ECC
 
 
@@ -45,15 +44,13 @@ class DescendOperation(TypedDict):
 class ORS:
     """Operation Reference System"""
 
-    def __init__(
-        self, *, vehicle: Vehicle, track: Track, task: Task, gamma: float
-    ) -> None:
+    def __init__(self, *, vehicle: Vehicle, track: Track, gamma: float) -> None:
         self.vehicle = vehicle
         self.track = track
         self.trackprofile = TrackProfile(track=track)
-        self.end_speed: float = 0.0
-        self.destination: float = task.target_position
-        self.schedule_time: float = task.schedule_time
+        # self.end_speed: float = 0.0
+        # self.destination: float = task.target_position
+        # self.schedule_time: float = task.schedule_time
         self.gamma: float = gamma
 
     def _getSpeedLimitsIntervalIndex(self, pos: float, *, ascend: bool = True) -> int:
@@ -131,9 +128,11 @@ class ORS:
         """
         根据当前位置和速度反向计算在最大制动加速度下的
         部分运行过程，直至达到顶棚运行速度
+
         Args:
-            end_speed: 终点速度
             end_pos: 终点位置
+            end_speed: 终点速度
+
         Returns:
             最大制动模式的起始位置
             最大制动模式的运行时间
@@ -190,8 +189,9 @@ class ORS:
         根据当前位置和速度反向计算在最大牵引加速度下的
         部分运行过程，直至达到顶棚运行速度
         Args:
-            end_speed: 终点速度
-            end_pos: 终点位置
+            begin_pos: 起始位置
+            begin_speed: 起始速度
+
         Returns:
             最大牵引模式下的终点位置
             最大牵引模式下的运行时间
@@ -300,14 +300,16 @@ class ORS:
         operation.append(GeneralOperation(-self.vehicle.max_dec, mb_time))
         return operation
 
-    def _cal_min_runtime_operation(self, current_pos: float, current_speed: float):
+    def _cal_min_runtime_operation(
+        self, current_pos: float, current_speed: float, end_pos: float, end_speed: float
+    ):
         """
         计算列车在给定线路条件和约束下的最短运行时间操作序列
         """
         tow_begin_speed = current_speed
         tow_begin_pos = current_pos
-        brake_end_speed = 0.0
-        brake_end_pos = self.destination
+        brake_end_speed = end_speed
+        brake_end_pos = end_pos
 
         (
             tow_end_pos,
@@ -377,16 +379,14 @@ class ORS:
                         begin_pos=ascend_begin_pos, begin_speed=ascend_begin_speed
                     )
 
-                    ascend_operations.append(
-                        {
-                            "ascend_begin_pos": ascend_begin_pos,
-                            "ascend_begin_speed": ascend_begin_speed,
-                            "ascend_operation_time": ascend_operation_time,
-                            "ascend_end_pos": ascend_end_pos,
-                            "ascend_end_interval": ascend_end_interval,
-                            "ascend_begin_interval": ascend_begin_interval,
-                        }
-                    )
+                    ascend_operations.append({
+                        "ascend_begin_pos": ascend_begin_pos,
+                        "ascend_begin_speed": ascend_begin_speed,
+                        "ascend_operation_time": ascend_operation_time,
+                        "ascend_end_pos": ascend_end_pos,
+                        "ascend_end_interval": ascend_end_interval,
+                        "ascend_begin_interval": ascend_begin_interval,
+                    })
                     prev_ascend_end_interval = ascend_end_interval
 
             prev_descend_begin_interval = brake_begin_interval
@@ -405,16 +405,14 @@ class ORS:
                         end_pos=descend_end_pos, end_speed=descend_end_speed
                     )
 
-                    descend_operations.append(
-                        {
-                            "descend_end_pos": descend_end_pos,
-                            "descend_end_speed": descend_end_speed,
-                            "descend_operation_time": descend_operation_time,
-                            "descend_begin_pos": descend_begin_pos,
-                            "descend_begin_interval": descend_begin_interval,
-                            "descend_end_interval": descend_end_interval,
-                        }
-                    )
+                    descend_operations.append({
+                        "descend_end_pos": descend_end_pos,
+                        "descend_end_speed": descend_end_speed,
+                        "descend_operation_time": descend_operation_time,
+                        "descend_begin_pos": descend_begin_pos,
+                        "descend_begin_interval": descend_begin_interval,
+                        "descend_end_interval": descend_end_interval,
+                    })
             # descend_operations不必反转
             # ToDO: 添加其他特殊情况下的子操作剔除
             # 计算操作模式
@@ -562,16 +560,21 @@ class ORS:
         return operations
 
     def CalMinRuntimeCurve(
-        self, begin_pos: float | np.number, begin_speed: float | np.number
+        self,
+        begin_pos: float,
+        begin_speed: float,
+        end_pos: float,
+        end_speed: float,
     ) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
         """计算在给定当前位置、速度下的最小运行速度曲线及其运行时间"""
-        current_pos = float(begin_pos)
-        current_speed = float(begin_speed)
         operations = self._cal_min_runtime_operation(
-            current_pos=current_pos, current_speed=current_speed
+            current_pos=begin_pos,
+            current_speed=begin_speed,
+            end_pos=end_pos,
+            end_speed=end_speed,
         )
-        curve_pos_array = np.array([current_pos], dtype=np.float64)
-        curve_speed_array = np.array([current_speed], dtype=np.float64)
+        curve_pos_array = np.array([begin_pos], dtype=np.float64)
+        curve_speed_array = np.array([begin_speed], dtype=np.float64)
         for acc, operation_time in operations:
             # build trajectory for this operation (constant accel for duration)
             if operation_time <= 0:
@@ -585,17 +588,15 @@ class ORS:
             t_samples = np.linspace(
                 0.0, operation_time, n_steps, endpoint=True, dtype=np.float64
             )
-            speeds = current_speed + acc * t_samples
-            positions = (
-                current_pos + current_speed * t_samples + 0.5 * acc * t_samples**2
-            )
+            speeds = begin_speed + acc * t_samples
+            positions = begin_pos + begin_speed * t_samples + 0.5 * acc * t_samples**2
 
             curve_pos_array = np.concatenate((curve_pos_array[:-1], positions))
             curve_speed_array = np.concatenate((curve_speed_array[:-1], speeds))
 
             # update current state
-            current_pos = curve_pos_array[-1]
-            current_speed = curve_speed_array[-1]
+            begin_pos = curve_pos_array[-1]
+            begin_speed = curve_speed_array[-1]
 
         return (
             curve_pos_array.astype(np.float32),
@@ -604,9 +605,11 @@ class ORS:
 
     def CalRefEnergyAndOperationTime(
         self,
-        begin_pos: float | np.floating,
-        begin_speed: float | np.floating,
-        distance: float | np.floating,
+        begin_pos: float,
+        begin_speed: float,
+        end_pos: float,
+        end_speed: float,
+        distance: float,
         ecc: ECC,
     ) -> tuple[float, float, float]:
         """
@@ -624,7 +627,10 @@ class ORS:
             ref_operation_time: 参考运行时间(s)
         """
         ref_operations: list[GeneralOperation] = self._cal_min_runtime_operation(
-            current_pos=float(begin_pos), current_speed=float(begin_speed)
+            current_pos=begin_pos,
+            current_speed=begin_speed,
+            end_pos=end_pos,
+            end_speed=end_speed,
         )
 
         ref_mec = 0.0

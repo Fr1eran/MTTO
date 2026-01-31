@@ -66,7 +66,7 @@ task = Task(
     max_arr_time_error=120.0,
     max_stop_error=0.3,
 )
-ors = ORS(vehicle=vehicle, track=track, task=task, gamma=gamma)
+ors = ORS(vehicle=vehicle, track=track, gamma=gamma)
 ecc = ECC(
     R_m=0.2796,
     L_d=0.0002,
@@ -149,12 +149,20 @@ def draw_curve(pos, speed) -> bool:
     try:
         # 计算最短运行时间曲线
         min_curve_pos_array, min_curve_speed_array = ors.CalMinRuntimeCurve(
-            begin_pos=pos, begin_speed=speed
+            begin_pos=pos,
+            begin_speed=speed,
+            end_pos=task.target_position,
+            end_speed=0.0,
         )
 
         # 计算最速操作模式下的总运行时间和能耗
         PEC, LEC, total_operation_time = ors.CalRefEnergyAndOperationTime(
-            begin_pos=pos, begin_speed=speed, distance=end_pos - pos, ecc=ecc
+            begin_pos=pos,
+            begin_speed=speed,
+            end_pos=task.target_position,
+            end_speed=0.0,
+            distance=end_pos - pos,
+            ecc=ecc,
         )
         total_energy = PEC + LEC
 

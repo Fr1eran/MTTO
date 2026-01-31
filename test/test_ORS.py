@@ -40,4 +40,4 @@ def ors():
         max_arr_time_error=120.0,
         max_stop_error=0.3,
     )
-    return ORS(vehicle=vehicle, track=track, task=task, gamma=0.95)
+    return ORS(vehicle=vehicle, track=track, gamma=0.95)

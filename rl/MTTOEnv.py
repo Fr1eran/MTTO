@@ -14,6 +14,7 @@ from model.Vehicle import Vehicle, VehicleDynamic
 from model.Track import Track, TrackProfile
 from model.Task import Task
 from model.ORS import ORS
+from model.SPS import SPS
 from model.ECC import ECC
 from utils.misc import SetChineseFont
 
@@ -92,7 +93,6 @@ class MTTOEnv(gym.Env):
         self.ors = ORS(
             vehicle=self.vehicle,
             track=self.track,
-            task=self.task,
             gamma=self.safeguardutil.gamma,
         )
 
@@ -100,12 +100,18 @@ class MTTOEnv(gym.Env):
         self.ref_curve_pos, self.ref_curve_speed = self.ors.CalMinRuntimeCurve(
             begin_pos=self.task.start_position,
             begin_speed=self.task.start_speed,
+            end_pos=self.task.target_position + self.task.max_stop_error,
+            end_speed=0.0,
         )
         # 计算最大能耗和最短运行时间
         mec, lec, self.min_operation_time = self.ors.CalRefEnergyAndOperationTime(
             begin_pos=self.task.start_position,
             begin_speed=self.task.start_speed,
-            distance=self.task.target_position - self.task.start_position,
+            end_pos=self.task.target_position + self.task.max_stop_error,
+            end_speed=0.0,
+            distance=self.task.target_position
+            + self.task.max_stop_error
+            - self.task.start_position,
             ecc=self.ecc,
         )
         self.max_total_energy = mec + lec
@@ -170,41 +176,37 @@ class MTTOEnv(gym.Env):
         )
 
         # 定义智能体能够观测的状态信息
-        self.observation_space = gym.spaces.Dict(
-            {
-                "agent_remainning_distance": gym.spaces.Box(
-                    0.0,
-                    self.whole_distance,
-                    shape=(1,),
-                    dtype=np.float32,
-                ),
-                "agent_current_speed": gym.spaces.Box(
-                    0.0, 600.0 / 3.6, shape=(1,), dtype=np.float32
-                ),
-                "agent_remainning_schedule_time": gym.spaces.Box(
-                    -600.0,  # 最多超时10分钟
-                    self.task.schedule_time,
-                    shape=(1,),
-                    dtype=np.float32,  # 允许超时或提前
-                ),
-                "current_slope": gym.spaces.Box(
-                    -4.0, 4.0, shape=(1,), dtype=np.float32
-                ),
-                "current_max_speed": gym.spaces.Box(
-                    0.0, 600 / 3.6, shape=(1,), dtype=np.float32
-                ),
-                "current_min_speed": gym.spaces.Box(
-                    0.0, 600 / 3.6, shape=(1,), dtype=np.float32
-                ),
-                "next_slope": gym.spaces.Box(-4.0, 4.0, shape=(1,), dtype=np.float32),
-                "next_max_speed": gym.spaces.Box(
-                    0.0, 600 / 3.6, shape=(1,), dtype=np.float32
-                ),
-                "next_min_speed": gym.spaces.Box(
-                    0.0, 600 / 3.6, shape=(1,), dtype=np.float32
-                ),
-            }
-        )
+        self.observation_space = gym.spaces.Dict({
+            "agent_remainning_distance": gym.spaces.Box(
+                0.0,
+                self.whole_distance,
+                shape=(1,),
+                dtype=np.float32,
+            ),
+            "agent_current_speed": gym.spaces.Box(
+                0.0, 600.0 / 3.6, shape=(1,), dtype=np.float32
+            ),
+            "agent_remainning_schedule_time": gym.spaces.Box(
+                -600.0,  # 最多超时10分钟
+                self.task.schedule_time,
+                shape=(1,),
+                dtype=np.float32,  # 允许超时或提前
+            ),
+            "current_slope": gym.spaces.Box(-4.0, 4.0, shape=(1,), dtype=np.float32),
+            "current_max_speed": gym.spaces.Box(
+                0.0, 600 / 3.6, shape=(1,), dtype=np.float32
+            ),
+            "current_min_speed": gym.spaces.Box(
+                0.0, 600 / 3.6, shape=(1,), dtype=np.float32
+            ),
+            "next_slope": gym.spaces.Box(-4.0, 4.0, shape=(1,), dtype=np.float32),
+            "next_max_speed": gym.spaces.Box(
+                0.0, 600 / 3.6, shape=(1,), dtype=np.float32
+            ),
+            "next_min_speed": gym.spaces.Box(
+                0.0, 600 / 3.6, shape=(1,), dtype=np.float32
+            ),
+        })
 
         # 定义智能体的动作空间, 归一化
         self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
@@ -214,6 +216,9 @@ class MTTOEnv(gym.Env):
 
         # 当前步进停车点编号
         self.current_sp: int = -1
+
+        # 停车点步进机制模拟
+        self.sps = SPS(sgu=self.safeguardutil, numofSPS=9, T_r=2.0)
 
         # Q初始值
         self.q_init: float = 0.0
@@ -321,11 +326,13 @@ class MTTOEnv(gym.Env):
         self.current_slope = self.trackprofile.GetSlope(
             pos=self.current_pos, interpolate=False
         )
-        self.current_min_speed, self.current_max_speed, self.current_sp = (
-            self.safeguardutil.GetMinAndMaxSpeed(
-                current_pos=self.current_pos,
-                current_speed=self.current_speed,
-                current_sp=None,
+
+        # 重置停车点步进
+        self.current_sp = -1
+        self.sps.Reset()
+        self.current_min_speed, self.current_max_speed = (
+            self.safeguardutil.GetCurrentMinAndMaxSpeed(
+                current_pos=self.current_pos, current_sp=self.current_sp
             )
         )
         self.current_max_speed = min(
@@ -335,12 +342,12 @@ class MTTOEnv(gym.Env):
         self.next_slope = self.trackprofile.GetSlope(
             pos=self.current_pos + self.max_step_distance, interpolate=False
         )
-        self.next_min_speed, self.next_max_speed, _ = (
-            self.safeguardutil.GetMinAndMaxSpeed(
-                current_pos=self.current_pos + self.max_step_distance,
-                current_speed=self.current_speed,
-                current_sp=self.current_sp,
-            )
+        (
+            self.next_min_speed,
+            self.next_max_speed,
+        ) = self.safeguardutil.GetCurrentMinAndMaxSpeed(
+            current_pos=self.current_pos + self.max_step_distance,
+            current_sp=self.current_sp,
         )
         self.next_max_speed = min(
             self._get_ref_speed(self.current_pos + self.max_step_distance),
@@ -414,10 +421,15 @@ class MTTOEnv(gym.Env):
         self.current_slope = self.trackprofile.GetSlope(
             pos=self.current_pos, interpolate=True
         )
-        self.current_min_speed, self.current_max_speed, self.current_sp = (
-            self.safeguardutil.GetMinAndMaxSpeed(
+        self.current_sp = self.sps.StepToNextSP(
+            current_pos=self.current_pos,
+            current_speed=self.current_speed,
+            current_time=self.current_operation_time,
+            current_sp=self.current_sp,
+        )
+        self.current_min_speed, self.current_max_speed = (
+            self.safeguardutil.GetCurrentMinAndMaxSpeed(
                 current_pos=self.current_pos,
-                current_speed=self.current_speed,
                 current_sp=self.current_sp,
             )
         )
@@ -429,10 +441,9 @@ class MTTOEnv(gym.Env):
             pos=self.current_pos + self.max_step_distance * self.direction,
             interpolate=False,
         )
-        self.next_min_speed, self.next_max_speed, _ = (
-            self.safeguardutil.GetMinAndMaxSpeed(
+        self.next_min_speed, self.next_max_speed = (
+            self.safeguardutil.GetCurrentMinAndMaxSpeed(
                 current_pos=self.current_pos + self.max_step_distance * self.direction,
-                current_speed=self.current_speed,
                 current_sp=self.current_sp,
             )
         )
@@ -453,7 +464,7 @@ class MTTOEnv(gym.Env):
         truncated = (
             True
             if self.current_speed < self.current_min_speed
-            or self.current_speed > self.current_max_speed
+            or self.current_speed >= self.current_max_speed
             else False
         )
 
