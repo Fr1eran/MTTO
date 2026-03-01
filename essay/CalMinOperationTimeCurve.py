@@ -6,7 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from model.Track import Track
+from model.Track import Track, TrackProfile
 from model.SafeGuard import SafeGuardUtility
 from model.Vehicle import Vehicle
 from model.Task import Task
@@ -49,6 +49,7 @@ sgu = SafeGuardUtility(
 )
 
 track = Track(slopes, slope_intervals, speed_limits.tolist(), speed_limit_intervals)
+trackprofile = TrackProfile(track=track)
 vehicle = Vehicle(
     mass=317.5,
     numoftrainsets=5,
@@ -84,6 +85,8 @@ max_speed = float(np.max(speed_limits))
 
 end_pos = task.target_position
 end_speed = 0.0
+
+distance = 100.0
 
 # 设置matplotlib
 SetChineseFont()
@@ -137,9 +140,7 @@ fig.text(
 )
 
 # 更新标题显示命令提示
-ax.set_title(
-    "极限操作模式下的最短运行时间曲线\n(请在图形窗口中按 Y/I/P/Q 键操作)", fontsize=12
-)
+ax.set_title("极限操作模式下的最短运行时间曲线", fontsize=12)
 
 
 # 绘制曲线的通用函数
@@ -148,7 +149,26 @@ def draw_curve(pos, speed) -> bool:
 
     try:
         # 计算最短运行时间曲线
-        min_curve_pos_array, min_curve_speed_array = ors.CalMinRuntimeCurve(
+        min_curve_pos_array, min_curve_speed_array = ors.CalcMinRuntimeCurve(
+            begin_pos=pos,
+            begin_speed=speed,
+            end_pos=task.target_position,
+            end_speed=0.0,
+        )
+
+        # 计算参考运行模式下的某些参数
+        next_pos = pos + distance
+        next_speed = max(
+            0.0, np.interp(next_pos, min_curve_pos_array, min_curve_speed_array)
+        )
+        t_min = ors.CalcRefOperationTime(
+            begin_pos=pos,
+            begin_speed=speed,
+            end_pos=next_pos,
+            end_speed=next_speed,
+        )
+
+        T_min = ors.CalcRefOperationTime(
             begin_pos=pos,
             begin_speed=speed,
             end_pos=task.target_position,
@@ -156,13 +176,13 @@ def draw_curve(pos, speed) -> bool:
         )
 
         # 计算最速操作模式下的总运行时间和能耗
-        PEC, LEC, total_operation_time = ors.CalRefEnergyAndOperationTime(
+        PEC, LEC, total_operation_time = ors.CalcRefEnergyAndOperationTime(
             begin_pos=pos,
             begin_speed=speed,
             end_pos=task.target_position,
             end_speed=0.0,
             distance=end_pos - pos,
-            ecc=ecc,
+            energy_con_calc=ecc,
         )
         total_energy = PEC + LEC
 
@@ -198,7 +218,10 @@ def draw_curve(pos, speed) -> bool:
 
         # 更新标题
         ax.set_title(
-            f"极限操作模式下的最短运行时间曲线\n起点: ({pos:.2f}m, {speed:.2f}m/s) 运行能耗: {total_energy:.2f} 运行时间: {total_operation_time:.2f}\n按 Y/I/P/Q 操作",
+            "极限操作模式下的最短运行时间曲线\n"
+            + f"起点: ({pos:.2f}m, {speed:.2f}m/s) 运行能耗: {total_energy:.2f} 运行时间: {total_operation_time:.2f}\n"
+            + r"$t_m={:.2f}$".format(t_min)
+            + r"$T_m={:.2f}$".format(T_min),
             fontsize=12,
         )
 

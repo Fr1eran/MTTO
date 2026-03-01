@@ -48,9 +48,6 @@ class ORS:
         self.vehicle = vehicle
         self.track = track
         self.trackprofile = TrackProfile(track=track)
-        # self.end_speed: float = 0.0
-        # self.destination: float = task.target_position
-        # self.schedule_time: float = task.schedule_time
         self.gamma: float = gamma
 
     def _getSpeedLimitsIntervalIndex(self, pos: float, *, ascend: bool = True) -> int:
@@ -120,7 +117,7 @@ class ORS:
 
         return AscendBeginPoints, DescendEndPoints
 
-    def _cal_mb_descend_operation(
+    def _calc_mb_descend_operation(
         self,
         end_pos: float,
         end_speed: float,
@@ -180,7 +177,7 @@ class ORS:
             int(np.clip(begin_interval, 0, len(self.track.speed_limits) - 1)),
         )
 
-    def _cal_ma_ascend_operation(
+    def _calc_ma_ascend_operation(
         self,
         begin_pos: float,
         begin_speed: float,
@@ -238,7 +235,7 @@ class ORS:
             int(np.clip(end_interval, 0, len(self.track.speed_limits) - 1)),
         )
 
-    def _cal_withnocruise_scenario(
+    def _calc_withnocruise_scenario(
         self, begin_pos: float, begin_speed: float, end_pos: float, end_speed: float
     ) -> tuple[list[GeneralOperation], float | None]:
         """计算限速区间内不存在巡航阶段的操作模式序列"""
@@ -283,7 +280,7 @@ class ORS:
             )
         return operation, sceptical_pos
 
-    def _cal_withcruise_scenario(
+    def _calc_withcruise_scenario(
         self,
         cruise_begin_pos: float,
         cruise_end_pos: float,
@@ -300,7 +297,7 @@ class ORS:
         operation.append(GeneralOperation(-self.vehicle.max_dec, mb_time))
         return operation
 
-    def _cal_min_runtime_operation(
+    def _calc_min_runtime_operation(
         self, current_pos: float, current_speed: float, end_pos: float, end_speed: float
     ):
         """
@@ -315,7 +312,7 @@ class ORS:
             tow_end_pos,
             tow_operation_time,
             tow_end_interval,
-        ) = self._cal_ma_ascend_operation(
+        ) = self._calc_ma_ascend_operation(
             begin_pos=tow_begin_pos, begin_speed=tow_begin_speed
         )
 
@@ -323,7 +320,7 @@ class ORS:
             brake_begin_pos,
             brake_operation_time,
             brake_begin_interval,
-        ) = self._cal_mb_descend_operation(
+        ) = self._calc_mb_descend_operation(
             end_pos=brake_end_pos,
             end_speed=brake_end_speed,
         )
@@ -375,18 +372,20 @@ class ORS:
                         ascend_end_pos,
                         ascend_operation_time,
                         ascend_end_interval,
-                    ) = self._cal_ma_ascend_operation(
+                    ) = self._calc_ma_ascend_operation(
                         begin_pos=ascend_begin_pos, begin_speed=ascend_begin_speed
                     )
 
-                    ascend_operations.append({
-                        "ascend_begin_pos": ascend_begin_pos,
-                        "ascend_begin_speed": ascend_begin_speed,
-                        "ascend_operation_time": ascend_operation_time,
-                        "ascend_end_pos": ascend_end_pos,
-                        "ascend_end_interval": ascend_end_interval,
-                        "ascend_begin_interval": ascend_begin_interval,
-                    })
+                    ascend_operations.append(
+                        {
+                            "ascend_begin_pos": ascend_begin_pos,
+                            "ascend_begin_speed": ascend_begin_speed,
+                            "ascend_operation_time": ascend_operation_time,
+                            "ascend_end_pos": ascend_end_pos,
+                            "ascend_end_interval": ascend_end_interval,
+                            "ascend_begin_interval": ascend_begin_interval,
+                        }
+                    )
                     prev_ascend_end_interval = ascend_end_interval
 
             prev_descend_begin_interval = brake_begin_interval
@@ -401,18 +400,20 @@ class ORS:
                         descend_begin_pos,
                         descend_operation_time,
                         descend_begin_interval,
-                    ) = self._cal_mb_descend_operation(
+                    ) = self._calc_mb_descend_operation(
                         end_pos=descend_end_pos, end_speed=descend_end_speed
                     )
 
-                    descend_operations.append({
-                        "descend_end_pos": descend_end_pos,
-                        "descend_end_speed": descend_end_speed,
-                        "descend_operation_time": descend_operation_time,
-                        "descend_begin_pos": descend_begin_pos,
-                        "descend_begin_interval": descend_begin_interval,
-                        "descend_end_interval": descend_end_interval,
-                    })
+                    descend_operations.append(
+                        {
+                            "descend_end_pos": descend_end_pos,
+                            "descend_end_speed": descend_end_speed,
+                            "descend_operation_time": descend_operation_time,
+                            "descend_begin_pos": descend_begin_pos,
+                            "descend_begin_interval": descend_begin_interval,
+                            "descend_end_interval": descend_end_interval,
+                        }
+                    )
             # descend_operations不必反转
             # ToDO: 添加其他特殊情况下的子操作剔除
             # 计算操作模式
@@ -447,7 +448,7 @@ class ORS:
                     if ascend_op["ascend_end_pos"] > descend_op["descend_begin_pos"]:
                         # 此时不存在中间巡航过程
                         middle_operations, sceptical_pos = (
-                            self._cal_withnocruise_scenario(
+                            self._calc_withnocruise_scenario(
                                 begin_pos=ascend_op["ascend_begin_pos"],
                                 begin_speed=ascend_op["ascend_begin_speed"],
                                 end_pos=descend_op["descend_end_pos"],
@@ -456,7 +457,7 @@ class ORS:
                         )
                     else:
                         # 此时必定存在中间巡航过程
-                        middle_operations = self._cal_withcruise_scenario(
+                        middle_operations = self._calc_withcruise_scenario(
                             cruise_begin_pos=ascend_op["ascend_end_pos"],
                             cruise_end_pos=descend_op["descend_begin_pos"],
                             cruise_interval=current_interval,
@@ -540,7 +541,7 @@ class ORS:
         else:  # 没有中间最大牵引或最大制动环节
             if tow_end_pos > brake_begin_pos:
                 # 此时不存在中间巡航过程
-                operations, _ = self._cal_withnocruise_scenario(
+                operations, _ = self._calc_withnocruise_scenario(
                     begin_pos=tow_begin_pos,
                     begin_speed=tow_begin_speed,
                     end_pos=brake_end_pos,
@@ -549,7 +550,7 @@ class ORS:
 
             else:
                 # 此时必定存在中间巡航过程
-                operations = self._cal_withcruise_scenario(
+                operations = self._calc_withcruise_scenario(
                     cruise_begin_pos=tow_end_pos,
                     cruise_end_pos=brake_begin_pos,
                     cruise_interval=brake_begin_interval,
@@ -559,7 +560,7 @@ class ORS:
 
         return operations
 
-    def CalMinRuntimeCurve(
+    def CalcMinRuntimeCurve(
         self,
         begin_pos: float,
         begin_speed: float,
@@ -567,7 +568,7 @@ class ORS:
         end_speed: float,
     ) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
         """计算在给定当前位置、速度下的最小运行速度曲线及其运行时间"""
-        operations = self._cal_min_runtime_operation(
+        operations = self._calc_min_runtime_operation(
             current_pos=begin_pos,
             current_speed=begin_speed,
             end_pos=end_pos,
@@ -603,30 +604,62 @@ class ORS:
             curve_speed_array.astype(np.float32),
         )
 
-    def CalRefEnergyAndOperationTime(
+    def CalcRefOperationTime(
+        self, begin_pos: float, begin_speed: float, end_pos: float, end_speed: float
+    ):
+        """
+        计算在给定起始位置、起始速度、终止位置、终止速度
+        在参考系统运行模式下的最短运行时间
+
+        Args:
+            begin_pos: 起始位置(m)
+            begin_speed: 起始速度(m/s)
+            end_pos: 终止位置(m)
+            end_speed: 终止速度(m/s)
+
+        Returns:
+            ref_operation_time: 参考最短运行时间
+
+        """
+        ref_operations: list[GeneralOperation] = self._calc_min_runtime_operation(
+            current_pos=begin_pos,
+            current_speed=begin_speed,
+            end_pos=end_pos,
+            end_speed=end_speed,
+        )
+
+        ref_operation_time: float = 0.0
+        for _, time in ref_operations:
+            ref_operation_time += time
+
+        return ref_operation_time
+
+    def CalcRefEnergyAndOperationTime(
         self,
         begin_pos: float,
         begin_speed: float,
         end_pos: float,
         end_speed: float,
         distance: float,
-        ecc: ECC,
+        energy_con_calc: ECC,
     ) -> tuple[float, float, float]:
         """
-        计算在给定当前位置、速度、目标位移量
-        和当前参考操作模式下的能耗和运行时间
+        计算在给定起始位置、起始速度、终止位置、终止速度和目标位移量
+        在参考系统运行模式下的能耗和最短运行时间
 
         Args:
             begin_pos: 起始位置(m)
             begin_speed: 起始速度(m/s)
-            displacement: 目标位移量(m)
+            end_pos: 终止位置(m)
+            end_speed: 终止速度(m/s)
+            distance: 目标位移量(m)
 
         Returns:
             ref_mechanic_energy_consumption: 参考机械能耗(J)
             ref_leviated_energy_consumption: 参考悬浮能耗(J)
             ref_operation_time: 参考运行时间(s)
         """
-        ref_operations: list[GeneralOperation] = self._cal_min_runtime_operation(
+        ref_operations: list[GeneralOperation] = self._calc_min_runtime_operation(
             current_pos=begin_pos,
             current_speed=begin_speed,
             end_pos=end_pos,
@@ -666,7 +699,7 @@ class ORS:
                     actual_time = (np.sqrt(discriminant) - current_speed_i) / acc
 
                 # 计算该段的能耗
-                PEC, LEC = ecc.CalcEnergy(
+                PEC, LEC = energy_con_calc.CalcEnergy(
                     begin_pos=current_pos_i,
                     begin_speed=current_speed_i,
                     acc=acc,
@@ -683,7 +716,7 @@ class ORS:
                 break
             else:
                 # 该段未达到目标位移，计算完整段的能耗
-                PEC, LEC = ecc.CalcEnergy(
+                PEC, LEC = energy_con_calc.CalcEnergy(
                     begin_pos=current_pos_i,
                     begin_speed=current_speed_i,
                     acc=acc,

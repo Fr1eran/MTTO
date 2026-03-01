@@ -4,6 +4,7 @@ import sys
 import pickle
 import numpy as np
 import matplotlib.pyplot as plt
+from datetime import datetime
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from rl.Callbacks import TensorboardCallback
@@ -103,10 +104,12 @@ mttoenv_train = RecordEpisodeStatistics(
 
 
 # 记录训练后的运行轨迹
+eval_name_prefix = f"eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
 mttoenv_eval = RecordVideo(
     FlattenObservation(mttoenv_eval),
     video_folder="mtto_eval_video",
-    name_prefix="eval",
+    name_prefix=eval_name_prefix,
     episode_trigger=lambda x: True,
     fps=10,
 )
@@ -137,7 +140,7 @@ model = PPO(
 
 # 训练，并使用tensorboard记录回报和网络损失变化
 model.learn(
-    total_timesteps=50_000,
+    total_timesteps=100_000,
     callback=TensorboardCallback(),
     log_interval=1,
     tb_log_name="trainning_log",

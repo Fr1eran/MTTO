@@ -17,8 +17,10 @@ class Vehicle:
     mass: float  # 单位: T
     numoftrainsets: int
     length: float  # 单位: m
+    max_speed: float = 500.0 / 3.6  # 单位: m/s
     max_acc: float = 1.0  # 单位: m/s^2
     max_dec: float = 1.0  # 单位: m/s^2
+    max_slope_capacity: float = 4.0  # 百分位
     levi_power_per_mass: float = 1.7  # 单位 kW/T
 
 
