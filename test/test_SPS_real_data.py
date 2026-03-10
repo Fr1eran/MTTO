@@ -56,6 +56,14 @@ class TestSPSIntegration:
             speed_limits = np.asarray(speed_limit_data["speed_limits"]) / 3.6
             speed_limit_intervals = speed_limit_data["intervals"]
 
+        # 辅助停车区
+        with open(
+            "data/rail/raw/auxiliary_parking_areas.json", "r", encoding="utf-8"
+        ) as f:
+            apa_data = json.load(f)
+            aps = apa_data["accessible_points"]
+            dps = apa_data["dangerous_points"]
+
         with open("data/rail/safeguard/min_curves_list.pkl", "rb") as f:
             min_curves_list = pickle.load(f)
         with open("data/rail/safeguard/max_curves_list.pkl", "rb") as f:
@@ -69,6 +77,8 @@ class TestSPSIntegration:
             "slope_intervals": slope_intervals,
             "speed_limits": speed_limits,
             "speed_limit_intervals": speed_limit_intervals,
+            "aps": aps,
+            "dps": dps,
             "min_curves_list": min_curves_list,
             "max_curves_list": max_curves_list,
         }
@@ -85,16 +95,21 @@ class TestSPSIntegration:
             gamma=0.9,
         )
 
-        return sgu, len(setup_data["min_curves_list"])
+        return sgu, len(setup_data["aps"]) + 1
 
     def test_sps_stepping_with_real_data(self, setup_data, setup_system):
         """
         使用真实运行数据测试停车点步进机制实现
         """
-        sgu, num_ap = setup_system
+        sgu, num_sp = setup_system
 
         T_r = 2.0
-        sps = SPS(sgu=sgu, numofSPS=num_ap, T_r=T_r)
+        sps = SPS(
+            sgu=sgu,
+            ASA_ap_list=setup_data["aps"],
+            ASA_dp_list=setup_data["dps"],
+            T_s=T_r,
+        )
 
         current_sp = -1
         step_history = []
@@ -124,10 +139,10 @@ class TestSPSIntegration:
 
         # 2. 检查是否到达最终停车点
         final_sp = current_sp
-        print(f"Final SP: {final_sp}, Total SPs: {num_ap}")
+        print(f"Final SP: {final_sp}, Total SPs: {num_sp}")
 
-        assert final_sp == num_ap - 1, (
-            f"Train only reached SP {final_sp}, expected is {num_ap - 1}"
+        assert final_sp == num_sp - 1, (
+            f"Train only reached SP {final_sp}, expected is {num_sp - 1}"
         )
 
         # 3. 检查步进是否单调

@@ -16,6 +16,8 @@ class Track:
     slope_intervals: NDArray[np.float64]  # 单位: m
     speed_limits: NDArray[np.float64]  # 单位: m/s
     speed_limit_intervals: NDArray[np.float64]  # 单位: m
+    ASA_aps: list[float]  # 辅助停车区可达点
+    ASA_dps: list[float]  # 辅助停车区危险点
 
     def __post_init__(self):
         self.slopes = np.asarray(self.slopes, dtype=np.float64)

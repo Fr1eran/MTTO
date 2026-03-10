@@ -27,6 +27,12 @@ with open("data/rail/raw/speed_limits.json", "r", encoding="utf-8") as f:
     speed_limits = np.asarray(speed_limits) / 3.6
     speed_limit_intervals = speedlimit_data["intervals"]
 
+# 辅助停车区
+with open("data/rail/raw/auxiliary_parking_areas.json", "r", encoding="utf-8") as f:
+    apa_data = json.load(f)
+    aps = apa_data["accessible_points"]
+    dps = apa_data["dangerous_points"]
+
 # 车站
 with open("data/rail/raw/stations.json", "r", encoding="utf-8") as f:
     stations_data = json.load(f)
@@ -48,7 +54,9 @@ sgu = SafeGuardUtility(
     gamma=gamma,
 )
 
-track = Track(slopes, slope_intervals, speed_limits.tolist(), speed_limit_intervals)
+track = Track(
+    slopes, slope_intervals, speed_limits.tolist(), speed_limit_intervals, aps, dps
+)
 trackprofile = TrackProfile(track=track)
 vehicle = Vehicle(
     mass=317.5,

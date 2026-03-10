@@ -27,6 +27,11 @@ with open("data/rail/raw/speed_limits.json", "r", encoding="utf-8") as f:
     s_limits = sl_data["speed_limits"]
     s_limits = np.asarray(s_limits, dtype=np.float64) / 3.6
     s_intervals = sl_data["intervals"]
+# 辅助停车区
+with open("data/rail/raw/auxiliary_parking_areas.json", "r", encoding="utf-8") as f:
+    apa_data = json.load(f)
+    aps = apa_data["accessible_points"]
+    dps = apa_data["dangerous_points"]
 # 读取车站数据
 with open("data/rail/raw/stations.json", "r", encoding="utf-8") as f:
     stations_data = json.load(f)
@@ -54,6 +59,8 @@ track = Track(
     slope_intervals=slope_intervals,
     speed_limits=s_limits,
     speed_limit_intervals=s_intervals,
+    ASA_aps=aps,
+    ASA_dps=dps,
 )
 vehicle = Vehicle(mass=317.5, numoftrainsets=5, length=128.5)
 task = Task(

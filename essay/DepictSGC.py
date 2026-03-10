@@ -158,9 +158,9 @@ safeguard.Render(ax=ax2)
 
 # 绘制辅助停车区、车站
 ax2.hlines(
-    y=np.zeros_like(aps),
-    xmin=aps,
-    xmax=dps,
+    y=np.zeros_like(aps[:-1]),
+    xmin=aps[:-1],
+    xmax=dps[:-1],
     colors="green",
     linestyles="solid",
     linewidth=8,

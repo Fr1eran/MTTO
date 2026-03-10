@@ -19,6 +19,7 @@ with open("data/rail/raw/slopes.json", "r", encoding="utf-8") as f:
     slope_intervals = slope_data["intervals"]
 
 # 辅助停车区
+# 目标车站被视为特殊的辅助停车区，现已包含
 with open("data/rail/raw/auxiliary_parking_areas.json", "r", encoding="utf-8") as f:
     apa_data = json.load(f)
     aps = apa_data["accessible_points"]
@@ -48,14 +49,16 @@ with open("data/rail/raw/speed_limits.json", "r", encoding="utf-8") as f:
     speed_limits = np.asarray(speed_limits) / 3.6
     speed_limit_intervals = speedlimit_data["intervals"]
 
-track = Track(slopes, slope_intervals, speed_limits.tolist(), speed_limit_intervals)
+track = Track(
+    slopes, slope_intervals, speed_limits.tolist(), speed_limit_intervals, aps, dps
+)
 trackprofile = TrackProfile(track=track)
 cal_SGC = SafeGuardCurves(trackprofile=trackprofile)
 vehicle = Vehicle(mass=317.5, numoftrainsets=5, length=128.5)
 
 # 终点站同样需要计算防护曲线
-aps = np.append(aps, pa_begin)
-dps = np.append(dps, pa_end)
+# aps = np.append(aps, pa_begin)
+# dps = np.append(dps, pa_end)
 
 # 加速区需要计算安全制动曲线
 dps = np.insert(dps, 0, az_end)
