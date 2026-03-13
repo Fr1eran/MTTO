@@ -666,11 +666,12 @@ class MTTOEnv(gym.Env):
         reward_total = 0.0
         if not truncated:
             if terminated:
-                reward_total = self._get_reward_goal() + 50.0
+                reward_total = self._get_reward_goal() + 5.0
             else:
                 reward_total = self._get_reward_dense()
         else:
-            reward_total = -100.0
+            progress = self.current_pos / self.whole_distance
+            reward_total = -1.0 * (1.0 - progress) - 14.0
 
         self.rewards_info["reward_total"] = reward_total
         return reward_total
@@ -684,19 +685,19 @@ class MTTOEnv(gym.Env):
         # 能耗奖励 (范围为[-1, 0])
         reward_energy = self._get_reward_energy_dense()
 
-        # 舒适度奖励 (范围为[-1, 1])
+        # 舒适度奖励 (范围为[-1, 0])
         reward_comfort = self._get_reward_comfort()
 
         # 运行时间奖励 (范围为[-1, 0])
-        # reward_puncuality = self._get_punctuality_reward_dense()
+        reward_puncuality = self._get_punctuality_reward_dense()
 
         # 记录
         self.rewards_info["reward_safety"] = reward_safety
         self.rewards_info["reward_energy"] = reward_energy
         self.rewards_info["reward_comfort"] = reward_comfort
-        # self.rewards_info["reward_punctuality"] = reward_puncuality
+        self.rewards_info["reward_punctuality"] = reward_puncuality
 
-        return reward_safety + reward_energy + reward_comfort
+        return reward_safety + reward_energy + reward_comfort + reward_puncuality
 
     def _get_reward_safety_dense(self) -> float:
         # 计算当前状态势能
@@ -759,13 +760,10 @@ class MTTOEnv(gym.Env):
 
         norm_speed = (speed - center_speed) / safe_margin
 
-        # 在中间势能越高，靠近两边势能越低
-        base_potential = 1.0 - (norm_speed**2) * 2.0
-
         # 靠近目标位置时，适当增大惩罚力度
-        scale = 1.0 + np.exp(-0.001 * distanceToTarget)
+        scale = 1.0 + 2.0 * np.exp(-0.001 * distanceToTarget)
 
-        return 10.0 * scale * base_potential
+        return -5.0 * scale * norm_speed**2
 
     def _get_reward_energy_dense(self) -> float:
         # phi_curr = self._potential_energy(
@@ -785,26 +783,11 @@ class MTTOEnv(gym.Env):
                 )
                 / self.max_energy_consumption
             )
-            * 10
+            * 5
         )
 
     def _potential_energy(self, energy_consumption: float) -> float:
         return -energy_consumption / self.max_energy_consumption
-
-    def _get_punctuality_reward_dense(self) -> float:
-        phi_curr = self._potential_punctuality(
-            pos=self.current_pos,
-            speed=self.current_speed,
-            operation_time=self.current_operation_time,
-        )
-
-        phi_prev = self._potential_punctuality(
-            pos=self.last_state["pos"],
-            speed=self.last_state["speed"],
-            operation_time=self.last_state["operation_time"],
-        )
-
-        return self.gamma * phi_curr - phi_prev
 
     # def _get_punctuality_reward_dense(self) -> float:
     #     # 估计当前位置在最短运行实际操作模式下应该消耗的时间
@@ -826,6 +809,24 @@ class MTTOEnv(gym.Env):
     #     else:
     #         return 0.0
 
+    def _get_punctuality_reward_dense(self) -> float:
+        phi_curr = self._potential_punctuality(
+            pos=self.current_pos,
+            speed=self.current_speed,
+            operation_time=self.current_operation_time,
+        )
+
+        phi_prev = self._potential_punctuality(
+            pos=self.last_state["pos"],
+            speed=self.last_state["speed"],
+            operation_time=self.last_state["operation_time"],
+        )
+
+        return self.gamma * phi_curr - phi_prev
+
+    # 通过计算预计运行时间与实际运行时间的偏差来定义势能
+    # 根据行程进度和规划运行时间来计算预计运行时间
+    # 偏差越大，势能越小
     # def _potential_punctuality(
     #     self, operation_time: float, remaining_distance: float
     # ) -> float:
@@ -835,9 +836,30 @@ class MTTOEnv(gym.Env):
 
     #     return -abs(operation_time - expected_time) / self.task.schedule_time
 
-    def _potential_punctuality(
-        self, pos: float, speed: float, operation_time: float
-    ) -> float:
+    # 当列车晚点时，势能下降；未晚点时，势能始终为0
+    # def _potential_punctuality(
+    #     self, pos: float, speed: float, operation_time: float
+    # ) -> float:
+    #     # 计算理论上跑完剩余路程的最短运行时间
+    #     min_remaining_operation_time = self.ors.CalcRefOperationTime(
+    #         begin_pos=pos,
+    #         begin_speed=speed,
+    #         end_pos=self.task.target_position,
+    #         end_speed=0.0,
+    #     )
+
+    #     # 计算实际剩余规划运行时间
+    #     actual_remaining_operation_time = self.task.schedule_time - operation_time
+
+    #     # 计算必然晚点时间
+    #     guaranteed_delay = max(
+    #         0.0, min_remaining_operation_time - actual_remaining_operation_time
+    #     )
+
+    #     return -10.0 * (guaranteed_delay / self.task.schedule_time)
+
+    # 基于连续非线性衰减的冗余时间势能场
+    def _potential_punctuality(self, pos: float, speed: float, operation_time: float):
         # 计算理论上跑完剩余路程的最短运行时间
         min_remaining_operation_time = self.ors.CalcRefOperationTime(
             begin_pos=pos,
@@ -849,31 +871,37 @@ class MTTOEnv(gym.Env):
         # 计算实际剩余规划运行时间
         actual_remaining_operation_time = self.task.schedule_time - operation_time
 
-        # 计算必然晚点时间
-        guaranteed_delay = max(
-            0.0, min_remaining_operation_time - actual_remaining_operation_time
+        # 计算冗余运行时间
+        redundant_operation_time = (
+            actual_remaining_operation_time - min_remaining_operation_time
         )
 
-        return -10.0 * (guaranteed_delay / self.task.schedule_time)
+        # 计算时间冗余度
+        time_redundancy_norm = redundant_operation_time / self.task.schedule_time
+
+        # 防止梯度爆炸, 对时间冗余度进行下界截断
+        time_redundancy_norm_cliped = max(time_redundancy_norm, -0.3)
+
+        return -2.0 * np.exp(-8.0 * time_redundancy_norm_cliped)
 
     def _get_reward_comfort(self) -> float:
         delta_acc = abs(self.last_state["acc"] - self.current_acc)
         # 使用指数衰减式的钟形曲线
         norm_jerk = delta_acc / (self.task.max_acc_change)
-        return -0.05 * (1 - np.exp(-2.0 * norm_jerk))
+        return -0.02 * (1 - np.exp(-2.0 * norm_jerk))
 
     def _get_reward_goal(
         self,
     ) -> float:
-        reward_docking = self._get_reward_docking_goal() * 20
-        reward_punctuality = self._get_reward_punctuality_goal() * 20
-        reward_energy = self._get_reward_energy_goal() * 10
+        reward_docking = self._get_reward_docking_goal() * 5
+        reward_punctuality = self._get_reward_punctuality_goal() * 5
+        # reward_energy = self._get_reward_energy_goal() * 10
 
         self.rewards_info["reward_docking"] = reward_docking
         self.rewards_info["reward_punctuality"] = reward_punctuality
-        self.rewards_info["reward_energy"] = reward_energy
+        # self.rewards_info["reward_energy"] = reward_energy
 
-        return reward_docking + reward_punctuality + reward_energy
+        return reward_docking + reward_punctuality
 
     def _get_reward_docking_goal(self) -> float:
         # 停站位置误差不超过0.3m

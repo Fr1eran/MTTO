@@ -3,7 +3,8 @@ import os
 import sys
 import pickle
 import numpy as np
-import matplotlib.pyplot as plt
+
+# import matplotlib.pyplot as plt
 from datetime import datetime
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -13,7 +14,7 @@ from model.Vehicle import Vehicle
 from model.SafeGuard import SafeGuardUtility
 from model.Track import Track
 from model.Task import Task
-from gymnasium.wrappers import FlattenObservation, RecordVideo, RecordEpisodeStatistics
+from gymnasium.wrappers import FlattenObservation, RecordVideo
 from stable_baselines3 import PPO
 
 
@@ -100,10 +101,12 @@ mttoenv_eval = MTTOEnv(
 # 记录训练过程的性能数据
 num_eval_episodes_during_train = 1000
 
-mttoenv_train = RecordEpisodeStatistics(
-    FlattenObservation(mttoenv_train),
-    buffer_length=num_eval_episodes_during_train,
-)
+# mttoenv_train = RecordEpisodeStatistics(
+#     FlattenObservation(mttoenv_train),
+#     buffer_length=num_eval_episodes_during_train,
+# )
+mttoenv_train = FlattenObservation(mttoenv_train)
+
 
 # mttoenv_train = Monitor(
 #     FlattenObservation(mttoenv_train),
@@ -157,24 +160,24 @@ model.learn(
 print("\nTrain Evaluation Summary:")
 
 # 绘制训练过程的性能数据
-fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+# fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
 # 总回报变化曲线
-axes[0].plot(list(mttoenv_train.return_queue), linewidth=1.5)
-axes[0].set_xlabel("Episode")
-axes[0].set_ylabel("Reward")
-axes[0].set_title("Episode Reward Over Training")
-axes[0].grid(True, alpha=0.3)
+# axes[0].plot(list(mttoenv_train.return_queue), linewidth=1.5)
+# axes[0].set_xlabel("Episode")
+# axes[0].set_ylabel("Reward")
+# axes[0].set_title("Episode Reward Over Training")
+# axes[0].grid(True, alpha=0.3)
 
 # 回合长度变化曲线
-axes[1].plot(list(mttoenv_train.length_queue), linewidth=1.5, color="orange")
-axes[1].set_xlabel("Episode")
-axes[1].set_ylabel("Episode Length")
-axes[1].set_title("Episode Length Over Training")
-axes[1].grid(True, alpha=0.3)
+# axes[1].plot(list(mttoenv_train.length_queue), linewidth=1.5, color="orange")
+# axes[1].set_xlabel("Episode")
+# axes[1].set_ylabel("Episode Length")
+# axes[1].set_title("Episode Length Over Training")
+# axes[1].grid(True, alpha=0.3)
 
-plt.tight_layout()
-plt.show()
+# plt.tight_layout()
+# plt.show()
 
 
 user_input = (
