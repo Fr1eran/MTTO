@@ -78,6 +78,7 @@ def SetChineseFont():
         "Microsoft YaHei",
         "Noto Sans CJK JP",  # common on many Linux distros
         "WenQuanYi Zen Hei",
+        "Source Han Sans CN",
         "Source Han Sans SC",
         "STHeiti",  # macOS fallback
     ]
