@@ -33,19 +33,19 @@ with open("data/rail/raw/stations.json", "r", encoding="utf-8") as f:
     ly_zp = stations_data["LY"]["zp"]
     pa_zp = stations_data["PA"]["zp"]
 
-with open("data/rail/safeguard/levi_curves_list.pkl", "rb") as f:
-    levi_curves_list = pickle.load(f)
-with open("data/rail/safeguard/brake_curves_list.pkl", "rb") as f:
-    brake_curves_list = pickle.load(f)
+with open("data/rail/safeguard/min_curves_list.pkl", "rb") as f:
+    min_curves_list = pickle.load(f)
+with open("data/rail/safeguard/max_curves_list.pkl", "rb") as f:
+    max_curves_list = pickle.load(f)
 
 
-gamma: float = 0.99
+factor: float = 0.99
 sgu = SafeGuardUtility(
     speed_limits=speed_limits,
     speed_limit_intervals=speed_limit_intervals,
-    min_curves_list=levi_curves_list,
-    max_curves_list=brake_curves_list,
-    gamma=gamma,
+    min_curves_list=min_curves_list,
+    max_curves_list=max_curves_list,
+    factor=factor,
 )
 
 track = Track(slopes, slope_intervals, speed_limits.tolist(), speed_limit_intervals)
@@ -67,7 +67,7 @@ task = Task(
     max_arr_time_error=120.0,
     max_stop_error=0.3,
 )
-ors = ORS(vehicle=vehicle, track=track, gamma=gamma)
+ors = ORS(vehicle=vehicle, track=track, gamma=factor)
 ecc = ECC(
     R_m=0.2796,
     L_d=0.0002,

@@ -150,7 +150,7 @@ safeguard = SafeGuardUtility(
     speed_limit_intervals=speed_limit_intervals,
     min_curves_list=min_curves_list,
     max_curves_list=max_curves_list,
-    gamma=0.99,
+    factor=0.99,
 )
 
 # 绘制区间限速、危险交叉点、部分安全防护曲线和围成的危险速度域

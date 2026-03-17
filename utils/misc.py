@@ -1,11 +1,65 @@
 import numpy as np
 from numpy.typing import NDArray
-from typing import Union, overload
+from typing import Union, overload, Sequence, Any
 from matplotlib.font_manager import fontManager
 import matplotlib.pyplot as plt
+from datetime import datetime
+import os
+import json
 
 
 Numeric = Union[float, np.number, NDArray]
+
+
+def SaveCurveAndMetrics(
+    pos_arr: Sequence[float] | NDArray,
+    speed_arr: Sequence[float] | NDArray,
+    output_path: str,
+    metrics: dict[str, Any] | None = None,
+) -> tuple[str, str]:
+    """
+    将曲线数据保存为NPZ格式, 并将性能指标保存为同目录下JSON文件。
+
+    Args:
+        pos_arr: 曲线位置序列
+        speed_arr: 曲线速度序列
+        output_npz_path: 数据存放路径
+        metrics: 性能指标
+
+    Returns:
+        npz_path: 曲线数据存放路径
+        metrics_json_path: 性能指标存放路径
+    """
+    pos = np.asarray(pos_arr, dtype=np.float32)
+    speed = np.asarray(speed_arr, dtype=np.float32)
+    created_at = datetime.now().isoformat(timespec="seconds")
+
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    base_name = os.path.splitext(os.path.basename(output_path))[0]
+    metrics_json_path = os.path.join(output_dir, f"{base_name}_metrics.json")
+
+    np.savez_compressed(
+        output_path,
+        pos_m=pos,
+        speed_mps=speed,
+        created_at=np.asarray([created_at], dtype=str),
+    )
+
+    metrics_payload: dict[str, Any] = {"created_at": created_at}
+    if metrics:
+        for key, value in metrics.items():
+            if isinstance(value, np.generic):
+                metrics_payload[key] = value.item()
+            else:
+                metrics_payload[key] = value
+
+    with open(metrics_json_path, "w", encoding="utf-8") as f:
+        json.dump(metrics_payload, f, ensure_ascii=False, indent=2)
+
+    return output_path, metrics_json_path
 
 
 @overload

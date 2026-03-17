@@ -47,7 +47,7 @@ sgu = SafeGuardUtility(
     speed_limit_intervals=s_intervals,
     min_curves_list=levi_curves_list,
     max_curves_list=brake_curves_list,
-    gamma=0.95,
+    factor=0.95,
 )
 track = Track(
     slopes=slopes,

@@ -47,7 +47,7 @@ def mttoenv():
         speed_limit_intervals=s_intervals,
         min_curves_list=min_curves_list,
         max_curves_list=max_curves_list,
-        gamma=0.95,
+        factor=0.95,
     )
 
     track = Track(

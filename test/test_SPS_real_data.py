@@ -82,7 +82,7 @@ class TestSPSIntegration:
             speed_limit_intervals=setup_data["speed_limit_intervals"],
             min_curves_list=setup_data["min_curves_list"],
             max_curves_list=setup_data["max_curves_list"],
-            gamma=0.9,
+            factor=0.9,
         )
 
         return sgu, len(setup_data["min_curves_list"])

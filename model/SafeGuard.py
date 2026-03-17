@@ -494,7 +494,8 @@ class SafeGuardUtility:
         speed_limit_intervals : 限速区间
         min_curves_list : 最小速度曲线集合
         max_curves_list : 最大速度曲线集合
-        gamma : 限速因子
+        factor : 限速因子
+
     Methods:
         DetectDanger() : 检查速度是否超出限速或落入危险速度域
     """
@@ -506,7 +507,7 @@ class SafeGuardUtility:
         speed_limit_intervals: Sequence[float] | NDArray[np.floating],
         min_curves_list: list[NDArray],
         max_curves_list: list[NDArray],
-        gamma: float,
+        factor: float,
     ):
         self.speed_limits = np.asarray(speed_limits)
         self.speed_limit_intervals = np.asarray(speed_limit_intervals)
@@ -536,9 +537,12 @@ class SafeGuardUtility:
             curve[1, :] for curve in self.max_curves_part_list_padded
         ]
         self.numofregions = idp_points.shape[1]
-        self.gamma = gamma
+        self.gamma = factor
 
-    def GetCurrentSP(self, current_pos: float, current_speed: float):
+    def GetIDPPosition(self) -> NDArray:
+        return self.idp_points_x
+
+    def GetCurrentSP(self, current_pos: float, current_speed: float) -> int:
         """
         根据当前状态获得列车的目标停车点编号
 
@@ -565,6 +569,8 @@ class SafeGuardUtility:
                     break
 
             current_sp += 1
+
+        return current_sp
 
     def GetCurrentMinAndMaxSpeed(
         self, current_pos: float, current_sp: int
