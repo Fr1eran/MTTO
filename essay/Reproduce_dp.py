@@ -3,7 +3,7 @@ import json
 import pickle
 import os
 import sys
-from typing import TypedDict, Sequence
+from typing import TypedDict, Sequence, Any
 from numpy.typing import NDArray
 import matplotlib.pyplot as plt
 
@@ -15,7 +15,7 @@ from model.Track import Track, TrackProfile
 from model.Task import Task
 from model.ECC import ECC
 from model.ORS import ORS
-from utils.misc import SaveCurveAndMetrics
+from utils.misc import SaveCurveAndMetrics, SetChineseFont
 
 
 class OptimalSpeedProfile(TypedDict):
@@ -82,9 +82,125 @@ class VariableSpacingDPOptimizer:
             end_pos=self.task.target_position,
             end_speed=0.0,
         )
+        self._graph_cache_signature: tuple[float, float, int] | None = None
+        self._graph_cache: dict[str, Any] | None = None
 
     def _get_ref_speed(self, pos: float) -> float:
         return max(0.0, np.interp(pos, self.ref_curve_pos, self.ref_curve_speed))
+
+    def _get_stage_speed_upper_indices(
+        self, stages: NDArray[np.float64], speed_states: NDArray[np.float64]
+    ) -> NDArray[np.int_]:
+        """预插值参考速度上界，避免在DP内层重复插值。"""
+        ref_speed_at_stage = np.maximum(
+            0.0, np.interp(stages, self.ref_curve_pos, self.ref_curve_speed)
+        )
+        upper_idx = np.searchsorted(speed_states, ref_speed_at_stage, side="right") - 1
+        return np.clip(upper_idx, -1, len(speed_states) - 1).astype(np.int_)
+
+    def _build_transition_graph(
+        self, stages: NDArray[np.float64], speed_states: NDArray[np.float64]
+    ) -> dict[str, Any]:
+        """
+        预计算状态转移图（可行性/能耗/时间），供外层不同lambda复用。
+        """
+        total_steps = len(stages) - 1
+        num_speed_states = len(speed_states)
+        stage_speed_upper_idx = self._get_stage_speed_upper_indices(
+            stages, speed_states
+        )
+
+        transitions: list[
+            list[
+                tuple[NDArray[np.int_], NDArray[np.float64], NDArray[np.float64]] | None
+            ]
+        ] = [[None for _ in range(num_speed_states)] for _ in range(total_steps)]
+        total_valid_edges = 0
+
+        for k in range(total_steps):
+            pos_k = stages[k]
+            delta_pos = stages[k + 1] - pos_k
+            abs_delta_pos = abs(delta_pos)
+            current_upper = int(stage_speed_upper_idx[k])
+            next_upper = int(stage_speed_upper_idx[k + 1])
+
+            if current_upper < 0 or next_upper < 0:
+                continue
+
+            for i in range(current_upper + 1):
+                speed_k = float(speed_states[i])
+
+                # 基于加减速度物理边界的下一阶段速度索引剪枝
+                v2_min = max(
+                    speed_k**2 - 2.0 * self.vehicle.max_dec * abs_delta_pos, 0.0
+                )
+                v2_max = max(
+                    speed_k**2 + 2.0 * self.vehicle.max_acc * abs_delta_pos, 0.0
+                )
+                v_next_min = np.sqrt(v2_min)
+                v_next_max = np.sqrt(v2_max)
+
+                j_min = int(np.searchsorted(speed_states, v_next_min, side="left"))
+                j_max = int(np.searchsorted(speed_states, v_next_max, side="right") - 1)
+                j_max = min(j_max, next_upper)
+
+                if j_min > j_max:
+                    continue
+
+                next_indices: list[int] = []
+                delta_energy_list: list[float] = []
+                delta_time_list: list[float] = []
+
+                for j in range(j_min, j_max + 1):
+                    speed_next = float(speed_states[j])
+                    is_valid, delta_energy, delta_time = self._calculate_transition(
+                        pos_k=pos_k,
+                        speed_k=speed_k,
+                        displacement=delta_pos,
+                        speed_k_1=speed_next,
+                    )
+                    if not is_valid:
+                        continue
+
+                    next_indices.append(j)
+                    delta_energy_list.append(delta_energy)
+                    delta_time_list.append(delta_time)
+
+                if not next_indices:
+                    continue
+
+                transitions[k][i] = (
+                    np.asarray(next_indices, dtype=np.int_),
+                    np.asarray(delta_energy_list, dtype=np.float64),
+                    np.asarray(delta_time_list, dtype=np.float64),
+                )
+                total_valid_edges += len(next_indices)
+
+        return {
+            "stages": stages,
+            "speed_states": speed_states,
+            "stage_speed_upper_idx": stage_speed_upper_idx,
+            "transitions": transitions,
+            "total_valid_edges": total_valid_edges,
+        }
+
+    def _prepare_transition_graph_cache(
+        self, max_speed: float, delta_speed: float
+    ) -> dict[str, Any]:
+        stages = self._generate_variable_spacing_stages().astype(np.float64)
+        speed_states = np.arange(0, max_speed, delta_speed, dtype=np.float64)
+        cache_signature = (float(max_speed), float(delta_speed), len(stages))
+
+        if self._graph_cache_signature != cache_signature:
+            print("正在预计算状态转移图（仅首次或参数变化时执行）...")
+            self._graph_cache = self._build_transition_graph(stages, speed_states)
+            self._graph_cache_signature = cache_signature
+            print(
+                f"转移图预计算完成: 可行转移边数量 {self._graph_cache['total_valid_edges']}"
+            )
+
+        assert self._graph_cache is not None
+        return self._graph_cache
 
     def _generate_variable_spacing_stages(self, sub_stage_count: int = 30) -> NDArray:
         """
@@ -179,11 +295,15 @@ class VariableSpacingDPOptimizer:
         逆推法求解变间距动态规划, 结合目标函数及约束
         使用拉格朗日乘子法简化时间惩罚
         """
-        stages = self._generate_variable_spacing_stages()
-        total_steps = len(stages) - 1
+        cache = self._prepare_transition_graph_cache(
+            max_speed=max_speed, delta_speed=delta_speed
+        )
+        stages = cache["stages"]
+        speed_states = cache["speed_states"]
+        stage_speed_upper_idx = cache["stage_speed_upper_idx"]
+        transitions = cache["transitions"]
 
-        # 离散状态空间
-        speed_states = np.arange(0, max_speed, delta_speed)
+        total_steps = len(stages) - 1
         num_speed_states = len(speed_states)
 
         # 初始化DP状态值表
@@ -195,8 +315,8 @@ class VariableSpacingDPOptimizer:
         dp_time_accum = np.full(
             (total_steps + 1, num_speed_states), np.inf
         )  # 记录对应的累计时间
-        dp_policy = np.zeros(
-            (total_steps + 1, num_speed_states), dtype=int
+        dp_policy = np.full(
+            (total_steps + 1, num_speed_states), -1, dtype=int
         )  # 记录状态转移动作
 
         # 状态初始化
@@ -207,46 +327,39 @@ class VariableSpacingDPOptimizer:
 
         # 逆推法
         for k in range(total_steps - 1, -1, -1):
-            pos_k = stages[k]
-            delta_pos = stages[k + 1] - pos_k
+            current_upper = int(stage_speed_upper_idx[k])
+            if current_upper < 0:
+                continue
 
-            for i, speed_k in enumerate(speed_states):
-                # 检查是否在最短运行时间速度曲线下方
-                if speed_k > self._get_ref_speed(pos=pos_k):
-                    break
+            for i in range(current_upper + 1):
+                transition = transitions[k][i]
+                if transition is None:
+                    continue
 
-                min_cost = np.inf
-                best_next_j = -1
-                best_time = np.inf
+                next_indices, delta_energy_arr, delta_time_arr = transition
+                next_dp_cost = dp_cost[k + 1, next_indices]
+                finite_mask = np.isfinite(next_dp_cost)
+                if not np.any(finite_mask):
+                    continue
 
-                # 遍历下一个阶段的所有可能速度状态
-                for j, speed_next in enumerate(speed_states):
-                    if np.isinf(dp_cost[k + 1, j]):
-                        continue
+                valid_next_indices = next_indices[finite_mask]
+                valid_delta_energy = delta_energy_arr[finite_mask]
+                valid_delta_time = delta_time_arr[finite_mask]
+                valid_next_dp_cost = next_dp_cost[finite_mask]
 
-                    # 阶段内的运动过程与能耗计算
-                    is_valid, delta_energy, delta_time = self._calculate_transition(
-                        pos_k=pos_k,
-                        speed_k=speed_k,
-                        displacement=delta_pos,
-                        speed_k_1=speed_next,
-                    )
+                total_cost_arr = (
+                    valid_delta_energy
+                    + lambda_time * valid_delta_time
+                    + valid_next_dp_cost
+                )
+                best_local_idx = int(np.argmin(total_cost_arr))
+                best_next_j = int(valid_next_indices[best_local_idx])
 
-                    if not is_valid:
-                        continue
-
-                    # 计算代价函数
-                    transition_cost = delta_energy + lambda_time * delta_time
-                    total_cost = transition_cost + dp_cost[k + 1, j]
-
-                    if total_cost < min_cost:
-                        min_cost = total_cost
-                        best_next_j = j
-                        best_time = delta_time + dp_time_accum[k + 1, j]
-
-                dp_cost[k, i] = min_cost
+                dp_cost[k, i] = float(total_cost_arr[best_local_idx])
                 dp_policy[k, i] = best_next_j
-                dp_time_accum[k, i] = best_time
+                dp_time_accum[k, i] = float(
+                    valid_delta_time[best_local_idx] + dp_time_accum[k + 1, best_next_j]
+                )
 
         # 检验是否找到可行解
         if np.isinf(dp_cost[0, 0]):
@@ -257,22 +370,26 @@ class VariableSpacingDPOptimizer:
         current_speed_idx = 0
         for k in range(total_steps):
             next_speed_idx = dp_policy[k, current_speed_idx]
+            if next_speed_idx < 0:
+                return None
             optimal_speed_indices.append(next_speed_idx)
             current_speed_idx = next_speed_idx
 
-        optimal_speed_profile = [speed_states[idx] for idx in optimal_speed_indices]
+        optimal_speed_profile = speed_states[
+            np.asarray(optimal_speed_indices, dtype=int)
+        ]
         total_time = dp_time_accum[0, 0]
         total_energy = dp_cost[0, 0] - lambda_time * total_time  # 剥离时间惩罚
 
         return {
             "pos": stages.tolist(),
-            "speed": optimal_speed_profile,
+            "speed": optimal_speed_profile.tolist(),
             "total_time": total_time,
             "total_energy": total_energy,
         }
 
     def optimize(
-        self, max_speed: float, delta_speed: float, max_iters: int = 30
+        self, max_speed: float, delta_speed: float, max_iters: int = 100
     ) -> OptimalSpeedProfile | None:
         """
         二分法调整运行时间乘子, 从而使结果逼近规定的运行时间
@@ -283,7 +400,7 @@ class VariableSpacingDPOptimizer:
         )
 
         lambda_min = 0.0
-        lambda_max = 1e4
+        lambda_max = 1e8
         best_result = None
 
         for iteration in range(max_iters):
@@ -396,10 +513,10 @@ if __name__ == "__main__":
         time_tolerance=0.01,
     )
 
-    result = VSDP.optimize(max_speed=500.0 / 3.6, delta_speed=1.0, max_iters=30)
+    result = VSDP.optimize(max_speed=500.0 / 3.6, delta_speed=1.0, max_iters=100)
 
     if result is not None:
-        output_file = "data/operation/optimized_speed_curve.npz"
+        output_file = "data/optimal/DP/optimized_speed_curve.npz"
         saved_npz_path, saved_metrics_path = SaveCurveAndMetrics(
             pos_arr=result["pos"],
             speed_arr=result["speed"],
@@ -414,6 +531,8 @@ if __name__ == "__main__":
         )
         print(f"优化速度曲线已保存到: {saved_npz_path}")
         print(f"性能指标已保存到: {saved_metrics_path}")
+
+        SetChineseFont()
 
         fig, ax = plt.subplots(figsize=(12, 7))
 
@@ -463,3 +582,5 @@ if __name__ == "__main__":
         ax.set_ylabel(r"速度$v\left( km/h \right)$")
         ax.grid(True, alpha=0.3)
         ax.legend(loc="upper right")
+
+        plt.show()
