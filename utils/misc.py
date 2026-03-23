@@ -1,6 +1,7 @@
 import numpy as np
 from numpy.typing import NDArray
 from typing import Union, overload, Sequence, Any
+from functools import lru_cache
 from matplotlib.font_manager import fontManager
 import matplotlib.pyplot as plt
 from datetime import datetime
@@ -9,6 +10,60 @@ import json
 
 
 Numeric = Union[float, np.number, NDArray]
+
+
+@lru_cache(maxsize=32)
+def _LoadJsonCached(path: str) -> dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def LoadOptimizedCurveAndMetrics(
+    npz_path: str,
+    metrics_path: str | None = None,
+    *,
+    dtype: np.dtype | type[np.floating] = np.float32,
+    use_metrics_cache: bool = True,
+) -> tuple[NDArray[np.floating], NDArray[np.floating], dict[str, Any]]:
+    """
+    快速读取优化结果曲线及指标。
+
+    约定优先读取 NPZ 中的 pos_m/speed_mps 字段，若不存在则回退到 pos/speed。
+    metrics_path 为空时，自动读取同名 *_metrics.json 文件。
+
+    Args:
+        npz_path: 曲线 NPZ 路径
+        metrics_path: 指标 JSON 路径；为空时按同名规则自动推断
+        dtype: 返回数组的数据类型
+        use_metrics_cache: 是否使用 JSON 缓存（重复读取同一文件更快）
+
+    Returns:
+        pos_arr: 位置数组
+        speed_arr: 速度数组
+        metrics: 指标字典（文件不存在时返回空字典）
+    """
+    with np.load(npz_path, allow_pickle=False) as npz_data:
+        keys = set(npz_data.files)
+        pos_key = "pos_m" if "pos_m" in keys else "pos"
+        speed_key = "speed_mps" if "speed_mps" in keys else "speed"
+        pos_arr = np.asarray(npz_data[pos_key], dtype=dtype)
+        speed_arr = np.asarray(npz_data[speed_key], dtype=dtype)
+
+    if metrics_path is None:
+        base_name = os.path.splitext(os.path.basename(npz_path))[0]
+        metrics_path = os.path.join(
+            os.path.dirname(npz_path), f"{base_name}_metrics.json"
+        )
+
+    metrics: dict[str, Any] = {}
+    if os.path.exists(metrics_path):
+        if use_metrics_cache:
+            metrics = dict(_LoadJsonCached(metrics_path))
+        else:
+            with open(metrics_path, "r", encoding="utf-8") as f:
+                metrics = json.load(f)
+
+    return pos_arr, speed_arr, metrics
 
 
 def SaveCurveAndMetrics(

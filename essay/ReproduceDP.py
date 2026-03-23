@@ -30,7 +30,7 @@ class VariableSpacingDPOptimizer:
     采用动态规划算法计算磁浮列车最优运行速度曲线
 
     1.内层动态规划
-    _slove_dp_inner 接收运行时间的拉格朗日乘子, 执行一次二维变间距动态规划,
+    _solve_dp_inner 接收运行时间的拉格朗日乘子, 执行一次二维变间距动态规划,
     并返回此时的最优解。
 
     2.外层二分法
@@ -43,6 +43,9 @@ class VariableSpacingDPOptimizer:
     [2] Lai Q, Liu J, Haghani A, et al. Optimal Energy Speed Profile of Medium-Speed
     Maglev Trains Integrating the Power Supply System and Train Control System[J].
     Transportation Research Record, 2020, 2674(Compendex): 729-738.
+    [3] Fu C, Sun P, Wang Q, et al. Modeling and energy-saving operation optimization
+    of high-speed maglev trains[J]. Journal of Cleaner Production, 2025, 519.
+
 
     """
 
@@ -91,7 +94,7 @@ class VariableSpacingDPOptimizer:
     def _get_stage_speed_upper_indices(
         self, stages: NDArray[np.float64], speed_states: NDArray[np.float64]
     ) -> NDArray[np.int_]:
-        """预插值参考速度上界，避免在DP内层重复插值。"""
+        """预插值参考速度上界, 避免在DP内层重复插值。"""
         ref_speed_at_stage = np.maximum(
             0.0, np.interp(stages, self.ref_curve_pos, self.ref_curve_speed)
         )
@@ -102,7 +105,7 @@ class VariableSpacingDPOptimizer:
         self, stages: NDArray[np.float64], speed_states: NDArray[np.float64]
     ) -> dict[str, Any]:
         """
-        预计算状态转移图（可行性/能耗/时间），供外层不同lambda复用。
+        预计算状态转移图（可行性/能耗/时间）, 供外层不同lambda复用。
         """
         total_steps = len(stages) - 1
         num_speed_states = len(speed_states)
@@ -233,52 +236,43 @@ class VariableSpacingDPOptimizer:
     def _calculate_transition(
         self, pos_k: float, speed_k: float, displacement: float, speed_k_1: float
     ) -> tuple[bool, float, float]:
-        distance_sample = np.linspace(
-            0, displacement, max(10, int(np.abs(displacement) / 10.0))
-        )
-        pos_sample = pos_k + distance_sample
-        k = (speed_k_1 - speed_k) / displacement
-        speed_sample = k * distance_sample + speed_k
-
-        # 检查是否进入危险速度域
-        if self.safeguardutil.DetectDanger(pos=pos_sample, speed=speed_sample).all():
+        if np.isclose(displacement, 0.0):
             return False, np.inf, np.inf
 
-        # 检查列车是否静止不动
         if np.isclose(speed_k + speed_k_1, 0.0):
             return False, np.inf, np.inf
 
-        acc_sample = k**2 * distance_sample + speed_k * k
+        # 匀变速模型: a = (v1^2 - v0^2) / (2 * ds)
+        acc = (speed_k_1**2 - speed_k**2) / (2.0 * displacement)
 
-        # 检查加速度是否超出预设范围
+        acc_tol = 1e-9
         if (
-            np.max(acc_sample) > self.vehicle.max_acc
-            or np.min(acc_sample) < -self.vehicle.max_dec
+            acc > self.vehicle.max_acc + acc_tol
+            or acc < -self.vehicle.max_dec - acc_tol
         ):
             return False, np.inf, np.inf
 
-        # 引入极小正数补偿, 提供数值稳定性
-        epsilon = 1e-3
-        safe_speed_k = max(speed_k, epsilon)
-        safe_speed_k_1 = max(speed_k_1, epsilon)
-        safe_k = (safe_speed_k_1 - safe_speed_k) / displacement
+        sample_count = max(10, int(np.abs(displacement) / 10.0))
+        distance_sample = np.linspace(0.0, displacement, sample_count, dtype=np.float64)
+        pos_sample = pos_k + distance_sample
 
-        # 使用补偿后的安全速度和安全斜率来计算状态转移时间
-        # if np.isclose(safe_speed_k, safe_speed_k_1):
-        #     time = displacement / safe_speed_k
-        # else:
-        #     time = (np.log(safe_speed_k_1) - np.log(safe_speed_k)) / safe_k
+        # 由匀变速公式采样速度，保证与端点速度一致
+        speed_sq_sample = speed_k**2 + 2.0 * acc * distance_sample
+        speed_sample = np.sqrt(np.maximum(speed_sq_sample, 0.0))
 
-        time = (
-            displacement / safe_speed_k
-            if np.isclose(safe_speed_k, safe_speed_k_1)
-            else (np.log(safe_speed_k_1) - np.log(safe_speed_k)) / safe_k
-        )
+        # 检查是否进入危险速度域
+        if self.safeguardutil.DetectDanger(pos=pos_sample, speed=speed_sample).any():
+            return False, np.inf, np.inf
+
+        if np.abs(acc) < 1e-9:
+            time = np.abs(displacement) / speed_k
+        else:
+            time = (speed_k_1 - speed_k) / acc
 
         propulsion_energy, leviation_energy = self.ecc.CalcEnergy(
             begin_pos=pos_k,
             begin_speed=speed_k,
-            acc=lambda distance: k**2 * distance + speed_k * k,
+            acc=acc,
             distance=abs(displacement),
             direction=1 if displacement > 0 else -1,
             operation_time=time,
@@ -288,7 +282,55 @@ class VariableSpacingDPOptimizer:
 
         return True, propulsion_energy + leviation_energy, time
 
-    def _slove_dp_inner(
+    def BuildSmoothedDisplayCurve(
+        self,
+        pos_arr: Sequence[float] | NDArray,
+        speed_arr: Sequence[float] | NDArray,
+        samples_per_segment: int = 20,
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """
+        基于匀变速直线运动模型对离散优化结果进行分段加密采样。
+        仅用于可视化展示，不参与优化与能耗计算。
+        """
+        pos = np.asarray(pos_arr, dtype=np.float64)
+        speed = np.asarray(speed_arr, dtype=np.float64)
+
+        if pos.ndim != 1 or speed.ndim != 1 or pos.size != speed.size:
+            raise ValueError(
+                "pos_arr and speed_arr must be 1-D arrays with equal length"
+            )
+        if pos.size < 2:
+            return pos.copy(), speed.copy()
+
+        dense_pos: list[float] = [float(pos[0])]
+        dense_speed: list[float] = [float(max(speed[0], 0.0))]
+        n_local = max(3, int(samples_per_segment))
+
+        for i in range(pos.size - 1):
+            p0 = float(pos[i])
+            p1 = float(pos[i + 1])
+            v0 = float(max(speed[i], 0.0))
+            v1 = float(max(speed[i + 1], 0.0))
+            ds = p1 - p0
+
+            if np.isclose(ds, 0.0):
+                continue
+
+            # 对每个阶段采用匀变速方程重建速度曲线
+            acc = (v1**2 - v0**2) / (2.0 * ds)
+            s_local = np.linspace(0.0, ds, n_local, endpoint=True, dtype=np.float64)
+            v_sq_local = v0**2 + 2.0 * acc * s_local
+            v_local = np.sqrt(np.maximum(v_sq_local, 0.0))
+            p_local = p0 + s_local
+
+            dense_pos.extend(p_local[1:].tolist())
+            dense_speed.extend(v_local[1:].tolist())
+
+        return np.asarray(dense_pos, dtype=np.float64), np.asarray(
+            dense_speed, dtype=np.float64
+        )
+
+    def _solve_dp_inner(
         self, lambda_time: float, max_speed: float, delta_speed: float
     ) -> OptimalSpeedProfile | None:
         """
@@ -399,19 +441,19 @@ class VariableSpacingDPOptimizer:
             f"开始双层寻优: 目标时间为{target_time:.2f}s, 时间误差容忍率为 {self.time_tolerance}"
         )
 
+        lambda_time = 1e5
         lambda_min = 0.0
         lambda_max = 1e8
         best_result = None
 
         for iteration in range(max_iters):
-            lambda_mid = (lambda_min + lambda_max) / 2.0
             print(
-                f"第{iteration + 1}次迭代: 测试 lambda = {lambda_mid:.2f} ...", end=""
+                f"第{iteration + 1}次迭代: 测试 lambda = {lambda_time:.2f} ...", end=""
             )
 
             # 调用内层DP
-            result = self._slove_dp_inner(
-                lambda_time=lambda_mid, max_speed=max_speed, delta_speed=delta_speed
+            result = self._solve_dp_inner(
+                lambda_time=lambda_time, max_speed=max_speed, delta_speed=delta_speed
             )
 
             if result is None:
@@ -420,7 +462,7 @@ class VariableSpacingDPOptimizer:
 
             total_time = result["total_time"]
             total_energy = result["total_energy"]
-            print(f"实际耗时为{total_time:.2f}s, 能耗为{total_energy:.2f}J")
+            print(f"实际耗时为{total_time:.2f}s, 能耗为{total_energy:.2f}kJ")
 
             best_result = result
 
@@ -435,16 +477,18 @@ class VariableSpacingDPOptimizer:
             # 二分查找
             if total_time > target_time:
                 # 耗时太长, 增大时间惩罚
-                lambda_min = lambda_mid
+                lambda_min = lambda_time
             else:
                 # 耗时太短, 减小时间惩罚
-                lambda_max = lambda_mid
+                lambda_max = lambda_time
+
+            lambda_time = (lambda_min + lambda_max) / 2.0
 
         if best_result is not None:
             print("最终优化结果")
             print(f"目标运行时间: {target_time:.2f}s")
             print(f"实际规划时间: {best_result['total_time']:.2f}s")
-            print(f"最低运行能耗: {best_result['total_energy']:.2f}J")
+            print(f"最低运行能耗: {best_result['total_energy']:.2f}kJ")
 
         return best_result
 
@@ -513,7 +557,7 @@ if __name__ == "__main__":
         time_tolerance=0.01,
     )
 
-    result = VSDP.optimize(max_speed=500.0 / 3.6, delta_speed=1.0, max_iters=100)
+    result = VSDP.optimize(max_speed=500.0 / 3.6, delta_speed=0.5, max_iters=100)
 
     if result is not None:
         output_file = "data/optimal/DP/optimized_speed_curve.npz"
@@ -524,7 +568,7 @@ if __name__ == "__main__":
             metrics={
                 "target_time_s": float(task.schedule_time),
                 "total_time_s": float(result["total_time"]),
-                "total_energy_j": float(result["total_energy"]),
+                "total_energy_kj": float(result["total_energy"]),
                 "start_position_m": float(task.start_position),
                 "target_position_m": float(task.target_position),
             },
@@ -538,6 +582,12 @@ if __name__ == "__main__":
 
         # 绘制静态元素（区间限速、危险速度域和终点等）
         safeguardutility.Render(ax=ax)
+
+        smooth_pos, smooth_speed = VSDP.BuildSmoothedDisplayCurve(
+            pos_arr=result["pos"],
+            speed_arr=result["speed"],
+            samples_per_segment=24,
+        )
 
         # 绘制起点
         ax.scatter(
@@ -568,9 +618,9 @@ if __name__ == "__main__":
         )
 
         ax.plot(
-            result["pos"],
-            np.asarray(result["speed"]) * 3.6,
-            label="最短运行时间曲线",
+            smooth_pos,
+            smooth_speed * 3.6,
+            label="优化速度曲线(平滑展示)",
             color="blue",
             alpha=0.7,
             linewidth=2,
