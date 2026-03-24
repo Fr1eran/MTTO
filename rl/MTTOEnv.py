@@ -25,6 +25,7 @@ class RewardsInfoForTB(TypedDict, total=False):
     reward_total: float
     reward_energy: float
     reward_comfort: float
+    reward_process: float
     # reward_time: float
 
 
@@ -330,6 +331,7 @@ class MTTOEnv(gym.Env):
         return {
             "current_energy_consumption": self.current_energy_consumption,
             "current_operation_time": self.current_operation_time,
+            "docking_position": self.current_pos,
         }
 
     def _get_action_denormalized(self, action: float | np.floating) -> float:
@@ -666,12 +668,17 @@ class MTTOEnv(gym.Env):
         reward_total = 0.0
         if not truncated:
             if terminated:
-                reward_total = self._get_reward_goal() + 5.0
+                reward_total = self._get_reward_goal() + 10.0
             else:
                 reward_total = self._get_reward_dense()
         else:
             progress = self.current_pos / self.whole_distance
-            reward_total = -1.0 * (1.0 - progress) - 14.0
+            # reward_total = -1.0 * (1.0 - progress) - 14.0
+            reward_total = -15.0 * (1.0 - progress) - max(
+                0,
+                self.current_min_speed - self.current_speed,
+                self.current_speed - self.current_max_speed,
+            )
 
         self.rewards_info["reward_total"] = reward_total
         return reward_total
@@ -679,25 +686,35 @@ class MTTOEnv(gym.Env):
     def _get_reward_dense(
         self,
     ) -> float:
-        # 安全奖励 (只要智能体训练没被截断，则持续获得小的正奖励)
+        # 安全奖励
         reward_safety = self._get_reward_safety_dense()
 
-        # 能耗奖励 (范围为[-1, 0])
+        # 能耗奖励
         reward_energy = self._get_reward_energy_dense()
 
-        # 舒适度奖励 (范围为[-1, 0])
+        # 舒适度奖励
         reward_comfort = self._get_reward_comfort()
 
-        # 运行时间奖励 (范围为[-1, 0])
+        # 运行时间奖励
         reward_puncuality = self._get_punctuality_reward_dense()
+
+        # 进度奖励
+        reward_process = self._get_reward_process_dense()
 
         # 记录
         self.rewards_info["reward_safety"] = reward_safety
         self.rewards_info["reward_energy"] = reward_energy
         self.rewards_info["reward_comfort"] = reward_comfort
         self.rewards_info["reward_punctuality"] = reward_puncuality
+        self.rewards_info["reward_process"] = reward_process
 
-        return reward_safety + reward_energy + reward_comfort + reward_puncuality
+        return (
+            reward_safety
+            + reward_energy
+            + reward_comfort
+            + reward_puncuality
+            + reward_process
+        )
 
     def _get_reward_safety_dense(self) -> float:
         # 计算当前状态势能
@@ -761,33 +778,41 @@ class MTTOEnv(gym.Env):
         norm_speed = (speed - center_speed) / safe_margin
 
         # 靠近目标位置时，适当增大惩罚力度
-        scale = 1.0 + 2.0 * np.exp(-0.001 * distanceToTarget)
+        scale = 1.0 + 1.0 * np.exp(-0.002 * distanceToTarget)
 
-        return -5.0 * scale * norm_speed**2
+        return -4.0 * scale * norm_speed**2
 
     def _get_reward_energy_dense(self) -> float:
-        # phi_curr = self._potential_energy(
-        #     energy_consumption=self.current_energy_consumption
-        # )
-
-        # phi_prev = self._potential_energy(
-        #     energy_consumption=self.last_state["energy_consumption"]
-        # )
-
-        # return self.gamma * phi_curr - phi_prev
-        return (
-            -(
-                (
-                    self.current_energy_consumption
-                    - self.last_state["energy_consumption"]
-                )
-                / self.max_energy_consumption
-            )
-            * 5
+        phi_curr = self._potential_energy(
+            energy_consumption=self.current_energy_consumption
         )
 
+        phi_prev = self._potential_energy(
+            energy_consumption=self.last_state["energy_consumption"]
+        )
+
+        return self.gamma * phi_curr - phi_prev
+
     def _potential_energy(self, energy_consumption: float) -> float:
-        return -energy_consumption / self.max_energy_consumption
+        return -5.0 * energy_consumption / self.max_energy_consumption
+
+    # def _get_reward_energy_dense(self) -> float:
+    #     return (
+    #         -(
+    #             (
+    #                 self.current_energy_consumption
+    #                 - self.last_state["energy_consumption"]
+    #             )
+    #             / self.max_energy_consumption
+    #         )
+    #         * 5
+    #     )
+
+    def _get_reward_comfort(self) -> float:
+        delta_acc = abs(self.last_state["acc"] - self.current_acc)
+        # 使用指数衰减式的钟形曲线
+        norm_jerk = delta_acc / (self.task.max_acc_change)
+        return -0.02 * (1 - np.exp(-2.0 * norm_jerk))
 
     # def _get_punctuality_reward_dense(self) -> float:
     #     # 估计当前位置在最短运行实际操作模式下应该消耗的时间
@@ -884,11 +909,10 @@ class MTTOEnv(gym.Env):
 
         return -2.0 * np.exp(-8.0 * time_redundancy_norm_cliped)
 
-    def _get_reward_comfort(self) -> float:
-        delta_acc = abs(self.last_state["acc"] - self.current_acc)
-        # 使用指数衰减式的钟形曲线
-        norm_jerk = delta_acc / (self.task.max_acc_change)
-        return -0.02 * (1 - np.exp(-2.0 * norm_jerk))
+    def _get_reward_process_dense(self) -> float:
+        displacement = (self.current_pos - self.last_state["pos"]) * self.direction
+
+        return 5.0 * (displacement / self.whole_distance)
 
     def _get_reward_goal(
         self,

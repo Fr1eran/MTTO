@@ -129,16 +129,16 @@ model = PPO(
     mttoenv_train,
     device="cpu",
     verbose=1,
-    learning_rate=1e-3,
+    learning_rate=3e-4,
     # n_steps=2048,
     # batch_size=64,
     # n_epochs=10,
-    # gamma=reward_discount,  # 提高折扣因子
+    gamma=reward_discount,  # 提高折扣因子
     # gae_lambda=0.95,
     clip_range=0.3,
     # clip_range_vf=None,
     # normalize_advantage=True,
-    ent_coef=0.001,  # 增加探索
+    ent_coef=0.01,  # 增加探索
     # vf_coef=1.0,  # 增加价值函数权重
     # max_grad_norm=0.5,
     tensorboard_log="./mtto_ppo_tensorboard_logs/",  # TensorBoard日志存放目录
@@ -150,7 +150,7 @@ model = PPO(
 
 # 训练，并使用tensorboard记录回报和网络损失变化
 model.learn(
-    total_timesteps=100_000,
+    total_timesteps=200_000,
     callback=TensorboardCallback(),
     log_interval=1,
     tb_log_name="trainning_log",
@@ -158,27 +158,6 @@ model.learn(
 
 # 打印训练过程的性能数据
 print("\nTrain Evaluation Summary:")
-
-# 绘制训练过程的性能数据
-# fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
-# 总回报变化曲线
-# axes[0].plot(list(mttoenv_train.return_queue), linewidth=1.5)
-# axes[0].set_xlabel("Episode")
-# axes[0].set_ylabel("Reward")
-# axes[0].set_title("Episode Reward Over Training")
-# axes[0].grid(True, alpha=0.3)
-
-# 回合长度变化曲线
-# axes[1].plot(list(mttoenv_train.length_queue), linewidth=1.5, color="orange")
-# axes[1].set_xlabel("Episode")
-# axes[1].set_ylabel("Episode Length")
-# axes[1].set_title("Episode Length Over Training")
-# axes[1].grid(True, alpha=0.3)
-
-# plt.tight_layout()
-# plt.show()
-
 
 user_input = (
     input("Training finished. Do you want to continue to evaluation? (y/n): ")
@@ -189,22 +168,31 @@ if user_input != "y":
     print("Exiting without evaluation.")
     sys.exit(0)
 
-# Evaluate
-# mean_reward_after, std_reward_after = evaluate_policy(
-#     model, maglevttoenv_eval, n_eval_episodes=1, deterministic=True, render=True
-# )
 
 reward_after = 0.0
 obs, info = mttoenv_eval.reset()
 episode_over = False
+
+energy_consumption = 0.0
+operation_time = 0.0
+docking_position = 0.0
 
 while not episode_over:
     action, _ = model.predict(obs, deterministic=True)
     obs, reward, terminated, truncated, info = mttoenv_eval.step(action)
     reward_after += float(reward)
     episode_over = terminated or truncated
+    if terminated:
+        energy_consumption = info["current_energy_consumption"]
+        operation_time = info["current_operation_time"]
+        docking_position = info["docking_position"]
 
 mttoenv_eval.close()  # 必须调用，否则无法保存视频
 
 print("Evaluate after train:")
 print(f"reward_after: {reward_after}")
+
+if (energy_consumption != 0.0) and (operation_time != 0.0):
+    print(f"Total energy consumption:{energy_consumption}")
+    print(f"Operation time:{operation_time}")
+    print(f"Docking position: {docking_position}")
