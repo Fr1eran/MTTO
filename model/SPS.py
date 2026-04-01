@@ -54,7 +54,7 @@ class SPS:
                 (
                     next_guard_curve_min_speed,
                     _,
-                ) = self.sgu.GetCurrentMinAndMaxSpeed(
+                ) = self.sgu.GetMinAndMaxSpeed(
                     current_pos=current_pos,
                     current_sp=next_sp,
                 )

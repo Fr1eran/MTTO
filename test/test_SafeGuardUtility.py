@@ -258,3 +258,69 @@ def test_GetMinAndMaxSpeed_with_currentspisNotNone(safeguardutil):
         result_IsCurrentMaxSpeedBiggerThanCurrentSpeed, expected_IsCurrentMaxSpeedBigger
     )
     np.testing.assert_array_equal(result_Currentsp, expected_Currentsp)
+
+
+@pytest.fixture(scope="module")
+def position_safeguardutil():
+    safeguardutil = SafeGuardUtility.__new__(SafeGuardUtility)
+    safeguardutil.speed_limits = np.array([10.0], dtype=np.float64)
+    safeguardutil.speed_limit_intervals = np.array([0.0, 100.0], dtype=np.float64)
+    safeguardutil.min_curves_list = [
+        np.array([[0.0, 1.0, 2.0, 3.0], [3.0, 2.0, 1.0, 0.0]], dtype=np.float64),
+        np.array([[0.0, 1.0, 2.0, 3.0], [4.0, 3.0, 2.0, 0.0]], dtype=np.float64),
+    ]
+    safeguardutil.max_curves_list = [
+        np.array([[0.0, 1.0, 2.0, 3.0], [5.0, 4.0, 2.0, 0.0]], dtype=np.float64),
+        np.array([[0.0, 1.0, 2.0, 3.0], [4.0, 3.0, 1.0, 0.0]], dtype=np.float64),
+        np.array([[0.0, 1.0, 2.0, 3.0], [6.0, 5.0, 3.0, 0.0]], dtype=np.float64),
+    ]
+    safeguardutil._min_curve_pos_list = [
+        curve[0, :] for curve in safeguardutil.min_curves_list
+    ]
+    safeguardutil._min_curve_speed_list = [
+        curve[1, :] for curve in safeguardutil.min_curves_list
+    ]
+    safeguardutil._max_curve_pos_list = [
+        curve[0, :] for curve in safeguardutil.max_curves_list
+    ]
+    safeguardutil._max_curve_speed_list = [
+        curve[1, :] for curve in safeguardutil.max_curves_list
+    ]
+    return safeguardutil
+
+
+def test_GetMinAndMaxPosition_with_currentsp(position_safeguardutil):
+    min_pos, max_pos = position_safeguardutil.GetMinAndMaxPosition(
+        current_speed=1.5,
+        current_sp=0,
+    )
+    np.testing.assert_allclose(min_pos, 1.5)
+    np.testing.assert_allclose(max_pos, 1.75)
+
+
+def test_GetMinAndMaxPosition_with_currentsp_extrapolation(position_safeguardutil):
+    min_pos, max_pos = position_safeguardutil.GetMinAndMaxPosition(
+        current_speed=4.5,
+        current_sp=0,
+    )
+    np.testing.assert_allclose(min_pos, -1.5)
+    np.testing.assert_allclose(max_pos, -0.5)
+
+
+def test_GetMinAndMaxPosition_with_currentsp_negative_one(position_safeguardutil):
+    min_pos, max_pos = position_safeguardutil.GetMinAndMaxPosition(
+        current_speed=1.5,
+        current_sp=-1,
+    )
+    np.testing.assert_allclose(min_pos, 0.0)
+    np.testing.assert_allclose(max_pos, 2.25)
+
+
+def test_GetMinAndMaxPosition_real_data_smoke(safeguardutil):
+    min_pos, max_pos = safeguardutil.GetMinAndMaxPosition(
+        current_speed=2.0,
+        current_sp=0,
+    )
+    assert np.isfinite(min_pos)
+    assert np.isfinite(max_pos)
+    assert min_pos <= max_pos

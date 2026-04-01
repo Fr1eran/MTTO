@@ -24,7 +24,19 @@ def trackprofile():
         speed_limits = np.asarray(speed_limits) / 3.6
         speed_limit_intervals = speedlimit_data["intervals"]
 
-    track = Track(slopes, slope_intervals, speed_limits.tolist(), speed_limit_intervals)
+    with open("data/rail/raw/auxiliary_parking_areas.json", "r", encoding="utf-8") as f:
+        apa_data = json.load(f)
+        aps = apa_data["accessible_points"]
+        dps = apa_data["dangerous_points"]
+
+    track = Track(
+        slopes,
+        slope_intervals,
+        speed_limits.tolist(),
+        speed_limit_intervals,
+        ASA_aps=aps,
+        ASA_dps=dps,
+    )
     return TrackProfile(track=track)
 
 
@@ -77,15 +89,16 @@ def test_GetSlope(trackprofile: TrackProfile):
         ],
         dtype=np.float32,
     )
-    result1 = trackprofile.GetSlope(pos=pos, interpolate=False, dtype=np.float32)
-    result2 = trackprofile.GetSlope(pos=pos, interpolate=True)
-    result3 = trackprofile.GetSlope(pos=2885.1417, interpolate=False)
-    result4 = trackprofile.GetSlope(pos=2883.4972, interpolate=True)
+    result1 = trackprofile.GetSlope(pos=pos, dtype=np.float32)
+    result2 = trackprofile.GetSlope(pos=pos)
+    result3 = trackprofile.GetSlope(pos=2885.1417)
+    result4 = trackprofile.GetSlope(pos=2883.4972)
     np.testing.assert_allclose(result1, expected_result)
-    assert len(np.asarray(result2)) == len(pos)
+    np.testing.assert_allclose(result2, expected_result)
     assert isinstance(result3, np.floating)
     np.testing.assert_allclose(result3, -0.0179)
     assert isinstance(result4, np.floating)
+    np.testing.assert_allclose(result4, -0.0154)
 
 
 def test_GetSpeedlimit(trackprofile: TrackProfile):

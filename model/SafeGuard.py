@@ -50,9 +50,7 @@ class SafeGuardCurves:
             pos = begins[i]  # 初位置
             max_steps = int(pos // ds)
             speed_arr = np.empty(max_steps + 1)
-            slopes = self.trackprofile.GetSlope(
-                pos=np.arange(pos, 0.0, -ds), interpolate=True
-            )
+            slopes = self.trackprofile.GetSlope(pos=np.arange(pos, 0.0, -ds))
             speed_limits = self.trackprofile.GetSpeedlimit(pos=np.arange(pos, 0.0, -ds))
             idx = 0
             speed_arr[0] = 0.0
@@ -91,7 +89,7 @@ class SafeGuardCurves:
             speed = 0.0  # 初速度
             pos_arr = np.arange(begins[i], 0.0, -ds)
             speed_arr = np.zeros_like(pos_arr)
-            slopes = self.trackprofile.GetSlope(pos=pos_arr, interpolate=True)
+            slopes = self.trackprofile.GetSlope(pos=pos_arr)
             for j in range(1, speed_arr.shape[0]):
                 dec = dec_func(speed, slopes[j - 1])
                 next_speed_squared = speed**2 + 2 * dec * ds
@@ -207,19 +205,22 @@ class SafeGuardCurves:
                     curve_pos_arr=min_pos_arr, curve_speed_arr=min_speed_arr
                 )
             )
-            # 插值补齐至末端速度为0
-            min_pos_arr_truncated = np.append(
-                min_pos_arr_truncated,
-                min_pos_arr_truncated[-1]
-                - min_speed_arr_truncated[-1] ** 2
-                / (
-                    2
-                    * self._get_deccelerate_for_min_curves(
-                        min_speed_arr_truncated[-1], vehicle
-                    )
-                ),
-            )
-            min_speed_arr_truncated = np.append(min_speed_arr_truncated, 0.0)
+            # 补齐至末端速度为0，同时保持位置数组严格递增
+            if min_speed_arr_truncated[-1] > 0:
+                min_pos_arr_truncated = np.append(
+                    min_pos_arr_truncated,
+                    min_pos_arr_truncated[-1]
+                    + min_speed_arr_truncated[-1] ** 2
+                    / (
+                        2
+                        * self._get_deccelerate_for_min_curves(
+                            min_speed_arr_truncated[-1], vehicle
+                        )
+                    ),
+                )
+                min_speed_arr_truncated = np.append(min_speed_arr_truncated, 0.0)
+            else:
+                min_speed_arr_truncated[-1] = 0.0
             curve_list.append(
                 np.stack(
                     [min_pos_arr_truncated, min_speed_arr_truncated],
@@ -259,7 +260,7 @@ class SafeGuardCurves:
             levi_dec_arr = VehicleDynamic.CalcLeviDec(
                 vehicle=vehicle,
                 speed=brake_speed_arr,
-                slope=self.trackprofile.GetSlope(pos=brake_pos_arr, interpolate=True),
+                slope=self.trackprofile.GetSlope(pos=brake_pos_arr),
             )
             # 计算最大速度曲线
             max_speed_arr = (
@@ -293,24 +294,27 @@ class SafeGuardCurves:
                 max_pos_arr_truncated = max_pos_arr_truncated[: last_valid_idx + 1]
                 max_speed_arr_truncated = max_speed_arr_truncated[: last_valid_idx + 1]
 
-            # 插值补齐至末端速度为0
-            max_pos_arr_truncated = np.append(
-                max_pos_arr_truncated,
-                max_pos_arr_truncated[-1]
-                + max_speed_arr_truncated[-1] ** 2
-                / (
-                    2
-                    * VehicleDynamic.CalcBrakeDec(
-                        vehicle=vehicle,
-                        speed=max_speed_arr_truncated[-1],
-                        slope=self.trackprofile.GetSlope(
-                            pos=max_pos_arr_truncated[-1], interpolate=True
-                        ),
-                        level=0,
-                    )
-                ),
-            )
-            max_speed_arr_truncated = np.append(max_speed_arr_truncated, 0.0)
+            # 补齐至末端速度为0，同时保持位置数组严格递增
+            if max_speed_arr_truncated[-1] > 0:
+                max_pos_arr_truncated = np.append(
+                    max_pos_arr_truncated,
+                    max_pos_arr_truncated[-1]
+                    + max_speed_arr_truncated[-1] ** 2
+                    / (
+                        2
+                        * VehicleDynamic.CalcBrakeDec(
+                            vehicle=vehicle,
+                            speed=max_speed_arr_truncated[-1],
+                            slope=self.trackprofile.GetSlope(
+                                pos=max_pos_arr_truncated[-1]
+                            ),
+                            level=0,
+                        )
+                    ),
+                )
+                max_speed_arr_truncated = np.append(max_speed_arr_truncated, 0.0)
+            else:
+                max_speed_arr_truncated[-1] = 0.0
             curve_list.append(
                 np.stack(
                     [max_pos_arr_truncated, max_speed_arr_truncated],
@@ -496,6 +500,7 @@ class SafeGuardUtility:
         max_curves_list : 最大速度曲线集合
         gamma : 限速因子
     Methods:
+        GetMinAndMaxPosition() : 根据速度反查最小位置和最大位置
         DetectDanger() : 检查速度是否超出限速或落入危险速度域
     """
 
@@ -512,6 +517,18 @@ class SafeGuardUtility:
         self.speed_limit_intervals = np.asarray(speed_limit_intervals)
         self.min_curves_list = min_curves_list
         self.max_curves_list = max_curves_list
+        self._min_curve_pos_list = [
+            np.asarray(curve[0, :], dtype=np.float64) for curve in self.min_curves_list
+        ]
+        self._min_curve_speed_list = [
+            np.asarray(curve[1, :], dtype=np.float64) for curve in self.min_curves_list
+        ]
+        self._max_curve_pos_list = [
+            np.asarray(curve[0, :], dtype=np.float64) for curve in self.max_curves_list
+        ]
+        self._max_curve_speed_list = [
+            np.asarray(curve[1, :], dtype=np.float64) for curve in self.max_curves_list
+        ]
 
         # 计算危险交叉点和危险交叉点之后的部分防护曲线
         idp_points, self.min_curves_part_list, self.max_curves_part_list = CalRegions(
@@ -566,7 +583,7 @@ class SafeGuardUtility:
 
             current_sp += 1
 
-    def GetCurrentMinAndMaxSpeed(
+    def GetMinAndMaxSpeed(
         self, current_pos: float, current_sp: int
     ) -> tuple[float, float]:
         """
@@ -626,115 +643,93 @@ class SafeGuardUtility:
 
         return float(current_min_speed), float(current_max_speed)
 
-    def GetMinAndMaxSpeed(
-        self, current_pos: float, current_speed: float, current_sp: int | None
-    ) -> tuple[float, float, int]:
+    def GetMinAndMaxPosition(
+        self, current_speed: float | np.number, current_sp: int
+    ) -> tuple[float, float]:
         """
-        获得当前位置在目标辅助停车区下的最小防护速度和最大防护速度,
-        并尝试步进到下一个辅助停车区
+        根据速度反查最小位置和最大位置。
 
         Args:
-            current_pos: 当前位置
-            current_speed: 当前速度
-            current_sp: 当前目标停车点编号, 从 -1 开始
+            current_speed: 当前速度, 单位: m/s, 需大于等于0
+            current_sp: 当前目标停车点编号
 
         Returns:
-            tuple(current_min_speed, current_max_speed, current_sp)
+            current_min_pos, current_max_pos
         """
-        current_min_speed = 0.0
-        current_max_speed = 0.0
-        if current_sp is None:
-            # 没有给定当前目标停车点编号，需要遍历确定
-            # 设置初始停车点编号为-1
-            current_sp = -1
-            # 遍历所有停车点对应的最小速度曲线
-            for current_min_curve in self.min_curves_list:
-                if current_pos > current_min_curve[0, -1]:
-                    # 当前位置大于最小速度曲线的右端点
-                    # 设置最小速度为0
-                    current_min_speed = 0.0
-                else:
-                    # 当前位置小于最小速度曲线的右端点
-                    # 设置最小速度为最小速度曲线在当前位置的插值
-                    min_speed = np.interp(
-                        current_pos, current_min_curve[0, :], current_min_curve[1, :]
-                    )
-                    # 未步进到当前停车点
-                    if current_speed <= min_speed:
-                        break
-                    else:
-                        current_min_speed = min_speed
-                current_sp += 1
-            current_max_curve = self.max_curves_list[current_sp + 1]
-            if current_pos > current_max_curve[0, 0]:
-                # 当前位置大于最大速度曲线的左端点
-                # 设置最大速度为最大速度曲线在当前位置的插值
-                max_speed = np.interp(
-                    current_pos, current_max_curve[0, :], current_max_curve[1, :]
-                )
-            else:
-                # 当前位置小于最大速度曲线的左端点
-                # 设置最大速度为当前位置区间限速
-                max_speed = self.speed_limits[
-                    np.clip(
-                        GetIntervalIndex(current_pos, self.speed_limit_intervals),
-                        0,
-                        len(self.speed_limits) - 1,
-                    )
-                ]
-            current_max_speed = max_speed
-        else:
-            # 已给定当前目标停车点编号
-            if current_sp == -1:
-                # 还在加速区，尚未步进到第一个辅助停车区
-                min_speed = 0.0
-            else:
-                # 已开始停车点步进
-                current_min_curve = self.min_curves_list[current_sp]
-                if current_pos > current_min_curve[0, -1]:
-                    # 当前位置大于最小速度曲线的右端点
-                    # 设置最小速度为0
-                    min_speed = 0.0
-                else:
-                    # 当前位置小于最小速度曲线的右端点
-                    # 设置最小速度为最小速度曲线在当前位置的插值
-                    min_speed = np.interp(
-                        current_pos, current_min_curve[0, :], current_min_curve[1, :]
-                    )
-            current_min_speed = min_speed
-            current_max_curve = self.max_curves_list[current_sp + 1]
-            if current_pos > current_max_curve[0, 0]:
-                # 当前位置大于最大速度曲线的左端点
-                # 设置最大速度为最大速度曲线在当前位置的插值
-                max_speed = max(
-                    0.0,
-                    np.interp(
-                        current_pos, current_max_curve[0, :], current_max_curve[1, :]
-                    ),
-                )
-            else:
-                # 当前位置小于最大速度曲线的左端点
-                # 设置最大速度为当前位置区间限速
-                max_speed = self.speed_limits[
-                    np.clip(
-                        GetIntervalIndex(current_pos, self.speed_limit_intervals),
-                        0,
-                        len(self.speed_limits) - 1,
-                    )
-                ]
-            current_max_speed = max_speed
-            next_sp = current_sp + 1
-            if next_sp != len(self.min_curves_list):
-                # 未步进到最后一个停车点
-                # 检查是否能步进到下一个停车点
-                next_min_curve = self.min_curves_list[next_sp]
-                if current_speed > np.interp(
-                    current_pos, next_min_curve[0, :], next_min_curve[1, :]
-                ):
-                    # 可以步进到下一个停车点，且立即执行
-                    current_sp = next_sp
 
-        return float(current_min_speed), float(current_max_speed), current_sp
+        current_speed_value = float(current_speed)
+
+        if current_sp == -1:
+            current_min_pos = 0.0
+        else:
+            # if current_sp < -1 or current_sp >= len(self._min_curve_pos_list):
+            #     raise IndexError(f"current_sp {current_sp} 超出范围")
+            current_min_pos = self._get_monotone_curve_position_by_speed(
+                curve_pos=self._min_curve_pos_list[current_sp],
+                curve_speed=self._min_curve_speed_list[current_sp],
+                current_speed=current_speed_value,
+            )
+
+        # if current_sp + 1 >= len(self._max_curve_pos_list):
+        #     raise IndexError(f"current_sp {current_sp} 无法映射到最大速度曲线")
+
+        current_max_pos = self._get_monotone_curve_position_by_speed(
+            curve_pos=self._max_curve_pos_list[current_sp + 1],
+            curve_speed=self._max_curve_speed_list[current_sp + 1],
+            current_speed=current_speed_value,
+        )
+
+        return float(current_min_pos), float(current_max_pos)
+
+    @staticmethod
+    def _get_monotone_curve_position_by_speed(
+        curve_pos: NDArray[np.floating],
+        curve_speed: NDArray[np.floating],
+        current_speed: float,
+    ) -> float:
+        """根据单调递减曲线的速度值反查位置。"""
+
+        curve_pos = np.asarray(curve_pos, dtype=np.float64)
+        curve_speed = np.asarray(curve_speed, dtype=np.float64)
+
+        if curve_pos.shape != curve_speed.shape:
+            raise ValueError("curve_pos and curve_speed must have the same shape")
+        if curve_pos.size == 0:
+            raise ValueError("curve must contain at least one point")
+        if curve_pos.size == 1:
+            return float(curve_pos[0])
+
+        if np.any(np.diff(curve_pos) <= 0.0):
+            raise ValueError("curve_pos must be strictly increasing")
+
+        target_speed = float(current_speed)
+        speed_scale = max(1.0, float(np.max(np.abs(curve_speed))))
+        speed_tol = np.finfo(np.float64).eps * speed_scale * 16.0
+        if np.any(np.diff(curve_speed) > speed_tol):
+            raise ValueError("curve_speed must be monotone decreasing")
+
+        ascending_pos = curve_pos[::-1]
+        ascending_speed = curve_speed[::-1]
+        unique_speed, unique_indices = np.unique(ascending_speed, return_index=True)
+        unique_pos = ascending_pos[unique_indices]
+
+        if unique_speed.size == 1:
+            return float(unique_pos[0])
+
+        if target_speed <= unique_speed[0]:
+            speed0 = unique_speed[0]
+            speed1 = unique_speed[1]
+            pos0 = unique_pos[0]
+            pos1 = unique_pos[1]
+        elif target_speed >= unique_speed[-1]:
+            speed0 = unique_speed[-2]
+            speed1 = unique_speed[-1]
+            pos0 = unique_pos[-2]
+            pos1 = unique_pos[-1]
+        else:
+            return float(np.interp(target_speed, unique_speed, unique_pos))
+
+        return float(pos0 + (target_speed - speed0) * (pos1 - pos0) / (speed1 - speed0))
 
     @overload
     def DetectDanger(

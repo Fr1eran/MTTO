@@ -23,13 +23,25 @@ def ors():
         speed_limits = np.asarray(speed_limits) / 3.6
         speed_limit_intervals = speedlimit_data["intervals"]
 
+    with open("data/rail/raw/auxiliary_parking_areas.json", "r", encoding="utf-8") as f:
+        apa_data = json.load(f)
+        aps = apa_data["accessible_points"]
+        dps = apa_data["dangerous_points"]
+
     # 车站
     with open("data/rail/raw/stations.json", "r", encoding="utf-8") as f:
         stations_data = json.load(f)
         ly_zp = stations_data["LY"]["zp"]
         pa_zp = stations_data["PA"]["zp"]
 
-    track = Track(slopes, slope_intervals, speed_limits.tolist(), speed_limit_intervals)
+    track = Track(
+        slopes,
+        slope_intervals,
+        speed_limits.tolist(),
+        speed_limit_intervals,
+        ASA_aps=aps,
+        ASA_dps=dps,
+    )
     vehicle = Vehicle(mass=317.5, numoftrainsets=5, length=128.5)
     task = Task(
         start_position=ly_zp,

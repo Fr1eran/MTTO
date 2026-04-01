@@ -95,7 +95,7 @@ class TestSPSIntegration:
             gamma=0.9,
         )
 
-        return sgu, len(setup_data["aps"]) + 1
+        return sgu, len(setup_data["aps"])
 
     def test_sps_stepping_with_real_data(self, setup_data, setup_system):
         """

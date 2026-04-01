@@ -26,7 +26,19 @@ def sgc_and_vehicle():
         speed_limits = np.asarray(speed_limits) / 3.6
         speed_limit_intervals = speedlimit_data["intervals"]
 
-    track = Track(slopes, slope_intervals, speed_limits.tolist(), speed_limit_intervals)
+    with open("data/rail/raw/auxiliary_parking_areas.json", "r", encoding="utf-8") as f:
+        apa_data = json.load(f)
+        aps = apa_data["accessible_points"]
+        dps = apa_data["dangerous_points"]
+
+    track = Track(
+        slopes,
+        slope_intervals,
+        speed_limits.tolist(),
+        speed_limit_intervals,
+        ASA_aps=aps,
+        ASA_dps=dps,
+    )
     trackprofile = TrackProfile(track=track)
     cal_SGC = SafeGuardCurves(trackprofile=trackprofile)
     vehicle = Vehicle(mass=317.5, numoftrainsets=5, length=128.5)
