@@ -35,6 +35,8 @@ class TrainState(TypedDict, total=True):
     acc: float
     min_speed: float
     max_speed: float
+    latest_traction_intervation_point: float
+    latest_braking_intervation_point: float
     operation_time: float
     energy_consumption: float
     stopping_point_index: int
@@ -188,26 +190,30 @@ class MTTOEnv(gym.Env):
             ),
             self.next_max_speed,
         )
+        (
+            self.current_latest_traction_intervation_point,
+            self.current_latest_braking_intervention_point,
+        ) = self.safeguardutil.GetLatestTranctionAndBrakingIntervationPoint(
+            current_speed=self.current_speed, current_sp=self.current_sp
+        )
 
         # 定义智能体能够观测的状态信息
         self.observation_space = gym.spaces.Dict(
             {
-                "agent_remaining_distance": gym.spaces.Box(
+                "remaining_distance": gym.spaces.Box(
                     0.0,
                     1.0,
                     shape=(1,),
                     dtype=np.float32,
                 ),
-                "agent_current_speed": gym.spaces.Box(
-                    0.0, 1.0, shape=(1,), dtype=np.float32
-                ),
-                "agent_current_acc": gym.spaces.Box(
+                "current_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
+                "current_acc": gym.spaces.Box(
                     -1.0,
                     1.0,
                     shape=(1,),
                     dtype=np.float32,
                 ),
-                "agent_remaining_schedule_time": gym.spaces.Box(
+                "remaining_schedule_time": gym.spaces.Box(
                     -1.0,  # 最多超时10分钟
                     1.0,
                     shape=(1,),
@@ -227,6 +233,12 @@ class MTTOEnv(gym.Env):
                     0.0, 1.0, shape=(1,), dtype=np.float32
                 ),
                 "next_min_speed": gym.spaces.Box(
+                    0.0, 1.0, shape=(1,), dtype=np.float32
+                ),
+                "current_latest_traction_intervation_point": gym.spaces.Box(
+                    0.0, 1.0, shape=(1,), dtype=np.float32
+                ),
+                "current_latest_braking_intervation_point": gym.spaces.Box(
                     0.0, 1.0, shape=(1,), dtype=np.float32
                 ),
             }
@@ -285,15 +297,15 @@ class MTTOEnv(gym.Env):
         """
 
         return {
-            "agent_remaining_distance": np.array(
+            "remaining_distance": np.array(
                 [(self.whole_distance - self.current_pos) / self.whole_distance],
                 dtype=np.float32,
             ),
-            "agent_current_speed": np.array(
+            "current_speed": np.array(
                 [self.current_speed / self.vehicle.max_speed], dtype=np.float32
             ),
-            "agent_current_acc": np.array([self.current_acc], dtype=np.float32),
-            "agent_remaining_schedule_time": np.array(
+            "current_acc": np.array([self.current_acc], dtype=np.float32),
+            "remaining_schedule_time": np.array(
                 [
                     (self.task.schedule_time - self.current_operation_time)
                     / self.task.schedule_time
@@ -317,6 +329,14 @@ class MTTOEnv(gym.Env):
             ),
             "next_min_speed": np.array(
                 [self.next_min_speed / self.vehicle.max_speed], dtype=np.float32
+            ),
+            "current_latest_traction_intervation_point": np.array(
+                [self.current_latest_traction_intervation_point / self.whole_distance],
+                dtype=np.float32,
+            ),
+            "current_latest_braking_intervation_point": np.array(
+                [self.current_latest_braking_intervention_point / self.whole_distance],
+                dtype=np.float32,
             ),
         }
 
@@ -390,6 +410,12 @@ class MTTOEnv(gym.Env):
         self.next_max_speed = min(
             self._get_ref_speed(self.current_pos + self.max_step_distance),
             self.next_max_speed,
+        )
+        (
+            self.current_latest_traction_intervation_point,
+            self.current_latest_braking_intervention_point,
+        ) = self.safeguardutil.GetLatestTranctionAndBrakingIntervationPoint(
+            current_speed=self.current_speed, current_sp=self.current_sp
         )
 
         # 重置历史数据
@@ -486,6 +512,12 @@ class MTTOEnv(gym.Env):
             ),
             self.next_max_speed,
         )
+        (
+            self.current_latest_traction_intervation_point,
+            self.current_latest_braking_intervention_point,
+        ) = self.safeguardutil.GetLatestTranctionAndBrakingIntervationPoint(
+            current_speed=self.current_speed, current_sp=self.current_sp
+        )
 
         # 判断智能体是否到达目标区域
         terminated = (
@@ -508,7 +540,6 @@ class MTTOEnv(gym.Env):
             truncated=truncated,
         )
 
-        self._record_history()
         if self.render_mode is not None:
             # 记录轨迹数据
             self._record_trajectory(
@@ -688,22 +719,22 @@ class MTTOEnv(gym.Env):
         # 运行时间奖励
         reward_puncuality = self._get_reward_punctuality_dense()
 
-        # 进度奖励
-        reward_process = self._get_reward_process_dense()
+        # 停站奖励
+        reward_docking = self._get_reward_docking_dense()
 
         # 记录
         self.rewards_info["reward_safety"] = reward_safety
         self.rewards_info["reward_energy"] = reward_energy
         self.rewards_info["reward_comfort"] = reward_comfort
         self.rewards_info["reward_punctuality"] = reward_puncuality
-        self.rewards_info["reward_process"] = reward_process
+        self.rewards_info["reward_docking"] = reward_docking
 
         return (
             reward_safety
             + reward_energy
             + reward_comfort
             + reward_puncuality
-            + reward_process
+            + reward_docking
         )
 
     def _get_reward_safety_dense(self) -> float:
@@ -718,6 +749,15 @@ class MTTOEnv(gym.Env):
             else self.task.target_position,
         )
 
+        # phi_curr = self._potential_safety_position(
+        #     pos=self.current_pos,
+        #     min_pos=self.current_latest_traction_intervation_point,
+        #     max_pos=self.current_latest_braking_intervention_point,
+        #     target_pos=self.sps.GetASATargetPointPosition(sp=self.current_sp)
+        #     if self.current_sp >= 0
+        #     else self.task.target_position,
+        # )
+
         # 计算上个状态势能
         phi_prev = self._potential_safety_speed(
             pos=self.last_state["pos"],
@@ -730,6 +770,17 @@ class MTTOEnv(gym.Env):
             if self.last_state["stopping_point_index"] >= 0
             else self.task.target_position,
         )
+
+        # phi_prev = self._potential_safety_position(
+        #     pos=self.last_state["pos"],
+        #     min_pos=self.last_state["latest_traction_intervation_point"],
+        #     max_pos=self.last_state["latest_braking_intervation_point"],
+        #     target_pos=self.sps.GetASATargetPointPosition(
+        #         sp=self.last_state["stopping_point_index"]
+        #     )
+        #     if self.last_state["stopping_point_index"] >= 0
+        #     else self.task.target_position,
+        # )
 
         return self.gamma * phi_curr - phi_prev
 
@@ -755,19 +806,21 @@ class MTTOEnv(gym.Env):
 
         return -4.0 * scale * norm_speed**2
 
-    # def _get_reward_energy_dense(self) -> float:
-    #     phi_curr = self._potential_energy(
-    #         energy_consumption=self.current_energy_consumption
-    #     )
+    def _potential_safety_position(
+        self, pos: float, min_pos: float, max_pos: float, target_pos: float
+    ):
+        distanceToTarget = np.abs(target_pos - pos)
 
-    #     phi_prev = self._potential_energy(
-    #         energy_consumption=self.last_state["energy_consumption"]
-    #     )
+        center_pos = (max_pos + min_pos) / 2.0
+        safe_margin = (max_pos - min_pos) / 2.0
 
-    #     return self.gamma * phi_curr - phi_prev
+        safe_margin = max(safe_margin, 1e-3)
 
-    # def _potential_energy(self, energy_consumption: float) -> float:
-    #     return -5.0 * energy_consumption / self.max_energy_consumption
+        norm_pos = (pos - center_pos) / safe_margin
+
+        scale = 1.0 + 1.0 * np.exp(-0.002 * distanceToTarget)
+
+        return -10.0 * scale * (norm_pos**2)
 
     def _get_reward_energy_dense(self) -> float:
         return (
@@ -828,10 +881,32 @@ class MTTOEnv(gym.Env):
 
         return -2.0 * np.exp(-8.0 * time_redundancy_norm_cliped)
 
-    def _get_reward_process_dense(self) -> float:
-        displacement = (self.current_pos - self.last_state["pos"]) * self.direction
+    # def _get_reward_process_dense(self) -> float:
+    #     displacement = (self.current_pos - self.last_state["pos"]) * self.direction
 
-        return 5.0 * (displacement / self.whole_distance)
+    #     return 5.0 * (displacement / self.whole_distance)
+
+    def _get_reward_docking_dense(self):
+        phi_curr = self._potential_docking(
+            pos=self.current_pos, speed=self.current_speed
+        )
+
+        phi_prev = self._potential_docking(
+            pos=self.last_state["pos"], speed=self.last_state["speed"]
+        )
+
+        return self.gamma * phi_curr - phi_prev
+
+    def _potential_docking(self, pos: float, speed: float):
+        sigma_d = 1000.0
+        sigma_v = 40.0
+
+        distance_error = self.task.target_position - pos
+
+        distance_term = np.exp(-(distance_error**2) / (2.0 * sigma_d**2))
+        speed_term = np.exp(-(speed**2) / (2.0 * sigma_v**2))
+
+        return 2.0 * distance_term * speed_term
 
     def _get_reward_goal(
         self,
@@ -874,6 +949,12 @@ class MTTOEnv(gym.Env):
         self.last_state["acc"] = self.current_acc
         self.last_state["min_speed"] = self.current_min_speed
         self.last_state["max_speed"] = self.current_max_speed
+        self.last_state["latest_traction_intervation_point"] = (
+            self.current_latest_traction_intervation_point
+        )
+        self.last_state["latest_braking_intervation_point"] = (
+            self.current_latest_braking_intervention_point
+        )
         self.last_state["operation_time"] = self.current_operation_time
         self.last_state["energy_consumption"] = self.current_energy_consumption
         self.last_state["stopping_point_index"] = self.current_sp
@@ -885,6 +966,8 @@ class MTTOEnv(gym.Env):
             "acc": 0.0,
             "min_speed": 0.0,
             "max_speed": 0.0,
+            "latest_traction_intervation_point": 0.0,
+            "latest_braking_intervation_point": 0.0,
             "operation_time": 0.0,
             "energy_consumption": 0.0,
             "stopping_point_index": -1,
