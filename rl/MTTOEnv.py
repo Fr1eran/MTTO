@@ -6,10 +6,9 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from scipy.interpolate import PchipInterpolator
-from scipy.integrate import trapezoid
 
 from model.SafeGuard import SafeGuardUtility
-from model.Vehicle import Vehicle, VehicleDynamic
+from model.Vehicle import Vehicle
 from model.Track import Track, TrackProfile
 from model.Task import Task
 from model.ORS import ORS
@@ -25,7 +24,6 @@ class RewardsInfoForTB(TypedDict, total=False):
     reward_energy: float
     reward_comfort: float
     reward_total: float
-
 
 
 class TrainState(TypedDict, total=True):
@@ -120,7 +118,7 @@ class MTTOEnv(gym.Env):
         self.ref_curve_pos, self.ref_curve_speed = self.ors.CalcMinRuntimeCurve(
             begin_pos=self.task.start_position,
             begin_speed=self.task.start_speed,
-            end_pos=self.task.target_position + self.task.max_stop_error*10,
+            end_pos=self.task.target_position + self.task.max_stop_error * 10,
             end_speed=0.0,
         )
         # 最短运行时间曲线采用三次埃尔米特插值
@@ -132,7 +130,7 @@ class MTTOEnv(gym.Env):
         mec, lec, self.min_operation_time = self.ors.CalcRefEnergyAndOperationTime(
             begin_pos=self.task.start_position,
             begin_speed=self.task.start_speed,
-            end_pos=self.task.target_position + self.task.max_stop_error*10,
+            end_pos=self.task.target_position + self.task.max_stop_error * 10,
             end_speed=0.0,
             distance=self.task.target_position
             + self.task.max_stop_error
@@ -259,7 +257,7 @@ class MTTOEnv(gym.Env):
             sgu=self.safeguardutil,
             ASA_ap_list=self.track.ASA_aps,
             ASA_dp_list=self.track.ASA_dps,
-            T_s=2.0,
+            T_s=1.0,
         )
 
         # Q初始值
@@ -634,7 +632,9 @@ class MTTOEnv(gym.Env):
             else:
                 reward_total = self._get_reward_dense()
         else:
-            progress = abs(self.current_pos-self.task.start_position) / self.whole_distance
+            progress = (
+                abs(self.current_pos - self.task.start_position) / self.whole_distance
+            )
             reward_total = -15.0 * (1.0 - progress) - max(
                 0,
                 self.current_min_speed - self.current_speed,
