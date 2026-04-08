@@ -1,4 +1,4 @@
-from model.safe_guard_utility import SafeGuardUtility
+from model.ocs import SafeGuardUtility
 
 
 class SPS:

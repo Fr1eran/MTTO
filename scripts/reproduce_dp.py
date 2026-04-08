@@ -4,12 +4,10 @@ from typing import TypedDict, Sequence, Any
 from numpy.typing import NDArray
 import matplotlib.pyplot as plt
 
-from model.safe_guard_utility import SafeGuardUtility
-from model.vehicle import Vehicle
-from model.track import Track, TrackProfile
-from model.task import Task
-from model.ecc import ECC
-from model.ors import ORS
+from model.ocs import SafeGuardUtility,TrainService
+from model.vehicle import VehicleInfo
+from model.track import TrackInfo, TrackProfile
+from model.common import ECC,ORS
 from utils.io_utils import save_curve_and_metrics
 from utils.plot_utils import set_chinese_font
 from utils.data_loader import (
@@ -53,17 +51,17 @@ class VariableSpacingDPOptimizer:
 
     def __init__(
         self,
-        vehicle: Vehicle,
-        track: Track,
+        vehicle: VehicleInfo,
+        track: TrackInfo,
         safeguard_utility: SafeGuardUtility,
-        task: Task,
+        train_service: TrainService,
         time_tolerance: float,
     ) -> None:
         self.vehicle = vehicle
         self.track = track
         self.trackprofile = TrackProfile(track=self.track)
         self.safeguard_utility = safeguard_utility
-        self.task = task
+        self.task = train_service
         self.time_tolerance = time_tolerance
         # self.direction = (
         #     1 if self.task.target_position >= self.task.start_position else -1
@@ -533,9 +531,9 @@ if __name__ == "__main__":
         factor=factor,
     )
 
-    track = Track(slopes, slope_intervals, speed_limits.tolist(), speed_limit_intervals)
+    track = TrackInfo(slopes, slope_intervals, speed_limits.tolist(), speed_limit_intervals)
 
-    vehicle = Vehicle(
+    vehicle = VehicleInfo(
         mass=317.5,
         numoftrainsets=5,
         length=128.5,
@@ -544,7 +542,7 @@ if __name__ == "__main__":
         levi_power_per_mass=1.7,
     )
 
-    task = Task(
+    train_service = TrainService(
         start_position=longyang_target,
         start_speed=0.0,
         target_position=putong_target,
@@ -558,7 +556,7 @@ if __name__ == "__main__":
         vehicle=vehicle,
         track=track,
         safeguard_utility=safeguard_utility,
-        task=task,
+        train_service=train_service,
         time_tolerance=0.01,
     )
 
@@ -571,11 +569,11 @@ if __name__ == "__main__":
             speed_arr=result["speed"],
             output_path=output_file,
             metrics={
-                "target_time_s": float(task.schedule_time),
+                "target_time_s": float(train_service.schedule_time),
                 "total_time_s": float(result["total_time"]),
                 "total_energy_kj": float(result["total_energy"]),
-                "start_position_m": float(task.start_position),
-                "target_position_m": float(task.target_position),
+                "start_position_m": float(train_service.start_position),
+                "target_position_m": float(train_service.target_position),
             },
         )
         print(f"优化速度曲线已保存到: {saved_npz_path}")
@@ -596,8 +594,8 @@ if __name__ == "__main__":
 
         # 绘制起点
         ax.scatter(
-            task.start_position,
-            task.start_speed * 3.6,
+            train_service.start_position,
+            train_service.start_speed * 3.6,
             marker="o",
             color="green",
             s=100,
@@ -610,7 +608,7 @@ if __name__ == "__main__":
 
         # 绘制终点
         ax.scatter(
-            task.target_position,
+            train_service.target_position,
             0.0,
             marker="o",
             color="red",

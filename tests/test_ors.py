@@ -1,10 +1,10 @@
 import numpy as np
 import pytest
 
-from model.vehicle import Vehicle
-from model.track import Track
-from model.task import Task
-from model.ors import ORS
+from model.vehicle import VehicleInfo
+from model.track import TrackInfo
+from model.ocs import TrainService
+from model.common import ORS
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_slopes,
@@ -26,7 +26,7 @@ def operation_reference_system():
     # 车站
     ly_zp, pa_zp = load_stations_goal_positions()
 
-    track = Track(
+    track = TrackInfo(
         slopes,
         slope_intervals,
         speed_limits.tolist(),
@@ -34,8 +34,8 @@ def operation_reference_system():
         ASA_aps=aps,
         ASA_dps=dps,
     )
-    vehicle = Vehicle(mass=317.5, numoftrainsets=5, length=128.5)
-    task = Task(
+    vehicle = VehicleInfo(mass=317.5, numoftrainsets=5, length=128.5)
+    train_service = TrainService(
         start_position=ly_zp,
         start_speed=0.0,
         target_position=pa_zp,

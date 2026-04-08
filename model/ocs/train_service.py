@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 
 @dataclass
-class Task:
+class TrainService:
     start_position: float  # 单位: m
     start_speed: float  # 单位: m/s
     target_position: float  # 单位: m

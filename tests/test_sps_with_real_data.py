@@ -1,8 +1,7 @@
 import numpy as np
 import pytest
 
-from model.safe_guard_utility import SafeGuardUtility
-from model.sps import SPS
+from model.ocs import SafeGuardUtility,SPS
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_excel,

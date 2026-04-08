@@ -1,17 +1,16 @@
-from model.safe_guard_utility import SafeGuardUtility
-from model.task import Task
-from model.track import Track
-from model.vehicle import Vehicle
+from model.ocs import SafeGuardUtility, TrainService
+from model.track import TrackInfo
+from model.vehicle import VehicleInfo
 from gymnasium.wrappers import FlattenObservation
 
 from rl.mtto_env import MTTOEnv
 
 
 def make_env(
-    vehicle: Vehicle,
-    track: Track,
+    vehicle: VehicleInfo,
+    track: TrackInfo,
     safeguard_utility: SafeGuardUtility,
-    task: Task,
+    train_service: TrainService,
     gamma: float,
     max_step_distance: float,
     render_mode: str | None = None,
@@ -20,7 +19,7 @@ def make_env(
         vehicle=vehicle,
         track=track,
         safeguard_utility=safeguard_utility,
-        task=task,
+        train_service=train_service,
         gamma=gamma,
         max_step_distance=max_step_distance,
         render_mode=render_mode,

@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from model.safe_guard_utility import SafeGuardUtility
+from model.ocs import SafeGuardUtility
 from utils.data_loader import load_safeguard_curves, load_speed_limits
 
 

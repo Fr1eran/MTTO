@@ -18,7 +18,7 @@ Numeric = Union[float, np.floating, NDArray[np.floating]]
 
 
 @dataclass
-class Vehicle:
+class VehicleInfo:
     mass: float  # 单位: T
     numoftrainsets: int
     length: float  # 单位: m
@@ -31,7 +31,7 @@ class Vehicle:
 
 class VehicleDynamic:
     @staticmethod
-    def calc_levi_deceleration(vehicle: Vehicle, speed: Numeric, slope: Numeric):
+    def calc_levi_deceleration(vehicle: VehicleInfo, speed: Numeric, slope: Numeric):
         """
         计算列车悬浮减速度大小
 
@@ -64,7 +64,7 @@ class VehicleDynamic:
 
     @staticmethod
     def calc_brake_deceleration(
-        vehicle: Vehicle, speed: Numeric, slope: Numeric, level: int
+        vehicle: VehicleInfo, speed: Numeric, slope: Numeric, level: int
     ):
         """
         计算列车安全制动减速度大小
@@ -112,7 +112,7 @@ class VehicleDynamic:
 
     @staticmethod
     def calc_longitudinal_force(
-        vehicle: Vehicle, acc: Numeric, speed: Numeric, slope: Numeric
+        vehicle: VehicleInfo, acc: Numeric, speed: Numeric, slope: Numeric
     ):
         """
         计算列车受到牵引系统施加的纵向力大小

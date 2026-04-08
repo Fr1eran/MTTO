@@ -5,10 +5,9 @@ import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize, VecVideoRecorder
 
-from model.safe_guard_utility import SafeGuardUtility
-from model.task import Task
-from model.track import Track
-from model.vehicle import Vehicle
+from model.ocs import SafeGuardUtility,TrainService
+from model.track import TrackInfo
+from model.vehicle import VehicleInfo
 from rl.env_factory import make_env
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
@@ -19,7 +18,7 @@ from utils.data_loader import (
 )
 
 
-def build_scenario() -> tuple[Vehicle, Track, SafeGuardUtility, Task]:
+def build_scenario() -> tuple[VehicleInfo, TrackInfo, SafeGuardUtility, TrainService]:
     slopes, slope_intervals = load_slopes()
     speed_limits, speed_limit_intervals = load_speed_limits(
         to_mps=True, dtype=np.float64
@@ -38,7 +37,7 @@ def build_scenario() -> tuple[Vehicle, Track, SafeGuardUtility, Task]:
         factor=0.95,
     )
 
-    track = Track(
+    track = TrackInfo(
         slopes=slopes,
         slope_intervals=slope_intervals,
         speed_limits=speed_limits,
@@ -47,9 +46,9 @@ def build_scenario() -> tuple[Vehicle, Track, SafeGuardUtility, Task]:
         ASA_dps=dangerous_points,
     )
 
-    vehicle = Vehicle(mass=317.5, numoftrainsets=5, length=128.5)
+    vehicle = VehicleInfo(mass=317.5, numoftrainsets=5, length=128.5)
 
-    task = Task(
+    train_service = TrainService(
         start_position=longyang_start_position,
         start_speed=0.0,
         target_position=putong_end_position,
@@ -59,7 +58,7 @@ def build_scenario() -> tuple[Vehicle, Track, SafeGuardUtility, Task]:
         max_stop_error=0.3,
     )
 
-    return vehicle, track, safeguard_utility, task
+    return vehicle, track, safeguard_utility, train_service
 
 
 def main():
@@ -84,7 +83,7 @@ def main():
                 vehicle=vehicle,
                 track=track,
                 safeguard_utility=safeguard_utility,
-                task=task,
+                train_service=task,
                 gamma=reward_discount,
                 max_step_distance=ds,
                 render_mode="rgb_array",

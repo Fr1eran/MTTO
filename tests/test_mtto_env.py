@@ -1,10 +1,9 @@
 import numpy as np
 import pytest
 from rl.mtto_env import MTTOEnv
-from model.vehicle import Vehicle
-from model.safe_guard_utility import SafeGuardUtility
-from model.track import Track
-from model.task import Task
+from model.vehicle import VehicleInfo
+from model.ocs import SafeGuardUtility,TrainService
+from model.track import TrackInfo
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_safeguard_curves,
@@ -35,7 +34,7 @@ def mtto_env():
         factor=0.95,
     )
 
-    track = Track(
+    track = TrackInfo(
         slopes=slopes,
         slope_intervals=slope_intervals,
         speed_limits=speed_limits,
@@ -44,8 +43,8 @@ def mtto_env():
         ASA_dps=dangerous_points,
     )
 
-    vehicle = Vehicle(mass=317.5, numoftrainsets=5, length=128.5)
-    task = Task(
+    vehicle = VehicleInfo(mass=317.5, numoftrainsets=5, length=128.5)
+    train_service = TrainService(
         start_position=longyang_start_position,
         start_speed=0.0,
         target_position=putong_end_position,
@@ -59,7 +58,7 @@ def mtto_env():
         vehicle=vehicle,
         track=track,
         safeguard_utility=safeguard_utility,
-        task=task,
+        train_service=train_service,
         gamma=0.995,
         max_step_distance=10.0,
     )

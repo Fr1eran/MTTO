@@ -7,13 +7,10 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from scipy.interpolate import PchipInterpolator
 
-from model.safe_guard_utility import SafeGuardUtility
-from model.vehicle import Vehicle
-from model.track import Track, TrackProfile
-from model.task import Task
-from model.ors import ORS
-from model.sps import SPS
-from model.ecc import ECC
+from model.ocs import SafeGuardUtility,TrainService,SPS
+from model.vehicle import VehicleInfo
+from model.track import TrackInfo, TrackProfile
+from model.common import ECC, ORS
 from utils.plot_utils import set_chinese_font
 
 
@@ -44,10 +41,10 @@ class MTTOEnv(gym.Env):
 
     def __init__(
         self,
-        vehicle: Vehicle,
-        track: Track,
+        vehicle: VehicleInfo,
+        track: TrackInfo,
         safeguard_utility: SafeGuardUtility,
-        task: Task,
+        train_service: TrainService,
         gamma: float,
         max_step_distance: float,
         render_mode: str | None = None,
@@ -66,7 +63,7 @@ class MTTOEnv(gym.Env):
         self.safeguard_utility = safeguard_utility
 
         # 运行任务约束
-        self.task = task
+        self.task = train_service
 
         # 回报折扣因子
         self.gamma = gamma

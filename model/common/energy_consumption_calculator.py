@@ -4,8 +4,8 @@ from typing import cast
 import numpy as np
 from scipy.integrate import cumulative_trapezoid, trapezoid
 from numpy.typing import NDArray
-from model.vehicle import Vehicle, VehicleDynamic
-from model.track import TrackProfile
+from model.vehicle.vehicle import VehicleInfo, VehicleDynamic
+from model.track.track import TrackProfile
 
 AccProfile = Callable[[NDArray[np.floating]], NDArray[np.floating]]
 
@@ -75,7 +75,7 @@ class ECC:
         pos_arr: NDArray[np.floating],
         speed_arr: NDArray[np.floating],
         acc_arr: NDArray[np.floating],
-        vehicle: Vehicle,
+        vehicle: VehicleInfo,
         trackprofile: TrackProfile,
         travel_time_arr: NDArray[np.floating],
     ) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
@@ -142,7 +142,7 @@ class ECC:
         distance: float,
         direction: int,
         operation_time: float | None,
-        vehicle: Vehicle,
+        vehicle: VehicleInfo,
         trackprofile: TrackProfile,
     ) -> tuple[float, float]:
         """

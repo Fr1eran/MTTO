@@ -5,7 +5,7 @@ import pickle
 import matplotlib.pyplot as plt
 import numpy as np
 
-from model.safe_guard_utility import SafeGuardUtility
+from model.ocs import SafeGuardUtility
 from utils.io_utils import load_optimized_curve_and_metrics
 from utils.plot_utils import set_chinese_font
 

@@ -2,8 +2,8 @@ import numpy as np
 from numpy.typing import NDArray
 from typing import Callable, Union
 
-from model.vehicle import Vehicle, VehicleDynamic
-from model.track import TrackProfile
+from model.vehicle.vehicle import VehicleInfo, VehicleDynamic
+from model.track.track import TrackProfile
 
 Numeric = Union[float | np.floating | NDArray[np.floating]]
 AccFunc = Callable[[Numeric, Numeric], Numeric]
@@ -94,7 +94,7 @@ class SafeGuardCurves:
             )
         return curve_list
 
-    def _get_deccelerate_for_min_curves(self, speed: Numeric, vehicle: Vehicle):
+    def _get_deccelerate_for_min_curves(self, speed: Numeric, vehicle: VehicleInfo):
         """
         获得计算最小速度曲线时的减速度大小
 
@@ -154,7 +154,7 @@ class SafeGuardCurves:
     def calc_min_curves(
         self,
         levi_curves_list: list[NDArray[np.float64]],
-        vehicle: Vehicle,
+        vehicle: VehicleInfo,
         pos_error: float = 1.0,
         speed_error: float = 0.1,
         pos_offset: float = 0.0,
@@ -226,7 +226,7 @@ class SafeGuardCurves:
     def calc_max_curves(
         self,
         brake_curves_list: list[NDArray[np.float64]],
-        vehicle: Vehicle,
+        vehicle: VehicleInfo,
         pos_error: float = -1.0,
         speed_error: float = -0.1,
         delay_time_until_DPS_done: float = 0.5,
@@ -318,7 +318,7 @@ class SafeGuardCurves:
         return curve_list
 
     def calc_levi_curves(
-        self, apoffsets: NDArray[np.floating], vehicle: Vehicle, ds: float = 5.0
+        self, apoffsets: NDArray[np.floating], vehicle: VehicleInfo, ds: float = 5.0
     ):
         """
         计算安全悬浮曲线
@@ -340,7 +340,7 @@ class SafeGuardCurves:
     def calc_levi_and_min_curves(
         self,
         apoffsets: NDArray[np.floating],
-        vehicle: Vehicle,
+        vehicle: VehicleInfo,
         ds: float = 5.0,
         pos_error: float = 1.0,
         speed_error: float = 0.1,
@@ -400,7 +400,7 @@ class SafeGuardCurves:
         return levi_curves_list_truncated, min_curves_list
 
     def calc_brake_curves(
-        self, dpoffsets: NDArray[np.floating], vehicle: Vehicle, ds: float = 5.0
+        self, dpoffsets: NDArray[np.floating], vehicle: VehicleInfo, ds: float = 5.0
     ):
         """
         计算安全制动曲线
@@ -424,7 +424,7 @@ class SafeGuardCurves:
     def calc_brake_and_max_curves(
         self,
         dpoffsets: NDArray[np.floating],
-        vehicle: Vehicle,
+        vehicle: VehicleInfo,
         ds: float = 5.0,
         pos_error: float = -1.0,
         speed_error: float = -0.1,

@@ -3,10 +3,9 @@ import numpy as np
 
 from rl.callbacks import TensorboardCallback
 from rl.env_factory import make_env
-from model.vehicle import Vehicle
-from model.safe_guard_utility import SafeGuardUtility
-from model.track import Track
-from model.task import Task
+from model.vehicle.vehicle import VehicleInfo
+from model.ocs import SafeGuardUtility,TrainService
+from model.track.track import TrackInfo
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_safeguard_curves,
@@ -42,7 +41,7 @@ safeguard_utility = SafeGuardUtility(
     max_curves_list=max_curves_list,
     factor=0.95,
 )
-track = Track(
+track = TrackInfo(
     slopes=slopes,
     slope_intervals=slope_intervals,
     speed_limits=speed_limits,
@@ -50,8 +49,8 @@ track = Track(
     ASA_aps=accessible_points,
     ASA_dps=dangerous_points,
 )
-vehicle = Vehicle(mass=317.5, numoftrainsets=5, length=128.5)
-task = Task(
+vehicle = VehicleInfo(mass=317.5, numoftrainsets=5, length=128.5)
+train_service = TrainService(
     start_position=longyang_start_position,
     start_speed=0.0,
     target_position=putong_end_position,
@@ -74,7 +73,7 @@ venv_train = DummyVecEnv(
             vehicle=vehicle,
             track=track,
             safeguard_utility=safeguard_utility,
-            task=task,
+            train_service=train_service,
             gamma=reward_discount,
             max_step_distance=ds,
         )

@@ -1,21 +1,21 @@
 import numpy as np
 import pytest
 
-from model.ecc import ECC
-from model.track import Track, TrackProfile
-from model.vehicle import Vehicle
+from model.common import ECC
+from model.track import TrackInfo, TrackProfile
+from model.vehicle import VehicleInfo
 
 
 @pytest.fixture(scope="module")
 def energy_consumption_calculator_case():
-    track = Track(
+    track = TrackInfo(
         slopes=np.asarray([0.0], dtype=np.float64),
         slope_intervals=np.asarray([0.0, 20000.0], dtype=np.float64),
         speed_limits=np.asarray([120.0 / 3.6], dtype=np.float64),
         speed_limit_intervals=np.asarray([0.0, 20000.0], dtype=np.float64),
     )
     track_profile = TrackProfile(track)
-    vehicle = Vehicle(mass=317.5, numoftrainsets=5, length=128.5)
+    vehicle = VehicleInfo(mass=317.5, numoftrainsets=5, length=128.5)
     ecc = ECC(
         R_m=0.2796,
         L_d=0.0002,

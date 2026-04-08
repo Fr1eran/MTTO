@@ -10,7 +10,7 @@ Numeric = Union[float, np.floating, NDArray[np.floating]]
 
 
 @dataclass
-class Track:
+class TrackInfo:
     slopes: NDArray[np.float64]  # 单位: %
     slope_intervals: NDArray[np.float64]  # 单位: m
     speed_limits: NDArray[np.float64]  # 单位: m/s
@@ -39,7 +39,7 @@ class TrackProfile:
 
     def __init__(
         self,
-        track: Track,
+        track: TrackInfo,
         *,
         dtype: DTypeLike = np.float64,
     ):

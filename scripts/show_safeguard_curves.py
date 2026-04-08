@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 
-from model.safe_guard_utility import SafeGuardUtility
+from model.ocs import SafeGuardUtility
 from utils.curve_plot import concatenate_curves_with_NaN
 from utils.data_loader import (
     load_acceleration_zones,

@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from model.track import Track, TrackProfile
+from model.track.track import TrackInfo, TrackProfile
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_slopes,
@@ -18,7 +18,7 @@ def track_profile():
 
     aps, dps = load_auxiliary_stopping_areas_ap_and_dp()
 
-    track = Track(
+    track = TrackInfo(
         slopes,
         slope_intervals,
         speed_limits.tolist(),

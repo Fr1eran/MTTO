@@ -2,9 +2,9 @@ import os
 import pickle
 import numpy as np
 
-from model.safe_guard_curves import SafeGuardCurves
-from model.vehicle import Vehicle
-from model.track import Track, TrackProfile
+from model.ocs import SafeGuardCurves
+from model.vehicle import VehicleInfo
+from model.track import TrackInfo, TrackProfile
 from utils.data_loader import (
     load_acceleration_zones,
     load_auxiliary_stopping_areas_ap_and_dp,
@@ -42,7 +42,7 @@ acceleration_zone_end = acceleration_zone_data["uplink"]["end"]
 # 区间限速
 speed_limits, speed_limit_intervals = load_speed_limits(to_mps=True)
 
-track = Track(
+track = TrackInfo(
     slopes,
     slope_intervals,
     speed_limits.tolist(),
@@ -52,7 +52,7 @@ track = Track(
 )
 trackprofile = TrackProfile(track=track)
 cal_SGC = SafeGuardCurves(trackprofile=trackprofile)
-vehicle = Vehicle(mass=317.5, numoftrainsets=5, length=128.5)
+vehicle = VehicleInfo(mass=317.5, numoftrainsets=5, length=128.5)
 
 # 终点站同样需要计算防护曲线
 # aps = np.append(aps, pa_begin)

@@ -1,9 +1,9 @@
 import matplotlib.pyplot as plt
 import numpy as np
 
-from model.vehicle import Vehicle
-from model.ecc import ECC
-from model.track import Track, TrackProfile
+from model.vehicle.vehicle import VehicleInfo
+from model.common.energy_consumption_calculator import ECC
+from model.track.track import TrackInfo, TrackProfile
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_excel,
@@ -45,7 +45,7 @@ speed_limits, speed_limit_intervals = load_speed_limits(to_mps=True)
 accessible_points, dangerous_points = load_auxiliary_stopping_areas_ap_and_dp()
 
 
-track = Track(
+track = TrackInfo(
     slopes,
     slope_intervals,
     speed_limits.tolist(),
@@ -55,7 +55,7 @@ track = Track(
 )
 trackprofile = TrackProfile(track=track)
 
-vehicle = Vehicle(mass=317.5, numoftrainsets=5, length=128.5)
+vehicle = VehicleInfo(mass=317.5, numoftrainsets=5, length=128.5)
 
 tec = ECC(
     R_m=0.2796, L_d=0.0002, R_k=50.0, L_k=0.000142, Tau=0.258, Psi_fd=3.9629, k_c=0.8

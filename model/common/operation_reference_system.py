@@ -1,9 +1,9 @@
 import numpy as np
 from numpy.typing import NDArray
 from typing import NamedTuple, TypedDict
-from model.vehicle import Vehicle
-from model.track import Track, TrackProfile
-from model.ecc import ECC
+from model.vehicle.vehicle import VehicleInfo
+from model.track.track import TrackInfo, TrackProfile
+from model.common.energy_consumption_calculator import ECC
 
 
 class GeneralOperation(NamedTuple):
@@ -44,7 +44,7 @@ class DescendOperation(TypedDict):
 class ORS:
     """Operation Reference System"""
 
-    def __init__(self, *, vehicle: Vehicle, track: Track, factor: float) -> None:
+    def __init__(self, *, vehicle: VehicleInfo, track: TrackInfo, factor: float) -> None:
         self.vehicle = vehicle
         self.track = track
         self.trackprofile = TrackProfile(track=track)

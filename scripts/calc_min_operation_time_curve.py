@@ -1,12 +1,10 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-from model.track import Track, TrackProfile
-from model.safe_guard_utility import SafeGuardUtility
-from model.vehicle import Vehicle
-from model.task import Task
-from model.ors import ORS
-from model.ecc import ECC
+from model.ocs import SafeGuardUtility,TrainService
+from model.track import TrackInfo, TrackProfile
+from model.vehicle import VehicleInfo
+from model.common import ORS,ECC
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_safeguard_curves,
@@ -34,7 +32,7 @@ safeguard_utility = SafeGuardUtility(
     factor=factor,
 )
 
-track = Track(
+track = TrackInfo(
     slopes,
     slope_intervals,
     speed_limits.tolist(),
@@ -42,8 +40,8 @@ track = Track(
     accessible_points,
     dangerous_points,
 )
-trackprofile = TrackProfile(track=track)
-vehicle = Vehicle(
+track_profile = TrackProfile(track=track)
+vehicle = VehicleInfo(
     mass=317.5,
     numoftrainsets=5,
     length=128.5,
@@ -51,7 +49,7 @@ vehicle = Vehicle(
     max_dec=1.0,
     levi_power_per_mass=1.7,
 )
-task = Task(
+train_service = TrainService(
     start_position=longyang_start_position,
     start_speed=0.0,
     target_position=putong_end_position,
@@ -76,7 +74,7 @@ begin_pos = longyang_start_position
 begin_speed = 0.0
 max_speed = float(np.max(speed_limits))
 
-end_pos = task.target_position
+end_pos = train_service.target_position
 end_speed = 0.0
 
 distance = 100.0
@@ -145,7 +143,7 @@ def draw_curve(pos, speed) -> bool:
         min_curve_pos_array, min_curve_speed_array = ors.calc_min_operation_time_curve(
             begin_pos=pos,
             begin_speed=speed,
-            end_pos=task.target_position,
+            end_pos=train_service.target_position,
             end_speed=0.0,
         )
 
@@ -164,7 +162,7 @@ def draw_curve(pos, speed) -> bool:
         T_min = ors.calc_min_operation_time(
             begin_pos=pos,
             begin_speed=speed,
-            end_pos=task.target_position,
+            end_pos=train_service.target_position,
             end_speed=0.0,
         )
 
@@ -172,7 +170,7 @@ def draw_curve(pos, speed) -> bool:
         PEC, LEC, total_operation_time = ors.calc_max_energy_and_min_operation_time(
             begin_pos=pos,
             begin_speed=speed,
-            end_pos=task.target_position,
+            end_pos=train_service.target_position,
             end_speed=0.0,
             distance=end_pos - pos,
             energy_con_calc=ecc,
