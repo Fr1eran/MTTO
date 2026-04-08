@@ -1,35 +1,39 @@
 import numpy as np
-import json
 import pytest
 
 from model.Vehicle import Vehicle
 from model.Track import Track
 from model.Task import Task
 from model.ORS import ORS
+from utils.data_loader import (
+    load_auxiliary_parking_areas,
+    load_slopes,
+    load_speed_limits,
+    load_station_zp_positions,
+)
 
 
 @pytest.fixture(scope="module")
 def ors():
     # 坡度，百分位
-    with open("data/rail/raw/slopes.json", "r", encoding="utf-8") as f:
-        slope_data = json.load(f)
-        slopes = slope_data["slopes"]
-        slope_intervals = slope_data["intervals"]
+    slopes, slope_intervals = load_slopes()
 
     # 区间限速
-    with open("data/rail/raw/speed_limits.json", "r", encoding="utf-8") as f:
-        speedlimit_data = json.load(f)
-        speed_limits = speedlimit_data["speed_limits"]
-        speed_limits = np.asarray(speed_limits) / 3.6
-        speed_limit_intervals = speedlimit_data["intervals"]
+    speed_limits, speed_limit_intervals = load_speed_limits(to_mps=True)
+
+    aps, dps = load_auxiliary_parking_areas()
 
     # 车站
-    with open("data/rail/raw/stations.json", "r", encoding="utf-8") as f:
-        stations_data = json.load(f)
-        ly_zp = stations_data["LY"]["zp"]
-        pa_zp = stations_data["PA"]["zp"]
+    ly_zp, pa_zp = load_station_zp_positions()
 
-    track = Track(slopes, slope_intervals, speed_limits.tolist(), speed_limit_intervals)
+    track = Track(
+        slopes,
+        slope_intervals,
+        speed_limits.tolist(),
+        speed_limit_intervals,
+        ASA_aps=aps,
+        ASA_dps=dps,
+    )
     vehicle = Vehicle(mass=317.5, numoftrainsets=5, length=128.5)
     task = Task(
         start_position=ly_zp,

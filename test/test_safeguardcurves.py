@@ -1,4 +1,3 @@
-import json
 import os
 import sys
 
@@ -9,24 +8,31 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from model.SafeGuard import SafeGuardCurves
 from model.Vehicle import Vehicle
 from model.Track import Track, TrackProfile
+from utils.data_loader import (
+    load_auxiliary_parking_areas,
+    load_slopes,
+    load_speed_limits,
+)
 
 
 @pytest.fixture(scope="module")
 def sgc_and_vehicle():
     # 坡度，百分位
-    with open("data/rail/raw/slopes.json", "r", encoding="utf-8") as f:
-        slope_data = json.load(f)
-        slopes = slope_data["slopes"]
-        slope_intervals = slope_data["intervals"]
+    slopes, slope_intervals = load_slopes()
 
     # 区间限速
-    with open("data/rail/raw/speed_limits.json", "r", encoding="utf-8") as f:
-        speedlimit_data = json.load(f)
-        speed_limits = speedlimit_data["speed_limits"]
-        speed_limits = np.asarray(speed_limits) / 3.6
-        speed_limit_intervals = speedlimit_data["intervals"]
+    speed_limits, speed_limit_intervals = load_speed_limits(to_mps=True)
 
-    track = Track(slopes, slope_intervals, speed_limits.tolist(), speed_limit_intervals)
+    aps, dps = load_auxiliary_parking_areas()
+
+    track = Track(
+        slopes,
+        slope_intervals,
+        speed_limits.tolist(),
+        speed_limit_intervals,
+        ASA_aps=aps,
+        ASA_dps=dps,
+    )
     trackprofile = TrackProfile(track=track)
     cal_SGC = SafeGuardCurves(trackprofile=trackprofile)
     vehicle = Vehicle(mass=317.5, numoftrainsets=5, length=128.5)
@@ -35,9 +41,7 @@ def sgc_and_vehicle():
 
 def test_cal_levi_curves(sgc_and_vehicle):
     cal_SGC, vehicle = sgc_and_vehicle
-    with open("data/rail/raw/auxiliary_parking_areas.json", "r", encoding="utf-8") as f:
-        apa_data = json.load(f)
-        aps = apa_data["accessible_points"]
+    aps, _ = load_auxiliary_parking_areas()
     curves = cal_SGC.CalcLeviCurves(aps, vehicle, ds=1)
     # 检查返回类型和内容
     assert isinstance(curves, list)
@@ -50,9 +54,7 @@ def test_cal_levi_curves(sgc_and_vehicle):
 
 def test_cal_brake_curves(sgc_and_vehicle):
     cal_SGC, vehicle = sgc_and_vehicle
-    with open("data/rail/raw/auxiliary_parking_areas.json", "r", encoding="utf-8") as f:
-        apa_data = json.load(f)
-        dps = apa_data["dangerous_points"]
+    _, dps = load_auxiliary_parking_areas()
     curves = cal_SGC.CalcBrakeCurves(dps, vehicle, ds=1)
     assert isinstance(curves, list)
     assert all(isinstance(item, np.ndarray) and item.shape[0] == 2 for item in curves)

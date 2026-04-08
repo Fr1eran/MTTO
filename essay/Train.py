@@ -1,50 +1,45 @@
-import json
 import os
 import sys
-import pickle
 import numpy as np
-import matplotlib.pyplot as plt
-from datetime import datetime
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from rl.Callbacks import TensorboardCallback
-from rl.MTTOEnv import MTTOEnv
+from rl.env_factory import make_env
 from model.Vehicle import Vehicle
 from model.SafeGuard import SafeGuardUtility
 from model.Track import Track
 from model.Task import Task
-from gymnasium.wrappers import FlattenObservation, RecordVideo, RecordEpisodeStatistics
+from utils.data_loader import (
+    load_auxiliary_parking_areas,
+    load_safeguard_curves,
+    load_slopes,
+    load_speed_limits,
+    load_station_zp_positions,
+)
 from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor, VecNormalize
+
+
+# 学习率线性衰减
+def linear_schedule(initial_value: float):
+    def func(progress_remaining: float) -> float:
+        return progress_remaining * initial_value
+
+    return func
 
 
 # 读取线路数据
-with open("data/rail/raw/slopes.json", "r", encoding="utf-8") as f:
-    slope_data = json.load(f)
-    slopes = slope_data["slopes"]
-    slope_intervals = slope_data["intervals"]
-with open("data/rail/raw/speed_limits.json", "r", encoding="utf-8") as f:
-    sl_data = json.load(f)
-    s_limits = sl_data["speed_limits"]
-    s_limits = np.asarray(s_limits, dtype=np.float64) / 3.6
-    s_intervals = sl_data["intervals"]
-# 读取车站数据
-with open("data/rail/raw/stations.json", "r", encoding="utf-8") as f:
-    stations_data = json.load(f)
-    ly_begin = stations_data["LY"]["begin"]
-    ly_zp = stations_data["LY"]["zp"]
-    ly_end = stations_data["LY"]["end"]
-    pa_begin = stations_data["PA"]["begin"]
-    pa_zp = stations_data["PA"]["zp"]
-    pa_end = stations_data["PA"]["end"]
-# 读取安全防护曲线
-with open("data/rail/safeguard/levi_curves_list.pkl", "rb") as f:
-    levi_curves_list = pickle.load(f)
-with open("data/rail/safeguard/brake_curves_list.pkl", "rb") as f:
-    brake_curves_list = pickle.load(f)
+slopes, slope_intervals = load_slopes()
+speed_limits, speed_limit_intervals = load_speed_limits(to_mps=True, dtype=np.float64)
+aps, dps = load_auxiliary_parking_areas()
+ly_zp, pa_zp = load_station_zp_positions()
+levi_curves_list, brake_curves_list = load_safeguard_curves(
+    "levi_curves_list", "brake_curves_list"
+)
 
 sgu = SafeGuardUtility(
-    speed_limits=s_limits,
-    speed_limit_intervals=s_intervals,
+    speed_limits=speed_limits,
+    speed_limit_intervals=speed_limit_intervals,
     min_curves_list=levi_curves_list,
     max_curves_list=brake_curves_list,
     factor=0.95,
@@ -52,8 +47,10 @@ sgu = SafeGuardUtility(
 track = Track(
     slopes=slopes,
     slope_intervals=slope_intervals,
-    speed_limits=s_limits,
-    speed_limit_intervals=s_intervals,
+    speed_limits=speed_limits,
+    speed_limit_intervals=speed_limit_intervals,
+    ASA_aps=aps,
+    ASA_dps=dps,
 )
 vehicle = Vehicle(mass=317.5, numoftrainsets=5, length=128.5)
 task = Task(
@@ -68,133 +65,65 @@ task = Task(
 
 reward_discount = 0.99
 ds = 100.0
+model_save_path = "data/optimal/RL/ppo_mtto"
+vecnormalize_save_path = "data/optimal/RL/vecnormalize.pkl"
+os.makedirs(os.path.dirname(model_save_path), exist_ok=True)
 
 # 创建训练环境
-mttoenv_train = MTTOEnv(
-    vehicle=vehicle,
-    track=track,
-    safeguardutil=sgu,
-    task=task,
-    gamma=reward_discount,
-    max_step_distance=ds,
+venv_train = DummyVecEnv(
+    [
+        lambda: make_env(
+            vehicle=vehicle,
+            track=track,
+            safeguardutility=sgu,
+            task=task,
+            gamma=reward_discount,
+            max_step_distance=ds,
+        )
+    ]
 )
-
-# 创建评估环境
-mttoenv_eval = MTTOEnv(
-    vehicle=vehicle,
-    track=track,
-    safeguardutil=sgu,
-    task=task,
-    gamma=reward_discount,
-    max_step_distance=ds,
-    render_mode="rgb_array",
-)
-
-# 记录训练过程的性能数据
-num_eval_episodes_during_train = 1000
-
-mttoenv_train = RecordEpisodeStatistics(
-    FlattenObservation(mttoenv_train),
-    buffer_length=num_eval_episodes_during_train,
-)
-
-# mttoenv_train = Monitor(
-#     FlattenObservation(mttoenv_train),
-# )
-
-
-# 记录训练后的运行轨迹
-eval_name_prefix = f"eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
-mttoenv_eval = RecordVideo(
-    FlattenObservation(mttoenv_eval),
-    video_folder="mtto_eval_video",
-    name_prefix=eval_name_prefix,
-    episode_trigger=lambda x: True,
-    fps=10,
+venv_train = VecMonitor(venv_train)
+venv_train = VecNormalize(
+    venv=venv_train, norm_obs=False, norm_reward=True, gamma=reward_discount
 )
 
 model = PPO(
     "MlpPolicy",
-    mttoenv_train,
+    venv_train,
     device="cpu",
     verbose=1,
-    learning_rate=1e-3,
-    # n_steps=2048,
-    # batch_size=64,
-    # n_epochs=10,
-    # gamma=reward_discount,  # 提高折扣因子
-    # gae_lambda=0.95,
-    clip_range=0.3,
+    learning_rate=linear_schedule(3e-4),
+    n_steps=2048,
+    batch_size=256,
+    n_epochs=15,
+    gamma=reward_discount,  # 提高折扣因子
+    gae_lambda=0.95,
+    clip_range=0.2,  # 缩小clip区间, 防止策略突变
     # clip_range_vf=None,
     # normalize_advantage=True,
-    ent_coef=0.001,  # 增加探索
-    # vf_coef=1.0,  # 增加价值函数权重
-    # max_grad_norm=0.5,
+    ent_coef=0.01,  # 增加探索
+    vf_coef=0.5,  # 增加价值函数权重
+    max_grad_norm=0.5,
     tensorboard_log="./mtto_ppo_tensorboard_logs/",  # TensorBoard日志存放目录
-    # policy_kwargs=dict(
-    #     net_arch=dict(pi=[512, 256, 128], vf=[512, 256, 128]),  # 改进网络结构
-    # ),
+    policy_kwargs=dict(
+        net_arch=dict(pi=[256, 256], vf=[256, 256]),  # 改进网络结构
+    ),
 )
 
 
 # 训练，并使用tensorboard记录回报和网络损失变化
 model.learn(
-    total_timesteps=100_000,
+    total_timesteps=200_000,
     callback=TensorboardCallback(),
-    log_interval=1,
+    log_interval=5,
     tb_log_name="trainning_log",
 )
-
-# 打印训练过程的性能数据
-print("\nTrain Evaluation Summary:")
-
-# 绘制训练过程的性能数据
-fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
-# 总回报变化曲线
-axes[0].plot(list(mttoenv_train.return_queue), linewidth=1.5)
-axes[0].set_xlabel("Episode")
-axes[0].set_ylabel("Reward")
-axes[0].set_title("Episode Reward Over Training")
-axes[0].grid(True, alpha=0.3)
-
-# 回合长度变化曲线
-axes[1].plot(list(mttoenv_train.length_queue), linewidth=1.5, color="orange")
-axes[1].set_xlabel("Episode")
-axes[1].set_ylabel("Episode Length")
-axes[1].set_title("Episode Length Over Training")
-axes[1].grid(True, alpha=0.3)
-
-plt.tight_layout()
-plt.show()
+model.save(model_save_path)
+venv_train.save(vecnormalize_save_path)
+venv_train.close()
 
 
-user_input = (
-    input("Training finished. Do you want to continue to evaluation? (y/n): ")
-    .strip()
-    .lower()
-)
-if user_input != "y":
-    print("Exiting without evaluation.")
-    sys.exit(0)
-
-# Evaluate
-# mean_reward_after, std_reward_after = evaluate_policy(
-#     model, maglevttoenv_eval, n_eval_episodes=1, deterministic=True, render=True
-# )
-
-reward_after = 0.0
-obs, info = mttoenv_eval.reset()
-episode_over = False
-
-while not episode_over:
-    action, _ = model.predict(obs, deterministic=True)
-    obs, reward, terminated, truncated, info = mttoenv_eval.step(action)
-    reward_after += float(reward)
-    episode_over = terminated or truncated
-
-mttoenv_eval.close()  # 必须调用，否则无法保存视频
-
-print("Evaluate after train:")
-print(f"reward_after: {reward_after}")
+print("Training finished.")
+print(f"Model saved to: {model_save_path}.zip")
+print(f"VecNormalize stats saved to: {vecnormalize_save_path}")
+print("Run essay/Evaluate.py to evaluate the trained policy.")

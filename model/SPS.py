@@ -10,12 +10,21 @@ class SPS:
     步进到下个辅助停车区
     """
 
-    def __init__(self, sgu: SafeGuardUtility, numofSPS: int, T_r: float) -> None:
+    def __init__(
+        self,
+        sgu: SafeGuardUtility,
+        ASA_ap_list: list[float],
+        ASA_dp_list: list[float],
+        T_s: float,
+    ) -> None:
         self.sgu: SafeGuardUtility = sgu  # 进路安全防护实例
         self.IsPrevSPSReqDone: bool = True  # 上次步进请求处理完成标志
         self.SPSReqTimeStamp: float = 0.0  # 步进请求发起时间戳
-        self.numofSPS: int = numofSPS  # 进路停车点总数
-        self.T_r: float = T_r  # 步进冗余时间
+        assert len(ASA_ap_list) == len(ASA_dp_list), "停车可达点与危险点数量应一致"
+        self.ASA_ap_list: list[float] = ASA_ap_list  # 停车区可达点列表
+        self.ASA_dp_list: list[float] = ASA_dp_list  # 停车区危险点列表
+        self.numofSPS: int = len(self.ASA_ap_list)  # 办理进路上停车区总数(加上车站)
+        self.T_s: float = T_s  # 步进从发起到完成的平均耗时
 
     def StepToNextSP(
         self,
@@ -43,19 +52,19 @@ class SPS:
                 # 未步进到最后一个停车点
                 # 可以尝试发起步进请求
                 (
-                    next_min_speed,
+                    next_guard_curve_min_speed,
                     _,
-                ) = self.sgu.GetCurrentMinAndMaxSpeed(
+                ) = self.sgu.GetMinAndMaxSpeed(
                     current_pos=current_pos,
                     current_sp=next_sp,
                 )
-                if current_speed > next_min_speed:
+                if current_speed > next_guard_curve_min_speed:
                     # 满足步进速度条件，立即发起步进请求
                     self.IsPrevSPSReqDone = False  # 设置标志位
                     self.SPSReqTimeStamp = current_time  # 记录发起步进请求时间戳
             return current_sp
         else:
-            if current_time > self.SPSReqTimeStamp + self.T_r:
+            if current_time > self.SPSReqTimeStamp + self.T_s:
                 # 此时已完成步进
                 # 设置执行完成标志
                 self.IsPrevSPSReqDone = True
@@ -70,3 +79,8 @@ class SPS:
         """
         self.IsPrevSPSReqDone = True
         self.SPSReqTimeStamp = 0.0
+
+    def GetASATargetPointPosition(self, sp: int) -> float:
+        if sp < 0 or sp >= self.numofSPS:
+            raise IndexError(f"停车点编号 {sp} 超出范围 [0, {self.numofSPS - 1}]")
+        return (self.ASA_ap_list[sp] + self.ASA_dp_list[sp]) / 2

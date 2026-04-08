@@ -1,7 +1,5 @@
-import json
 import os
 import sys
-import pickle
 
 import numpy as np
 import pytest
@@ -12,6 +10,13 @@ from model.Vehicle import Vehicle
 from model.SafeGuard import SafeGuardUtility
 from model.Track import Track
 from model.Task import Task
+from utils.data_loader import (
+    load_auxiliary_parking_areas,
+    load_safeguard_curves,
+    load_slopes,
+    load_speed_limits,
+    load_station_zp_positions,
+)
 
 from gymnasium.utils.env_checker import check_env
 
@@ -19,28 +24,13 @@ from gymnasium.utils.env_checker import check_env
 @pytest.fixture(scope="module")
 def mttoenv():
     # 读取线路数据
-    with open("data/rail/raw/slopes.json", "r", encoding="utf-8") as f:
-        slope_data = json.load(f)
-        slopes = slope_data["slopes"]
-        slope_intervals = slope_data["intervals"]
-    with open("data/rail/raw/speed_limits.json", "r", encoding="utf-8") as f:
-        sl_data = json.load(f)
-        s_limits = sl_data["speed_limits"]
-        s_intervals = sl_data["intervals"]
-    # 读取车站数据
-    with open("data/rail/raw/stations.json", "r", encoding="utf-8") as f:
-        stations_data = json.load(f)
-        # ly_begin = stations_data["LY"]["begin"]
-        ly_zp = stations_data["LY"]["zp"]
-        # ly_end = stations_data["LY"]["end"]
-        # pa_begin = stations_data["PA"]["begin"]
-        pa_zp = stations_data["PA"]["zp"]
-        # pa_end = stations_data["PA"]["end"]
-    # 读取防护曲线
-    with open("data/rail/safeguard/min_curves_list.pkl", "rb") as f:
-        min_curves_list = pickle.load(f)
-    with open("data/rail/safeguard/max_curves_list.pkl", "rb") as f:
-        max_curves_list = pickle.load(f)
+    slopes, slope_intervals = load_slopes()
+    s_limits, s_intervals = load_speed_limits(to_mps=True)
+    aps, dps = load_auxiliary_parking_areas()
+    ly_zp, pa_zp = load_station_zp_positions()
+    min_curves_list, max_curves_list = load_safeguard_curves(
+        "min_curves_list", "max_curves_list"
+    )
 
     sgu = SafeGuardUtility(
         speed_limits=s_limits,
@@ -55,6 +45,8 @@ def mttoenv():
         slope_intervals=slope_intervals,
         speed_limits=s_limits,
         speed_limit_intervals=s_intervals,
+        ASA_aps=aps,
+        ASA_dps=dps,
     )
 
     vehicle = Vehicle(mass=317.5, numoftrainsets=5, length=128.5)
@@ -71,7 +63,7 @@ def mttoenv():
     maglevttoenv = MTTOEnv(
         vehicle=vehicle,
         track=track,
-        safeguardutil=sgu,
+        safeguardutility=sgu,
         task=task,
         gamma=0.995,
         max_step_distance=10.0,
@@ -83,52 +75,85 @@ def test_reset(mttoenv: MTTOEnv):
     obs, info = mttoenv.reset()
     assert isinstance(obs, dict), "obs should be a dictionary"
     expected_keys = [
-        "agent_remainning_displacement",
-        "agent_current_speed",
-        "agent_remainning_schedule_time",
+        "remaining_distance",
+        "current_speed",
+        "current_acc",
+        "remaining_schedule_time",
         "current_slope",
-        "next_dslope",
-        "displacement_between_next_dslope",
-        "current_vlimit",
-        "next_dvlimit",
-        "displacement_between_next_dvlimit",
+        "current_max_speed",
+        "current_min_speed",
+        "next_slope",
+        "next_max_speed",
+        "next_min_speed",
+        "current_latest_traction_intervation_point",
+        "current_latest_braking_intervation_point",
     ]
     for key in expected_keys:
         assert key in obs, f"Missing key in obs: {key}"
     # Check types of some important fields
-    assert isinstance(obs["agent_remainning_displacement"], np.ndarray)
-    assert isinstance(obs["agent_current_speed"], np.ndarray)
-    assert isinstance(obs["agent_remainning_schedule_time"], np.ndarray)
+    assert isinstance(obs["remaining_distance"], np.ndarray)
+    assert isinstance(obs["current_speed"], np.ndarray)
+    assert isinstance(obs["current_acc"], np.ndarray)
+    assert isinstance(obs["remaining_schedule_time"], np.ndarray)
     assert isinstance(obs["current_slope"], np.ndarray)
-    assert isinstance(obs["next_dslope"], np.ndarray)
-    assert isinstance(obs["displacement_between_next_dslope"], np.ndarray)
-    assert isinstance(obs["current_vlimit"], np.ndarray)
-    assert isinstance(obs["next_dvlimit"], np.ndarray)
-    assert isinstance(obs["displacement_between_next_dvlimit"], np.ndarray)
-    np.testing.assert_allclose(obs["agent_remainning_displacement"], 29270.046 - 135.0)
-    np.testing.assert_allclose(obs["agent_current_speed"], 0.0)
-    np.testing.assert_allclose(obs["agent_remainning_schedule_time"], 440.0)
+    assert isinstance(obs["current_max_speed"], np.ndarray)
+    assert isinstance(obs["current_min_speed"], np.ndarray)
+    assert isinstance(obs["next_slope"], np.ndarray)
+    assert isinstance(obs["next_max_speed"], np.ndarray)
+    assert isinstance(obs["next_min_speed"], np.ndarray)
+    assert isinstance(obs["current_latest_traction_intervation_point"], np.ndarray)
+    assert isinstance(obs["current_latest_braking_intervation_point"], np.ndarray)
+    np.testing.assert_allclose(obs["remaining_distance"], 0.9953664)
+    np.testing.assert_allclose(obs["current_speed"], 0.0)
+    np.testing.assert_allclose(obs["current_acc"], 0.0)
+    np.testing.assert_allclose(obs["remaining_schedule_time"], 1.0)
     np.testing.assert_allclose(obs["current_slope"], 0.0)
-    np.testing.assert_allclose(obs["next_dslope"], -0.0154)
-    np.testing.assert_allclose(obs["displacement_between_next_dslope"], 2748.4972)
-    np.testing.assert_allclose(obs["current_vlimit"], 60.0)
-    np.testing.assert_allclose(obs["next_dvlimit"], 40.0)
-    np.testing.assert_allclose(obs["displacement_between_next_dvlimit"], 105.0)
-    assert "total_energy_consumption" in info, (
-        "Missing key in info: total_energy_consumption"
+    np.testing.assert_allclose(obs["current_max_speed"], 0.0)
+    np.testing.assert_allclose(obs["current_min_speed"], 0.0)
+    np.testing.assert_allclose(obs["next_slope"], 0.0)
+    np.testing.assert_allclose(obs["next_max_speed"], 0.032199375331401825, rtol=1e-6)
+    np.testing.assert_allclose(obs["next_min_speed"], 0.0)
+    assert "current_energy_consumption" in info, (
+        "Missing key in info: current_energy_consumption"
     )
-    assert isinstance(info["total_energy_consumption"], float)
-    np.testing.assert_allclose(info["total_energy_consumption"], 0.0)
+    assert "current_operation_time" in info, (
+        "Missing key in info: current_operation_time"
+    )
+    assert "docking_position" in info, "Missing key in info: docking_position"
+    assert isinstance(info["current_energy_consumption"], float)
+    assert isinstance(info["current_operation_time"], float)
+    assert isinstance(info["docking_position"], float)
+    np.testing.assert_allclose(info["current_energy_consumption"], 0.0)
+    np.testing.assert_allclose(info["current_operation_time"], 0.0)
+    np.testing.assert_allclose(info["docking_position"], 135.0)
 
 
 def test_cal_energy_consumption(mttoenv: MTTOEnv):
     obs, info = mttoenv.reset()
-    energy_consumption1 = mttoenv._cal_energy_consumption(
-        acc=0.0, displacement=0.0, travel_time=0.0
+    mec1, lec1 = mttoenv.ecc.CalcEnergy(
+        begin_pos=mttoenv.current_pos,
+        begin_speed=mttoenv.current_speed,
+        acc=0.0,
+        distance=0.0,
+        direction=mttoenv.direction,
+        operation_time=0.0,
+        vehicle=mttoenv.vehicle,
+        trackprofile=mttoenv.trackprofile,
     )
-    energy_consumption2 = mttoenv._cal_energy_consumption(
-        acc=1.0, displacement=100.0, travel_time=14.142
+    energy_consumption1 = mec1 + lec1
+
+    mec2, lec2 = mttoenv.ecc.CalcEnergy(
+        begin_pos=mttoenv.current_pos,
+        begin_speed=mttoenv.current_speed,
+        acc=1.0,
+        distance=100.0,
+        direction=mttoenv.direction,
+        operation_time=14.142,
+        vehicle=mttoenv.vehicle,
+        trackprofile=mttoenv.trackprofile,
     )
+    energy_consumption2 = mec2 + lec2
+
     print(f"acc=0.0 step energy consumption is {energy_consumption1}")
     print(f"acc=1.0 step energy consumption is {energy_consumption2}")
     assert energy_consumption1 >= 0, "Energy consumption should be non-negative"

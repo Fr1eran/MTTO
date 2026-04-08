@@ -98,7 +98,7 @@ class ECC:
             vehicle,
             acc_arr,
             speed_arr,
-            trackprofile.GetSlope(pos_arr, interpolate=True),
+            trackprofile.GetSlope(pos_arr),
         )
 
         mechanic_energy_consumption = cumulative_trapezoid(
@@ -204,7 +204,7 @@ class ECC:
                 vehicle=vehicle,
                 acc=acc_for_force,
                 speed=begin_speed,
-                slope=trackprofile.GetSlope(pos=begin_pos, interpolate=True),
+                slope=trackprofile.GetSlope(pos=begin_pos),
             )
             mechanic_energy_consumption = np.abs(F_longitudinal * distance)
             motor_energy_consumption = 0.0

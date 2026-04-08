@@ -1,5 +1,3 @@
-import json
-import pickle
 import os
 import sys
 import numpy as np
@@ -12,31 +10,22 @@ from model.Vehicle import Vehicle
 from model.Task import Task
 from model.ORS import ORS
 from model.ECC import ECC
+from utils.data_loader import (
+    load_auxiliary_parking_areas,
+    load_safeguard_curves,
+    load_slopes,
+    load_speed_limits,
+    load_station_zp_positions,
+)
 from utils.misc import SetChineseFont
 
-# 坡度，百分位
-with open("data/rail/raw/slopes.json", "r", encoding="utf-8") as f:
-    slope_data = json.load(f)
-    slopes = slope_data["slopes"]
-    slope_intervals = slope_data["intervals"]
-
-# 区间限速
-with open("data/rail/raw/speed_limits.json", "r", encoding="utf-8") as f:
-    speedlimit_data = json.load(f)
-    speed_limits = speedlimit_data["speed_limits"]
-    speed_limits = np.asarray(speed_limits) / 3.6
-    speed_limit_intervals = speedlimit_data["intervals"]
-
-# 车站
-with open("data/rail/raw/stations.json", "r", encoding="utf-8") as f:
-    stations_data = json.load(f)
-    ly_zp = stations_data["LY"]["zp"]
-    pa_zp = stations_data["PA"]["zp"]
-
-with open("data/rail/safeguard/min_curves_list.pkl", "rb") as f:
-    min_curves_list = pickle.load(f)
-with open("data/rail/safeguard/max_curves_list.pkl", "rb") as f:
-    max_curves_list = pickle.load(f)
+slopes, slope_intervals = load_slopes()
+speed_limits, speed_limit_intervals = load_speed_limits(to_mps=True)
+aps, dps = load_auxiliary_parking_areas()
+ly_zp, pa_zp = load_station_zp_positions()
+levi_curves_list, brake_curves_list = load_safeguard_curves(
+    "levi_curves_list", "brake_curves_list"
+)
 
 
 factor: float = 0.99
@@ -48,7 +37,9 @@ sgu = SafeGuardUtility(
     factor=factor,
 )
 
-track = Track(slopes, slope_intervals, speed_limits.tolist(), speed_limit_intervals)
+track = Track(
+    slopes, slope_intervals, speed_limits.tolist(), speed_limit_intervals, aps, dps
+)
 trackprofile = TrackProfile(track=track)
 vehicle = Vehicle(
     mass=317.5,
