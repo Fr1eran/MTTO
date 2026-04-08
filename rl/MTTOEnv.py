@@ -46,7 +46,7 @@ class MTTOEnv(gym.Env):
         self,
         vehicle: Vehicle,
         track: Track,
-        safeguardutil: SafeGuardUtility,
+        safeguardutility: SafeGuardUtility,
         task: Task,
         gamma: float,
         max_step_distance: float,
@@ -63,7 +63,7 @@ class MTTOEnv(gym.Env):
         self.trackprofile = TrackProfile(track=self.track)
 
         # 磁浮列车安全防护实例
-        self.safeguardutil = safeguardutil
+        self.safeguardutil = safeguardutility
 
         # 运行任务约束
         self.task = task
@@ -628,18 +628,14 @@ class MTTOEnv(gym.Env):
 
         if not truncated:
             if terminated:
-                reward_total = self._get_reward_goal() + 10.0
+                reward_total = self._get_reward_goal() + 20.0
             else:
                 reward_total = self._get_reward_dense()
         else:
             progress = (
                 abs(self.current_pos - self.task.start_position) / self.whole_distance
             )
-            reward_total = -15.0 * (1.0 - progress) - max(
-                0,
-                self.current_min_speed - self.current_speed,
-                self.current_speed - self.current_max_speed,
-            )
+            reward_total = -30.0 * (1.0 - progress)
 
         self.rewards_info["reward_total"] = reward_total
 
@@ -734,18 +730,19 @@ class MTTOEnv(gym.Env):
         target_pos: float,
     ) -> float:
         distanceToTarget = abs(target_pos - pos)
-
         center_speed = (max_speed + min_speed) / 2.0
-        safe_margin = (max_speed - min_speed) / 2.0
+        safe_margin = max((max_speed - min_speed) / 2.0, 0.5)
 
-        safe_margin = max(safe_margin, 1e-3)
+        # 基础偏离惩罚(二次方项, 引导列车走中间)
+        norm_speed_diff = (speed - center_speed) / safe_margin
+        phi_base = -5.0 * (norm_speed_diff**2)
 
-        norm_speed = (speed - center_speed) / safe_margin
+        # 边界壁垒
 
         # 靠近目标位置时，适当增大惩罚力度
-        scale = 1.0 + 1.0 * np.exp(-0.002 * distanceToTarget)
+        scale = 1.0 + 1.0 * np.exp(-0.001 * distanceToTarget)
 
-        return -4.0 * scale * norm_speed**2
+        return scale * phi_base
 
     def _potential_safety_position(
         self, pos: float, min_pos: float, max_pos: float, target_pos: float
@@ -779,7 +776,8 @@ class MTTOEnv(gym.Env):
         delta_acc = abs(self.last_state["acc"] - self.current_acc)
         # 使用指数衰减式的钟形曲线
         norm_jerk = delta_acc / (self.task.max_acc_change)
-        return -0.02 * (1 - np.exp(-2.0 * norm_jerk))
+
+        return -0.1 * (1 - np.exp(-2.0 * norm_jerk))
 
     def _get_reward_punctuality_dense(self) -> float:
         phi_curr = self._potential_punctuality(
@@ -834,15 +832,23 @@ class MTTOEnv(gym.Env):
         return self.gamma * phi_curr - phi_prev
 
     def _potential_docking(self, pos: float, speed: float):
-        sigma_d = 1000.0
-        sigma_v = 40.0
+        dist_error = self.task.target_position - pos
 
-        distance_error = self.task.target_position - pos
+        # 广域引导: 在距离目标5km时就知道终点在哪
+        phi_wide = (
+            1.0
+            * np.exp(-(dist_error**2) / (2.0 * 2000.0**2))
+            * np.exp(-(speed**2) / (2.0 * 50.0**2))
+        )
 
-        distance_term = np.exp(-(distance_error**2) / (2.0 * sigma_d**2))
-        speed_term = np.exp(-(speed**2) / (2.0 * sigma_v**2))
+        # 精确引导
+        phi_tight = (
+            4.0
+            * np.exp(-(dist_error**2) / (2.0 * 100.0**2))
+            * np.exp(-(speed**2) / (2.0 * 5.0**2))
+        )
 
-        return 2.0 * distance_term * speed_term
+        return phi_wide + phi_tight
 
     def _get_reward_goal(
         self,

@@ -1,4 +1,3 @@
-import json
 import os
 import sys
 
@@ -7,27 +6,22 @@ import pytest
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from model.Track import Track, TrackProfile
+from utils.data_loader import (
+    load_auxiliary_parking_areas,
+    load_slopes,
+    load_speed_limits,
+)
 
 
 @pytest.fixture(scope="module")
 def trackprofile():
     # 坡度，百分位
-    with open("data/rail/raw/slopes.json", "r", encoding="utf-8") as f:
-        slope_data = json.load(f)
-        slopes = slope_data["slopes"]
-        slope_intervals = slope_data["intervals"]
+    slopes, slope_intervals = load_slopes()
 
     # 区间限速
-    with open("data/rail/raw/speed_limits.json", "r", encoding="utf-8") as f:
-        speedlimit_data = json.load(f)
-        speed_limits = speedlimit_data["speed_limits"]
-        speed_limits = np.asarray(speed_limits) / 3.6
-        speed_limit_intervals = speedlimit_data["intervals"]
+    speed_limits, speed_limit_intervals = load_speed_limits(to_mps=True)
 
-    with open("data/rail/raw/auxiliary_parking_areas.json", "r", encoding="utf-8") as f:
-        apa_data = json.load(f)
-        aps = apa_data["accessible_points"]
-        dps = apa_data["dangerous_points"]
+    aps, dps = load_auxiliary_parking_areas()
 
     track = Track(
         slopes,

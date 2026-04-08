@@ -1,11 +1,11 @@
 import numpy as np
-import pickle
 import matplotlib.pyplot as plt
 import os
 import sys
 from typing import Any, cast
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from utils.data_loader import load_safeguard_curves
 from utils.misc import SetChineseFont
 
 SetChineseFont()
@@ -19,43 +19,39 @@ def calc_potential_safety_speed(pos, speed, min_speed, max_speed, target_pos):
 
     速度带中间位置势能最大
     """
-    distanceToTarget = np.abs(target_pos - pos)
+    distanceToTarget = abs(target_pos - pos)
     center_speed = (max_speed + min_speed) / 2.0
-    safe_margin = (max_speed - min_speed) / 2.0
+    safe_margin = np.maximum((max_speed - min_speed) / 2.0, 0.5)
 
-    # 防止除零错误
-    safe_margin = np.maximum(safe_margin, 1e-3)
+    # 基础偏离惩罚(二次方项, 引导列车走中间)
+    norm_speed_diff = (speed - center_speed) / safe_margin
+    phi_base = -5.0 * (norm_speed_diff**2)
 
-    norm_speed = (speed - center_speed) / safe_margin
+    # 边界壁垒
 
-    # 距离敏感系数
+    # 靠近目标位置时，适当增大惩罚力度
     scale = 1.0 + 1.0 * np.exp(-0.001 * distanceToTarget)
 
-    return -4.0 * scale * (norm_speed**2)
+    return scale * phi_base
 
 
 def calc_potential_safety_spatial(pos, min_pos, max_pos, target_pos):
     distanceToTarget = np.abs(target_pos - pos)
-
     center_pos = (max_pos + min_pos) / 2.0
     safe_margin = (max_pos - min_pos) / 2.0
 
-    safe_margin = np.maximum(safe_margin, 1e-3)
+    norm_pos_diff = (pos - center_pos) / safe_margin
+    phi_base = -5.0 * (norm_pos_diff**2)
 
-    norm_pos = (pos - center_pos) / safe_margin
+    scale = 1.0 + 1.0 * np.exp(-0.001 * distanceToTarget)
 
-    scale = 1.0 + 1.0 * np.exp(-0.002 * distanceToTarget)
-
-    return -4.0 * scale * (norm_pos**2)
+    return scale * phi_base
 
 
-def calc_potential_stop(
+def calc_potential_docking(
     pos,
     speed,
     target_pos,
-    k_p=5.0,
-    sigma_d=120.0,
-    sigma_v=20.0 / 3.6,
 ):
     """
     向量化停站势函数（对应图中公式）
@@ -63,16 +59,23 @@ def calc_potential_stop(
     Phi_P(s) = K_P * exp(-d^2 / (2 * sigma_d^2)) * exp(-v^2 / (2 * sigma_v^2))
     其中 d = target_pos - pos, v = speed。
     """
+    dist_error = target_pos - pos
 
-    sigma_d = np.maximum(sigma_d, 1e-6)
-    sigma_v = np.maximum(sigma_v, 1e-6)
+    # 广域引导: 在距离目标5km时就知道终点在哪
+    phi_wide = (
+        1.0
+        * np.exp(-(dist_error**2) / (2.0 * 2000.0**2))
+        * np.exp(-(speed**2) / (2.0 * 50.0**2))
+    )
 
-    distance_error = target_pos - pos
+    # 精确引导
+    phi_tight = (
+        4.0
+        * np.exp(-(dist_error**2) / (2.0 * 100.0**2))
+        * np.exp(-(speed**2) / (2.0 * 5.0**2))
+    )
 
-    distance_term = np.exp(-(distance_error**2) / (2.0 * sigma_d**2))
-    speed_term = np.exp(-(speed**2) / (2.0 * sigma_v**2))
-
-    return k_p * distance_term * speed_term
+    return phi_wide + phi_tight
 
 
 def infer_position_from_speed(curve_pos, curve_speed, target_speed):
@@ -105,10 +108,9 @@ def interp_with_constant_fill(x, y, query, left_value, right_value):
 
 
 def plot_safety_potential_heatmap_speed():
-    with open("data/rail/safeguard/min_curves_list.pkl", "rb") as f:
-        min_curves_list = pickle.load(f)
-    with open("data/rail/safeguard/max_curves_list.pkl", "rb") as f:
-        max_curves_list = pickle.load(f)
+    min_curves_list, max_curves_list = load_safeguard_curves(
+        "min_curves_list", "max_curves_list"
+    )
 
     # 以第7个辅助停车区作为示例
     target_pos = 17828.0
@@ -211,11 +213,10 @@ def plot_safety_potential_heatmap_speed():
     plt.show()
 
 
-def plot_safety_potential_heatmap_spatial():
-    with open("data/rail/safeguard/min_curves_list.pkl", "rb") as f:
-        min_curves_list = pickle.load(f)
-    with open("data/rail/safeguard/max_curves_list.pkl", "rb") as f:
-        max_curves_list = pickle.load(f)
+def plot_safety_potential_heatmap_position():
+    min_curves_list, max_curves_list = load_safeguard_curves(
+        "min_curves_list", "max_curves_list"
+    )
 
     # 仍然以第7个辅助停车区为示例。
     target_pos = 17828.0
@@ -318,9 +319,7 @@ def plot_stop_potential_heatmap(view_mode="3d"):
 
     target_pos = 17828.0
 
-    k_p = 2.0
-    sigma_d = 1000.0  # m
-    sigma_v = 40.0  # m/s
+    k_p = 5.0
 
     # 扩大位置与速度展示范围
     pos_array = np.linspace(target_pos - 10000.0, target_pos + 10000.0, 1200)
@@ -328,13 +327,10 @@ def plot_stop_potential_heatmap(view_mode="3d"):
 
     POS, SPEED = np.meshgrid(pos_array, speed_array_ms)
 
-    POTENTIAL = calc_potential_stop(
+    POTENTIAL = calc_potential_docking(
         pos=POS,
         speed=SPEED,
         target_pos=target_pos,
-        k_p=k_p,
-        sigma_d=sigma_d,
-        sigma_v=sigma_v,
     )
 
     mode = str(view_mode).lower().strip()
@@ -343,13 +339,10 @@ def plot_stop_potential_heatmap(view_mode="3d"):
     target_speed_ms = 0.0
     target_speed_kmh = target_speed_ms * 3.6
     target_potential = float(
-        calc_potential_stop(
+        calc_potential_docking(
             pos=target_pos,
             speed=target_speed_ms,
             target_pos=target_pos,
-            k_p=k_p,
-            sigma_d=sigma_d,
-            sigma_v=sigma_v,
         )
     )
 
@@ -456,7 +449,6 @@ def plot_stop_potential_slices():
 
     target_pos = 17828.0
 
-    k_p = 5.0
     sigma_d = 120.0  # m
     sigma_v = 20.0 / 3.6  # m/s
 
@@ -464,21 +456,15 @@ def plot_stop_potential_slices():
     pos_array = target_pos + distance_error_array
     speed_array_ms = np.linspace(0.0, 120.0 / 3.6, 1200)
 
-    potential_vs_distance = calc_potential_stop(
+    potential_vs_distance = calc_potential_docking(
         pos=pos_array,
         speed=0.0,
         target_pos=target_pos,
-        k_p=k_p,
-        sigma_d=sigma_d,
-        sigma_v=sigma_v,
     )
-    potential_vs_speed = calc_potential_stop(
+    potential_vs_speed = calc_potential_docking(
         pos=target_pos,
         speed=speed_array_ms,
         target_pos=target_pos,
-        k_p=k_p,
-        sigma_d=sigma_d,
-        sigma_v=sigma_v,
     )
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), dpi=150)
@@ -507,7 +493,7 @@ def plot_stop_potential_slices():
 
 if __name__ == "__main__":
     # plot_safety_potential_heatmap_speed()
-    # plot_safety_potential_heatmap_spatial()
-    # plot_stop_potential_heatmap(view_mode="3d")
-    plot_stop_potential_heatmap(view_mode="2d")
+    # plot_safety_potential_heatmap_position()
+    plot_stop_potential_heatmap(view_mode="3d")
+    # plot_stop_potential_heatmap(view_mode="2d")
     # plot_stop_potential_slices()

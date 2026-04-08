@@ -1,25 +1,19 @@
 import numpy as np
-import pickle
-import json
 import sys
 import os
 import pytest
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from model.SafeGuard import SafeGuardUtility
+from utils.data_loader import load_safeguard_curves, load_speed_limits
 
 
 @pytest.fixture(scope="module")
 def safeguardutil():
-    with open("data/rail/raw/speed_limits.json", "r", encoding="utf-8") as f:
-        sl_data = json.load(f)
-        s_limits = sl_data["speed_limits"]
-        s_limits = np.asarray(s_limits, dtype=np.float64) / 3.6
-        s_intervals = sl_data["intervals"]
-    with open("data/rail/safeguard/min_curves_list.pkl", "rb") as f:
-        min_curves_list = pickle.load(f)
-    with open("data/rail/safeguard/max_curves_list.pkl", "rb") as f:
-        max_curves_list = pickle.load(f)
+    s_limits, s_intervals = load_speed_limits(to_mps=True, dtype=np.float64)
+    min_curves_list, max_curves_list = load_safeguard_curves(
+        "min_curves_list", "max_curves_list"
+    )
     return SafeGuardUtility(
         speed_limits=s_limits,
         speed_limit_intervals=s_intervals,
@@ -110,7 +104,7 @@ def test_GetMinAndMaxSpeed_with_currentspisNone(safeguardutil):
         60.0 / 3.6,
         60.0 / 3.6,
     ]
-    expected_sp: list[int] = [-1, -1, -1, 0, 0, 1, 2, 3, 4, 5, 6, 7, 7, 8]
+    input_sp: list[int] = [-1, -1, -1, 0, 0, 1, 2, 3, 4, 5, 6, 7, 7, 8]
     expected_IsCurrentMinSpeedEqualToZero: list[bool] = [
         True,
         True,
@@ -145,22 +139,17 @@ def test_GetMinAndMaxSpeed_with_currentspisNone(safeguardutil):
     ]
     result_CurrentMinSpeed: list[float] = []
     result_CurrentMaxSpeed: list[float] = []
-    result_Currentsp: list[int] = []
     for i in range(len(pos)):
-        current_min_speed, current_max_speed, current_sp = (
-            safeguardutil.GetMinAndMaxSpeed(
-                current_pos=pos[i], current_speed=speed[i], current_sp=None
-            )
+        current_min_speed, current_max_speed = safeguardutil.GetMinAndMaxSpeed(
+            current_pos=pos[i], current_sp=input_sp[i]
         )
         result_CurrentMinSpeed.append(current_min_speed)
         result_CurrentMaxSpeed.append(current_max_speed)
-        result_Currentsp.append(current_sp)
     result_IsCurrentMinSpeedEqualToZero = np.isclose(result_CurrentMinSpeed, 0.0)
     result_IsCurrentSpeedBigger = np.asarray(speed) > np.asarray(result_CurrentMaxSpeed)
     np.testing.assert_array_equal(
         result_IsCurrentMinSpeedEqualToZero, expected_IsCurrentMinSpeedEqualToZero
     )
-    np.testing.assert_array_equal(result_Currentsp, expected_sp)
     np.testing.assert_array_equal(
         result_IsCurrentSpeedBigger,
         expected_IsCurrentSpeedBiggerThanCurrentMaxSpeed,
@@ -207,7 +196,6 @@ def test_GetMinAndMaxSpeed_with_currentspisNotNone(safeguardutil):
         8,
         8,
     ]
-    expected_Currentsp: list[int] = [-1, -1, -1, 0, 0, 1, 2, 3, 3, 8, 8]
     expected_IsCurrentMinSpeedEqualToZero: list[bool] = [
         True,
         True,
@@ -236,17 +224,13 @@ def test_GetMinAndMaxSpeed_with_currentspisNotNone(safeguardutil):
     ]
     result_CurrentMinSpeed: list[float] = []
     result_CurrentMaxSpeed: list[float] = []
-    result_Currentsp: list[int] = []
     for i in range(len(pos)):
         current_sp = sp[i]
-        current_min_speed, current_max_speed, current_sp = (
-            safeguardutil.GetMinAndMaxSpeed(
-                current_pos=pos[i], current_speed=speed[i], current_sp=current_sp
-            )
+        current_min_speed, current_max_speed = safeguardutil.GetMinAndMaxSpeed(
+            current_pos=pos[i], current_sp=current_sp
         )
         result_CurrentMinSpeed.append(current_min_speed)
         result_CurrentMaxSpeed.append(current_max_speed)
-        result_Currentsp.append(current_sp)
     result_IsCurrentMinSpeedEqualToZero = np.isclose(result_CurrentMinSpeed, 0.0)
     result_IsCurrentMaxSpeedBiggerThanCurrentSpeed = np.asarray(
         result_CurrentMaxSpeed
@@ -257,7 +241,6 @@ def test_GetMinAndMaxSpeed_with_currentspisNotNone(safeguardutil):
     np.testing.assert_array_equal(
         result_IsCurrentMaxSpeedBiggerThanCurrentSpeed, expected_IsCurrentMaxSpeedBigger
     )
-    np.testing.assert_array_equal(result_Currentsp, expected_Currentsp)
 
 
 @pytest.fixture(scope="module")
@@ -290,34 +273,40 @@ def position_safeguardutil():
 
 
 def test_GetMinAndMaxPosition_with_currentsp(position_safeguardutil):
-    min_pos, max_pos = position_safeguardutil.GetMinAndMaxPosition(
-        current_speed=1.5,
-        current_sp=0,
+    min_pos, max_pos = (
+        position_safeguardutil.GetLatestTranctionAndBrakingIntervationPoint(
+            current_speed=1.5,
+            current_sp=0,
+        )
     )
     np.testing.assert_allclose(min_pos, 1.5)
     np.testing.assert_allclose(max_pos, 1.75)
 
 
 def test_GetMinAndMaxPosition_with_currentsp_extrapolation(position_safeguardutil):
-    min_pos, max_pos = position_safeguardutil.GetMinAndMaxPosition(
-        current_speed=4.5,
-        current_sp=0,
+    min_pos, max_pos = (
+        position_safeguardutil.GetLatestTranctionAndBrakingIntervationPoint(
+            current_speed=4.5,
+            current_sp=0,
+        )
     )
     np.testing.assert_allclose(min_pos, -1.5)
     np.testing.assert_allclose(max_pos, -0.5)
 
 
 def test_GetMinAndMaxPosition_with_currentsp_negative_one(position_safeguardutil):
-    min_pos, max_pos = position_safeguardutil.GetMinAndMaxPosition(
-        current_speed=1.5,
-        current_sp=-1,
+    min_pos, max_pos = (
+        position_safeguardutil.GetLatestTranctionAndBrakingIntervationPoint(
+            current_speed=1.5,
+            current_sp=-1,
+        )
     )
     np.testing.assert_allclose(min_pos, 0.0)
     np.testing.assert_allclose(max_pos, 2.25)
 
 
 def test_GetMinAndMaxPosition_real_data_smoke(safeguardutil):
-    min_pos, max_pos = safeguardutil.GetMinAndMaxPosition(
+    min_pos, max_pos = safeguardutil.GetLatestTranctionAndBrakingIntervationPoint(
         current_speed=2.0,
         current_sp=0,
     )

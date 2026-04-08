@@ -1,27 +1,26 @@
-import json
 import os
 import sys
 import numpy as np
-import pandas as pd
 import pytest
-import pickle
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from model.SafeGuard import SafeGuardUtility
 from model.SPS import SPS
+from utils.data_loader import (
+    load_auxiliary_parking_areas,
+    load_excel,
+    load_safeguard_curves,
+    load_slopes,
+    load_speed_limits,
+)
 
 
 class TestSPSIntegration:
     @pytest.fixture
     def setup_data(self):
-        base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-        excel_path = os.path.join(
-            base_path, "data", "operation", "a_longyang_to_airport.xlsx"
-        )
-        raw_data = pd.read_excel(
-            excel_path,
+        raw_data = load_excel(
+            "data/operation/a_longyang_to_airport.xlsx",
             sheet_name="a轨_双端两步4节_龙阳－机场",
             header=0,
             dtype=np.float32,
@@ -38,36 +37,12 @@ class TestSPSIntegration:
         )  # km/h -> m/s
         travel_time = raw_data["时间(s)"][1:].to_numpy(dtype=np.float64)  # s
 
-        with open(
-            os.path.join(base_path, "data", "rail", "raw", "slopes.json"),
-            "r",
-            encoding="utf-8",
-        ) as f:
-            slope_data = json.load(f)
-            slopes = slope_data["slopes"]
-            slope_intervals = slope_data["intervals"]
-
-        with open(
-            os.path.join(base_path, "data", "rail", "raw", "speed_limits.json"),
-            "r",
-            encoding="utf-8",
-        ) as f:
-            speed_limit_data = json.load(f)
-            speed_limits = np.asarray(speed_limit_data["speed_limits"]) / 3.6
-            speed_limit_intervals = speed_limit_data["intervals"]
-
-        # 辅助停车区
-        with open(
-            "data/rail/raw/auxiliary_parking_areas.json", "r", encoding="utf-8"
-        ) as f:
-            apa_data = json.load(f)
-            aps = apa_data["accessible_points"]
-            dps = apa_data["dangerous_points"]
-
-        with open("data/rail/safeguard/min_curves_list.pkl", "rb") as f:
-            min_curves_list = pickle.load(f)
-        with open("data/rail/safeguard/max_curves_list.pkl", "rb") as f:
-            max_curves_list = pickle.load(f)
+        slopes, slope_intervals = load_slopes()
+        speed_limits, speed_limit_intervals = load_speed_limits(to_mps=True)
+        aps, dps = load_auxiliary_parking_areas()
+        min_curves_list, max_curves_list = load_safeguard_curves(
+            "min_curves_list", "max_curves_list"
+        )
 
         return {
             "distance": distance,

@@ -1,5 +1,3 @@
-import json
-import pickle
 import os
 import sys
 import matplotlib.pyplot as plt
@@ -8,46 +6,44 @@ import numpy as np
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from model.SafeGuard import SafeGuardUtility
 from utils.curve import ConcatenateCurvesWithNaN
+from utils.data_loader import (
+    load_acceleration_zones,
+    load_auxiliary_parking_areas,
+    load_safeguard_curves,
+    load_speed_limits,
+    load_stations,
+)
 from utils.misc import SetChineseFont
 
 # 辅助停车区
-with open("data/rail/raw/auxiliary_parking_areas.json", "r", encoding="utf-8") as f:
-    apa_data = json.load(f)
-    aps = apa_data["accessible_points"]
-    dps = apa_data["dangerous_points"]
+aps, dps = load_auxiliary_parking_areas()
 
 # 车站
-with open("data/rail/raw/stations.json", "r", encoding="utf-8") as f:
-    stations_data = json.load(f)
-    ly_begin = stations_data["LY"]["begin"]
-    ly_zp = stations_data["LY"]["zp"]
-    ly_end = stations_data["LY"]["end"]
-    pa_begin = stations_data["PA"]["begin"]
-    pa_zp = stations_data["PA"]["zp"]
-    pa_end = stations_data["PA"]["end"]
-    stations_cor = np.array([[ly_begin, pa_begin], [ly_end, pa_end]])
+stations_data = load_stations()
+ly_begin = stations_data["LY"]["begin"]
+ly_zp = stations_data["LY"]["zp"]
+ly_end = stations_data["LY"]["end"]
+pa_begin = stations_data["PA"]["begin"]
+pa_zp = stations_data["PA"]["zp"]
+pa_end = stations_data["PA"]["end"]
+stations_cor = np.array([[ly_begin, pa_begin], [ly_end, pa_end]])
 
 # 加速区
-with open("data/rail/raw/acceleration_zones.json", "r", encoding="utf-8") as f:
-    az_datas = json.load(f)
-    az_begin = az_datas["uplink"]["begin"]
-    az_end = az_datas["uplink"]["end"]
+az_datas = load_acceleration_zones()
+az_begin = az_datas["uplink"]["begin"]
+az_end = az_datas["uplink"]["end"]
 
 # 区间限速
-with open("data/rail/raw/speed_limits.json", "r", encoding="utf-8") as f:
-    speedlimit_data = json.load(f)
-    speed_limits = speedlimit_data["speed_limits"]
-    speed_limits = np.asarray(speed_limits) / 3.6
-    speed_limit_intervals = speedlimit_data["intervals"]
+speed_limits, speed_limit_intervals = load_speed_limits(to_mps=True)
 
-with open("data/rail/safeguard/levi_curves_list.pkl", "rb") as f:
-    levi_curves_list = pickle.load(f)
-with open("data/rail/safeguard/brake_curves_list.pkl", "rb") as f:
-    brake_curves_list = pickle.load(f)
-with open("data/rail/safeguard/min_curves_list.pkl", "rb") as f:
-    min_curves_list = pickle.load(f)
-with open("data/rail/safeguard/max_curves_list.pkl", "rb") as f:
-    max_curves_list = pickle.load(f)
+levi_curves_list, brake_curves_list, min_curves_list, max_curves_list = (
+    load_safeguard_curves(
+        "levi_curves_list",
+        "brake_curves_list",
+        "min_curves_list",
+        "max_curves_list",
+    )
+)
 
 # 将所有的坐标值数组列表合并为一个数组并在相邻段之间插入np.nan
 levi_curves_pos_con, levi_curves_speed_con = ConcatenateCurvesWithNaN(levi_curves_list)
