@@ -1,10 +1,10 @@
 import numpy as np
 import pytest
 
-from model.Vehicle import Vehicle
-from model.Track import Track
-from model.Task import Task
-from model.ORS import ORS
+from model.vehicle import Vehicle
+from model.track import Track
+from model.task import Task
+from model.ors import ORS
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_slopes,

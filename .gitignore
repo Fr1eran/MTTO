@@ -24,9 +24,6 @@ ENV/
 # Others
 *.sqlite3
 
-# 排除所有 data/rail/safeguard 下的文件
-/data/rail/safeguard/**/*
-
 # 排除存放智能体评估视频的文件夹
 */**/*video*/
 **/*video*/
@@ -38,5 +35,5 @@ ENV/
 # 排除训练分析报告目录
 /mtto_train_reports/
 
-# 排除存放优化结果的文件夹下的所有文件
-/data/optimal/**/*
+# 排除所有输出结果
+/output/**/*

@@ -1,20 +1,16 @@
-import os
-import sys
-
 import matplotlib.pyplot as plt
 import numpy as np
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from model.Vehicle import Vehicle
-from model.ECC import ECC
-from model.Track import Track, TrackProfile
+from model.vehicle import Vehicle
+from model.ecc import ECC
+from model.track import Track, TrackProfile
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_excel,
     load_slopes,
     load_speed_limits,
 )
-from utils.misc import SetChineseFont
+from utils.plot_utils import set_chinese_font
 
 # 绘制龙阳路到浦东国际机场的实际运行速度-里程曲线
 raw_data = load_excel(
@@ -29,7 +25,7 @@ v_km = raw_data["速度(km/h)"][1:]
 accelerate = raw_data["加速度(m/s2)"][1:]
 travel_time = raw_data["时间(s)"][1:]
 
-SetChineseFont()
+set_chinese_font()
 
 fig1, ax1 = plt.subplots(figsize=(10, 6))
 ax1.plot(distance, v_km, label="实际运行速度随里程变化曲线", color="blue")
@@ -65,13 +61,15 @@ tec = ECC(
     R_m=0.2796, L_d=0.0002, R_k=50.0, L_k=0.000142, Tau=0.258, Psi_fd=3.9629, k_c=0.8
 )
 
-propulsion_energy_consumption, leviation_energy_consumption = tec.CalcEnergyCumul(
-    pos_arr=distance.to_numpy(dtype=np.float64),
-    speed_arr=v_km.to_numpy(dtype=np.float64) / 3.6,
-    acc_arr=accelerate.to_numpy(dtype=np.float64),
-    vehicle=vehicle,
-    trackprofile=trackprofile,
-    travel_time_arr=travel_time.to_numpy(dtype=np.float64),
+propulsion_energy_consumption, leviation_energy_consumption = (
+    tec.calc_energy_cumulative(
+        pos_arr=distance.to_numpy(dtype=np.float64),
+        speed_arr=v_km.to_numpy(dtype=np.float64) / 3.6,
+        acc_arr=accelerate.to_numpy(dtype=np.float64),
+        vehicle=vehicle,
+        trackprofile=trackprofile,
+        travel_time_arr=travel_time.to_numpy(dtype=np.float64),
+    )
 )
 # 绘制列车能耗随里程变化曲线
 fig3, ax3 = plt.subplots(figsize=(10, 6))

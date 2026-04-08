@@ -2,11 +2,16 @@ from dataclasses import dataclass
 import numpy as np
 from typing import Union
 from numpy.typing import NDArray
-from model.force.resis import AirResis, GuidewayVortexResis, LinearGeneResis, SlopeResis
+from model.force.resis import (
+    air_resis_force,
+    guideway_vortex_resis_force,
+    linear_generator_resis_force,
+    slope_resis_force,
+)
 from model.force.brake import (
-    SledgeFrictionalBrake,
-    VortexBrake,
-    WearPlateFrictionalBrake,
+    sledge_frictional_brake_force,
+    vortex_brake_force,
+    wear_plate_frictional_brake_force,
 )
 
 Numeric = Union[float, np.floating, NDArray[np.floating]]
@@ -26,7 +31,7 @@ class Vehicle:
 
 class VehicleDynamic:
     @staticmethod
-    def CalcLeviDec(vehicle: Vehicle, speed: Numeric, slope: Numeric):
+    def calc_levi_deceleration(vehicle: Vehicle, speed: Numeric, slope: Numeric):
         """
         计算列车悬浮减速度大小
 
@@ -45,11 +50,11 @@ class VehicleDynamic:
         Returns:
             悬浮减速度
         """
-        f_sledge = SledgeFrictionalBrake(speed, vehicle.mass, slope)
-        f_air_resis = AirResis(speed, vehicle.numoftrainsets)
-        f_guide_ele_resis = GuidewayVortexResis(speed, vehicle.numoftrainsets)
-        f_lineargene_resis = LinearGeneResis(speed, vehicle.numoftrainsets)
-        f_grad = SlopeResis(vehicle.mass, slope)
+        f_sledge = sledge_frictional_brake_force(speed, vehicle.mass, slope)
+        f_air_resis = air_resis_force(speed, vehicle.numoftrainsets)
+        f_guide_ele_resis = guideway_vortex_resis_force(speed, vehicle.numoftrainsets)
+        f_lineargene_resis = linear_generator_resis_force(speed, vehicle.numoftrainsets)
+        f_grad = slope_resis_force(vehicle.mass, slope)
 
         f_total = (
             f_air_resis + f_guide_ele_resis + f_lineargene_resis + f_grad + f_sledge
@@ -58,7 +63,9 @@ class VehicleDynamic:
         return f_total / vehicle.mass
 
     @staticmethod
-    def CalcBrakeDec(vehicle: Vehicle, speed: Numeric, slope: Numeric, level: int):
+    def calc_brake_deceleration(
+        vehicle: Vehicle, speed: Numeric, slope: Numeric, level: int
+    ):
         """
         计算列车安全制动减速度大小
 
@@ -81,13 +88,15 @@ class VehicleDynamic:
         Returns:
             安全制动减速度
         """
-        f_vortex_brake = VortexBrake(speed, vehicle.numoftrainsets, level)
-        f_wearplate_brake = WearPlateFrictionalBrake(speed, vehicle.numoftrainsets)
-        f_sledge_brake = SledgeFrictionalBrake(speed, vehicle.mass, slope)
-        f_air_resis = AirResis(speed, vehicle.numoftrainsets)
-        f_guide_ele_resis = GuidewayVortexResis(speed, vehicle.numoftrainsets)
-        f_lineargene_resis = LinearGeneResis(speed, vehicle.numoftrainsets)
-        f_grad = SlopeResis(vehicle.mass, slope)
+        f_vortex_brake = vortex_brake_force(speed, vehicle.numoftrainsets, level)
+        f_wearplate_brake = wear_plate_frictional_brake_force(
+            speed, vehicle.numoftrainsets
+        )
+        f_sledge_brake = sledge_frictional_brake_force(speed, vehicle.mass, slope)
+        f_air_resis = air_resis_force(speed, vehicle.numoftrainsets)
+        f_guide_ele_resis = guideway_vortex_resis_force(speed, vehicle.numoftrainsets)
+        f_lineargene_resis = linear_generator_resis_force(speed, vehicle.numoftrainsets)
+        f_grad = slope_resis_force(vehicle.mass, slope)
 
         f_total = (
             f_vortex_brake
@@ -102,7 +111,7 @@ class VehicleDynamic:
         return f_total / vehicle.mass
 
     @staticmethod
-    def CalcLongitudinalForce(
+    def calc_longitudinal_force(
         vehicle: Vehicle, acc: Numeric, speed: Numeric, slope: Numeric
     ):
         """
@@ -124,10 +133,10 @@ class VehicleDynamic:
             纵向力
         """
         f_resis = (
-            AirResis(speed, vehicle.numoftrainsets)
-            + GuidewayVortexResis(speed, vehicle.numoftrainsets)
-            + LinearGeneResis(speed, vehicle.numoftrainsets)
-            + SlopeResis(vehicle.mass, slope)
+            air_resis_force(speed, vehicle.numoftrainsets)
+            + guideway_vortex_resis_force(speed, vehicle.numoftrainsets)
+            + linear_generator_resis_force(speed, vehicle.numoftrainsets)
+            + slope_resis_force(vehicle.mass, slope)
         )
         f_longitudinal = vehicle.mass * acc + f_resis
 

@@ -1,14 +1,9 @@
-import os
-import sys
-
 import numpy as np
 import pytest
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-
-from model.ECC import ECC
-from model.Track import Track, TrackProfile
-from model.Vehicle import Vehicle
+from model.ecc import ECC
+from model.track import Track, TrackProfile
+from model.vehicle import Vehicle
 
 
 @pytest.fixture(scope="module")
@@ -46,7 +41,7 @@ def test_calc_energy_constant_function_equivalent_to_scalar(
         s_arr = np.asarray(s, dtype=np.float64)
         return np.full_like(s_arr, scalar_acc, dtype=np.float64)
 
-    scalar_pec, scalar_lec = ecc.CalcEnergy(
+    scalar_pec, scalar_lec = ecc.calc_energy(
         begin_pos=begin_pos,
         begin_speed=begin_speed,
         acc=scalar_acc,
@@ -56,7 +51,7 @@ def test_calc_energy_constant_function_equivalent_to_scalar(
         vehicle=vehicle,
         trackprofile=track_profile,
     )
-    func_pec, func_lec = ecc.CalcEnergy(
+    func_pec, func_lec = ecc.calc_energy(
         begin_pos=begin_pos,
         begin_speed=begin_speed,
         acc=const_acc_profile,
@@ -80,7 +75,7 @@ def test_calc_energy_accepts_distance_dependent_acc(energy_consumption_calculato
         s_arr = np.asarray(s, dtype=np.float64)
         return 0.2 + 0.001 * s_arr
 
-    pec, lec = ecc.CalcEnergy(
+    pec, lec = ecc.calc_energy(
         begin_pos=1000.0,
         begin_speed=8.0,
         acc=acc_profile,
@@ -108,7 +103,7 @@ def test_calc_energy_callable_respects_operation_time_override(
         s_arr = np.asarray(s, dtype=np.float64)
         return 0.25 + 0.0002 * s_arr
 
-    _, lec = ecc.CalcEnergy(
+    _, lec = ecc.calc_energy(
         begin_pos=500.0,
         begin_speed=12.0,
         acc=acc_profile,
@@ -130,7 +125,7 @@ def test_calc_energy_accepts_array_only_callback(energy_consumption_calculator_c
         assert isinstance(s, np.ndarray)
         return 0.15 + 0.0005 * s
 
-    pec, lec = ecc.CalcEnergy(
+    pec, lec = ecc.calc_energy(
         begin_pos=200.0,
         begin_speed=7.5,
         acc=acc_profile_array_only,
@@ -154,7 +149,7 @@ def test_calc_energy_array_only_callback_with_tiny_distance(
         assert isinstance(s, np.ndarray)
         return np.full_like(s, 0.2, dtype=np.float64)
 
-    pec, lec = ecc.CalcEnergy(
+    pec, lec = ecc.calc_energy(
         begin_pos=200.0,
         begin_speed=7.5,
         acc=acc_profile_array_only,
@@ -180,7 +175,7 @@ def test_calc_energy_rejects_non_vectorized_callback(
         return 0.2
 
     with pytest.raises(TypeError, match="vectorized callback required"):
-        ecc.CalcEnergy(
+        ecc.calc_energy(
             begin_pos=200.0,
             begin_speed=7.5,
             acc=scalar_only_callback,
@@ -200,7 +195,7 @@ def test_calc_energy_rejects_scalar_output_callback(energy_consumption_calculato
         return 0.2
 
     with pytest.raises(ValueError, match="same ndim and shape"):
-        ecc.CalcEnergy(
+        ecc.calc_energy(
             begin_pos=200.0,
             begin_speed=7.5,
             acc=scalar_output_callback,

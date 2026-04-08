@@ -1,14 +1,11 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import os
-import sys
 from typing import Any, cast
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from utils.data_loader import load_safeguard_curves
-from utils.misc import SetChineseFont
+from utils.plot_utils import set_chinese_font
 
-SetChineseFont()
+set_chinese_font()
 # SimHei 缺少 U+2212 负号字形，关闭 Unicode 负号可避免告警。
 plt.rcParams["axes.unicode_minus"] = False
 

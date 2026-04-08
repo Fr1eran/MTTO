@@ -1,9 +1,9 @@
 import numpy as np
 from numpy.typing import NDArray
 from typing import NamedTuple, TypedDict
-from model.Vehicle import Vehicle
-from model.Track import Track, TrackProfile
-from model.ECC import ECC
+from model.vehicle import Vehicle
+from model.track import Track, TrackProfile
+from model.ecc import ECC
 
 
 class GeneralOperation(NamedTuple):
@@ -50,7 +50,9 @@ class ORS:
         self.trackprofile = TrackProfile(track=track)
         self.gamma: float = factor
 
-    def _getSpeedLimitsIntervalIndex(self, pos: float, *, ascend: bool = True) -> int:
+    def _get_speed_limits_interval_index(
+        self, pos: float, *, ascend: bool = True
+    ) -> int:
         """
         获得当前位置所处区间的索引
         Args:
@@ -70,7 +72,7 @@ class ORS:
         idx = np.searchsorted(self.track.speed_limit_intervals, pos, side=side) - 1
         return int(idx)
 
-    def _findSpeedRiseEntryAndFallExit(
+    def _find_speed_rise_entry_and_fall(
         self,
         *,
         start_idx: int,
@@ -135,7 +137,9 @@ class ORS:
             最大制动模式的运行时间
             最大制动模式的起始区间
         """
-        begin_interval: int = self._getSpeedLimitsIntervalIndex(end_pos, ascend=False)
+        begin_interval: int = self._get_speed_limits_interval_index(
+            end_pos, ascend=False
+        )
         while begin_interval >= 0:
             mark_pos = self.track.speed_limit_intervals[
                 begin_interval
@@ -194,7 +198,9 @@ class ORS:
             最大牵引模式下的运行时间
             最大牵引模式下的终止区间
         """
-        end_interval: int = self._getSpeedLimitsIntervalIndex(begin_pos, ascend=True)
+        end_interval: int = self._get_speed_limits_interval_index(
+            begin_pos, ascend=True
+        )
         while end_interval <= len(self.track.speed_limits) - 1:
             mark_pos = self.track.speed_limit_intervals[
                 end_interval + 1
@@ -328,7 +334,7 @@ class ORS:
 
         if tow_end_interval < brake_begin_interval:
             ascend_begin_points, descend_end_points = (
-                self._findSpeedRiseEntryAndFallExit(
+                self._find_speed_rise_entry_and_fall(
                     start_idx=tow_end_interval, end_idx=brake_begin_interval
                 )
             )
@@ -340,7 +346,7 @@ class ORS:
                     "ascend_operation_time": tow_operation_time,
                     "ascend_end_pos": tow_end_pos,
                     "ascend_end_interval": tow_end_interval,
-                    "ascend_begin_interval": self._getSpeedLimitsIntervalIndex(
+                    "ascend_begin_interval": self._get_speed_limits_interval_index(
                         tow_begin_pos,
                         ascend=True,
                     ),
@@ -354,7 +360,7 @@ class ORS:
                     "descend_operation_time": brake_operation_time,
                     "descend_begin_pos": brake_begin_pos,
                     "descend_begin_interval": brake_begin_interval,
-                    "descend_end_interval": self._getSpeedLimitsIntervalIndex(
+                    "descend_end_interval": self._get_speed_limits_interval_index(
                         brake_end_pos,
                         ascend=False,
                     ),
@@ -560,7 +566,7 @@ class ORS:
 
         return operations
 
-    def CalcMinRuntimeCurve(
+    def calc_min_operation_time_curve(
         self,
         begin_pos: float,
         begin_speed: float,
@@ -604,7 +610,7 @@ class ORS:
             curve_speed_array.astype(np.float32),
         )
 
-    def CalcRefOperationTime(
+    def calc_min_operation_time(
         self, begin_pos: float, begin_speed: float, end_pos: float, end_speed: float
     ):
         """
@@ -634,7 +640,7 @@ class ORS:
 
         return ref_operation_time
 
-    def CalcRefEnergyAndOperationTime(
+    def calc_max_energy_and_min_operation_time(
         self,
         begin_pos: float,
         begin_speed: float,
@@ -699,7 +705,7 @@ class ORS:
                     actual_time = (np.sqrt(discriminant) - current_speed_i) / acc
 
                 # 计算该段的能耗
-                PEC, LEC = energy_con_calc.CalcEnergy(
+                PEC, LEC = energy_con_calc.calc_energy(
                     begin_pos=current_pos_i,
                     begin_speed=current_speed_i,
                     acc=acc,
@@ -716,7 +722,7 @@ class ORS:
                 break
             else:
                 # 该段未达到目标位移，计算完整段的能耗
-                PEC, LEC = energy_con_calc.CalcEnergy(
+                PEC, LEC = energy_con_calc.calc_energy(
                     begin_pos=current_pos_i,
                     begin_speed=current_speed_i,
                     acc=acc,

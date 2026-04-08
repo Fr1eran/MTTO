@@ -1,16 +1,13 @@
 import argparse
 import json
-import os
 import pickle
-import sys
 
 import matplotlib.pyplot as plt
 import numpy as np
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-
-from model.SafeGuard import SafeGuardUtility
-from utils.misc import LoadOptimizedCurveAndMetrics, SetChineseFont
+from model.safe_guard_utility import SafeGuardUtility
+from utils.io_utils import load_optimized_curve_and_metrics
+from utils.plot_utils import set_chinese_font
 
 
 def _build_safeguard_utility(factor: float = 0.99) -> SafeGuardUtility:
@@ -81,7 +78,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    pos_arr, speed_arr, metrics = LoadOptimizedCurveAndMetrics(
+    pos_arr, speed_arr, metrics = load_optimized_curve_and_metrics(
         npz_path=args.npz,
         metrics_path=args.metrics,
         dtype=np.float32,
@@ -90,12 +87,12 @@ def main() -> None:
 
     _print_metrics(metrics)
 
-    SetChineseFont()
+    set_chinese_font()
     fig, ax = plt.subplots(figsize=(12, 7))
 
     if not args.no_safeguard:
         safeguard = _build_safeguard_utility(factor=args.factor)
-        safeguard.Render(ax=ax)
+        safeguard.render(ax=ax)
 
     ax.plot(
         pos_arr,

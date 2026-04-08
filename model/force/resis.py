@@ -5,7 +5,7 @@ from typing import Union
 Numeric = Union[float, np.floating, NDArray]
 
 
-def AddedResis(
+def added_resis_force(
     speed: Numeric,
     mass: Numeric,
     kind: int,
@@ -36,7 +36,7 @@ def AddedResis(
     return added_resis_force
 
 
-def AirResis(
+def air_resis_force(
     speed: Numeric,
     numoftrainsets: int,
 ) -> NDArray[np.float64]:
@@ -57,7 +57,7 @@ def AirResis(
     return air_resis_force
 
 
-def GuidewayVortexResis(
+def guideway_vortex_resis_force(
     speed: Numeric,
     numoftrainsets: int,
 ) -> NDArray[np.float64]:
@@ -83,7 +83,7 @@ def GuidewayVortexResis(
     return guideway_vortex_resis_force
 
 
-def LinearGeneResis(
+def linear_generator_resis_force(
     speed: Numeric,
     numoftrainsets: int,
 ) -> NDArray[np.float64]:
@@ -116,7 +116,7 @@ def LinearGeneResis(
     return lineargene_resis_force
 
 
-def SlopeResis(
+def slope_resis_force(
     mass: Numeric,
     slope: Numeric,
 ) -> NDArray[np.float64]:

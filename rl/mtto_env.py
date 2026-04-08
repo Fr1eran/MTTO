@@ -7,14 +7,14 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from scipy.interpolate import PchipInterpolator
 
-from model.SafeGuard import SafeGuardUtility
-from model.Vehicle import Vehicle
-from model.Track import Track, TrackProfile
-from model.Task import Task
-from model.ORS import ORS
-from model.SPS import SPS
-from model.ECC import ECC
-from utils.misc import SetChineseFont
+from model.safe_guard_utility import SafeGuardUtility
+from model.vehicle import Vehicle
+from model.track import Track, TrackProfile
+from model.task import Task
+from model.ors import ORS
+from model.sps import SPS
+from model.ecc import ECC
+from utils.plot_utils import set_chinese_font
 
 
 class RewardsInfoForTB(TypedDict, total=False):
@@ -115,11 +115,13 @@ class MTTOEnv(gym.Env):
         )
 
         # 计算最短运行时间参考曲线
-        self.ref_curve_pos, self.ref_curve_speed = self.ors.CalcMinRuntimeCurve(
-            begin_pos=self.task.start_position,
-            begin_speed=self.task.start_speed,
-            end_pos=self.task.target_position + self.task.max_stop_error * 10,
-            end_speed=0.0,
+        self.ref_curve_pos, self.ref_curve_speed = (
+            self.ors.calc_min_operation_time_curve(
+                begin_pos=self.task.start_position,
+                begin_speed=self.task.start_speed,
+                end_pos=self.task.target_position + self.task.max_stop_error * 10,
+                end_speed=0.0,
+            )
         )
         # 最短运行时间曲线采用三次埃尔米特插值
         self.ref_curve_interp_func = PchipInterpolator(
@@ -127,15 +129,17 @@ class MTTOEnv(gym.Env):
         )
 
         # 计算最大能耗和最短运行时间
-        mec, lec, self.min_operation_time = self.ors.CalcRefEnergyAndOperationTime(
-            begin_pos=self.task.start_position,
-            begin_speed=self.task.start_speed,
-            end_pos=self.task.target_position + self.task.max_stop_error * 10,
-            end_speed=0.0,
-            distance=self.task.target_position
-            + self.task.max_stop_error
-            - self.task.start_position,
-            energy_con_calc=self.ecc,
+        mec, lec, self.min_operation_time = (
+            self.ors.calc_max_energy_and_min_operation_time(
+                begin_pos=self.task.start_position,
+                begin_speed=self.task.start_speed,
+                end_pos=self.task.target_position + self.task.max_stop_error * 10,
+                end_speed=0.0,
+                distance=self.task.target_position
+                + self.task.max_stop_error
+                - self.task.start_position,
+                energy_con_calc=self.ecc,
+            )
         )
         self.max_energy_consumption = mec + lec
 
@@ -164,10 +168,10 @@ class MTTOEnv(gym.Env):
         self.current_operation_time: float = 0.0
         self.current_energy_consumption: float = 0.0
         # self.mass = self.vehicle.mass
-        self.current_slope = self.trackprofile.GetSlope(pos=self.current_pos)
+        self.current_slope = self.trackprofile.get_slope(pos=self.current_pos)
         self.current_sp: int = -1  # 初始时在加速区，尚未步进至第一个辅助停车区
         self.current_min_speed, self.current_max_speed = (
-            self.safeguard_utility.GetMinAndMaxSpeed(
+            self.safeguard_utility.get_min_and_max_speed(
                 current_pos=self.current_pos,
                 current_sp=self.current_sp,
             )
@@ -176,11 +180,11 @@ class MTTOEnv(gym.Env):
             self._get_ref_speed(self.current_pos),
             self.current_max_speed,
         )
-        self.next_slope = self.trackprofile.GetSlope(
+        self.next_slope = self.trackprofile.get_slope(
             pos=self.current_pos + self.max_step_distance * self.direction
         )
         self.next_min_speed, self.next_max_speed = (
-            self.safeguard_utility.GetMinAndMaxSpeed(
+            self.safeguard_utility.get_min_and_max_speed(
                 current_pos=self.current_pos + self.max_step_distance * self.direction,
                 current_sp=self.current_sp,
             )
@@ -194,7 +198,7 @@ class MTTOEnv(gym.Env):
         (
             self.current_latest_traction_intervention_point,
             self.current_latest_braking_intervention_point,
-        ) = self.safeguard_utility.GetLatestTractionAndBrakingInterventionPoint(
+        ) = self.safeguard_utility.get_latest_traction_and_braking_intervention_points(
             current_speed=self.current_speed, current_sp=self.current_sp
         )
 
@@ -383,14 +387,14 @@ class MTTOEnv(gym.Env):
         self.current_operation_time = 0.0
         self.current_energy_consumption = 0.0
         # self.mass = self.vehicle.mass
-        self.current_slope = self.trackprofile.GetSlope(pos=self.current_pos)
+        self.current_slope = self.trackprofile.get_slope(pos=self.current_pos)
 
         # 重置停车点步进
         self.current_sp = -1
-        self.sps.Reset()
+        self.sps.reset()
 
         self.current_min_speed, self.current_max_speed = (
-            self.safeguard_utility.GetMinAndMaxSpeed(
+            self.safeguard_utility.get_min_and_max_speed(
                 current_pos=self.current_pos, current_sp=self.current_sp
             )
         )
@@ -398,13 +402,13 @@ class MTTOEnv(gym.Env):
             self._get_ref_speed(self.current_pos),
             self.current_max_speed,
         )
-        self.next_slope = self.trackprofile.GetSlope(
+        self.next_slope = self.trackprofile.get_slope(
             pos=self.current_pos + self.max_step_distance
         )
         (
             self.next_min_speed,
             self.next_max_speed,
-        ) = self.safeguard_utility.GetMinAndMaxSpeed(
+        ) = self.safeguard_utility.get_min_and_max_speed(
             current_pos=self.current_pos + self.max_step_distance,
             current_sp=self.current_sp,
         )
@@ -415,7 +419,7 @@ class MTTOEnv(gym.Env):
         (
             self.current_latest_traction_intervention_point,
             self.current_latest_braking_intervention_point,
-        ) = self.safeguard_utility.GetLatestTractionAndBrakingInterventionPoint(
+        ) = self.safeguard_utility.get_latest_traction_and_braking_intervention_points(
             current_speed=self.current_speed, current_sp=self.current_sp
         )
 
@@ -465,7 +469,7 @@ class MTTOEnv(gym.Env):
         # ref_energy_consumption = ref_mec + ref_lec
 
         # 计算当前能耗
-        current_mec, current_lec = self.ecc.CalcEnergy(
+        current_mec, current_lec = self.ecc.calc_energy(
             begin_pos=self.last_state["pos"],
             begin_speed=self.last_state["speed"],
             acc=self.current_acc,
@@ -483,15 +487,15 @@ class MTTOEnv(gym.Env):
         self.current_operation_time += operation_time
         self.current_energy_consumption += energy_consumption
         # self.mass = self.vehicle.mass
-        self.current_slope = self.trackprofile.GetSlope(pos=self.current_pos)
-        self.current_sp = self.sps.StepToNextSP(
+        self.current_slope = self.trackprofile.get_slope(pos=self.current_pos)
+        self.current_sp = self.sps.step_to_next_stopping_point(
             current_pos=self.current_pos,
             current_speed=self.current_speed,
             current_time=self.current_operation_time,
             current_sp=self.current_sp,
         )
         self.current_min_speed, self.current_max_speed = (
-            self.safeguard_utility.GetMinAndMaxSpeed(
+            self.safeguard_utility.get_min_and_max_speed(
                 current_pos=self.current_pos,
                 current_sp=self.current_sp,
             )
@@ -500,11 +504,11 @@ class MTTOEnv(gym.Env):
             self._get_ref_speed(self.current_pos),
             self.current_max_speed,
         )
-        self.next_slope = self.trackprofile.GetSlope(
+        self.next_slope = self.trackprofile.get_slope(
             pos=self.current_pos + self.max_step_distance * self.direction
         )
         self.next_min_speed, self.next_max_speed = (
-            self.safeguard_utility.GetMinAndMaxSpeed(
+            self.safeguard_utility.get_min_and_max_speed(
                 current_pos=self.current_pos + self.max_step_distance * self.direction,
                 current_sp=self.current_sp,
             )
@@ -518,7 +522,7 @@ class MTTOEnv(gym.Env):
         (
             self.current_latest_traction_intervention_point,
             self.current_latest_braking_intervention_point,
-        ) = self.safeguard_utility.GetLatestTractionAndBrakingInterventionPoint(
+        ) = self.safeguard_utility.get_latest_traction_and_braking_intervention_points(
             current_speed=self.current_speed, current_sp=self.current_sp
         )
 
@@ -685,7 +689,9 @@ class MTTOEnv(gym.Env):
             speed=self.current_speed,
             min_speed=self.current_min_speed,
             max_speed=self.current_max_speed,
-            target_pos=self.sps.GetASATargetPointPosition(sp=self.current_sp)
+            target_pos=self.sps.get_auxiliary_stopping_area_target_position(
+                sp=self.current_sp
+            )
             if self.current_sp >= 0
             else self.task.target_position,
         )
@@ -705,7 +711,7 @@ class MTTOEnv(gym.Env):
             speed=self.last_state["speed"],
             min_speed=self.last_state["min_speed"],
             max_speed=self.last_state["max_speed"],
-            target_pos=self.sps.GetASATargetPointPosition(
+            target_pos=self.sps.get_auxiliary_stopping_area_target_position(
                 sp=self.last_state["stopping_point_index"]
             )
             if self.last_state["stopping_point_index"] >= 0
@@ -714,8 +720,8 @@ class MTTOEnv(gym.Env):
 
         # phi_prev = self._potential_safety_position(
         #     pos=self.last_state["pos"],
-        #     min_pos=self.last_state["latest_traction_intervation_point"],
-        #     max_pos=self.last_state["latest_braking_intervation_point"],
+        #     min_pos=self.last_state["latest_traction_intervention_point"],
+        #     max_pos=self.last_state["latest_braking_intervention_point"],
         #     target_pos=self.sps.GetASATargetPointPosition(
         #         sp=self.last_state["stopping_point_index"]
         #     )
@@ -801,7 +807,7 @@ class MTTOEnv(gym.Env):
     # 基于连续非线性衰减的冗余时间势能场
     def _potential_punctuality(self, pos: float, speed: float, operation_time: float):
         # 计算理论上跑完剩余路程的最短运行时间
-        min_remaining_operation_time = self.ors.CalcRefOperationTime(
+        min_remaining_operation_time = self.ors.calc_min_operation_time(
             begin_pos=pos,
             begin_speed=speed,
             end_pos=self.task.target_position,
@@ -987,7 +993,7 @@ class MTTOEnv(gym.Env):
 
     def _setup_figure(self, mode: str):
         """初始化绘图对象"""
-        SetChineseFont()
+        set_chinese_font()
         # 仅在human模式下启用交互模式
         if mode == "human":
             plt.ion()
@@ -1027,7 +1033,7 @@ class MTTOEnv(gym.Env):
         )
 
         # 绘制限速和危险速度域
-        self.safeguard_utility.Render(ax=self.ax)
+        self.safeguard_utility.render(ax=self.ax)
 
         # 初始化动态绘制对象
         (self.vehicle_dot,) = self.ax.plot(

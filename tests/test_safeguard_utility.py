@@ -1,10 +1,6 @@
 import numpy as np
-import sys
-import os
 import pytest
-
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from model.SafeGuard import SafeGuardUtility
+from model.safe_guard_utility import SafeGuardUtility
 from utils.data_loader import load_safeguard_curves, load_speed_limits
 
 
@@ -69,7 +65,7 @@ def test_detect_danger(safeguard_utility):
             False,
         ]
     )
-    result = safeguard_utility.DetectDanger(pos, speed)
+    result = safeguard_utility.detect_danger(pos, speed)
     np.testing.assert_array_equal(result, expected_result)
 
 
@@ -142,7 +138,7 @@ def test_get_min_and_max_speed_with_current_stopping_point_is_none(safeguard_uti
     result_CurrentMinSpeed: list[float] = []
     result_CurrentMaxSpeed: list[float] = []
     for i in range(len(pos)):
-        current_min_speed, current_max_speed = safeguard_utility.GetMinAndMaxSpeed(
+        current_min_speed, current_max_speed = safeguard_utility.get_min_and_max_speed(
             current_pos=pos[i], current_sp=input_sp[i]
         )
         result_CurrentMinSpeed.append(current_min_speed)
@@ -230,7 +226,7 @@ def test_get_min_and_max_speed_with_current_stopping_point_is_not_none(
     result_CurrentMaxSpeed: list[float] = []
     for i in range(len(pos)):
         current_sp = sp[i]
-        current_min_speed, current_max_speed = safeguard_utility.GetMinAndMaxSpeed(
+        current_min_speed, current_max_speed = safeguard_utility.get_min_and_max_speed(
             current_pos=pos[i], current_sp=current_sp
         )
         result_CurrentMinSpeed.append(current_min_speed)
@@ -278,7 +274,7 @@ def position_safeguard_utility():
 
 def test_get_min_and_max_position_with_currentsp(position_safeguard_utility):
     min_pos, max_pos = (
-        position_safeguard_utility.GetLatestTractionAndBrakingInterventionPoint(
+        position_safeguard_utility.get_latest_traction_and_braking_intervention_points(
             current_speed=1.5,
             current_sp=0,
         )
@@ -291,7 +287,7 @@ def test_get_min_and_max_position_with_currentsp_extrapolation(
     position_safeguard_utility,
 ):
     min_pos, max_pos = (
-        position_safeguard_utility.GetLatestTractionAndBrakingInterventionPoint(
+        position_safeguard_utility.get_latest_traction_and_braking_intervention_points(
             current_speed=4.5,
             current_sp=0,
         )
@@ -304,7 +300,7 @@ def test_get_min_and_max_position_with_currentsp_negative_one(
     position_safeguard_utility,
 ):
     min_pos, max_pos = (
-        position_safeguard_utility.GetLatestTractionAndBrakingInterventionPoint(
+        position_safeguard_utility.get_latest_traction_and_braking_intervention_points(
             current_speed=1.5,
             current_sp=-1,
         )
@@ -314,9 +310,11 @@ def test_get_min_and_max_position_with_currentsp_negative_one(
 
 
 def test_get_min_and_max_position_real_data_smoke(safeguard_utility):
-    min_pos, max_pos = safeguard_utility.GetLatestTractionAndBrakingInterventionPoint(
-        current_speed=2.0,
-        current_sp=0,
+    min_pos, max_pos = (
+        safeguard_utility.get_latest_traction_and_braking_intervention_points(
+            current_speed=2.0,
+            current_sp=0,
+        )
     )
     assert np.isfinite(min_pos)
     assert np.isfinite(max_pos)

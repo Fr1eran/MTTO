@@ -1,10 +1,10 @@
-from model.SafeGuard import SafeGuardUtility
-from model.Task import Task
-from model.Track import Track
-from model.Vehicle import Vehicle
+from model.safe_guard_utility import SafeGuardUtility
+from model.task import Task
+from model.track import Track
+from model.vehicle import Vehicle
 from gymnasium.wrappers import FlattenObservation
 
-from rl.MTTOEnv import MTTOEnv
+from rl.mtto_env import MTTOEnv
 
 
 def make_env(
@@ -27,3 +27,4 @@ def make_env(
     )
     env = FlattenObservation(env)
     return env
+

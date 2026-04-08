@@ -1,16 +1,14 @@
 import os
-import sys
 from datetime import datetime
 
 import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize, VecVideoRecorder
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from model.SafeGuard import SafeGuardUtility
-from model.Task import Task
-from model.Track import Track
-from model.Vehicle import Vehicle
+from model.safe_guard_utility import SafeGuardUtility
+from model.task import Task
+from model.track import Track
+from model.vehicle import Vehicle
 from rl.env_factory import make_env
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
@@ -67,8 +65,8 @@ def build_scenario() -> tuple[Vehicle, Track, SafeGuardUtility, Task]:
 def main():
     reward_discount = 0.99
     ds = 100.0
-    model_save_path = "data/optimal/rl/ppo_mtto"
-    vecnormalize_save_path = "data/optimal/rl/vecnormalize.pkl"
+    model_save_path = "output/optimal/rl/ppo_mtto"
+    vecnormalize_save_path = "output/optimal/rl/vecnormalize.pkl"
 
     model_zip_path = f"{model_save_path}.zip"
     if not os.path.exists(model_zip_path):

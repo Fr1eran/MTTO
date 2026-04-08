@@ -1,12 +1,8 @@
-import os
-import sys
 import numpy as np
 import pytest
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from model.SafeGuard import SafeGuardUtility
-from model.SPS import SPS
+from model.safe_guard_utility import SafeGuardUtility
+from model.sps import SPS
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_excel,
@@ -98,7 +94,7 @@ class TestSPSIntegration:
             x = distances[i]
             v = speeds[i]
 
-            new_sp = sps.StepToNextSP(
+            new_sp = sps.step_to_next_stopping_point(
                 current_pos=x, current_speed=v, current_time=t, current_sp=current_sp
             )
 

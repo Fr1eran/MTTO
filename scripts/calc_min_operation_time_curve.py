@@ -1,15 +1,12 @@
-import os
-import sys
 import numpy as np
 import matplotlib.pyplot as plt
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from model.Track import Track, TrackProfile
-from model.SafeGuard import SafeGuardUtility
-from model.Vehicle import Vehicle
-from model.Task import Task
-from model.ORS import ORS
-from model.ECC import ECC
+from model.track import Track, TrackProfile
+from model.safe_guard_utility import SafeGuardUtility
+from model.vehicle import Vehicle
+from model.task import Task
+from model.ors import ORS
+from model.ecc import ECC
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_safeguard_curves,
@@ -17,7 +14,7 @@ from utils.data_loader import (
     load_speed_limits,
     load_stations_goal_positions,
 )
-from utils.misc import SetChineseFont
+from utils.plot_utils import set_chinese_font
 
 slopes, slope_intervals = load_slopes()
 speed_limits, speed_limit_intervals = load_speed_limits(to_mps=True)
@@ -85,13 +82,13 @@ end_speed = 0.0
 distance = 100.0
 
 # 设置matplotlib
-SetChineseFont()
+set_chinese_font()
 
 # 创建初始图形（只创建一次）
 fig, ax = plt.subplots(figsize=(12, 7))
 
 # 绘制静态元素（区间限速、危险速度域和终点等）
-safeguard_utility.Render(ax=ax)
+safeguard_utility.render(ax=ax)
 
 ax.scatter(
     end_pos,
@@ -145,7 +142,7 @@ def draw_curve(pos, speed) -> bool:
 
     try:
         # 计算最短运行时间曲线
-        min_curve_pos_array, min_curve_speed_array = ors.CalcMinRuntimeCurve(
+        min_curve_pos_array, min_curve_speed_array = ors.calc_min_operation_time_curve(
             begin_pos=pos,
             begin_speed=speed,
             end_pos=task.target_position,
@@ -157,14 +154,14 @@ def draw_curve(pos, speed) -> bool:
         next_speed = max(
             0.0, np.interp(next_pos, min_curve_pos_array, min_curve_speed_array)
         )
-        t_min = ors.CalcRefOperationTime(
+        t_min = ors.calc_min_operation_time(
             begin_pos=pos,
             begin_speed=speed,
             end_pos=next_pos,
             end_speed=next_speed,
         )
 
-        T_min = ors.CalcRefOperationTime(
+        T_min = ors.calc_min_operation_time(
             begin_pos=pos,
             begin_speed=speed,
             end_pos=task.target_position,
@@ -172,7 +169,7 @@ def draw_curve(pos, speed) -> bool:
         )
 
         # 计算最速操作模式下的总运行时间和能耗
-        PEC, LEC, total_operation_time = ors.CalcRefEnergyAndOperationTime(
+        PEC, LEC, total_operation_time = ors.calc_max_energy_and_min_operation_time(
             begin_pos=pos,
             begin_speed=speed,
             end_pos=task.target_position,
@@ -247,7 +244,7 @@ def on_key(event):
             np.random.uniform(longyang_start_position, putong_end_position)
         )
         begin_speed = float(np.random.uniform(0.0, max_speed))
-        while safeguard_utility.DetectDanger(pos=begin_pos, speed=begin_speed):
+        while safeguard_utility.detect_danger(pos=begin_pos, speed=begin_speed):
             begin_pos = float(
                 np.random.uniform(longyang_start_position, putong_end_position)
             )
@@ -293,7 +290,7 @@ def on_key(event):
                 return
 
             # 检查是否在危险区域
-            if safeguard_utility.DetectDanger(pos=input_pos, speed=input_speed):
+            if safeguard_utility.detect_danger(pos=input_pos, speed=input_speed):
                 print("[I] 警告：该起点位于危险速度域内！")
                 confirm = input("[I] 是否继续绘制？(y/n): ").strip().lower()
                 if confirm != "y":

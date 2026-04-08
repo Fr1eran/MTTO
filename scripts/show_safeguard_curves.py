@@ -1,11 +1,8 @@
-import os
-import sys
 import matplotlib.pyplot as plt
 import numpy as np
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from model.SafeGuard import SafeGuardUtility
-from utils.curve import ConcatenateCurvesWithNaN
+from model.safe_guard_utility import SafeGuardUtility
+from utils.curve_plot import concatenate_curves_with_NaN
 from utils.data_loader import (
     load_acceleration_zones,
     load_auxiliary_stopping_areas_ap_and_dp,
@@ -13,7 +10,7 @@ from utils.data_loader import (
     load_speed_limits,
     load_stations,
 )
-from utils.misc import SetChineseFont
+from utils.plot_utils import set_chinese_font
 
 # 辅助停车区
 accessible_points, dangerous_points = load_auxiliary_stopping_areas_ap_and_dp()
@@ -46,14 +43,16 @@ levi_curves_list, brake_curves_list, min_curves_list, max_curves_list = (
 )
 
 # 将所有的坐标值数组列表合并为一个数组并在相邻段之间插入np.nan
-levi_curves_pos_con, levi_curves_speed_con = ConcatenateCurvesWithNaN(levi_curves_list)
-brake_curves_pos_con, brake_curves_speed_con = ConcatenateCurvesWithNaN(
+levi_curves_pos_con, levi_curves_speed_con = concatenate_curves_with_NaN(
+    levi_curves_list
+)
+brake_curves_pos_con, brake_curves_speed_con = concatenate_curves_with_NaN(
     brake_curves_list
 )
-min_curves_pos_con, min_curves_speed_con = ConcatenateCurvesWithNaN(min_curves_list)
-max_curves_pos_con, max_curves_speed_con = ConcatenateCurvesWithNaN(max_curves_list)
+min_curves_pos_con, min_curves_speed_con = concatenate_curves_with_NaN(min_curves_list)
+max_curves_pos_con, max_curves_speed_con = concatenate_curves_with_NaN(max_curves_list)
 
-SetChineseFont()
+set_chinese_font()
 
 # 绘制区间限速、安全悬浮曲线、安全制动曲线、最小速度曲线
 # 最大速度曲线、辅助停车区、车站、加速区
@@ -150,7 +149,7 @@ safeguard = SafeGuardUtility(
 )
 
 # 绘制区间限速、危险交叉点、部分安全防护曲线和围成的危险速度域
-safeguard.Render(ax=ax2)
+safeguard.render(ax=ax2)
 
 # 绘制辅助停车区、车站
 ax2.hlines(

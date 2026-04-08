@@ -1,14 +1,12 @@
 import os
-import sys
 import numpy as np
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from rl.Callbacks import TensorboardCallback
+from rl.callbacks import TensorboardCallback
 from rl.env_factory import make_env
-from model.Vehicle import Vehicle
-from model.SafeGuard import SafeGuardUtility
-from model.Track import Track
-from model.Task import Task
+from model.vehicle import Vehicle
+from model.safe_guard_utility import SafeGuardUtility
+from model.track import Track
+from model.task import Task
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_safeguard_curves,
@@ -65,8 +63,8 @@ task = Task(
 
 reward_discount = 0.99
 ds = 100.0
-model_save_path = "data/optimal/RL/ppo_mtto"
-vecnormalize_save_path = "data/optimal/RL/vecnormalize.pkl"
+model_save_path = "output/optimal/rl/ppo_mtto"
+vecnormalize_save_path = "output/optimal/rl/vecnormalize.pkl"
 os.makedirs(os.path.dirname(model_save_path), exist_ok=True)
 
 # 创建训练环境
@@ -126,4 +124,4 @@ venv_train.close()
 print("Training finished.")
 print(f"Model saved to: {model_save_path}.zip")
 print(f"VecNormalize stats saved to: {vecnormalize_save_path}")
-print("Run essay/Evaluate.py to evaluate the trained policy.")
+print("Run python -m scripts.evaluate_rl to evaluate the trained policy.")

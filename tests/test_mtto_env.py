@@ -1,15 +1,10 @@
-import os
-import sys
-
 import numpy as np
 import pytest
-
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from rl.MTTOEnv import MTTOEnv
-from model.Vehicle import Vehicle
-from model.SafeGuard import SafeGuardUtility
-from model.Track import Track
-from model.Task import Task
+from rl.mtto_env import MTTOEnv
+from model.vehicle import Vehicle
+from model.safe_guard_utility import SafeGuardUtility
+from model.track import Track
+from model.task import Task
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_safeguard_curves,
@@ -130,7 +125,7 @@ def test_reset(mtto_env: MTTOEnv):
 
 def test_cal_energy_consumption(mtto_env: MTTOEnv):
     obs, info = mtto_env.reset()
-    mec1, lec1 = mtto_env.ecc.CalcEnergy(
+    mec1, lec1 = mtto_env.ecc.calc_energy(
         begin_pos=mtto_env.current_pos,
         begin_speed=mtto_env.current_speed,
         acc=0.0,
@@ -142,7 +137,7 @@ def test_cal_energy_consumption(mtto_env: MTTOEnv):
     )
     energy_consumption1 = mec1 + lec1
 
-    mec2, lec2 = mtto_env.ecc.CalcEnergy(
+    mec2, lec2 = mtto_env.ecc.calc_energy(
         begin_pos=mtto_env.current_pos,
         begin_speed=mtto_env.current_speed,
         acc=1.0,

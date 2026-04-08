@@ -3,7 +3,7 @@ from numpy.typing import DTypeLike, NDArray
 from typing import Union, overload
 from dataclasses import dataclass, field
 
-from utils.misc import GetIntervalIndex
+from utils.indexing_utils import get_interval_index
 
 
 Numeric = Union[float, np.floating, NDArray[np.floating]]
@@ -51,7 +51,7 @@ class TrackProfile:
         )
 
     @overload
-    def GetSlope(
+    def get_slope(
         self,
         pos: float | np.floating,
         *,
@@ -59,14 +59,14 @@ class TrackProfile:
     ) -> np.floating: ...
 
     @overload
-    def GetSlope(
+    def get_slope(
         self,
         pos: NDArray[np.floating],
         *,
         dtype: DTypeLike = np.float32,
     ) -> NDArray[np.floating]: ...
 
-    def GetSlope(
+    def get_slope(
         self,
         pos: Numeric,
         *,
@@ -82,18 +82,18 @@ class TrackProfile:
         """
         slope = self.slopes[
             np.clip(
-                GetIntervalIndex(pos, self.slope_intervals), 0, len(self.slopes) - 1
+                get_interval_index(pos, self.slope_intervals), 0, len(self.slopes) - 1
             )
         ]
         return slope.astype(dtype=dtype)
 
     @overload
-    def GetNextSlopeAndDistance(
+    def get_next_slope_and_distance(
         self, pos: float | np.floating, direction: int, *, dtype: DTypeLike = np.float32
     ) -> tuple[np.floating, np.floating]: ...
 
     @overload
-    def GetNextSlopeAndDistance(
+    def get_next_slope_and_distance(
         self,
         pos: NDArray[np.floating],
         direction: int,
@@ -101,7 +101,7 @@ class TrackProfile:
         dtype: DTypeLike = np.float32,
     ) -> tuple[NDArray[np.floating], NDArray[np.floating]]: ...
 
-    def GetNextSlopeAndDistance(
+    def get_next_slope_and_distance(
         self, pos: Numeric, direction: int, *, dtype: DTypeLike = np.float32
     ) -> (
         tuple[np.floating, np.floating]
@@ -117,7 +117,7 @@ class TrackProfile:
         Returns:
             下个坡度区间的坡度(百分位)，当前位置与下一坡度区间的距离(m)
         """
-        current_interval_index = GetIntervalIndex(pos, self.slope_intervals)
+        current_interval_index = get_interval_index(pos, self.slope_intervals)
         next_interval_index = np.clip(
             current_interval_index + direction, 0, len(self.slopes) - 1
         )
@@ -137,16 +137,16 @@ class TrackProfile:
         return next_slope.astype(dtype=dtype), distance.astype(dtype=dtype)
 
     @overload
-    def GetSpeedlimit(
+    def get_speed_limit(
         self, pos: float | np.floating, *, dtype: DTypeLike = np.float32
     ) -> np.floating: ...
 
     @overload
-    def GetSpeedlimit(
+    def get_speed_limit(
         self, pos: NDArray[np.floating], *, dtype: DTypeLike = np.float32
     ) -> NDArray[np.floating]: ...
 
-    def GetSpeedlimit(
+    def get_speed_limit(
         self, pos: Numeric, *, dtype: DTypeLike = np.float32
     ) -> np.floating | NDArray[np.floating]:
         """
@@ -158,7 +158,7 @@ class TrackProfile:
         """
         speed_limit = self.speed_limits[
             np.clip(
-                GetIntervalIndex(pos, self.speed_limit_intervals),
+                get_interval_index(pos, self.speed_limit_intervals),
                 0,
                 len(self.speed_limits) - 1,
             )
@@ -166,12 +166,12 @@ class TrackProfile:
         return speed_limit.astype(dtype=dtype)
 
     @overload
-    def GetNextSpeedlimitAndDistance(
+    def get_next_speed_limit_and_distance(
         self, pos: float | np.floating, direction: int, *, dtype: DTypeLike = np.float32
     ) -> tuple[np.floating, np.floating]: ...
 
     @overload
-    def GetNextSpeedlimitAndDistance(
+    def get_next_speed_limit_and_distance(
         self,
         pos: NDArray[np.floating],
         direction: int,
@@ -179,7 +179,7 @@ class TrackProfile:
         dtype: DTypeLike = np.float32,
     ) -> tuple[NDArray[np.floating], NDArray[np.floating]]: ...
 
-    def GetNextSpeedlimitAndDistance(
+    def get_next_speed_limit_and_distance(
         self, pos: Numeric, direction: int, *, dtype: DTypeLike = np.float32
     ) -> (
         tuple[np.floating, np.floating]
@@ -195,7 +195,7 @@ class TrackProfile:
         Returns:
             下个限速区间的限速值(m/s)，当前位置与下一限速区间的距离(m)
         """
-        current_interval_index = GetIntervalIndex(pos, self.speed_limit_intervals)
+        current_interval_index = get_interval_index(pos, self.speed_limit_intervals)
         next_interval_index = np.clip(
             current_interval_index + direction, 0, len(self.speed_limits) - 1
         )

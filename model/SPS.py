@@ -1,4 +1,4 @@
-from model.SafeGuard import SafeGuardUtility
+from model.safe_guard_utility import SafeGuardUtility
 
 
 class SPS:
@@ -26,7 +26,7 @@ class SPS:
         self.numofSPS: int = len(self.ASA_ap_list)  # 办理进路上停车区总数(加上车站)
         self.T_s: float = T_s  # 步进从发起到完成的平均耗时
 
-    def StepToNextSP(
+    def step_to_next_stopping_point(
         self,
         current_pos: float,
         current_speed: float,
@@ -54,7 +54,7 @@ class SPS:
                 (
                     next_guard_curve_min_speed,
                     _,
-                ) = self.sgu.GetMinAndMaxSpeed(
+                ) = self.sgu.get_min_and_max_speed(
                     current_pos=current_pos,
                     current_sp=next_sp,
                 )
@@ -73,14 +73,15 @@ class SPS:
                 # 未完成步进
                 return current_sp
 
-    def Reset(self) -> None:
+    def reset(self) -> None:
         """
         重置停车点步进模拟
         """
         self.IsPrevSPSReqDone = True
         self.SPSReqTimeStamp = 0.0
 
-    def GetASATargetPointPosition(self, sp: int) -> float:
+    def get_auxiliary_stopping_area_target_position(self, sp: int) -> float:
         if sp < 0 or sp >= self.numofSPS:
             raise IndexError(f"停车点编号 {sp} 超出范围 [0, {self.numofSPS - 1}]")
         return (self.ASA_ap_list[sp] + self.ASA_dp_list[sp]) / 2
+

@@ -1,11 +1,6 @@
-import os
-import sys
-
 import numpy as np
 import pytest
-
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from model.Track import Track, TrackProfile
+from model.track import Track, TrackProfile
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_slopes,
@@ -83,10 +78,10 @@ def test_get_slope(track_profile: TrackProfile):
         ],
         dtype=np.float32,
     )
-    result1 = track_profile.GetSlope(pos=pos, dtype=np.float32)
-    result2 = track_profile.GetSlope(pos=pos)
-    result3 = track_profile.GetSlope(pos=2885.1417)
-    result4 = track_profile.GetSlope(pos=2883.4972)
+    result1 = track_profile.get_slope(pos=pos, dtype=np.float32)
+    result2 = track_profile.get_slope(pos=pos)
+    result3 = track_profile.get_slope(pos=2885.1417)
+    result4 = track_profile.get_slope(pos=2883.4972)
     np.testing.assert_allclose(result1, expected_result)
     np.testing.assert_allclose(result2, expected_result)
     assert isinstance(result3, np.floating)
@@ -147,8 +142,8 @@ def test_get_speed_limit(track_profile: TrackProfile):
         )
         / 3.6
     )
-    result1 = track_profile.GetSpeedlimit(pos=pos, dtype=np.float32)
-    result2 = track_profile.GetSpeedlimit(pos=240.0)
+    result1 = track_profile.get_speed_limit(pos=pos, dtype=np.float32)
+    result2 = track_profile.get_speed_limit(pos=240.0)
     np.testing.assert_allclose(result1, expected_result)
     assert isinstance(result2, np.floating)
     np.testing.assert_allclose(result2, 100.0 / 3.6)
@@ -195,10 +190,10 @@ def test_get_next_slope_and_distance(track_profile: TrackProfile):
         ],
         dtype=np.float32,
     )
-    dslope_ahead, distance_ahead = track_profile.GetNextSlopeAndDistance(
+    dslope_ahead, distance_ahead = track_profile.get_next_slope_and_distance(
         pos=pos, direction=1, dtype=np.float32
     )
-    dslope_rear, distance_rear = track_profile.GetNextSlopeAndDistance(
+    dslope_rear, distance_rear = track_profile.get_next_slope_and_distance(
         pos=pos, direction=-1, dtype=np.float32
     )
     # 32位浮点数精度较低

@@ -1,13 +1,8 @@
-import os
-import sys
-
 import numpy as np
 import pytest
-
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from model.SafeGuard import SafeGuardCurves
-from model.Vehicle import Vehicle
-from model.Track import Track, TrackProfile
+from model.safe_guard_curves import SafeGuardCurves
+from model.vehicle import Vehicle
+from model.track import Track, TrackProfile
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_slopes,
@@ -42,7 +37,7 @@ def safeguard_curves_and_vehicle():
 def test_cal_levi_curves(safeguard_curves_and_vehicle):
     cal_SGC, vehicle = safeguard_curves_and_vehicle
     aps, _ = load_auxiliary_stopping_areas_ap_and_dp()
-    curves = cal_SGC.CalcLeviCurves(aps, vehicle, ds=1)
+    curves = cal_SGC.calc_levi_curves(aps, vehicle, ds=1)
     # 检查返回类型和内容
     assert isinstance(curves, list)
     assert all(isinstance(item, np.ndarray) and item.shape[0] == 2 for item in curves)
@@ -55,7 +50,7 @@ def test_cal_levi_curves(safeguard_curves_and_vehicle):
 def test_cal_brake_curves(safeguard_curves_and_vehicle):
     cal_SGC, vehicle = safeguard_curves_and_vehicle
     _, dps = load_auxiliary_stopping_areas_ap_and_dp()
-    curves = cal_SGC.CalcBrakeCurves(dps, vehicle, ds=1)
+    curves = cal_SGC.calc_brake_curves(dps, vehicle, ds=1)
     assert isinstance(curves, list)
     assert all(isinstance(item, np.ndarray) and item.shape[0] == 2 for item in curves)
     for item in curves:

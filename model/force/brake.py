@@ -5,7 +5,7 @@ from typing import Union
 Numeric = Union[float, np.floating, NDArray]
 
 
-def SledgeFrictionalBrake(
+def sledge_frictional_brake_force(
     speed: Numeric,
     mass: Numeric,
     slope: Numeric,
@@ -35,10 +35,11 @@ def SledgeFrictionalBrake(
     sledge_frictional_resis_force = np.where(
         speed_km <= MIN_V_KM, k * u * mass * 100 / np.sqrt(100**2 + slope**2) * 9.8, 0.0
     )
+
     return sledge_frictional_resis_force
 
 
-def VortexBrake(
+def vortex_brake_force(
     speed: Numeric,
     numoftrainsets: int,
     level: int,
@@ -73,10 +74,11 @@ def VortexBrake(
         / (speed_km / DENOM + (1 + np.sqrt(speed_km / DENOM)) ** 2),
         0.0,
     )
+
     return vortex_break_force
 
 
-def WearPlateFrictionalBrake(
+def wear_plate_frictional_brake_force(
     speed: Numeric,
     numoftrainsets: int,
 ) -> NDArray[np.float64]:
@@ -131,4 +133,5 @@ def WearPlateFrictionalBrake(
         2 * numoftrainsets * (A - np.sqrt(B - C * (speed_km[mask] - D) ** 2)) - E
     )
     wearplate_frictional_resis_force[mask] = tmp
+
     return wearplate_frictional_resis_force

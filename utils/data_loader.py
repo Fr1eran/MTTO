@@ -68,7 +68,7 @@ def load_acceleration_zones() -> dict[str, Any]:
 
 
 def load_safeguard_curve(curve_name: str):
-    return load_pickle(f"data/rail/safeguard/{curve_name}.pkl")
+    return load_pickle(f"output/safeguardcurves/{curve_name}.pkl")
 
 
 def load_safeguard_curves(*curve_names: str) -> tuple[Any, ...]:

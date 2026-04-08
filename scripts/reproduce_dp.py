@@ -1,19 +1,17 @@
 import numpy as np
 import os
-import sys
 from typing import TypedDict, Sequence, Any
 from numpy.typing import NDArray
 import matplotlib.pyplot as plt
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-
-from model.SafeGuard import SafeGuardUtility
-from model.Vehicle import Vehicle
-from model.Track import Track, TrackProfile
-from model.Task import Task
-from model.ECC import ECC
-from model.ORS import ORS
-from utils.misc import SaveCurveAndMetrics, SetChineseFont
+from model.safe_guard_utility import SafeGuardUtility
+from model.vehicle import Vehicle
+from model.track import Track, TrackProfile
+from model.task import Task
+from model.ecc import ECC
+from model.ors import ORS
+from utils.io_utils import save_curve_and_metrics
+from utils.plot_utils import set_chinese_font
 from utils.data_loader import (
     load_slopes,
     load_safeguard_curves,
@@ -83,11 +81,13 @@ class VariableSpacingDPOptimizer:
             vehicle=self.vehicle, track=self.track, factor=self.safeguard_utility.gamma
         )
         # 计算最短运行时间参考曲线
-        self.ref_curve_pos, self.ref_curve_speed = self.ors.CalcMinRuntimeCurve(
-            begin_pos=self.task.start_position,
-            begin_speed=self.task.start_speed,
-            end_pos=self.task.target_position,
-            end_speed=0.0,
+        self.ref_curve_pos, self.ref_curve_speed = (
+            self.ors.calc_min_operation_time_curve(
+                begin_pos=self.task.start_position,
+                begin_speed=self.task.start_speed,
+                end_pos=self.task.target_position,
+                end_speed=0.0,
+            )
         )
         self._graph_cache_signature: tuple[float, float, int] | None = None
         self._graph_cache: dict[str, Any] | None = None
@@ -217,7 +217,7 @@ class VariableSpacingDPOptimizer:
         critical_points_position_arr = np.concatenate(
             (
                 np.array([self.task.start_position]),
-                self.safeguard_utility.GetIDPPosition(),
+                self.safeguard_utility.get_intersecting_dangerous_point(),
                 np.array([self.task.target_position]),
             )
         )
@@ -265,7 +265,7 @@ class VariableSpacingDPOptimizer:
         speed_sample = np.sqrt(np.maximum(speed_sq_sample, 0.0))
 
         # 检查是否进入危险速度域
-        if self.safeguard_utility.DetectDanger(
+        if self.safeguard_utility.detect_danger(
             pos=pos_sample, speed=speed_sample
         ).any():
             return False, np.inf, np.inf
@@ -275,7 +275,7 @@ class VariableSpacingDPOptimizer:
         else:
             time = (speed_k_1 - speed_k) / acc
 
-        propulsion_energy, leviation_energy = self.ecc.CalcEnergy(
+        propulsion_energy, leviation_energy = self.ecc.calc_energy(
             begin_pos=pos_k,
             begin_speed=speed_k,
             acc=acc,
@@ -500,6 +500,9 @@ class VariableSpacingDPOptimizer:
 
 
 if __name__ == "__main__":
+    dp_result_save_dir = "output/optimial/dp"
+    os.makedirs(os.path.dirname(dp_result_save_dir), exist_ok=True)
+
     # 坡度，百分位
     slopes, slope_intervals = load_slopes()
 
@@ -562,8 +565,8 @@ if __name__ == "__main__":
     result = VSDP.optimize(max_speed=500.0 / 3.6, delta_speed=0.5, max_iters=100)
 
     if result is not None:
-        output_file = "data/optimal/DP/optimized_speed_curve.npz"
-        saved_npz_path, saved_metrics_path = SaveCurveAndMetrics(
+        output_file = f"{dp_result_save_dir}/optimized_speed_curve.npz"
+        saved_npz_path, saved_metrics_path = save_curve_and_metrics(
             pos_arr=result["pos"],
             speed_arr=result["speed"],
             output_path=output_file,
@@ -578,12 +581,12 @@ if __name__ == "__main__":
         print(f"优化速度曲线已保存到: {saved_npz_path}")
         print(f"性能指标已保存到: {saved_metrics_path}")
 
-        SetChineseFont()
+        set_chinese_font()
 
         fig, ax = plt.subplots(figsize=(12, 7))
 
         # 绘制静态元素（区间限速、危险速度域和终点等）
-        safeguard_utility.Render(ax=ax)
+        safeguard_utility.render(ax=ax)
 
         smooth_pos, smooth_speed = VSDP.BuildSmoothedDisplayCurve(
             pos_arr=result["pos"],

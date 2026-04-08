@@ -4,8 +4,8 @@ from typing import cast
 import numpy as np
 from scipy.integrate import cumulative_trapezoid, trapezoid
 from numpy.typing import NDArray
-from model.Vehicle import Vehicle, VehicleDynamic
-from model.Track import TrackProfile
+from model.vehicle import Vehicle, VehicleDynamic
+from model.track import TrackProfile
 
 AccProfile = Callable[[NDArray[np.floating]], NDArray[np.floating]]
 
@@ -70,7 +70,7 @@ class ECC:
         self.Phi_1 = 0.1049
         self.Phi_2 = 1.006
 
-    def CalcEnergyCumul(
+    def calc_energy_cumulative(
         self,
         pos_arr: NDArray[np.floating],
         speed_arr: NDArray[np.floating],
@@ -94,11 +94,11 @@ class ECC:
             tuple(propulsion_energy_consumption, leviation_energy_consumption)
         """
 
-        F_longitudinal = VehicleDynamic.CalcLongitudinalForce(
+        F_longitudinal = VehicleDynamic.calc_longitudinal_force(
             vehicle,
             acc_arr,
             speed_arr,
-            trackprofile.GetSlope(pos_arr),
+            trackprofile.get_slope(pos_arr),
         )
 
         mechanic_energy_consumption = cumulative_trapezoid(
@@ -134,7 +134,7 @@ class ECC:
             leviation_energy_consumption,
         )
 
-    def CalcEnergy(
+    def calc_energy(
         self,
         begin_pos: float,
         begin_speed: float,
@@ -200,11 +200,11 @@ class ECC:
             else:
                 acc_for_force = acc_value
             assert acc_for_force is not None
-            F_longitudinal = VehicleDynamic.CalcLongitudinalForce(
+            F_longitudinal = VehicleDynamic.calc_longitudinal_force(
                 vehicle=vehicle,
                 acc=acc_for_force,
                 speed=begin_speed,
-                slope=trackprofile.GetSlope(pos=begin_pos),
+                slope=trackprofile.get_slope(pos=begin_pos),
             )
             mechanic_energy_consumption = np.abs(F_longitudinal * distance)
             motor_energy_consumption = 0.0
@@ -240,9 +240,9 @@ class ECC:
                 )
                 t_nodes[i + 1] = t_nodes[i] + np.abs(delta_d[i]) / avg_speed
 
-            slope_nodes = trackprofile.GetSlope(p_nodes)
+            slope_nodes = trackprofile.get_slope(p_nodes)
 
-            F_longitudinal = VehicleDynamic.CalcLongitudinalForce(
+            F_longitudinal = VehicleDynamic.calc_longitudinal_force(
                 vehicle=vehicle,
                 acc=acc_nodes,
                 speed=speed_nodes,
