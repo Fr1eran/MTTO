@@ -6,25 +6,25 @@ from model.Track import Track
 from model.Task import Task
 from model.ORS import ORS
 from utils.data_loader import (
-    load_auxiliary_parking_areas,
+    load_auxiliary_stopping_areas_ap_and_dp,
     load_slopes,
     load_speed_limits,
-    load_station_zp_positions,
+    load_stations_goal_positions,
 )
 
 
 @pytest.fixture(scope="module")
-def ors():
+def operation_reference_system():
     # 坡度，百分位
     slopes, slope_intervals = load_slopes()
 
     # 区间限速
     speed_limits, speed_limit_intervals = load_speed_limits(to_mps=True)
 
-    aps, dps = load_auxiliary_parking_areas()
+    aps, dps = load_auxiliary_stopping_areas_ap_and_dp()
 
     # 车站
-    ly_zp, pa_zp = load_station_zp_positions()
+    ly_zp, pa_zp = load_stations_goal_positions()
 
     track = Track(
         slopes,
@@ -44,4 +44,4 @@ def ors():
         max_arr_time_error=120.0,
         max_stop_error=0.3,
     )
-    return ORS(vehicle=vehicle, track=track, gamma=0.95)
+    return ORS(vehicle=vehicle, track=track, factor=0.95)

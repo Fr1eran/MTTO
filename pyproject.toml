@@ -1,7 +1,7 @@
 [project]
 name = "mtto"
 version = "0.1.0"
-description = "Add your description here"
+description = "Maglev Train Trajectory Optimization based on Reinforcement Learning"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [

@@ -8,7 +8,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from model.SafeGuard import SafeGuardUtility
 from model.SPS import SPS
 from utils.data_loader import (
-    load_auxiliary_parking_areas,
+    load_auxiliary_stopping_areas_ap_and_dp,
     load_excel,
     load_safeguard_curves,
     load_slopes,
@@ -32,28 +32,28 @@ class TestSPSIntegration:
         distance = (
             raw_data["里程(km)"][1:].to_numpy(dtype=np.float64) * 1000.0
         )  # km -> m
-        v_SI = (
+        speed_mps = (
             raw_data["速度(km/h)"][1:].to_numpy(dtype=np.float64) / 3.6
         )  # km/h -> m/s
         travel_time = raw_data["时间(s)"][1:].to_numpy(dtype=np.float64)  # s
 
         slopes, slope_intervals = load_slopes()
         speed_limits, speed_limit_intervals = load_speed_limits(to_mps=True)
-        aps, dps = load_auxiliary_parking_areas()
+        accessible_points, dangerous_points = load_auxiliary_stopping_areas_ap_and_dp()
         min_curves_list, max_curves_list = load_safeguard_curves(
             "min_curves_list", "max_curves_list"
         )
 
         return {
             "distance": distance,
-            "speed": v_SI,
+            "speed": speed_mps,
             "time": travel_time,
             "slopes": slopes,
             "slope_intervals": slope_intervals,
             "speed_limits": speed_limits,
             "speed_limit_intervals": speed_limit_intervals,
-            "aps": aps,
-            "dps": dps,
+            "accessible_points": accessible_points,
+            "dangerous_points": dangerous_points,
             "min_curves_list": min_curves_list,
             "max_curves_list": max_curves_list,
         }
@@ -62,7 +62,7 @@ class TestSPSIntegration:
     def setup_system(self, setup_data):
 
         # Initialize SafeGuardUtility
-        sgu = SafeGuardUtility(
+        safeguard_utility = SafeGuardUtility(
             speed_limits=setup_data["speed_limits"],
             speed_limit_intervals=setup_data["speed_limit_intervals"],
             min_curves_list=setup_data["min_curves_list"],
@@ -70,19 +70,19 @@ class TestSPSIntegration:
             factor=0.9,
         )
 
-        return sgu, len(setup_data["aps"])
+        return safeguard_utility, len(setup_data["accessible_points"])
 
     def test_sps_stepping_with_real_data(self, setup_data, setup_system):
         """
         使用真实运行数据测试停车点步进机制实现
         """
-        sgu, num_sp = setup_system
+        safeguard_utility, num_sp = setup_system
 
         T_r = 2.0
         sps = SPS(
-            sgu=sgu,
-            ASA_ap_list=setup_data["aps"],
-            ASA_dp_list=setup_data["dps"],
+            sgu=safeguard_utility,
+            ASA_ap_list=setup_data["accessible_points"],
+            ASA_dp_list=setup_data["dangerous_points"],
             T_s=T_r,
         )
 

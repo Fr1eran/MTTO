@@ -9,7 +9,7 @@ from model.Vehicle import Vehicle
 from model.ECC import ECC
 from model.Track import Track, TrackProfile
 from utils.data_loader import (
-    load_auxiliary_parking_areas,
+    load_auxiliary_stopping_areas_ap_and_dp,
     load_excel,
     load_slopes,
     load_speed_limits,
@@ -46,11 +46,16 @@ ax2.set_title("龙阳路到浦东国际机场实际加速度-里程曲线")
 
 slopes, slope_intervals = load_slopes()
 speed_limits, speed_limit_intervals = load_speed_limits(to_mps=True)
-aps, dps = load_auxiliary_parking_areas()
+accessible_points, dangerous_points = load_auxiliary_stopping_areas_ap_and_dp()
 
 
 track = Track(
-    slopes, slope_intervals, speed_limits.tolist(), speed_limit_intervals, aps, dps
+    slopes,
+    slope_intervals,
+    speed_limits.tolist(),
+    speed_limit_intervals,
+    accessible_points,
+    dangerous_points,
 )
 trackprofile = TrackProfile(track=track)
 

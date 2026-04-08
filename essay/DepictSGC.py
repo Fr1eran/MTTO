@@ -8,7 +8,7 @@ from model.SafeGuard import SafeGuardUtility
 from utils.curve import ConcatenateCurvesWithNaN
 from utils.data_loader import (
     load_acceleration_zones,
-    load_auxiliary_parking_areas,
+    load_auxiliary_stopping_areas_ap_and_dp,
     load_safeguard_curves,
     load_speed_limits,
     load_stations,
@@ -16,22 +16,22 @@ from utils.data_loader import (
 from utils.misc import SetChineseFont
 
 # 辅助停车区
-aps, dps = load_auxiliary_parking_areas()
+accessible_points, dangerous_points = load_auxiliary_stopping_areas_ap_and_dp()
 
 # 车站
 stations_data = load_stations()
-ly_begin = stations_data["LY"]["begin"]
-ly_zp = stations_data["LY"]["zp"]
-ly_end = stations_data["LY"]["end"]
-pa_begin = stations_data["PA"]["begin"]
-pa_zp = stations_data["PA"]["zp"]
-pa_end = stations_data["PA"]["end"]
-stations_cor = np.array([[ly_begin, pa_begin], [ly_end, pa_end]])
+longyang_start = stations_data["start_station"]["start"]
+longyang_target = stations_data["start_station"]["target"]
+longyang_end = stations_data["start_station"]["end"]
+putong_start = stations_data["end_station"]["start"]
+putong_target = stations_data["end_station"]["target"]
+putong_end = stations_data["end_station"]["end"]
+stations_cor = np.array([[longyang_start, putong_start], [longyang_end, putong_end]])
 
 # 加速区
-az_datas = load_acceleration_zones()
-az_begin = az_datas["uplink"]["begin"]
-az_end = az_datas["uplink"]["end"]
+acceleration_zone_data = load_acceleration_zones()
+acceleration_zone_start = acceleration_zone_data["uplink"]["start"]
+acceleration_zone_end = acceleration_zone_data["uplink"]["end"]
 
 # 区间限速
 speed_limits, speed_limit_intervals = load_speed_limits(to_mps=True)
@@ -68,9 +68,9 @@ ax1.step(
     label="区间限速",
 )
 ax1.hlines(
-    y=np.zeros_like(aps),
-    xmin=aps,
-    xmax=dps,
+    y=np.zeros_like(accessible_points),
+    xmin=accessible_points,
+    xmax=dangerous_points,
     colors="green",
     linestyles="solid",
     linewidth=8,
@@ -89,8 +89,8 @@ ax1.hlines(
 )
 ax1.hlines(
     y=np.zeros(2),
-    xmin=az_begin,
-    xmax=az_end,
+    xmin=acceleration_zone_start,
+    xmax=acceleration_zone_end,
     colors="yellow",
     linestyles="solid",
     linewidth=8,
@@ -154,9 +154,9 @@ safeguard.Render(ax=ax2)
 
 # 绘制辅助停车区、车站
 ax2.hlines(
-    y=np.zeros_like(aps[:-1]),
-    xmin=aps[:-1],
-    xmax=dps[:-1],
+    y=np.zeros_like(accessible_points[:-1]),
+    xmin=accessible_points[:-1],
+    xmax=dangerous_points[:-1],
     colors="green",
     linestyles="solid",
     linewidth=8,
@@ -175,8 +175,8 @@ ax2.hlines(
 )
 ax2.hlines(
     y=np.zeros(2),
-    xmin=az_begin,
-    xmax=az_end,
+    xmin=acceleration_zone_start,
+    xmax=acceleration_zone_end,
     colors="yellow",
     linestyles="solid",
     linewidth=8,

@@ -240,7 +240,7 @@ class ECC:
                 )
                 t_nodes[i + 1] = t_nodes[i] + np.abs(delta_d[i]) / avg_speed
 
-            slope_nodes = trackprofile.GetSlope(p_nodes, interpolate=True)
+            slope_nodes = trackprofile.GetSlope(p_nodes)
 
             F_longitudinal = VehicleDynamic.CalcLongitudinalForce(
                 vehicle=vehicle,

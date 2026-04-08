@@ -54,7 +54,7 @@ def load_speed_limits(
     return speed_limits, np.asarray(data["intervals"], dtype=np.float64)
 
 
-def load_auxiliary_parking_areas() -> tuple[list[float], list[float]]:
+def load_auxiliary_stopping_areas_ap_and_dp() -> tuple[list[float], list[float]]:
     data = load_json("data/rail/raw/auxiliary_parking_areas.json")
     return data["accessible_points"], data["dangerous_points"]
 
@@ -75,6 +75,8 @@ def load_safeguard_curves(*curve_names: str) -> tuple[Any, ...]:
     return tuple(load_safeguard_curve(name) for name in curve_names)
 
 
-def load_station_zp_positions() -> tuple[float, float]:
+def load_stations_goal_positions() -> tuple[float, float]:
     stations = load_stations()
-    return float(stations["LY"]["zp"]), float(stations["PA"]["zp"])
+    return float(stations["start_station"]["target"]), float(
+        stations["end_station"]["target"]
+    )

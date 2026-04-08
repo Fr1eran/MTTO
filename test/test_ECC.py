@@ -12,7 +12,7 @@ from model.Vehicle import Vehicle
 
 
 @pytest.fixture(scope="module")
-def ecc_case():
+def energy_consumption_calculator_case():
     track = Track(
         slopes=np.asarray([0.0], dtype=np.float64),
         slope_intervals=np.asarray([0.0, 20000.0], dtype=np.float64),
@@ -33,8 +33,10 @@ def ecc_case():
     return ecc, vehicle, track_profile
 
 
-def test_calc_energy_constant_function_equivalent_to_scalar(ecc_case):
-    ecc, vehicle, track_profile = ecc_case
+def test_calc_energy_constant_function_equivalent_to_scalar(
+    energy_consumption_calculator_case,
+):
+    ecc, vehicle, track_profile = energy_consumption_calculator_case
     begin_pos = 100.0
     begin_speed = 10.0
     distance = 200.0
@@ -71,8 +73,8 @@ def test_calc_energy_constant_function_equivalent_to_scalar(ecc_case):
     assert abs(func_lec - scalar_lec) / max(abs(scalar_lec), 1.0) < 2e-2
 
 
-def test_calc_energy_accepts_distance_dependent_acc(ecc_case):
-    ecc, vehicle, track_profile = ecc_case
+def test_calc_energy_accepts_distance_dependent_acc(energy_consumption_calculator_case):
+    ecc, vehicle, track_profile = energy_consumption_calculator_case
 
     def acc_profile(s):
         s_arr = np.asarray(s, dtype=np.float64)
@@ -95,8 +97,10 @@ def test_calc_energy_accepts_distance_dependent_acc(ecc_case):
     assert lec > 0.0
 
 
-def test_calc_energy_callable_respects_operation_time_override(ecc_case):
-    ecc, vehicle, track_profile = ecc_case
+def test_calc_energy_callable_respects_operation_time_override(
+    energy_consumption_calculator_case,
+):
+    ecc, vehicle, track_profile = energy_consumption_calculator_case
     distance = 100.0
     forced_time = 12.34
 
@@ -119,8 +123,8 @@ def test_calc_energy_callable_respects_operation_time_override(ecc_case):
     assert lec == pytest.approx(expected_lec, rel=1e-8, abs=1e-8)
 
 
-def test_calc_energy_accepts_array_only_callback(ecc_case):
-    ecc, vehicle, track_profile = ecc_case
+def test_calc_energy_accepts_array_only_callback(energy_consumption_calculator_case):
+    ecc, vehicle, track_profile = energy_consumption_calculator_case
 
     def acc_profile_array_only(s):
         assert isinstance(s, np.ndarray)
@@ -141,8 +145,10 @@ def test_calc_energy_accepts_array_only_callback(ecc_case):
     assert np.isfinite(lec)
 
 
-def test_calc_energy_array_only_callback_with_tiny_distance(ecc_case):
-    ecc, vehicle, track_profile = ecc_case
+def test_calc_energy_array_only_callback_with_tiny_distance(
+    energy_consumption_calculator_case,
+):
+    ecc, vehicle, track_profile = energy_consumption_calculator_case
 
     def acc_profile_array_only(s):
         assert isinstance(s, np.ndarray)
@@ -163,8 +169,10 @@ def test_calc_energy_array_only_callback_with_tiny_distance(ecc_case):
     assert np.isfinite(lec)
 
 
-def test_calc_energy_rejects_non_vectorized_callback(ecc_case):
-    ecc, vehicle, track_profile = ecc_case
+def test_calc_energy_rejects_non_vectorized_callback(
+    energy_consumption_calculator_case,
+):
+    ecc, vehicle, track_profile = energy_consumption_calculator_case
 
     def scalar_only_callback(s):
         if not isinstance(s, (float, np.floating)):
@@ -184,8 +192,8 @@ def test_calc_energy_rejects_non_vectorized_callback(ecc_case):
         )
 
 
-def test_calc_energy_rejects_scalar_output_callback(ecc_case):
-    ecc, vehicle, track_profile = ecc_case
+def test_calc_energy_rejects_scalar_output_callback(energy_consumption_calculator_case):
+    ecc, vehicle, track_profile = energy_consumption_calculator_case
 
     def scalar_output_callback(s):
         assert isinstance(s, np.ndarray)

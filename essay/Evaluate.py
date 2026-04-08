@@ -13,11 +13,11 @@ from model.Track import Track
 from model.Vehicle import Vehicle
 from rl.env_factory import make_env
 from utils.data_loader import (
-    load_auxiliary_parking_areas,
+    load_auxiliary_stopping_areas_ap_and_dp,
     load_safeguard_curves,
     load_slopes,
     load_speed_limits,
-    load_station_zp_positions,
+    load_stations_goal_positions,
 )
 
 
@@ -26,18 +26,18 @@ def build_scenario() -> tuple[Vehicle, Track, SafeGuardUtility, Task]:
     speed_limits, speed_limit_intervals = load_speed_limits(
         to_mps=True, dtype=np.float64
     )
-    aps, dps = load_auxiliary_parking_areas()
-    ly_zp, pa_zp = load_station_zp_positions()
-    levi_curves_list, brake_curves_list = load_safeguard_curves(
-        "levi_curves_list", "brake_curves_list"
+    accessible_points, dangerous_points = load_auxiliary_stopping_areas_ap_and_dp()
+    longyang_start_position, putong_end_position = load_stations_goal_positions()
+    min_curves_list, max_curves_list = load_safeguard_curves(
+        "min_curves_list", "max_curves_list"
     )
 
-    safeguardutility = SafeGuardUtility(
+    safeguard_utility = SafeGuardUtility(
         speed_limits=speed_limits,
         speed_limit_intervals=speed_limit_intervals,
-        min_curves_list=levi_curves_list,
-        max_curves_list=brake_curves_list,
-        gamma=0.95,
+        min_curves_list=min_curves_list,
+        max_curves_list=max_curves_list,
+        factor=0.95,
     )
 
     track = Track(
@@ -45,23 +45,23 @@ def build_scenario() -> tuple[Vehicle, Track, SafeGuardUtility, Task]:
         slope_intervals=slope_intervals,
         speed_limits=speed_limits,
         speed_limit_intervals=speed_limit_intervals,
-        ASA_aps=aps,
-        ASA_dps=dps,
+        ASA_aps=accessible_points,
+        ASA_dps=dangerous_points,
     )
 
     vehicle = Vehicle(mass=317.5, numoftrainsets=5, length=128.5)
 
     task = Task(
-        start_position=ly_zp,
+        start_position=longyang_start_position,
         start_speed=0.0,
-        target_position=pa_zp,
+        target_position=putong_end_position,
         schedule_time=440.0,
         max_acc_change=0.75,
         max_arr_time_error=120,
         max_stop_error=0.3,
     )
 
-    return vehicle, track, safeguardutility, task
+    return vehicle, track, safeguard_utility, task
 
 
 def main():
@@ -78,14 +78,14 @@ def main():
             f"VecNormalize stats file not found: {vecnormalize_save_path}"
         )
 
-    vehicle, track, safeguardutility, task = build_scenario()
+    vehicle, track, safeguard_utility, task = build_scenario()
 
     venv_eval = DummyVecEnv(
         [
             lambda: make_env(
                 vehicle=vehicle,
                 track=track,
-                safeguardutility=safeguardutility,
+                safeguard_utility=safeguard_utility,
                 task=task,
                 gamma=reward_discount,
                 max_step_distance=ds,

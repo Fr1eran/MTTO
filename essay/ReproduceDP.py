@@ -1,6 +1,4 @@
 import numpy as np
-import json
-import pickle
 import os
 import sys
 from typing import TypedDict, Sequence, Any
@@ -16,6 +14,12 @@ from model.Task import Task
 from model.ECC import ECC
 from model.ORS import ORS
 from utils.misc import SaveCurveAndMetrics, SetChineseFont
+from utils.data_loader import (
+    load_slopes,
+    load_safeguard_curves,
+    load_speed_limits,
+    load_stations,
+)
 
 
 class OptimalSpeedProfile(TypedDict):
@@ -53,14 +57,14 @@ class VariableSpacingDPOptimizer:
         self,
         vehicle: Vehicle,
         track: Track,
-        safeguardutil: SafeGuardUtility,
+        safeguard_utility: SafeGuardUtility,
         task: Task,
         time_tolerance: float,
     ) -> None:
         self.vehicle = vehicle
         self.track = track
         self.trackprofile = TrackProfile(track=self.track)
-        self.safeguardutil = safeguardutil
+        self.safeguard_utility = safeguard_utility
         self.task = task
         self.time_tolerance = time_tolerance
         # self.direction = (
@@ -76,7 +80,7 @@ class VariableSpacingDPOptimizer:
             k_c=0.8,
         )
         self.ors = ORS(
-            vehicle=self.vehicle, track=self.track, gamma=self.safeguardutil.gamma
+            vehicle=self.vehicle, track=self.track, factor=self.safeguard_utility.gamma
         )
         # 计算最短运行时间参考曲线
         self.ref_curve_pos, self.ref_curve_speed = self.ors.CalcMinRuntimeCurve(
@@ -213,7 +217,7 @@ class VariableSpacingDPOptimizer:
         critical_points_position_arr = np.concatenate(
             (
                 np.array([self.task.start_position]),
-                self.safeguardutil.GetIDPPosition(),
+                self.safeguard_utility.GetIDPPosition(),
                 np.array([self.task.target_position]),
             )
         )
@@ -261,7 +265,9 @@ class VariableSpacingDPOptimizer:
         speed_sample = np.sqrt(np.maximum(speed_sq_sample, 0.0))
 
         # 检查是否进入危险速度域
-        if self.safeguardutil.DetectDanger(pos=pos_sample, speed=speed_sample).any():
+        if self.safeguard_utility.DetectDanger(
+            pos=pos_sample, speed=speed_sample
+        ).any():
             return False, np.inf, np.inf
 
         if np.abs(acc) < 1e-9:
@@ -495,32 +501,28 @@ class VariableSpacingDPOptimizer:
 
 if __name__ == "__main__":
     # 坡度，百分位
-    with open("data/rail/raw/slopes.json", "r", encoding="utf-8") as f:
-        slope_data = json.load(f)
-        slopes = slope_data["slopes"]
-        slope_intervals = slope_data["intervals"]
+    slopes, slope_intervals = load_slopes()
 
     # 区间限速
-    with open("data/rail/raw/speed_limits.json", "r", encoding="utf-8") as f:
-        speedlimit_data = json.load(f)
-        speed_limits = speedlimit_data["speed_limits"]
-        speed_limits = np.asarray(speed_limits) / 3.6
-        speed_limit_intervals = speedlimit_data["intervals"]
+    speed_limits, speed_limit_intervals = load_speed_limits(to_mps=True)
 
     # 车站
-    with open("data/rail/raw/stations.json", "r", encoding="utf-8") as f:
-        stations_data = json.load(f)
-        ly_zp = stations_data["LY"]["zp"]
-        pa_zp = stations_data["PA"]["zp"]
+    stations_data = load_stations()
+    longyang_start = stations_data["start_station"]["start"]
+    longyang_target = stations_data["start_station"]["target"]
+    longyang_end = stations_data["start_station"]["end"]
+    putong_start = stations_data["end_station"]["start"]
+    putong_target = stations_data["end_station"]["target"]
+    putong_end = stations_data["end_station"]["end"]
 
     # 防护曲线
-    with open("data/rail/safeguard/min_curves_list.pkl", "rb") as f:
-        min_curves_list = pickle.load(f)
-    with open("data/rail/safeguard/max_curves_list.pkl", "rb") as f:
-        max_curves_list = pickle.load(f)
+    min_curves_list, max_curves_list = load_safeguard_curves(
+        "min_curves_list",
+        "max_curves_list",
+    )
 
     factor: float = 0.99
-    safeguardutility = SafeGuardUtility(
+    safeguard_utility = SafeGuardUtility(
         speed_limits=speed_limits,
         speed_limit_intervals=speed_limit_intervals,
         min_curves_list=min_curves_list,
@@ -540,9 +542,9 @@ if __name__ == "__main__":
     )
 
     task = Task(
-        start_position=ly_zp,
+        start_position=longyang_target,
         start_speed=0.0,
-        target_position=pa_zp,
+        target_position=putong_target,
         schedule_time=440.0,
         max_acc_change=0.75,
         max_arr_time_error=120.0,
@@ -552,7 +554,7 @@ if __name__ == "__main__":
     VSDP = VariableSpacingDPOptimizer(
         vehicle=vehicle,
         track=track,
-        safeguardutil=safeguardutility,
+        safeguard_utility=safeguard_utility,
         task=task,
         time_tolerance=0.01,
     )
@@ -581,7 +583,7 @@ if __name__ == "__main__":
         fig, ax = plt.subplots(figsize=(12, 7))
 
         # 绘制静态元素（区间限速、危险速度域和终点等）
-        safeguardutility.Render(ax=ax)
+        safeguard_utility.Render(ax=ax)
 
         smooth_pos, smooth_speed = VSDP.BuildSmoothedDisplayCurve(
             pos_arr=result["pos"],

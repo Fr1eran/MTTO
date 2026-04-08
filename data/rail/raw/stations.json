@@ -1,12 +1,12 @@
 {
-    "LY": {
-        "begin": 28.0,
-        "zp": 135.0,
+    "start_station": {
+        "start": 28.0,
+        "target": 135.0,
         "end": 240.0
     },
-    "PA": {
-        "begin": 29135.046,
-        "zp": 29270.046,
+    "end_station": {
+        "start": 29135.046,
+        "target": 29270.046,
         "end": 29345.046
     }
 }

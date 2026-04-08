@@ -11,25 +11,25 @@ from model.Task import Task
 from model.ORS import ORS
 from model.ECC import ECC
 from utils.data_loader import (
-    load_auxiliary_parking_areas,
+    load_auxiliary_stopping_areas_ap_and_dp,
     load_safeguard_curves,
     load_slopes,
     load_speed_limits,
-    load_station_zp_positions,
+    load_stations_goal_positions,
 )
 from utils.misc import SetChineseFont
 
 slopes, slope_intervals = load_slopes()
 speed_limits, speed_limit_intervals = load_speed_limits(to_mps=True)
-aps, dps = load_auxiliary_parking_areas()
-ly_zp, pa_zp = load_station_zp_positions()
-levi_curves_list, brake_curves_list = load_safeguard_curves(
-    "levi_curves_list", "brake_curves_list"
+accessible_points, dangerous_points = load_auxiliary_stopping_areas_ap_and_dp()
+longyang_start_position, putong_end_position = load_stations_goal_positions()
+min_curves_list, max_curves_list = load_safeguard_curves(
+    "min_curves_list", "max_curves_list"
 )
 
 
 factor: float = 0.99
-sgu = SafeGuardUtility(
+safeguard_utility = SafeGuardUtility(
     speed_limits=speed_limits,
     speed_limit_intervals=speed_limit_intervals,
     min_curves_list=min_curves_list,
@@ -38,7 +38,12 @@ sgu = SafeGuardUtility(
 )
 
 track = Track(
-    slopes, slope_intervals, speed_limits.tolist(), speed_limit_intervals, aps, dps
+    slopes,
+    slope_intervals,
+    speed_limits.tolist(),
+    speed_limit_intervals,
+    accessible_points,
+    dangerous_points,
 )
 trackprofile = TrackProfile(track=track)
 vehicle = Vehicle(
@@ -50,15 +55,15 @@ vehicle = Vehicle(
     levi_power_per_mass=1.7,
 )
 task = Task(
-    start_position=ly_zp,
+    start_position=longyang_start_position,
     start_speed=0.0,
-    target_position=pa_zp,
+    target_position=putong_end_position,
     schedule_time=440.0,
     max_acc_change=0.75,
     max_arr_time_error=120.0,
     max_stop_error=0.3,
 )
-ors = ORS(vehicle=vehicle, track=track, gamma=factor)
+ors = ORS(vehicle=vehicle, track=track, factor=factor)
 ecc = ECC(
     R_m=0.2796,
     L_d=0.0002,
@@ -70,7 +75,7 @@ ecc = ECC(
 )
 
 # 初始化位置和速度
-begin_pos = ly_zp
+begin_pos = longyang_start_position
 begin_speed = 0.0
 max_speed = float(np.max(speed_limits))
 
@@ -86,7 +91,7 @@ SetChineseFont()
 fig, ax = plt.subplots(figsize=(12, 7))
 
 # 绘制静态元素（区间限速、危险速度域和终点等）
-sgu.Render(ax=ax)
+safeguard_utility.Render(ax=ax)
 
 ax.scatter(
     end_pos,
@@ -238,10 +243,14 @@ def on_key(event):
 
     if key == "y":
         # 随机初始化并绘制曲线
-        begin_pos = float(np.random.uniform(ly_zp, pa_zp))
+        begin_pos = float(
+            np.random.uniform(longyang_start_position, putong_end_position)
+        )
         begin_speed = float(np.random.uniform(0.0, max_speed))
-        while sgu.DetectDanger(pos=begin_pos, speed=begin_speed):
-            begin_pos = float(np.random.uniform(ly_zp, pa_zp))
+        while safeguard_utility.DetectDanger(pos=begin_pos, speed=begin_speed):
+            begin_pos = float(
+                np.random.uniform(longyang_start_position, putong_end_position)
+            )
             begin_speed = float(np.random.uniform(0.0, max_speed))
 
         if not draw_curve(begin_pos, begin_speed):
@@ -256,15 +265,17 @@ def on_key(event):
         try:
             # 输入位置
             pos_input = input(
-                f"请输入起点位置 (m) [范围: {ly_zp:.2f} - {pa_zp:.2f}]: "
+                f"请输入起点位置 (m) [范围: {longyang_start_position:.2f} - {putong_end_position:.2f}]: "
             ).strip()
             if not pos_input:
                 print("[I] 取消操作")
                 return
 
             input_pos = float(pos_input)
-            if input_pos < ly_zp or input_pos > pa_zp:
-                print(f"[I] 错误：位置超出范围 ({ly_zp:.2f} - {pa_zp:.2f})")
+            if input_pos < longyang_start_position or input_pos > putong_end_position:
+                print(
+                    f"[I] 错误：位置超出范围 ({longyang_start_position:.2f} - {putong_end_position:.2f})"
+                )
                 return
 
             # 输入速度
@@ -282,7 +293,7 @@ def on_key(event):
                 return
 
             # 检查是否在危险区域
-            if sgu.DetectDanger(pos=input_pos, speed=input_speed):
+            if safeguard_utility.DetectDanger(pos=input_pos, speed=input_speed):
                 print("[I] 警告：该起点位于危险速度域内！")
                 confirm = input("[I] 是否继续绘制？(y/n): ").strip().lower()
                 if confirm != "y":

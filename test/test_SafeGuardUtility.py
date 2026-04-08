@@ -9,21 +9,23 @@ from utils.data_loader import load_safeguard_curves, load_speed_limits
 
 
 @pytest.fixture(scope="module")
-def safeguardutil():
-    s_limits, s_intervals = load_speed_limits(to_mps=True, dtype=np.float64)
+def safeguard_utility():
+    speed_limits, speed_limit_intervals = load_speed_limits(
+        to_mps=True, dtype=np.float64
+    )
     min_curves_list, max_curves_list = load_safeguard_curves(
         "min_curves_list", "max_curves_list"
     )
     return SafeGuardUtility(
-        speed_limits=s_limits,
-        speed_limit_intervals=s_intervals,
+        speed_limits=speed_limits,
+        speed_limit_intervals=speed_limit_intervals,
         min_curves_list=min_curves_list,
         max_curves_list=max_curves_list,
         factor=0.95,
     )
 
 
-def test_detect_danger(safeguardutil):
+def test_detect_danger(safeguard_utility):
     pos = np.array(
         [
             725,
@@ -67,11 +69,11 @@ def test_detect_danger(safeguardutil):
             False,
         ]
     )
-    result = safeguardutil.DetectDanger(pos, speed)
+    result = safeguard_utility.DetectDanger(pos, speed)
     np.testing.assert_array_equal(result, expected_result)
 
 
-def test_GetMinAndMaxSpeed_with_currentspisNone(safeguardutil):
+def test_get_min_and_max_speed_with_current_stopping_point_is_none(safeguard_utility):
     pos: list[float] = [
         200.0,
         530.0,
@@ -140,7 +142,7 @@ def test_GetMinAndMaxSpeed_with_currentspisNone(safeguardutil):
     result_CurrentMinSpeed: list[float] = []
     result_CurrentMaxSpeed: list[float] = []
     for i in range(len(pos)):
-        current_min_speed, current_max_speed = safeguardutil.GetMinAndMaxSpeed(
+        current_min_speed, current_max_speed = safeguard_utility.GetMinAndMaxSpeed(
             current_pos=pos[i], current_sp=input_sp[i]
         )
         result_CurrentMinSpeed.append(current_min_speed)
@@ -156,7 +158,9 @@ def test_GetMinAndMaxSpeed_with_currentspisNone(safeguardutil):
     )
 
 
-def test_GetMinAndMaxSpeed_with_currentspisNotNone(safeguardutil):
+def test_get_min_and_max_speed_with_current_stopping_point_is_not_none(
+    safeguard_utility,
+):
     pos: list[float] = [
         200.0,
         530.0,
@@ -226,7 +230,7 @@ def test_GetMinAndMaxSpeed_with_currentspisNotNone(safeguardutil):
     result_CurrentMaxSpeed: list[float] = []
     for i in range(len(pos)):
         current_sp = sp[i]
-        current_min_speed, current_max_speed = safeguardutil.GetMinAndMaxSpeed(
+        current_min_speed, current_max_speed = safeguard_utility.GetMinAndMaxSpeed(
             current_pos=pos[i], current_sp=current_sp
         )
         result_CurrentMinSpeed.append(current_min_speed)
@@ -244,37 +248,37 @@ def test_GetMinAndMaxSpeed_with_currentspisNotNone(safeguardutil):
 
 
 @pytest.fixture(scope="module")
-def position_safeguardutil():
-    safeguardutil = SafeGuardUtility.__new__(SafeGuardUtility)
-    safeguardutil.speed_limits = np.array([10.0], dtype=np.float64)
-    safeguardutil.speed_limit_intervals = np.array([0.0, 100.0], dtype=np.float64)
-    safeguardutil.min_curves_list = [
+def position_safeguard_utility():
+    safeguard_utility = SafeGuardUtility.__new__(SafeGuardUtility)
+    safeguard_utility.speed_limits = np.array([10.0], dtype=np.float64)
+    safeguard_utility.speed_limit_intervals = np.array([0.0, 100.0], dtype=np.float64)
+    safeguard_utility.min_curves_list = [
         np.array([[0.0, 1.0, 2.0, 3.0], [3.0, 2.0, 1.0, 0.0]], dtype=np.float64),
         np.array([[0.0, 1.0, 2.0, 3.0], [4.0, 3.0, 2.0, 0.0]], dtype=np.float64),
     ]
-    safeguardutil.max_curves_list = [
+    safeguard_utility.max_curves_list = [
         np.array([[0.0, 1.0, 2.0, 3.0], [5.0, 4.0, 2.0, 0.0]], dtype=np.float64),
         np.array([[0.0, 1.0, 2.0, 3.0], [4.0, 3.0, 1.0, 0.0]], dtype=np.float64),
         np.array([[0.0, 1.0, 2.0, 3.0], [6.0, 5.0, 3.0, 0.0]], dtype=np.float64),
     ]
-    safeguardutil._min_curve_pos_list = [
-        curve[0, :] for curve in safeguardutil.min_curves_list
+    safeguard_utility._min_curve_pos_list = [
+        curve[0, :] for curve in safeguard_utility.min_curves_list
     ]
-    safeguardutil._min_curve_speed_list = [
-        curve[1, :] for curve in safeguardutil.min_curves_list
+    safeguard_utility._min_curve_speed_list = [
+        curve[1, :] for curve in safeguard_utility.min_curves_list
     ]
-    safeguardutil._max_curve_pos_list = [
-        curve[0, :] for curve in safeguardutil.max_curves_list
+    safeguard_utility._max_curve_pos_list = [
+        curve[0, :] for curve in safeguard_utility.max_curves_list
     ]
-    safeguardutil._max_curve_speed_list = [
-        curve[1, :] for curve in safeguardutil.max_curves_list
+    safeguard_utility._max_curve_speed_list = [
+        curve[1, :] for curve in safeguard_utility.max_curves_list
     ]
-    return safeguardutil
+    return safeguard_utility
 
 
-def test_GetMinAndMaxPosition_with_currentsp(position_safeguardutil):
+def test_get_min_and_max_position_with_currentsp(position_safeguard_utility):
     min_pos, max_pos = (
-        position_safeguardutil.GetLatestTranctionAndBrakingIntervationPoint(
+        position_safeguard_utility.GetLatestTractionAndBrakingInterventionPoint(
             current_speed=1.5,
             current_sp=0,
         )
@@ -283,9 +287,11 @@ def test_GetMinAndMaxPosition_with_currentsp(position_safeguardutil):
     np.testing.assert_allclose(max_pos, 1.75)
 
 
-def test_GetMinAndMaxPosition_with_currentsp_extrapolation(position_safeguardutil):
+def test_get_min_and_max_position_with_currentsp_extrapolation(
+    position_safeguard_utility,
+):
     min_pos, max_pos = (
-        position_safeguardutil.GetLatestTranctionAndBrakingIntervationPoint(
+        position_safeguard_utility.GetLatestTractionAndBrakingInterventionPoint(
             current_speed=4.5,
             current_sp=0,
         )
@@ -294,9 +300,11 @@ def test_GetMinAndMaxPosition_with_currentsp_extrapolation(position_safeguarduti
     np.testing.assert_allclose(max_pos, -0.5)
 
 
-def test_GetMinAndMaxPosition_with_currentsp_negative_one(position_safeguardutil):
+def test_get_min_and_max_position_with_currentsp_negative_one(
+    position_safeguard_utility,
+):
     min_pos, max_pos = (
-        position_safeguardutil.GetLatestTranctionAndBrakingIntervationPoint(
+        position_safeguard_utility.GetLatestTractionAndBrakingInterventionPoint(
             current_speed=1.5,
             current_sp=-1,
         )
@@ -305,8 +313,8 @@ def test_GetMinAndMaxPosition_with_currentsp_negative_one(position_safeguardutil
     np.testing.assert_allclose(max_pos, 2.25)
 
 
-def test_GetMinAndMaxPosition_real_data_smoke(safeguardutil):
-    min_pos, max_pos = safeguardutil.GetLatestTranctionAndBrakingIntervationPoint(
+def test_get_min_and_max_position_real_data_smoke(safeguard_utility):
+    min_pos, max_pos = safeguard_utility.GetLatestTractionAndBrakingInterventionPoint(
         current_speed=2.0,
         current_sp=0,
     )

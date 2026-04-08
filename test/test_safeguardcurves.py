@@ -9,29 +9,29 @@ from model.SafeGuard import SafeGuardCurves
 from model.Vehicle import Vehicle
 from model.Track import Track, TrackProfile
 from utils.data_loader import (
-    load_auxiliary_parking_areas,
+    load_auxiliary_stopping_areas_ap_and_dp,
     load_slopes,
     load_speed_limits,
 )
 
 
 @pytest.fixture(scope="module")
-def sgc_and_vehicle():
+def safeguard_curves_and_vehicle():
     # 坡度，百分位
     slopes, slope_intervals = load_slopes()
 
     # 区间限速
     speed_limits, speed_limit_intervals = load_speed_limits(to_mps=True)
 
-    aps, dps = load_auxiliary_parking_areas()
+    accessible_points, dangerous_points = load_auxiliary_stopping_areas_ap_and_dp()
 
     track = Track(
         slopes,
         slope_intervals,
         speed_limits.tolist(),
         speed_limit_intervals,
-        ASA_aps=aps,
-        ASA_dps=dps,
+        ASA_aps=accessible_points,
+        ASA_dps=dangerous_points,
     )
     trackprofile = TrackProfile(track=track)
     cal_SGC = SafeGuardCurves(trackprofile=trackprofile)
@@ -39,9 +39,9 @@ def sgc_and_vehicle():
     return cal_SGC, vehicle
 
 
-def test_cal_levi_curves(sgc_and_vehicle):
-    cal_SGC, vehicle = sgc_and_vehicle
-    aps, _ = load_auxiliary_parking_areas()
+def test_cal_levi_curves(safeguard_curves_and_vehicle):
+    cal_SGC, vehicle = safeguard_curves_and_vehicle
+    aps, _ = load_auxiliary_stopping_areas_ap_and_dp()
     curves = cal_SGC.CalcLeviCurves(aps, vehicle, ds=1)
     # 检查返回类型和内容
     assert isinstance(curves, list)
@@ -52,9 +52,9 @@ def test_cal_levi_curves(sgc_and_vehicle):
         assert isinstance(item[1, :], np.ndarray)  # 每条曲线纵坐标数组
 
 
-def test_cal_brake_curves(sgc_and_vehicle):
-    cal_SGC, vehicle = sgc_and_vehicle
-    _, dps = load_auxiliary_parking_areas()
+def test_cal_brake_curves(safeguard_curves_and_vehicle):
+    cal_SGC, vehicle = safeguard_curves_and_vehicle
+    _, dps = load_auxiliary_stopping_areas_ap_and_dp()
     curves = cal_SGC.CalcBrakeCurves(dps, vehicle, ds=1)
     assert isinstance(curves, list)
     assert all(isinstance(item, np.ndarray) and item.shape[0] == 2 for item in curves)

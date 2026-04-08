@@ -587,6 +587,8 @@ class SafeGuardUtility:
 
             current_sp += 1
 
+        return current_sp
+
     def GetMinAndMaxSpeed(
         self, current_pos: float, current_sp: int
     ) -> tuple[float, float]:
@@ -647,7 +649,7 @@ class SafeGuardUtility:
 
         return float(current_min_speed), float(current_max_speed)
 
-    def GetLatestTranctionAndBrakingIntervationPoint(
+    def GetLatestTractionAndBrakingInterventionPoint(
         self, current_speed: float | np.number, current_sp: int
     ) -> tuple[float, float]:
         """

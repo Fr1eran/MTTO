@@ -7,21 +7,21 @@ import pytest
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from model.Track import Track, TrackProfile
 from utils.data_loader import (
-    load_auxiliary_parking_areas,
+    load_auxiliary_stopping_areas_ap_and_dp,
     load_slopes,
     load_speed_limits,
 )
 
 
 @pytest.fixture(scope="module")
-def trackprofile():
+def track_profile():
     # 坡度，百分位
     slopes, slope_intervals = load_slopes()
 
     # 区间限速
     speed_limits, speed_limit_intervals = load_speed_limits(to_mps=True)
 
-    aps, dps = load_auxiliary_parking_areas()
+    aps, dps = load_auxiliary_stopping_areas_ap_and_dp()
 
     track = Track(
         slopes,
@@ -34,7 +34,7 @@ def trackprofile():
     return TrackProfile(track=track)
 
 
-def test_GetSlope(trackprofile: TrackProfile):
+def test_get_slope(track_profile: TrackProfile):
     pos = np.array(
         [
             2600.0,
@@ -83,10 +83,10 @@ def test_GetSlope(trackprofile: TrackProfile):
         ],
         dtype=np.float32,
     )
-    result1 = trackprofile.GetSlope(pos=pos, dtype=np.float32)
-    result2 = trackprofile.GetSlope(pos=pos)
-    result3 = trackprofile.GetSlope(pos=2885.1417)
-    result4 = trackprofile.GetSlope(pos=2883.4972)
+    result1 = track_profile.GetSlope(pos=pos, dtype=np.float32)
+    result2 = track_profile.GetSlope(pos=pos)
+    result3 = track_profile.GetSlope(pos=2885.1417)
+    result4 = track_profile.GetSlope(pos=2883.4972)
     np.testing.assert_allclose(result1, expected_result)
     np.testing.assert_allclose(result2, expected_result)
     assert isinstance(result3, np.floating)
@@ -95,7 +95,7 @@ def test_GetSlope(trackprofile: TrackProfile):
     np.testing.assert_allclose(result4, -0.0154)
 
 
-def test_GetSpeedlimit(trackprofile: TrackProfile):
+def test_get_speed_limit(track_profile: TrackProfile):
     pos = np.array(
         [
             200.0,
@@ -147,14 +147,14 @@ def test_GetSpeedlimit(trackprofile: TrackProfile):
         )
         / 3.6
     )
-    result1 = trackprofile.GetSpeedlimit(pos=pos, dtype=np.float32)
-    result2 = trackprofile.GetSpeedlimit(pos=240.0)
+    result1 = track_profile.GetSpeedlimit(pos=pos, dtype=np.float32)
+    result2 = track_profile.GetSpeedlimit(pos=240.0)
     np.testing.assert_allclose(result1, expected_result)
     assert isinstance(result2, np.floating)
     np.testing.assert_allclose(result2, 100.0 / 3.6)
 
 
-def test_GetNextSlopeAndDistance(trackprofile: TrackProfile):
+def test_get_next_slope_and_distance(track_profile: TrackProfile):
     pos = np.array(
         [
             2600.0,
@@ -195,10 +195,10 @@ def test_GetNextSlopeAndDistance(trackprofile: TrackProfile):
         ],
         dtype=np.float32,
     )
-    dslope_ahead, distance_ahead = trackprofile.GetNextSlopeAndDistance(
+    dslope_ahead, distance_ahead = track_profile.GetNextSlopeAndDistance(
         pos=pos, direction=1, dtype=np.float32
     )
-    dslope_rear, distance_rear = trackprofile.GetNextSlopeAndDistance(
+    dslope_rear, distance_rear = track_profile.GetNextSlopeAndDistance(
         pos=pos, direction=-1, dtype=np.float32
     )
     # 32位浮点数精度较低

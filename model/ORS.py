@@ -44,11 +44,11 @@ class DescendOperation(TypedDict):
 class ORS:
     """Operation Reference System"""
 
-    def __init__(self, *, vehicle: Vehicle, track: Track, gamma: float) -> None:
+    def __init__(self, *, vehicle: Vehicle, track: Track, factor: float) -> None:
         self.vehicle = vehicle
         self.track = track
         self.trackprofile = TrackProfile(track=track)
-        self.gamma: float = gamma
+        self.gamma: float = factor
 
     def _getSpeedLimitsIntervalIndex(self, pos: float, *, ascend: bool = True) -> int:
         """

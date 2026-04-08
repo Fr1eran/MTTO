@@ -10,7 +10,7 @@ from rl.MTTOEnv import MTTOEnv
 def make_env(
     vehicle: Vehicle,
     track: Track,
-    safeguardutility: SafeGuardUtility,
+    safeguard_utility: SafeGuardUtility,
     task: Task,
     gamma: float,
     max_step_distance: float,
@@ -19,7 +19,7 @@ def make_env(
     env = MTTOEnv(
         vehicle=vehicle,
         track=track,
-        safeguardutility=safeguardutility,
+        safeguard_utility=safeguard_utility,
         task=task,
         gamma=gamma,
         max_step_distance=max_step_distance,
