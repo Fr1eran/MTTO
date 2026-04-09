@@ -1,11 +1,12 @@
 import os
+import argparse
 from datetime import datetime
 
 import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize, VecVideoRecorder
 
-from model.ocs import SafeGuardUtility,TrainService
+from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
 from rl.env_factory import make_env
@@ -61,11 +62,86 @@ def build_scenario() -> tuple[VehicleInfo, TrackInfo, SafeGuardUtility, TrainSer
     return vehicle, track, safeguard_utility, train_service
 
 
-def main():
-    reward_discount = 0.99
-    ds = 100.0
-    model_save_path = "output/optimal/rl/ppo_mtto"
-    vecnormalize_save_path = "output/optimal/rl/vecnormalize.pkl"
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Evaluate trained MTTO PPO policy.",
+    )
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default="output/optimal/rl/ppo_mtto",
+        help="Path prefix of PPO model zip file (without .zip suffix).",
+    )
+    parser.add_argument(
+        "--vecnormalize-path",
+        type=str,
+        default="output/optimal/rl/vecnormalize.pkl",
+        help="Path of VecNormalize stats file.",
+    )
+    parser.add_argument(
+        "--reward-discount",
+        type=float,
+        default=0.99,
+        help="Discount factor used to reconstruct evaluation environment.",
+    )
+    parser.add_argument(
+        "--step-distance",
+        type=float,
+        default=100.0,
+        help="Environment max_step_distance for evaluation.",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cpu",
+        help="Inference device for loading PPO model.",
+    )
+    parser.add_argument(
+        "--deterministic",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use deterministic policy during evaluation.",
+    )
+    parser.add_argument(
+        "--record-video",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable video recording for evaluation rollout.",
+    )
+    parser.add_argument(
+        "--video-folder",
+        type=str,
+        default="mtto_eval_video",
+        help="Output directory for evaluation videos.",
+    )
+    parser.add_argument(
+        "--video-length",
+        type=int,
+        default=10000,
+        help="Maximum recorded video length in steps.",
+    )
+    parser.add_argument(
+        "--video-trigger-step",
+        type=int,
+        default=0,
+        help="Record video when step equals this value.",
+    )
+    parser.add_argument(
+        "--enable-env-diagnostics",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable diagnostics collection in evaluation environment.",
+    )
+    return parser
+
+
+def main() -> None:
+    args = build_arg_parser().parse_args()
+
+    reward_discount = args.reward_discount
+    ds = args.step_distance
+    model_save_path = args.model_path
+    vecnormalize_save_path = args.vecnormalize_path
 
     model_zip_path = f"{model_save_path}.zip"
     if not os.path.exists(model_zip_path):
@@ -86,7 +162,8 @@ def main():
                 train_service=task,
                 gamma=reward_discount,
                 max_step_distance=ds,
-                render_mode="rgb_array",
+                enable_diagnostics=args.enable_env_diagnostics,
+                render_mode="rgb_array" if args.record_video else None,
             )
         ]
     )
@@ -95,16 +172,17 @@ def main():
     venv_eval.training = False
     venv_eval.norm_reward = False
 
-    eval_name_prefix = f"eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    venv_eval = VecVideoRecorder(
-        venv_eval,
-        video_folder="mtto_eval_video",
-        record_video_trigger=lambda step: step == 0,
-        video_length=10000,
-        name_prefix=eval_name_prefix,
-    )
+    if args.record_video:
+        eval_name_prefix = f"eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        venv_eval = VecVideoRecorder(
+            venv_eval,
+            video_folder=args.video_folder,
+            record_video_trigger=lambda step: step == args.video_trigger_step,
+            video_length=args.video_length,
+            name_prefix=eval_name_prefix,
+        )
 
-    model = PPO.load(model_save_path, device="cpu")
+    model = PPO.load(model_save_path, device=args.device)
 
     reward_after = 0.0
     energy_consumption = 0.0
@@ -117,7 +195,7 @@ def main():
     while not episode_over:
         if not isinstance(obs, np.ndarray):
             raise TypeError("VecEnv observation must be a numpy.ndarray for MlpPolicy.")
-        action, _ = model.predict(obs, deterministic=True)
+        action, _ = model.predict(obs, deterministic=args.deterministic)
         obs, rewards, dones, infos = venv_eval.step(action)
         reward_after += float(rewards[0])
         episode_over = bool(dones[0])

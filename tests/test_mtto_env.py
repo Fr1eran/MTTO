@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from rl.mtto_env import MTTOEnv
 from model.vehicle import VehicleInfo
-from model.ocs import SafeGuardUtility,TrainService
+from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
@@ -156,3 +156,30 @@ def test_cal_energy_consumption(mtto_env: MTTOEnv):
 
 def test_whole_env(mtto_env: MTTOEnv):
     check_env(mtto_env)
+
+
+def test_step_without_diagnostics_keeps_tb_dicts_empty(mtto_env: MTTOEnv):
+    mtto_env.enable_diagnostics = False
+    try:
+        mtto_env.reset()
+        action = mtto_env.action_space.sample()
+        mtto_env.step(action)
+
+        assert mtto_env.rewards_info == {}
+        assert mtto_env.state_info == {}
+        assert mtto_env.constraint_info == {}
+        assert mtto_env.event_info == {}
+    finally:
+        mtto_env.enable_diagnostics = True
+
+
+def test_no_render_tracking_data_when_render_mode_is_none(mtto_env: MTTOEnv):
+    assert mtto_env.render_mode is None
+    assert mtto_env.enable_render_tracking is False
+
+    mtto_env.reset()
+    action = mtto_env.action_space.sample()
+    mtto_env.step(action)
+
+    assert mtto_env.trajectory_pos is None
+    assert mtto_env.trajectory_speed_km_h is None

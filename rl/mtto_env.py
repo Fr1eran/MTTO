@@ -7,20 +7,44 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from scipy.interpolate import PchipInterpolator
 
-from model.ocs import SafeGuardUtility,TrainService,SPS
+from model.ocs import SafeGuardUtility, TrainService, SPS
 from model.vehicle import VehicleInfo
 from model.track import TrackInfo, TrackProfile
 from model.common import ECC, ORS
+from utils.indexing_utils import get_interval_index
 from utils.plot_utils import set_chinese_font
 
 
-class RewardsInfoForTB(TypedDict, total=False):
-    reward_safety: float
-    reward_docking: float
-    reward_punctuality: float
-    reward_energy: float
-    reward_comfort: float
-    reward_total: float
+class RewardInfoForTB(TypedDict, total=False):
+    safety: float
+    docking: float
+    punctuality: float
+    energy: float
+    comfort: float
+    total: float
+
+
+class StateInfoForTB(TypedDict, total=False):
+    episode_id: float
+    pos_m: float
+    speed_mps: float
+    current_sp: float
+
+
+class ConstraintInfoForTB(TypedDict, total=False):
+    margin_to_vmax_mps: float
+    margin_to_vmin_mps: float
+    is_truncated: float
+    violation_code: float
+    speed_limit_mps: float
+    speed_limit_segment: float
+    is_near_miss: float
+
+
+class EventInfoForTB(TypedDict, total=False):
+    episode_truncated_count: float
+    episode_low_violation_count: float
+    episode_high_violation_count: float
 
 
 class TrainState(TypedDict, total=True):
@@ -47,8 +71,9 @@ class MTTOEnv(gym.Env):
         train_service: TrainService,
         gamma: float,
         max_step_distance: float,
+        enable_diagnostics: bool = True,
         render_mode: str | None = None,
-        use_animation=False,
+        use_animation: bool = False,
     ):
         super().__init__()
 
@@ -67,6 +92,9 @@ class MTTOEnv(gym.Env):
 
         # 回报折扣因子
         self.gamma = gamma
+
+        # 是否采集用于 TensorBoard/离线分析的扩展诊断字段
+        self.enable_diagnostics = enable_diagnostics
 
         # 单步状态转移容许的最大位移量
         self.max_step_distance: float = max_step_distance
@@ -266,19 +294,40 @@ class MTTOEnv(gym.Env):
         # Q初始值
         self.q_init: float = 0.0
 
-        self.rewards_info: RewardsInfoForTB = {}
+        self.rewards_info: RewardInfoForTB = {}
+        self.state_info: StateInfoForTB = {}
+        self.constraint_info: ConstraintInfoForTB = {}
+        self.event_info: EventInfoForTB = {}
+        self.episode_id: int = -1
+        self.episode_truncated_count: int = 0
+        self.episode_low_violation_count: int = 0
+        self.episode_high_violation_count: int = 0
+
+        self.current_speed_limit_mps: float = float(
+            self.trackprofile.get_speed_limit(pos=self.current_pos)
+        )
+        self.current_speed_limit_segment: int = self._get_speed_limit_segment(
+            self.current_pos
+        )
+        self.last_constraint_is_truncated: bool = False
+        self.last_constraint_violation_code: int = 0
 
         # 状态历史记录
         self._reset_history()
-
-        # 列车运行轨迹
-        self.trajectory_pos: list[float] = [self.current_pos]
-        self.trajectory_speed_km_h: list[float] = [self.current_speed * 3.6]
 
         # 渲染模式
         self.render_mode = render_mode
         # 是否启用动画
         self.use_animation = use_animation
+        # 仅在开启渲染时维护轨迹缓存，避免训练时无意义的列表扩容
+        self.enable_render_tracking: bool = self.render_mode is not None
+
+        # 列车运行轨迹
+        self.trajectory_pos: list[float] | None = None
+        self.trajectory_speed_km_h: list[float] | None = None
+        if self.enable_render_tracking:
+            self._reset_trajectory()
+
         # 可视化时需要的绘图实例
         self.fig = None
         self.ax = None
@@ -349,11 +398,80 @@ class MTTOEnv(gym.Env):
         Returns:
             dict: 智能体当前消耗的总能量和当前运行时间
         """
+        margin_to_vmax = self.current_max_speed - self.current_speed
+        margin_to_vmin = self.current_speed - self.current_min_speed
         return {
             "current_energy_consumption": self.current_energy_consumption,
             "current_operation_time": self.current_operation_time,
             "docking_position": self.current_pos,
+            "current_sp": self.current_sp,
+            "current_min_speed": self.current_min_speed,
+            "current_max_speed": self.current_max_speed,
+            "margin_to_vmax": margin_to_vmax,
+            "margin_to_vmin": margin_to_vmin,
+            "constraint_is_truncated": self.last_constraint_is_truncated,
+            "constraint_violation_code": self.last_constraint_violation_code,
+            "speed_limit_segment": self.current_speed_limit_segment,
+            "speed_limit_mps": self.current_speed_limit_mps,
         }
+
+    def _get_speed_limit_segment(self, pos: float) -> int:
+        segment_idx = get_interval_index(pos, self.track.speed_limit_intervals)
+        return int(np.clip(segment_idx, 0, len(self.track.speed_limits) - 1))
+
+    def _reset_episode_counters(self) -> None:
+        self.episode_truncated_count = 0
+        self.episode_low_violation_count = 0
+        self.episode_high_violation_count = 0
+
+    def _record_step_diagnostics(
+        self,
+        *,
+        truncated: bool,
+        violation_code: int,
+        margin_to_vmax: float,
+        margin_to_vmin: float,
+        near_miss_margin_mps: float = 1.0,
+    ) -> None:
+        self.last_constraint_is_truncated = truncated
+        self.last_constraint_violation_code = violation_code
+
+        if not self.enable_diagnostics:
+            return
+
+        if truncated:
+            self.episode_truncated_count += 1
+            if violation_code == 1:
+                self.episode_low_violation_count += 1
+            elif violation_code == 2:
+                self.episode_high_violation_count += 1
+
+        is_near_miss = (margin_to_vmax <= near_miss_margin_mps) or (
+            margin_to_vmin <= near_miss_margin_mps
+        )
+
+        self.state_info["episode_id"] = float(self.episode_id)
+        self.state_info["pos_m"] = float(self.current_pos)
+        self.state_info["speed_mps"] = float(self.current_speed)
+        self.state_info["current_sp"] = float(self.current_sp)
+
+        self.constraint_info["margin_to_vmax_mps"] = float(margin_to_vmax)
+        self.constraint_info["margin_to_vmin_mps"] = float(margin_to_vmin)
+        self.constraint_info["is_truncated"] = float(truncated)
+        self.constraint_info["violation_code"] = float(violation_code)
+        self.constraint_info["speed_limit_mps"] = float(self.current_speed_limit_mps)
+        self.constraint_info["speed_limit_segment"] = float(
+            self.current_speed_limit_segment
+        )
+        self.constraint_info["is_near_miss"] = float(is_near_miss)
+
+        self.event_info["episode_truncated_count"] = float(self.episode_truncated_count)
+        self.event_info["episode_low_violation_count"] = float(
+            self.episode_low_violation_count
+        )
+        self.event_info["episode_high_violation_count"] = float(
+            self.episode_high_violation_count
+        )
 
     def _get_action_denormalized(self, action: float | np.floating) -> float:
         """将动作反归一化为列车加速度"""
@@ -376,6 +494,8 @@ class MTTOEnv(gym.Env):
         """
         # 首先调用此超类方法设置随机数生成器
         super().reset(seed=seed, options=options)
+        self.episode_id += 1
+        self._reset_episode_counters()
 
         # 重新初始化运行状态
         self.current_pos = self.task.start_position
@@ -419,12 +539,20 @@ class MTTOEnv(gym.Env):
         ) = self.safeguard_utility.get_latest_traction_and_braking_intervention_points(
             current_speed=self.current_speed, current_sp=self.current_sp
         )
+        self.current_speed_limit_mps = float(
+            self.trackprofile.get_speed_limit(pos=self.current_pos)
+        )
+        self.current_speed_limit_segment = self._get_speed_limit_segment(
+            self.current_pos
+        )
+        self.last_constraint_is_truncated = False
+        self.last_constraint_violation_code = 0
 
         # 重置历史数据
         self._reset_history()
 
         # 重置轨迹数据
-        if self.render_mode is not None:
+        if self.enable_render_tracking:
             self._reset_trajectory()
 
         # 重置仿真步数
@@ -432,6 +560,9 @@ class MTTOEnv(gym.Env):
 
         # 重置奖励记录
         self.rewards_info = {}
+        self.state_info = {}
+        self.constraint_info = {}
+        self.event_info = {}
 
         observation = self._get_obs()
         info = self._get_info()
@@ -449,6 +580,11 @@ class MTTOEnv(gym.Env):
             tuple: (observation, reward, terminated, truncated, info)
         """
         self._record_history()
+        if self.enable_diagnostics:
+            self.rewards_info = {}
+            self.state_info = {}
+            self.constraint_info = {}
+            self.event_info = {}
 
         self.current_acc = self._get_action_denormalized(action[0])
 
@@ -522,6 +658,12 @@ class MTTOEnv(gym.Env):
         ) = self.safeguard_utility.get_latest_traction_and_braking_intervention_points(
             current_speed=self.current_speed, current_sp=self.current_sp
         )
+        self.current_speed_limit_mps = float(
+            self.trackprofile.get_speed_limit(pos=self.current_pos)
+        )
+        self.current_speed_limit_segment = self._get_speed_limit_segment(
+            self.current_pos
+        )
 
         # 判断智能体是否到达目标区域
         terminated = (
@@ -538,13 +680,29 @@ class MTTOEnv(gym.Env):
             else False
         )
 
+        if self.current_speed < self.current_min_speed:
+            violation_code = 1
+        elif self.current_speed >= self.current_max_speed:
+            violation_code = 2
+        else:
+            violation_code = 0
+
+        margin_to_vmax = self.current_max_speed - self.current_speed
+        margin_to_vmin = self.current_speed - self.current_min_speed
+        self._record_step_diagnostics(
+            truncated=truncated,
+            violation_code=violation_code,
+            margin_to_vmax=margin_to_vmax,
+            margin_to_vmin=margin_to_vmin,
+        )
+
         # 计算奖励
         reward = self._get_reward(
             terminated=terminated,
             truncated=truncated,
         )
 
-        if self.render_mode is not None:
+        if self.enable_render_tracking:
             # 记录轨迹数据
             self._record_trajectory(
                 pos=self.last_state["pos"],
@@ -642,7 +800,8 @@ class MTTOEnv(gym.Env):
             )
             reward_total = -30.0 * (1.0 - progress)
 
-        self.rewards_info["reward_total"] = reward_total
+        if self.enable_diagnostics:
+            self.rewards_info["total"] = reward_total
 
         return reward_total
 
@@ -659,23 +818,23 @@ class MTTOEnv(gym.Env):
         reward_comfort = self._get_reward_comfort()
 
         # 运行时间奖励
-        reward_puncuality = self._get_reward_punctuality_dense()
+        reward_punctuality = self._get_reward_punctuality_dense()
 
         # 停站奖励
         reward_docking = self._get_reward_docking_dense()
 
-        # 记录
-        self.rewards_info["reward_safety"] = reward_safety
-        self.rewards_info["reward_energy"] = reward_energy
-        self.rewards_info["reward_comfort"] = reward_comfort
-        self.rewards_info["reward_punctuality"] = reward_puncuality
-        self.rewards_info["reward_docking"] = reward_docking
+        if self.enable_diagnostics:
+            self.rewards_info["safety"] = reward_safety
+            self.rewards_info["energy"] = reward_energy
+            self.rewards_info["comfort"] = reward_comfort
+            self.rewards_info["punctuality"] = reward_punctuality
+            self.rewards_info["docking"] = reward_docking
 
         return (
             reward_safety
             + reward_energy
             + reward_comfort
-            + reward_puncuality
+            + reward_punctuality
             + reward_docking
         )
 
@@ -863,8 +1022,9 @@ class MTTOEnv(gym.Env):
         reward_docking = self._get_reward_docking_goal() * 5
         reward_punctuality = self._get_reward_punctuality_goal() * 5
 
-        self.rewards_info["reward_docking"] = reward_docking
-        self.rewards_info["reward_punctuality"] = reward_punctuality
+        if self.enable_diagnostics:
+            self.rewards_info["docking"] = reward_docking
+            self.rewards_info["punctuality"] = reward_punctuality
 
         return reward_docking + reward_punctuality
 
@@ -924,6 +1084,12 @@ class MTTOEnv(gym.Env):
         operation_time: float = 0.0,
     ):
         """记录完整的匀变速运动轨迹"""
+        if not self.enable_render_tracking:
+            return
+
+        assert self.trajectory_pos is not None
+        assert self.trajectory_speed_km_h is not None
+
         # 如果是初始状态或者没有运动，只记录当前点
         if abs(operation_time) < 1e-6 or abs(displacement) < 1e-6:
             self.trajectory_pos.append(pos)
@@ -949,6 +1115,11 @@ class MTTOEnv(gym.Env):
 
     def _reset_trajectory(self):
         """重置轨迹历史数据并记录初始状态"""
+        if not self.enable_render_tracking:
+            self.trajectory_pos = None
+            self.trajectory_speed_km_h = None
+            return
+
         self.trajectory_pos = [self.task.start_position]
         self.trajectory_speed_km_h = [abs(self.task.start_speed * 3.6)]
 
@@ -1076,7 +1247,11 @@ class MTTOEnv(gym.Env):
         # 更新列车位置
         self.vehicle_dot.set_data([self.current_pos], [self.current_speed * 3.6])
         # 更新轨迹
-        if len(self.trajectory_pos) > 1:
+        if (
+            self.trajectory_pos is not None
+            and self.trajectory_speed_km_h is not None
+            and len(self.trajectory_pos) > 1
+        ):
             self.traj_line.set_data(self.trajectory_pos, self.trajectory_speed_km_h)
 
     def close(self):

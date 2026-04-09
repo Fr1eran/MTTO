@@ -13,6 +13,7 @@ def make_env(
     train_service: TrainService,
     gamma: float,
     max_step_distance: float,
+    enable_diagnostics: bool = True,
     render_mode: str | None = None,
 ):
     env = MTTOEnv(
@@ -22,8 +23,8 @@ def make_env(
         train_service=train_service,
         gamma=gamma,
         max_step_distance=max_step_distance,
+        enable_diagnostics=enable_diagnostics,
         render_mode=render_mode,
     )
     env = FlattenObservation(env)
     return env
-
