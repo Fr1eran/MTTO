@@ -56,3 +56,17 @@ def test_cal_brake_curves(safeguard_curves_and_vehicle):
     for item in curves:
         assert isinstance(item[0, :], np.ndarray)
         assert isinstance(item[1, :], np.ndarray)
+
+
+def test_calc_brake_and_max_curves_max_speed_is_monotone(safeguard_curves_and_vehicle):
+    cal_SGC, vehicle = safeguard_curves_and_vehicle
+    _, dps = load_auxiliary_stopping_areas_ap_and_dp()
+    _, max_curves = cal_SGC.calc_brake_and_max_curves(
+        dpoffsets=np.asarray(dps, dtype=np.float64),
+        vehicle=vehicle,
+        ds=1.0,
+    )
+
+    for curve in max_curves:
+        speed_diff = np.diff(curve[1, :])
+        assert np.all(speed_diff <= 1e-9)

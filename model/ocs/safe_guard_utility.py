@@ -34,8 +34,12 @@ class SafeGuardUtility:
     ):
         self.speed_limits = np.asarray(speed_limits)
         self.speed_limit_intervals = np.asarray(speed_limit_intervals)
-        self.min_curves_list = min_curves_list
-        self.max_curves_list = max_curves_list
+        self.min_curves_list = self._sanitize_curve_list(
+            min_curves_list, curve_name="min_curves_list"
+        )
+        self.max_curves_list = self._sanitize_curve_list(
+            max_curves_list, curve_name="max_curves_list"
+        )
         self._min_curve_pos_list = [
             np.asarray(curve[0, :], dtype=np.float64) for curve in self.min_curves_list
         ]
@@ -73,6 +77,44 @@ class SafeGuardUtility:
         ]
         self.numofregions = idp_points.shape[1]
         self.gamma = factor
+
+    @staticmethod
+    def _sanitize_curve(curve: NDArray[np.floating]) -> NDArray[np.float64]:
+        """标准化防护曲线，并将速度数组投影为单调不增。"""
+
+        curve_arr = np.asarray(curve, dtype=np.float64)
+        if curve_arr.ndim != 2 or curve_arr.shape[0] != 2:
+            raise ValueError("curve must have shape (2, N)")
+
+        curve_pos = np.asarray(curve_arr[0, :], dtype=np.float64)
+        curve_speed = np.asarray(curve_arr[1, :], dtype=np.float64)
+
+        if curve_pos.shape != curve_speed.shape:
+            raise ValueError("curve_pos and curve_speed must have the same shape")
+        if curve_pos.size == 0:
+            raise ValueError("curve must contain at least one point")
+        if curve_pos.size > 1 and np.any(np.diff(curve_pos) <= 0.0):
+            raise ValueError("curve_pos must be strictly increasing")
+
+        if curve_speed.size > 1:
+            curve_speed = np.minimum.accumulate(curve_speed)
+
+        return np.stack([curve_pos, curve_speed], axis=0, dtype=np.float64)
+
+    @classmethod
+    def _sanitize_curve_list(
+        cls,
+        curves: Sequence[NDArray[np.floating]],
+        *,
+        curve_name: str,
+    ) -> list[NDArray[np.float64]]:
+        sanitized_curves: list[NDArray[np.float64]] = []
+        for idx, curve in enumerate(curves):
+            try:
+                sanitized_curves.append(cls._sanitize_curve(curve))
+            except ValueError as exc:
+                raise ValueError(f"{curve_name}[{idx}] is invalid: {exc}") from exc
+        return sanitized_curves
 
     def get_intersecting_dangerous_point(self) -> NDArray:
         return self.idp_points_x

@@ -8,6 +8,7 @@ from model.track.track import TrackProfile
 Numeric = Union[float | np.floating | NDArray[np.floating]]
 AccFunc = Callable[[Numeric, Numeric], Numeric]
 
+
 class SafeGuardCurves:
     """
     上海磁浮示范线线路安全防护计算类
@@ -151,6 +152,17 @@ class SafeGuardCurves:
         # 返回截断后的曲线
         return curve_pos_arr[truncate_idx + 1 :], curve_speed_arr[truncate_idx + 1 :]
 
+    @staticmethod
+    def _enforce_monotone_decreasing_speed(
+        curve_speed_arr: NDArray[np.floating],
+    ) -> NDArray[np.float64]:
+        """将速度数组投影为单调不增，消除局部回升。"""
+
+        speed_arr = np.asarray(curve_speed_arr, dtype=np.float64)
+        if speed_arr.size <= 1:
+            return speed_arr
+        return np.minimum.accumulate(speed_arr)
+
     def calc_min_curves(
         self,
         levi_curves_list: list[NDArray[np.float64]],
@@ -197,6 +209,9 @@ class SafeGuardCurves:
                 self._truncate_curve_by_speed_limit(
                     curve_pos_arr=min_pos_arr, curve_speed_arr=min_speed_arr
                 )
+            )
+            min_speed_arr_truncated = self._enforce_monotone_decreasing_speed(
+                min_speed_arr_truncated
             )
             # 补齐至末端速度为0，同时保持位置数组严格递增
             if min_speed_arr_truncated[-1] > 0:
@@ -286,6 +301,10 @@ class SafeGuardCurves:
                 last_valid_idx = np.where(valid_mask)[0][-1]
                 max_pos_arr_truncated = max_pos_arr_truncated[: last_valid_idx + 1]
                 max_speed_arr_truncated = max_speed_arr_truncated[: last_valid_idx + 1]
+
+            max_speed_arr_truncated = self._enforce_monotone_decreasing_speed(
+                max_speed_arr_truncated
+            )
 
             # 补齐至末端速度为0，同时保持位置数组严格递增
             if max_speed_arr_truncated[-1] > 0:
@@ -481,4 +500,3 @@ class SafeGuardCurves:
             )
 
         return brake_curves_list_truncated, max_curves_list
-

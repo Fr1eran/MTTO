@@ -319,3 +319,32 @@ def test_get_min_and_max_position_real_data_smoke(safeguard_utility):
     assert np.isfinite(min_pos)
     assert np.isfinite(max_pos)
     assert min_pos <= max_pos
+
+
+def test_sanitize_curve_projects_speed_to_monotone():
+    curve = np.array(
+        [[0.0, 1.0, 2.0, 3.0], [4.0, 3.0, 3.2, 0.0]],
+        dtype=np.float64,
+    )
+    sanitized_curve = SafeGuardUtility._sanitize_curve(curve)
+    assert np.all(np.diff(sanitized_curve[1, :]) <= 1e-9)
+
+
+def test_loaded_max_curves_are_monotone_after_init(safeguard_utility):
+    for curve_speed in safeguard_utility._max_curve_speed_list:
+        assert np.all(np.diff(curve_speed) <= 1e-9)
+
+
+def test_get_min_and_max_position_real_data_sp7_regression(safeguard_utility):
+    if len(safeguard_utility._max_curve_speed_list) < 9:
+        pytest.skip("requires full rail data with at least 9 max curves")
+
+    min_pos, max_pos = (
+        safeguard_utility.get_latest_traction_and_braking_intervention_points(
+            current_speed=10.0,
+            current_sp=7,
+        )
+    )
+    assert np.isfinite(min_pos)
+    assert np.isfinite(max_pos)
+    assert min_pos <= max_pos
