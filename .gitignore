@@ -6,8 +6,7 @@ __pycache__/
 *.so
 *.egg-info/
 .eggs/
-# VSCode
-.vscode/
+
 # Jupyter
 .ipynb_checkpoints/
 # OS
