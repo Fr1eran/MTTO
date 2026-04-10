@@ -100,7 +100,7 @@ class MTTOEnv(gym.Env):
         # 回报折扣因子
         self.gamma = gamma
 
-        # 是否采集用于 TensorBoard/离线分析的扩展诊断字段
+        # 是否采集诊断信息
         self.enable_diagnostics = enable_diagnostics
 
         # 单步状态转移容许的最大位移量
@@ -1000,10 +1000,7 @@ class MTTOEnv(gym.Env):
         # 计算时间冗余度
         time_redundancy_norm = redundant_operation_time / self.task.schedule_time
 
-        # 防止梯度爆炸, 对时间冗余度进行下界截断
-        time_redundancy_norm_cliped = max(time_redundancy_norm, -0.3)
-
-        return -2.0 * np.exp(-8.0 * time_redundancy_norm_cliped)
+        return -2.0 * np.log1p(np.exp(-8.0 * time_redundancy_norm))
 
     def _get_reward_docking_dense(self):
         phi_curr = self._potential_docking(

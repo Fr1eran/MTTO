@@ -75,6 +75,16 @@ def calc_potential_docking(
     return phi_wide + phi_tight
 
 
+def calc_potential_punctuality(
+    redundant_operation_time,
+    schedule_time: float,
+):
+    # 计算时间冗余度
+    time_redundancy_norm = redundant_operation_time / schedule_time
+
+    return -2.0 * np.log1p(np.exp(-8.0 * time_redundancy_norm))
+
+
 def infer_position_from_speed(curve_pos, curve_speed, target_speed):
     """
     在最小速度曲线随位置单调递减时，根据目标速度反推对应位置。
@@ -488,9 +498,68 @@ def plot_stop_potential_slices():
     plt.show()
 
 
+def plot_punctuality_potential_heatmap(
+    schedule_time: float = 440.0,
+    redundant_time_upper: float = 150.0,
+    redundant_time_lower: float = -200.0,
+    num_points: int = 1200,
+):
+    """
+    绘制准点势函数关于冗余运行时间的一维曲线。
+
+    Args:
+        schedule_time: 规划运行时间(s)。
+        redundant_time_upper: 冗余运行时间上界(s)。
+        redundant_time_lower: 冗余运行时间下界(s)。
+        num_points: 采样点数。
+    """
+
+    num_points = max(int(num_points), 2)
+    redundant_operation_time_array = np.linspace(
+        redundant_time_upper,
+        redundant_time_lower,
+        num_points,
+        dtype=np.float64,
+    )
+    potential_array = calc_potential_punctuality(
+        redundant_operation_time=redundant_operation_time_array,
+        schedule_time=float(schedule_time),
+    )
+
+    fig, ax = plt.subplots(figsize=(12, 6), dpi=150)
+
+    ax.plot(
+        redundant_operation_time_array,
+        potential_array,
+        color="tab:green",
+        linewidth=2,
+        label=r"准点势函数 $\Phi_{punctuality}$",
+    )
+    ax.axvline(0.0, color="black", linestyle="--", linewidth=1.2, label="零冗余")
+
+    ax.set_xlim(redundant_time_upper, redundant_time_lower)
+    ax.set_xlabel("冗余运行时间 (s)")
+    ax.set_ylabel(r"准点势能值 $\Phi_{punctuality}$")
+    ax.set_title(
+        "准点势函数曲线",
+        fontsize=13,
+        pad=12,
+    )
+    ax.legend(loc="upper right", framealpha=0.9)
+    ax.grid(True, alpha=0.3, linestyle=":")
+
+    plt.tight_layout()
+    plt.show()
+
+
 if __name__ == "__main__":
     # plot_safety_potential_heatmap_speed()
     # plot_safety_potential_heatmap_position()
-    plot_stop_potential_heatmap(view_mode="3d")
+    # plot_stop_potential_heatmap(view_mode="3d")
     # plot_stop_potential_heatmap(view_mode="2d")
     # plot_stop_potential_slices()
+    plot_punctuality_potential_heatmap(
+        schedule_time=440.0,
+        redundant_time_upper=150.0,
+        redundant_time_lower=-200.0,
+    )
