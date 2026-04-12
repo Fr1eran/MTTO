@@ -858,6 +858,9 @@ class MTTOEnv(gym.Env):
         )
 
     def _get_reward_safety_dense(self) -> float:
+        if self.current_sp != self.last_state["stopping_point_index"]:
+            return 0.0
+
         # 计算当前状态势能
         phi_curr = self._potential_safety_speed(
             pos=self.current_pos,
@@ -954,7 +957,7 @@ class MTTOEnv(gym.Env):
                 )
                 / self.max_energy_consumption
             )
-            * 5
+            * 15.0
         )
 
     def _get_reward_comfort(self) -> float:
@@ -962,7 +965,7 @@ class MTTOEnv(gym.Env):
         # 使用指数衰减式的钟形曲线
         norm_jerk = delta_acc / (self.task.max_acc_change)
 
-        return -0.1 * (1 - np.exp(-2.0 * norm_jerk))
+        return -0.5 * (1 - np.exp(-2.0 * norm_jerk))
 
     def _get_reward_punctuality_dense(self) -> float:
         phi_curr = self._potential_punctuality(
@@ -1000,7 +1003,7 @@ class MTTOEnv(gym.Env):
         # 计算时间冗余度
         time_redundancy_norm = redundant_operation_time / self.task.schedule_time
 
-        return -2.0 * np.log1p(np.exp(-8.0 * time_redundancy_norm))
+        return -5.0 * np.log1p(np.exp(-8.0 * time_redundancy_norm))
 
     def _get_reward_docking_dense(self):
         phi_curr = self._potential_docking(
@@ -1014,23 +1017,27 @@ class MTTOEnv(gym.Env):
         return self.gamma * phi_curr - phi_prev
 
     def _potential_docking(self, pos: float, speed: float):
+        # 基础参数
+        sigma_x_hat = 0.2
+        sigma_v_hat = 0.1
+        K_L = 5.0
+        K_G = 2.0
+        eps = 1e-6
+
+        # 正则化
         dist_error = self.task.target_position - pos
+        x_hat = dist_error / self.whole_distance
+        v_hat = speed / self.vehicle.max_speed
 
-        # 广域引导: 在距离目标5km时就知道终点在哪
-        phi_wide = (
-            1.0
-            * np.exp(-(dist_error**2) / (2.0 * 2000.0**2))
-            * np.exp(-(speed**2) / (2.0 * 50.0**2))
+        # 势能项
+        phi_linear = K_L * (1.0 - np.sqrt(x_hat**2 + eps))
+        phi_strong = (
+            K_G
+            * np.exp(-(x_hat**2) / (2 * sigma_x_hat**2))
+            * np.exp(-(v_hat**2) / (2 * sigma_v_hat**2))
         )
 
-        # 精确引导
-        phi_tight = (
-            4.0
-            * np.exp(-(dist_error**2) / (2.0 * 100.0**2))
-            * np.exp(-(speed**2) / (2.0 * 5.0**2))
-        )
-
-        return phi_wide + phi_tight
+        return phi_linear + phi_strong
 
     def _get_reward_goal(
         self,

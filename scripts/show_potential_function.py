@@ -20,9 +20,9 @@ def calc_potential_safety_speed(pos, speed, min_speed, max_speed, target_pos):
     center_speed = (max_speed + min_speed) / 2.0
     safe_margin = np.maximum((max_speed - min_speed) / 2.0, 0.5)
 
-    # 基础偏离惩罚(二次方项, 引导列车走中间)
+    # 基础偏离惩罚(四次方项, 引导列车走中间)
     norm_speed_diff = (speed - center_speed) / safe_margin
-    phi_base = -5.0 * (norm_speed_diff**2)
+    phi_base = -2.0 * (norm_speed_diff**4)
 
     # 边界壁垒
 
@@ -38,7 +38,7 @@ def calc_potential_safety_spatial(pos, min_pos, max_pos, target_pos):
     safe_margin = (max_pos - min_pos) / 2.0
 
     norm_pos_diff = (pos - center_pos) / safe_margin
-    phi_base = -5.0 * (norm_pos_diff**2)
+    phi_base = -2.0 * (norm_pos_diff**4)
 
     scale = 1.0 + 1.0 * np.exp(-0.001 * distanceToTarget)
 
@@ -51,28 +51,34 @@ def calc_potential_docking(
     target_pos,
 ):
     """
-    向量化停站势函数（对应图中公式）
-
-    Phi_P(s) = K_P * exp(-d^2 / (2 * sigma_d^2)) * exp(-v^2 / (2 * sigma_v^2))
-    其中 d = target_pos - pos, v = speed。
+    向量化停站势函数
     """
-    dist_error = target_pos - pos
+    # 基础参数
+    d_scale = 30000.0
+    speed_max = 500.0 / 3.6
+    eps = 1e-6
 
-    # 广域引导: 在距离目标5km时就知道终点在哪
-    phi_wide = (
-        1.0
-        * np.exp(-(dist_error**2) / (2.0 * 2000.0**2))
-        * np.exp(-(speed**2) / (2.0 * 50.0**2))
+    sigma_x_hat = 0.2
+    sigma_v_hat = 0.1
+
+    # 正则化项
+    dist_error = np.abs(target_pos - pos)
+    x_hat = dist_error / d_scale
+    v_hat = speed / speed_max
+
+    # 增益参数
+    K_L = 5.0
+    K_G = 2.0
+
+    # 势能
+    phi_linear = K_L * (1.0 - np.sqrt(x_hat**2 + eps))
+    phi_strong = (
+        K_G
+        * np.exp(-(x_hat**2) / (2 * sigma_x_hat**2))
+        * np.exp(-(v_hat**2) / (2 * sigma_v_hat**2))
     )
 
-    # 精确引导
-    phi_tight = (
-        4.0
-        * np.exp(-(dist_error**2) / (2.0 * 100.0**2))
-        * np.exp(-(speed**2) / (2.0 * 5.0**2))
-    )
-
-    return phi_wide + phi_tight
+    return phi_linear + phi_strong
 
 
 def calc_potential_punctuality(
@@ -316,7 +322,7 @@ def plot_safety_potential_heatmap_position():
     plt.show()
 
 
-def plot_stop_potential_heatmap(view_mode="3d"):
+def plot_docking_potential_heatmap(view_mode="3d"):
     """
     按停站势函数公式绘制势场图。
 
@@ -326,7 +332,7 @@ def plot_stop_potential_heatmap(view_mode="3d"):
 
     target_pos = 17828.0
 
-    k_p = 5.0
+    k_d = 10.0
 
     # 扩大位置与速度展示范围
     pos_array = np.linspace(target_pos - 10000.0, target_pos + 10000.0, 1200)
@@ -364,7 +370,7 @@ def plot_stop_potential_heatmap(view_mode="3d"):
             cmap=cmap,
             shading="auto",
             vmin=0.0,
-            vmax=k_p,
+            vmax=k_d,
         )
 
         ax.scatter(
@@ -386,7 +392,7 @@ def plot_stop_potential_heatmap(view_mode="3d"):
         ax.set_xlabel("位置 (m)")
         ax.set_ylabel("速度 (km/h)")
         ax.set_title(
-            r"停站势函数热力图: $\Phi_P = K_P e^{-d^2/(2\sigma_d^2)} e^{-v^2/(2\sigma_v^2)}$",
+            "停站势函数热力图",
             fontsize=13,
             pad=12,
         )
@@ -410,7 +416,7 @@ def plot_stop_potential_heatmap(view_mode="3d"):
             linewidth=0,
             antialiased=True,
             vmin=0.0,
-            vmax=k_p,
+            vmax=k_d,
         )
 
         ax_3d = cast(Any, ax)
@@ -430,12 +436,12 @@ def plot_stop_potential_heatmap(view_mode="3d"):
 
         ax.set_xlim(pos_array[0], pos_array[-1])
         ax.set_ylim(speed_array_kmh[0], speed_array_kmh[-1])
-        ax.set_zlim(0.0, k_p * 1.02)
+        ax.set_zlim(0.0, k_d * 1.02)
         ax.set_xlabel("位置 (m)")
         ax.set_ylabel("速度 (km/h)")
         ax.set_zlabel(r"势能值 $\Phi_P$")
         ax.set_title(
-            r"停站势函数三维曲面图: $\Phi_P = K_P e^{-d^2/(2\sigma_d^2)} e^{-v^2/(2\sigma_v^2)}$",
+            "停站势函数三维曲面图",
             fontsize=13,
             pad=12,
         )
@@ -449,15 +455,15 @@ def plot_stop_potential_heatmap(view_mode="3d"):
     raise ValueError("view_mode 仅支持 '2d' 或 '3d'")
 
 
-def plot_stop_potential_slices():
+def plot_docking_potential_slices():
     """
     绘制停站势函数在距离维与速度维上的一维切片，便于调参。
     """
 
     target_pos = 17828.0
 
-    sigma_d = 120.0  # m
-    sigma_v = 20.0 / 3.6  # m/s
+    scale_pos = 500.0  # m
+    scale_speed = 10.0  # m/s
 
     distance_error_array = np.linspace(-600.0, 600.0, 1200)
     pos_array = target_pos + distance_error_array
@@ -478,27 +484,30 @@ def plot_stop_potential_slices():
 
     axes[0].plot(distance_error_array, potential_vs_distance, color="tab:orange")
     axes[0].axvline(0.0, color="black", linestyle="--", linewidth=1.2)
-    axes[0].axvline(sigma_d, color="gray", linestyle=":", linewidth=1.2)
-    axes[0].axvline(-sigma_d, color="gray", linestyle=":", linewidth=1.2)
+    axes[0].axvline(scale_pos, color="gray", linestyle=":", linewidth=1.2)
+    axes[0].axvline(-scale_pos, color="gray", linestyle=":", linewidth=1.2)
     axes[0].set_xlabel("停站距离误差 d (m)")
     axes[0].set_ylabel(r"势能值 $\Phi_P$")
-    axes[0].set_title("v = 0 时的距离维切片")
+    axes[0].set_title("v = 0 时的距离维切片 (|d| 指数衰减)")
     axes[0].grid(True, alpha=0.3, linestyle=":")
 
     axes[1].plot(speed_array_ms * 3.6, potential_vs_speed, color="tab:red")
     axes[1].axvline(0.0, color="black", linestyle="--", linewidth=1.2)
-    axes[1].axvline(sigma_v * 3.6, color="gray", linestyle=":", linewidth=1.2)
+    axes[1].axvline(scale_speed * 3.6, color="gray", linestyle=":", linewidth=1.2)
     axes[1].set_xlabel("速度 v (km/h)")
     axes[1].set_ylabel(r"势能值 $\Phi_P$")
-    axes[1].set_title("d = 0 时的速度维切片")
+    axes[1].set_title("d = 0 时的速度维切片 (速度指数衰减)")
     axes[1].grid(True, alpha=0.3, linestyle=":")
 
-    fig.suptitle("停站势函数一维切片", fontsize=13)
+    fig.suptitle(
+        "停站势函数一维切片",
+        fontsize=13,
+    )
     plt.tight_layout()
     plt.show()
 
 
-def plot_punctuality_potential_heatmap(
+def plot_punctuality_potential_curve(
     schedule_time: float = 440.0,
     redundant_time_upper: float = 150.0,
     redundant_time_lower: float = -200.0,
@@ -555,11 +564,11 @@ def plot_punctuality_potential_heatmap(
 if __name__ == "__main__":
     # plot_safety_potential_heatmap_speed()
     # plot_safety_potential_heatmap_position()
-    # plot_stop_potential_heatmap(view_mode="3d")
-    # plot_stop_potential_heatmap(view_mode="2d")
-    # plot_stop_potential_slices()
-    plot_punctuality_potential_heatmap(
-        schedule_time=440.0,
-        redundant_time_upper=150.0,
-        redundant_time_lower=-200.0,
-    )
+    plot_docking_potential_heatmap(view_mode="3d")
+    # plot_docking_potential_heatmap(view_mode="2d")
+    # plot_docking_potential_slices()
+    # plot_punctuality_potential_curve(
+    #     schedule_time=440.0,
+    #     redundant_time_upper=150.0,
+    #     redundant_time_lower=-200.0,
+    # )
