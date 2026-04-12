@@ -81,6 +81,31 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Output directory for post-training analysis artifacts.",
     )
     parser.add_argument(
+        "--analysis-min-points-per-10k-steps",
+        type=float,
+        default=5.0,
+        help="Minimum acceptable mean samples per 10k steps for auto-analysis quality gate.",
+    )
+    parser.add_argument(
+        "--analysis-min-unique-episodes",
+        type=int,
+        default=100,
+        help="Minimum acceptable unique episodes for auto-analysis quality gate.",
+    )
+    parser.add_argument(
+        "--analysis-max-mean-step-gap",
+        type=float,
+        default=2048.0,
+        help="Maximum acceptable mean step gap for auto-analysis quality gate.",
+    )
+    parser.add_argument(
+        "--analysis-sampling-quality-mode",
+        type=str,
+        choices=["warn_only", "strict_fail"],
+        default="warn_only",
+        help="Sampling quality gate mode for auto-analysis.",
+    )
+    parser.add_argument(
         "--reward-discount",
         type=float,
         default=0.99,
@@ -121,6 +146,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default="trainning_log",
         help="TensorBoard run name used by model.learn.",
+    )
+    parser.add_argument(
+        "--log-interval",
+        type=int,
+        default=None,
+        help="Override PPO log_interval. Effective when logging is enabled; default is tune=1 and reproduce/eval are ignored under default no-logging switches.",
+    )
+    parser.add_argument(
+        "--tb-sample-interval-steps",
+        type=int,
+        default=1,
+        help="Minimum timesteps between callback TensorBoard records.",
+    )
+    parser.add_argument(
+        "--force-dump-interval-steps",
+        type=int,
+        default=0,
+        help="Force logger.dump every N timesteps in callback (<=0 disables).",
     )
     parser.add_argument(
         "--device",
@@ -192,6 +235,25 @@ def resolve_run_mode(
     )
 
 
+def resolve_log_interval(args: argparse.Namespace, run_mode: str, enable_tb: bool) -> int:
+    defaults_by_mode = {
+        "tune": 1,
+        "reproduce": 5,
+        "eval": 10,
+    }
+    if args.log_interval is not None:
+        return max(1, int(args.log_interval))
+    if not enable_tb:
+        return 1
+    return int(defaults_by_mode.get(run_mode, 1))
+
+
+def _normalize_optional_positive_int(value: int | None) -> int | None:
+    if value is None:
+        return None
+    return None if int(value) <= 0 else int(value)
+
+
 def build_scenario() -> tuple[VehicleInfo, TrackInfo, SafeGuardUtility, TrainService]:
     slopes, slope_intervals = load_slopes()
     speed_limits, speed_limit_intervals = load_speed_limits(
@@ -251,6 +313,11 @@ def main() -> None:
         enable_env_diagnostics,
         enable_auto_analysis,
     ) = resolve_run_mode(args)
+    log_interval = resolve_log_interval(args, run_mode, enable_tb)
+    tb_sample_interval_steps = max(1, int(args.tb_sample_interval_steps))
+    force_dump_interval_steps = _normalize_optional_positive_int(
+        args.force_dump_interval_steps
+    )
 
     print("Training runtime switches:")
     print(f"- run_mode={run_mode}")
@@ -266,6 +333,12 @@ def main() -> None:
     print(f"- total_timesteps={args.total_timesteps}")
     print(f"- tensorboard_log_dir={args.tensorboard_log_dir}")
     print(f"- tb_log_name={args.tb_log_name}")
+    if enable_tb:
+        print(f"- log_interval={log_interval}")
+    else:
+        print("- log_interval=ignored (logging disabled by current switches)")
+    print(f"- tb_sample_interval_steps={tb_sample_interval_steps}")
+    print(f"- force_dump_interval_steps={force_dump_interval_steps}")
     print(f"- device={args.device}")
     if enable_auto_analysis and not enable_tb:
         print(
@@ -318,11 +391,20 @@ def main() -> None:
         ),
     )
 
+    callback = (
+        TensorboardCallback(
+            min_tb_sample_interval_steps=tb_sample_interval_steps,
+            force_dump_interval_steps=force_dump_interval_steps,
+        )
+        if enable_callback
+        else None
+    )
+
     # 训练，并使用tensorboard记录回报和网络损失变化
     model.learn(
         total_timesteps=args.total_timesteps,
-        callback=TensorboardCallback() if enable_callback else None,
-        log_interval=5,
+        callback=callback,
+        log_interval=log_interval,
         tb_log_name=args.tb_log_name,
     )
     model.save(model_save_path)
@@ -336,7 +418,14 @@ def main() -> None:
 
     if enable_auto_analysis:
         try:
-            analyze_config = AnalysisConfig(output_root=args.analysis_output_root)
+            analyze_config = AnalysisConfig(
+                output_root=args.analysis_output_root,
+                training_log_interval=log_interval if enable_tb else None,
+                min_points_per_10k_steps=args.analysis_min_points_per_10k_steps,
+                min_unique_episodes=args.analysis_min_unique_episodes,
+                max_mean_step_gap=args.analysis_max_mean_step_gap,
+                sampling_quality_mode=args.analysis_sampling_quality_mode,
+            )
             analysis_result = run_training_analysis(
                 log_root=args.tensorboard_log_dir,
                 config=analyze_config,

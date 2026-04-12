@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from tensorboard.backend.event_processing import event_accumulator
@@ -13,6 +14,15 @@ class ScalarSeries:
     steps: np.ndarray
     values: np.ndarray
     wall_times: np.ndarray
+
+
+DEFAULT_SAMPLING_HEALTH_TAGS = [
+    "rollout/ep_rew_mean",
+    "state/episode_id",
+    "constraint/is_truncated",
+    "constraint/violation_code",
+    "rewards/safety",
+]
 
 
 def list_run_directories(log_root: str | Path) -> list[Path]:
@@ -99,3 +109,77 @@ def load_scalar_series_from_run(run_dir: str | Path) -> dict[str, ScalarSeries]:
         )
 
     return series_map
+
+
+def compute_sampling_health(
+    series_map: dict[str, ScalarSeries],
+    *,
+    key_tags: list[str] | None = None,
+) -> dict[str, Any]:
+    tags = key_tags or DEFAULT_SAMPLING_HEALTH_TAGS
+    available_tags = [tag for tag in tags if tag in series_map]
+
+    if not available_tags:
+        return {
+            "available": False,
+            "total_step_span": 0.0,
+            "tag_metrics": {},
+            "summary": {},
+        }
+
+    global_min_step = min(int(np.min(series_map[tag].steps)) for tag in available_tags)
+    global_max_step = max(int(np.max(series_map[tag].steps)) for tag in available_tags)
+    total_step_span = max(1, global_max_step - global_min_step)
+
+    tag_metrics: dict[str, dict[str, float]] = {}
+    samples_per_10k_values: list[float] = []
+    mean_gap_values: list[float] = []
+    p95_gap_values: list[float] = []
+    max_gap_values: list[float] = []
+
+    for tag in available_tags:
+        steps = series_map[tag].steps.astype(np.int64)
+        sample_count = int(steps.size)
+        if sample_count <= 1:
+            mean_gap = 0.0
+            p95_gap = 0.0
+            max_gap = 0.0
+        else:
+            gaps = np.diff(steps).astype(np.float64)
+            mean_gap = float(np.mean(gaps))
+            p95_gap = float(np.quantile(gaps, 0.95))
+            max_gap = float(np.max(gaps))
+
+        samples_per_10k = float(sample_count) * 10000.0 / float(total_step_span)
+        samples_per_10k_values.append(samples_per_10k)
+        mean_gap_values.append(mean_gap)
+        p95_gap_values.append(p95_gap)
+        max_gap_values.append(max_gap)
+
+        tag_metrics[tag] = {
+            "sample_count": float(sample_count),
+            "mean_step_gap": mean_gap,
+            "p95_step_gap": p95_gap,
+            "max_step_gap": max_gap,
+            "samples_per_10k_steps": samples_per_10k,
+            "step_start": float(int(steps[0])) if sample_count > 0 else 0.0,
+            "step_end": float(int(steps[-1])) if sample_count > 0 else 0.0,
+        }
+
+    summary = {
+        "observed_tag_count": float(len(available_tags)),
+        "min_sample_count": float(
+            min(int(tag_metrics[tag]["sample_count"]) for tag in available_tags)
+        ),
+        "mean_samples_per_10k_steps": float(np.mean(samples_per_10k_values)),
+        "max_mean_step_gap": float(np.max(mean_gap_values)),
+        "max_p95_step_gap": float(np.max(p95_gap_values)),
+        "max_max_step_gap": float(np.max(max_gap_values)),
+    }
+
+    return {
+        "available": True,
+        "total_step_span": float(total_step_span),
+        "tag_metrics": tag_metrics,
+        "summary": summary,
+    }

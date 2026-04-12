@@ -63,6 +63,73 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=500.0,
         help="Position bin size for geographic failure distribution.",
     )
+    parser.add_argument(
+        "--critical-point-radius-m",
+        type=float,
+        default=300.0,
+        help="Radius for slope transition and SPS critical-point attribution.",
+    )
+    parser.add_argument(
+        "--top-k-spatial-bins",
+        type=int,
+        default=8,
+        help="Top-K spatial risk bins rendered in report.",
+    )
+    parser.add_argument(
+        "--top-k-critical-points",
+        type=int,
+        default=8,
+        help="Top-K critical points rendered in report.",
+    )
+    parser.add_argument(
+        "--report-bar-width",
+        type=int,
+        default=24,
+        help="ASCII bar width used in report charts.",
+    )
+    parser.add_argument(
+        "--training-log-interval",
+        type=int,
+        default=None,
+        help="Training log interval used for this run, stored into analysis metadata.",
+    )
+    parser.add_argument(
+        "--min-points-per-10k-steps",
+        type=float,
+        default=5.0,
+        help="Minimum acceptable mean samples per 10k steps for sampling quality.",
+    )
+    parser.add_argument(
+        "--min-unique-episodes",
+        type=int,
+        default=100,
+        help="Minimum acceptable unique episodes for sampling quality.",
+    )
+    parser.add_argument(
+        "--max-mean-step-gap",
+        type=float,
+        default=2048.0,
+        help="Maximum acceptable mean step gap for sampling quality.",
+    )
+    parser.add_argument(
+        "--sampling-quality-mode",
+        type=str,
+        choices=["warn_only", "strict_fail"],
+        default="warn_only",
+        help="Sampling quality gate mode: warn_only logs warning, strict_fail aborts analysis.",
+    )
+    parser.add_argument(
+        "--export-csv",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Export CSV artifacts. Disabled by default.",
+    )
+    parser.add_argument(
+        "--include-snapshots",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Include raw step/episode snapshots in analysis payload.",
+    )
     return parser
 
 
@@ -77,6 +144,17 @@ def main() -> None:
         kl_threshold=args.kl_threshold,
         near_miss_threshold_mps=args.near_miss_threshold_mps,
         position_bin_size_m=args.position_bin_size_m,
+        critical_point_radius_m=args.critical_point_radius_m,
+        top_k_spatial_bins=args.top_k_spatial_bins,
+        top_k_critical_points=args.top_k_critical_points,
+        report_bar_width=args.report_bar_width,
+        training_log_interval=args.training_log_interval,
+        min_points_per_10k_steps=args.min_points_per_10k_steps,
+        min_unique_episodes=args.min_unique_episodes,
+        max_mean_step_gap=args.max_mean_step_gap,
+        sampling_quality_mode=args.sampling_quality_mode,
+        export_csv=args.export_csv,
+        include_snapshots=args.include_snapshots,
         output_root=args.output_root,
     )
 
@@ -90,7 +168,10 @@ def main() -> None:
     print("Training analysis completed.")
     print(f"JSON snapshot: {output_paths.get('json_snapshot', 'N/A')}")
     print(f"Markdown report: {output_paths.get('markdown_report', 'N/A')}")
-    print(f"Summary CSV: {output_paths.get('summary_metrics_csv', 'N/A')}")
+    if "summary_metrics_csv" in output_paths:
+        print(f"Summary CSV: {output_paths.get('summary_metrics_csv', 'N/A')}")
+    else:
+        print("CSV exports: disabled")
 
 
 if __name__ == "__main__":
