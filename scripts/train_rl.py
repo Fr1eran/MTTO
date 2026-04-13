@@ -162,7 +162,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--force-dump-interval-steps",
         type=int,
-        default=0,
+        default=1,
         help="Force logger.dump every N timesteps in callback (<=0 disables).",
     )
     parser.add_argument(
@@ -235,7 +235,9 @@ def resolve_run_mode(
     )
 
 
-def resolve_log_interval(args: argparse.Namespace, run_mode: str, enable_tb: bool) -> int:
+def resolve_log_interval(
+    args: argparse.Namespace, run_mode: str, enable_tb: bool
+) -> int:
     defaults_by_mode = {
         "tune": 1,
         "reproduce": 5,
@@ -372,7 +374,7 @@ def main() -> None:
         "MlpPolicy",
         venv_train,
         device=args.device,
-        verbose=1,
+        verbose=0,
         learning_rate=linear_schedule(3e-4),
         n_steps=2048,
         batch_size=256,
@@ -406,6 +408,7 @@ def main() -> None:
         callback=callback,
         log_interval=log_interval,
         tb_log_name=args.tb_log_name,
+        progress_bar=True,
     )
     model.save(model_save_path)
     venv_train.save(vecnormalize_save_path)

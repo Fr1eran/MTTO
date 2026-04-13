@@ -122,6 +122,11 @@ def test_constraint_diagnostic_basic():
     assert diagnostic["geographic_failure_distribution"]["truncated_count"] == 2
     assert diagnostic["safety_band_tolerance"]["available"] is True
     assert diagnostic["safety_band_tolerance"]["near_miss_ratio"] > 0.0
+    top_bin = diagnostic["geographic_failure_distribution"]["top_risk_bins"][0]
+    assert "near_miss_count" in top_bin
+    assert "near_miss_risk" in top_bin
+    assert "violation_risk" in top_bin
+    assert "failure_risk" in top_bin
 
 
 def test_build_episode_snapshots_with_state_episode_id():
@@ -275,10 +280,10 @@ def test_write_outputs_default_no_csv(tmp_path):
 class _FakeEnv:
     def __init__(self):
         self._attrs = {
-            "rewards_info": [{"total": 1.0}],
-            "state_info": [{"episode_id": 7.0}],
-            "constraint_info": [{"is_truncated": 0.0}],
-            "event_info": [{"episode_truncated_count": 0.0}],
+            "rewards_info": [{"total": 999.0}],
+            "state_info": [{"episode_id": 999.0}],
+            "constraint_info": [{"is_truncated": 999.0}],
+            "event_info": [{"episode_truncated_count": 999.0}],
         }
 
     def get_attr(self, attr_name: str):
@@ -306,6 +311,22 @@ class _FakeModel:
         return self._env
 
 
+def _make_callback_locals(*, truncated: float = 0.0) -> dict[str, Any]:
+    return {
+        "infos": [
+            {
+                "tb_diagnostics": {
+                    "rewards": {"total": 1.0},
+                    "state": {},
+                    "constraint": {"is_truncated": truncated},
+                    "event": {"episode_truncated_count": truncated},
+                }
+            }
+        ],
+        "dones": [False],
+    }
+
+
 def test_callback_sampling_throttle():
     env = _FakeEnv()
     logger = _FakeLogger()
@@ -315,10 +336,12 @@ def test_callback_sampling_throttle():
 
     for step in range(1, 7):
         callback.num_timesteps = step
+        callback.locals = _make_callback_locals()
         assert callback._on_step() is True
 
     # step=1 and step=4 will be sampled, each sample records four namespaces.
     assert len(logger.records) == 8
+    assert all(value != 999.0 for _, value in logger.records)
 
 
 def test_callback_force_dump_interval():
@@ -333,9 +356,87 @@ def test_callback_force_dump_interval():
 
     for step in range(1, 12):
         callback.num_timesteps = step
+        callback.locals = _make_callback_locals()
         assert callback._on_step() is True
 
     assert logger.dumps == [5, 10]
+
+
+def test_callback_reads_terminal_step_diagnostics_from_infos():
+    env = _FakeEnv()
+    logger = _FakeLogger()
+    model = _FakeModel(env, logger)
+    callback = TensorboardCallback(min_tb_sample_interval_steps=1)
+    callback.init_callback(cast(Any, model))
+
+    callback.num_timesteps = 1
+    callback.locals = _make_callback_locals(truncated=1.0)
+    assert callback._on_step() is True
+
+    records = dict(logger.records)
+    assert records["constraint/is_truncated"] == 1.0
+    assert records["event/episode_truncated_count"] == 1.0
+
+
+def test_callback_tracks_episode_id_from_dones():
+    env = _FakeEnv()
+    logger = _FakeLogger()
+    model = _FakeModel(env, logger)
+    callback = TensorboardCallback(min_tb_sample_interval_steps=1)
+    callback.init_callback(cast(Any, model))
+
+    callback.num_timesteps = 1
+    callback.locals = {
+        "infos": [
+            {
+                "tb_diagnostics": {
+                    "rewards": {},
+                    "state": {},
+                    "constraint": {},
+                    "event": {},
+                }
+            }
+        ],
+        "dones": [False],
+    }
+    assert callback._on_step() is True
+
+    callback.num_timesteps = 2
+    callback.locals = {
+        "infos": [
+            {
+                "tb_diagnostics": {
+                    "rewards": {},
+                    "state": {},
+                    "constraint": {},
+                    "event": {},
+                }
+            }
+        ],
+        "dones": [True],
+    }
+    assert callback._on_step() is True
+
+    callback.num_timesteps = 3
+    callback.locals = {
+        "infos": [
+            {
+                "tb_diagnostics": {
+                    "rewards": {},
+                    "state": {},
+                    "constraint": {},
+                    "event": {},
+                }
+            }
+        ],
+        "dones": [False],
+    }
+    assert callback._on_step() is True
+
+    episode_id_values = [
+        value for key, value in logger.records if key == "state/episode_id"
+    ]
+    assert episode_id_values == [0.0, 0.0, 1.0]
 
 
 def test_compute_sampling_health_basic_metrics():
@@ -486,3 +587,75 @@ def test_resolve_log_interval_defaults_and_override():
     args.log_interval = 3
     assert resolve_log_interval(args, "tune", True) == 3
     assert resolve_log_interval(args, "eval", False) == 3
+
+
+def test_write_outputs_includes_extended_risk_columns(tmp_path):
+    payload = build_analysis_payload(
+        run_name="unit_test_run",
+        run_directory="dummy",
+        available_tags=["constraint/is_truncated"],
+        regular_metrics={},
+        reward_component_impact={"available": False},
+        constraint_diagnostic={
+            "available": True,
+            "geographic_failure_distribution": {
+                "truncated_count": 1,
+                "top_risk_bins": [
+                    {
+                        "bin_start_m": 0.0,
+                        "bin_end_m": 500.0,
+                        "exposure_count": 10,
+                        "near_miss_count": 4,
+                        "violation_count": 2,
+                        "failure_count": 1,
+                        "near_miss_risk": 0.4,
+                        "violation_risk": 0.2,
+                        "failure_risk": 0.1,
+                    }
+                ],
+            },
+            "safety_band_tolerance": {
+                "average_distance_to_vmax_mps": 1.0,
+                "average_distance_to_vmin_mps": 1.0,
+                "near_miss_ratio": 0.4,
+                "violation_ratio": 0.2,
+                "sample_count": 10,
+            },
+            "boundary_adhesion": {
+                "near_miss_distance_m": 100.0,
+                "total_distance_m": 200.0,
+                "near_miss_distance_ratio": 0.5,
+            },
+            "critical_point_risk": {
+                "top_risky_points": [
+                    {
+                        "type": "slope_transition",
+                        "point_m": 1000.0,
+                        "exposure_count": 10,
+                        "near_miss_count": 4,
+                        "violation_count": 2,
+                        "failure_count": 1,
+                        "near_miss_risk": 0.4,
+                        "violation_risk": 0.2,
+                        "failure_risk": 0.1,
+                    }
+                ]
+            },
+        },
+        evolution_metrics={"available": False},
+        step_snapshots=[],
+        episode_snapshots=[],
+        config={"export_csv": False, "include_snapshots": False},
+    )
+
+    output_paths = write_analysis_outputs(
+        payload,
+        output_root=tmp_path,
+        run_name="unit_test_run",
+    )
+
+    report_path = Path(output_paths["markdown_report"])
+    report_text = report_path.read_text(encoding="utf-8")
+    assert "near_miss_risk" in report_text
+    assert "violation_risk" in report_text
+    assert "failure_risk" in report_text

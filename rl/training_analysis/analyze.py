@@ -487,6 +487,7 @@ def _build_critical_point_entries(
     positions: np.ndarray,
     failure_mask: np.ndarray,
     violation_mask: np.ndarray,
+    near_miss_mask: np.ndarray,
     points_m: np.ndarray,
     point_type: str,
     radius_m: float,
@@ -504,7 +505,10 @@ def _build_critical_point_entries(
 
         failure_count = int(np.sum(failure_mask & near_mask))
         violation_count = int(np.sum(violation_mask & near_mask))
-        risk = _safe_ratio(float(failure_count), float(exposure_count))
+        near_miss_count = int(np.sum(near_miss_mask & near_mask))
+        failure_risk = _safe_ratio(float(failure_count), float(exposure_count))
+        violation_risk = _safe_ratio(float(violation_count), float(exposure_count))
+        near_miss_risk = _safe_ratio(float(near_miss_count), float(exposure_count))
 
         entries.append(
             {
@@ -512,14 +516,25 @@ def _build_critical_point_entries(
                 "point_m": float(point),
                 "radius_m": radius,
                 "exposure_count": exposure_count,
+                "near_miss_count": near_miss_count,
                 "failure_count": failure_count,
                 "violation_count": violation_count,
-                "risk": risk,
+                "near_miss_risk": near_miss_risk,
+                "violation_risk": violation_risk,
+                "failure_risk": failure_risk,
+                "risk": failure_risk,
             }
         )
 
     entries.sort(
-        key=lambda item: (item["risk"], item["failure_count"], item["violation_count"]),
+        key=lambda item: (
+            item["failure_risk"],
+            item["violation_risk"],
+            item["near_miss_risk"],
+            item["failure_count"],
+            item["violation_count"],
+            item["near_miss_count"],
+        ),
         reverse=True,
     )
     return entries
@@ -657,6 +672,14 @@ def compute_constraint_diagnostic(
     violation_mask = (
         np.rint(violation_codes).astype(np.int64) > 0
     ) | margin_violation_mask
+    near_miss_event_mask = (
+        np.isfinite(margin_to_vmax)
+        & np.isfinite(margin_to_vmin)
+        & (
+            (margin_to_vmax <= near_miss_threshold_mps)
+            | (margin_to_vmin <= near_miss_threshold_mps)
+        )
+    )
 
     geographic_failure_distribution: dict[str, Any] = {
         "truncated_count": int(np.sum(truncated_mask)),
@@ -676,12 +699,14 @@ def compute_constraint_diagnostic(
         exposure_hist, edges = np.histogram(positions, bins=bins)
         failure_hist, _ = np.histogram(failure_positions, bins=bins)
         violation_hist, _ = np.histogram(positions[violation_mask], bins=bins)
+        near_miss_hist, _ = np.histogram(positions[near_miss_event_mask], bins=bins)
 
         hotspots = []
         risk_bins: list[dict[str, Any]] = []
         for idx, exposure_count in enumerate(exposure_hist):
             failure_count = int(failure_hist[idx])
             violation_count = int(violation_hist[idx])
+            near_miss_count = int(near_miss_hist[idx])
             if failure_count > 0:
                 hotspots.append(
                     {
@@ -694,23 +719,31 @@ def compute_constraint_diagnostic(
             if exposure_count <= 0:
                 continue
 
-            risk = _safe_ratio(float(failure_count), float(exposure_count))
+            failure_risk = _safe_ratio(float(failure_count), float(exposure_count))
+            violation_risk = _safe_ratio(float(violation_count), float(exposure_count))
+            near_miss_risk = _safe_ratio(float(near_miss_count), float(exposure_count))
             risk_bins.append(
                 {
                     "bin_start_m": float(edges[idx]),
                     "bin_end_m": float(edges[idx + 1]),
                     "exposure_count": int(exposure_count),
+                    "near_miss_count": near_miss_count,
                     "failure_count": failure_count,
                     "violation_count": violation_count,
-                    "failure_risk": risk,
+                    "near_miss_risk": near_miss_risk,
+                    "violation_risk": violation_risk,
+                    "failure_risk": failure_risk,
                 }
             )
 
         risk_bins.sort(
             key=lambda item: (
                 item["failure_risk"],
+                item["violation_risk"],
+                item["near_miss_risk"],
                 item["failure_count"],
                 item["violation_count"],
+                item["near_miss_count"],
             ),
             reverse=True,
         )
@@ -799,6 +832,7 @@ def compute_constraint_diagnostic(
         positions=positions,
         failure_mask=truncated_mask,
         violation_mask=violation_mask,
+        near_miss_mask=near_miss_event_mask,
         points_m=critical_points["slope_transition_points_m"],
         point_type="slope_transition",
         radius_m=radius_m,
@@ -807,6 +841,7 @@ def compute_constraint_diagnostic(
         positions=positions,
         failure_mask=truncated_mask,
         violation_mask=violation_mask,
+        near_miss_mask=near_miss_event_mask,
         points_m=critical_points["sps_switch_points_m"],
         point_type="sps_switch",
         radius_m=radius_m,
@@ -814,7 +849,14 @@ def compute_constraint_diagnostic(
 
     combined_entries = sorted(
         slope_entries + sps_entries,
-        key=lambda item: (item["risk"], item["failure_count"], item["violation_count"]),
+        key=lambda item: (
+            item["failure_risk"],
+            item["violation_risk"],
+            item["near_miss_risk"],
+            item["failure_count"],
+            item["violation_count"],
+            item["near_miss_count"],
+        ),
         reverse=True,
     )
     top_k_points = max(1, int(top_k_critical_points))

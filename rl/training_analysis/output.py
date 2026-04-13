@@ -241,6 +241,17 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
         "- overall_normal_to_high_transition_rate: "
         f"{_format_percent((evolution.get('overall_transition_probabilities') or [[0, 0, 0]])[0][2] if evolution.get('overall_transition_probabilities') else 0.0)}"
     )
+    sample_count = float(sbt.get("sample_count", 0.0)) if isinstance(sbt, dict) else 0.0
+    failure_count = (
+        float(gfd.get("truncated_count", 0.0)) if isinstance(gfd, dict) else 0.0
+    )
+    failure_ratio = (failure_count / sample_count) if sample_count > 0 else 0.0
+    lines.append(
+        "- safety_signal_ratio(sample): "
+        f"failure={_format_percent(failure_ratio)}, "
+        f"violation={_format_percent(sbt.get('violation_ratio'))}, "
+        f"near_miss={_format_percent(sbt.get('near_miss_ratio'))}"
+    )
 
     lines.append("")
     lines.append("## Run Metadata")
@@ -364,8 +375,10 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
         lines.append("")
         lines.append("### Violation Spatial Distribution (Top Risk Bins)")
         lines.append("")
-        lines.append("| bin_m | exposure | failure | risk | chart |")
-        lines.append("| --- | --- | --- | --- | --- |")
+        lines.append(
+            "| bin_m | exposure | near_miss | violation | failure | near_miss_risk | violation_risk | failure_risk | chart |"
+        )
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
         for item in top_risk_bins[:10]:
             if not isinstance(item, dict):
                 continue
@@ -373,9 +386,13 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
                 "| "
                 f"[{_format_number(item.get('bin_start_m'))}, {_format_number(item.get('bin_end_m'))}) | "
                 f"{item.get('exposure_count', 0)} | "
+                f"{item.get('near_miss_count', 0)} | "
+                f"{item.get('violation_count', 0)} | "
                 f"{item.get('failure_count', 0)} | "
+                f"{_format_percent(item.get('near_miss_risk'))} | "
+                f"{_format_percent(item.get('violation_risk'))} | "
                 f"{_format_percent(item.get('failure_risk'))} | "
-                f"{_ascii_bar(item.get('failure_risk', 0.0), width=bar_width)} |"
+                f"{_ascii_bar(item.get('near_miss_risk', 0.0), width=bar_width)} |"
             )
 
     top_risky_points = critical_points.get("top_risky_points", [])
@@ -383,18 +400,25 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
         lines.append("")
         lines.append("### Critical Point Attribution")
         lines.append("")
-        lines.append("| type | point_m | exposure | failure | risk |")
-        lines.append("| --- | --- | --- | --- | --- |")
+        lines.append(
+            "| type | point_m | exposure | near_miss | violation | failure | near_miss_risk | violation_risk | failure_risk |"
+        )
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
         for item in top_risky_points[:10]:
             if not isinstance(item, dict):
                 continue
+            failure_risk = item.get("failure_risk", item.get("risk"))
             lines.append(
                 "| "
                 f"{item.get('type', 'N/A')} | "
                 f"{_format_number(item.get('point_m'))} | "
                 f"{item.get('exposure_count', 0)} | "
+                f"{item.get('near_miss_count', 0)} | "
+                f"{item.get('violation_count', 0)} | "
                 f"{item.get('failure_count', 0)} | "
-                f"{_format_percent(item.get('risk'))} |"
+                f"{_format_percent(item.get('near_miss_risk'))} | "
+                f"{_format_percent(item.get('violation_risk'))} | "
+                f"{_format_percent(failure_risk)} |"
             )
 
     lines.append("")

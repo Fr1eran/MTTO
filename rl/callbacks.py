@@ -17,17 +17,78 @@ class TensorboardCallback(BaseCallback):
         )
         self._last_sample_step: int = -self.min_tb_sample_interval_steps
         self._last_dump_step: int = 0
+        self._episode_ids_by_env: list[int] = []
 
-    def _record_namespace(self, attr_name: str, namespace: str) -> None:
-        infos = self.training_env.get_attr(attr_name)
-        if not infos:
+    def _sync_episode_tracker(self, num_envs: int) -> None:
+        if num_envs < 0:
+            return
+        if len(self._episode_ids_by_env) != num_envs:
+            self._episode_ids_by_env = [0] * num_envs
+
+    def _advance_episode_tracker(self) -> None:
+        dones_raw = self.locals.get("dones")
+        if dones_raw is None:
             return
 
-        aggregated_values: dict[str, list[float]] = {}
+        try:
+            dones = list(dones_raw)
+        except TypeError:
+            return
+
+        self._sync_episode_tracker(len(dones))
+        for env_idx, done in enumerate(dones):
+            if bool(done):
+                self._episode_ids_by_env[env_idx] += 1
+
+    def _get_namespace_payloads_from_locals(
+        self, namespace: str
+    ) -> list[dict[str, float]]:
+        infos = self.locals.get("infos", [])
+        if not isinstance(infos, (list, tuple)):
+            return []
+
+        self._sync_episode_tracker(len(infos))
+
+        payloads: list[dict[str, float]] = []
         for info in infos:
             if not isinstance(info, dict):
                 continue
-            for key, value in info.items():
+            diagnostics = info.get("tb_diagnostics")
+            if not isinstance(diagnostics, dict):
+                continue
+            namespace_payload = diagnostics.get(namespace)
+            if isinstance(namespace_payload, dict):
+                payloads.append(namespace_payload)
+
+        return payloads
+
+    def _enrich_state_payloads(
+        self, payloads: list[dict[str, float]]
+    ) -> list[dict[str, float]]:
+        enriched_payloads: list[dict[str, float]] = []
+        for env_idx, payload in enumerate(payloads):
+            payload_copy = dict(payload)
+            if "episode_id" not in payload_copy:
+                episode_id = (
+                    self._episode_ids_by_env[env_idx]
+                    if env_idx < len(self._episode_ids_by_env)
+                    else 0
+                )
+                payload_copy["episode_id"] = float(episode_id)
+            enriched_payloads.append(payload_copy)
+
+        return enriched_payloads
+
+    def _record_namespace(self, namespace: str) -> None:
+        payloads = self._get_namespace_payloads_from_locals(namespace)
+        if not payloads:
+            return
+        if namespace == "state":
+            payloads = self._enrich_state_payloads(payloads)
+
+        aggregated_values: dict[str, list[float]] = {}
+        for payload in payloads:
+            for key, value in payload.items():
                 try:
                     scalar_value = float(value)
                 except TypeError, ValueError:
@@ -48,10 +109,10 @@ class TensorboardCallback(BaseCallback):
         ) >= self.min_tb_sample_interval_steps
 
         if should_sample:
-            self._record_namespace(attr_name="rewards_info", namespace="rewards")
-            self._record_namespace(attr_name="state_info", namespace="state")
-            self._record_namespace(attr_name="constraint_info", namespace="constraint")
-            self._record_namespace(attr_name="event_info", namespace="event")
+            self._record_namespace(namespace="rewards")
+            self._record_namespace(namespace="state")
+            self._record_namespace(namespace="constraint")
+            self._record_namespace(namespace="event")
             self._last_sample_step = current_step
 
         if (
@@ -60,5 +121,7 @@ class TensorboardCallback(BaseCallback):
         ):
             self.logger.dump(current_step)
             self._last_dump_step = current_step
+
+        self._advance_episode_tracker()
 
         return True

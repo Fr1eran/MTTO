@@ -47,6 +47,13 @@ class EventInfoForTB(TypedDict, total=False):
     episode_high_violation_count: float
 
 
+class DiagnosticsSnapshotForTB(TypedDict, total=False):
+    rewards: RewardInfoForTB
+    state: StateInfoForTB
+    constraint: ConstraintInfoForTB
+    event: EventInfoForTB
+
+
 class TrainState(TypedDict, total=True):
     pos: float
     speed: float
@@ -715,6 +722,18 @@ class MTTOEnv(gym.Env):
         # 获取可观测状态和信息
         observation = self._get_obs()
         info = self._get_info()
+        if self.enable_diagnostics:
+            state_snapshot = dict(self.state_info)
+            state_snapshot.pop("episode_id", None)
+            info["tb_diagnostics"] = cast(
+                DiagnosticsSnapshotForTB,
+                {
+                    "rewards": dict(self.rewards_info),
+                    "state": cast(StateInfoForTB, state_snapshot),
+                    "constraint": dict(self.constraint_info),
+                    "event": dict(self.event_info),
+                },
+            )
 
         return (observation, reward, terminated, truncated, info)
 
