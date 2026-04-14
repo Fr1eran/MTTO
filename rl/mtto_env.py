@@ -923,7 +923,7 @@ class MTTOEnv(gym.Env):
 
         # 基础偏离惩罚(二次方项, 引导列车走中间)
         norm_speed_diff = (speed - center_speed) / safe_margin
-        phi_base = -5.0 * (norm_speed_diff**2)
+        phi_base = -2.0 * (norm_speed_diff**4)
 
         # 边界壁垒
 
@@ -1003,7 +1003,7 @@ class MTTOEnv(gym.Env):
         # 计算时间冗余度
         time_redundancy_norm = redundant_operation_time / self.task.schedule_time
 
-        return -5.0 * np.log1p(np.exp(-8.0 * time_redundancy_norm))
+        return -2.0 * np.log1p(np.exp(-8.0 * time_redundancy_norm))
 
     def _get_reward_docking_dense(self):
         phi_curr = self._potential_docking(
@@ -1020,9 +1020,8 @@ class MTTOEnv(gym.Env):
         # 基础参数
         sigma_x_hat = 0.2
         sigma_v_hat = 0.1
-        K_L = 5.0
+        K_L = 10.0
         K_G = 2.0
-        eps = 1e-6
 
         # 正则化
         dist_error = self.task.target_position - pos
@@ -1030,11 +1029,9 @@ class MTTOEnv(gym.Env):
         v_hat = speed / self.vehicle.max_speed
 
         # 势能项
-        phi_linear = K_L * (1.0 - np.sqrt(x_hat**2 + eps))
-        phi_strong = (
-            K_G
-            * np.exp(-(x_hat**2) / (2 * sigma_x_hat**2))
-            * np.exp(-(v_hat**2) / (2 * sigma_v_hat**2))
+        phi_linear = -K_L * np.sqrt(x_hat**2 + v_hat**2)
+        phi_strong = K_G * np.exp(
+            -np.abs(x_hat) / sigma_x_hat - np.abs(v_hat) / sigma_v_hat
         )
 
         return phi_linear + phi_strong

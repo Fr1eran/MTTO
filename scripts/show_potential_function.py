@@ -56,7 +56,6 @@ def calc_potential_docking(
     # 基础参数
     d_scale = 30000.0
     speed_max = 500.0 / 3.6
-    eps = 1e-6
 
     sigma_x_hat = 0.2
     sigma_v_hat = 0.1
@@ -67,15 +66,15 @@ def calc_potential_docking(
     v_hat = speed / speed_max
 
     # 增益参数
-    K_L = 5.0
+    K_L = 10.0
     K_G = 2.0
 
     # 势能
-    phi_linear = K_L * (1.0 - np.sqrt(x_hat**2 + eps))
-    phi_strong = (
-        K_G
-        * np.exp(-(x_hat**2) / (2 * sigma_x_hat**2))
-        * np.exp(-(v_hat**2) / (2 * sigma_v_hat**2))
+    # phi_linear = -K_L * np.sqrt(x_hat**2 + v_hat**2)
+    phi_linear = -K_L * np.sqrt(x_hat**2)
+
+    phi_strong = K_G * np.exp(
+        -np.abs(x_hat) / sigma_x_hat - np.abs(v_hat) / sigma_v_hat
     )
 
     return phi_linear + phi_strong
@@ -211,7 +210,7 @@ def plot_safety_potential_heatmap_speed():
 
     # 添加色标
     cbar = fig.colorbar(c, ax=ax, extend="min")
-    cbar.set_label(r"安全势能值 $\Phi_{safety}$", fontsize=12)
+    cbar.set_label(r"安全势能值 $\Phi_{S}$", fontsize=12)
 
     # 图表格式化
     ax.set_xlim(pos_left_bound - 1000, pos_right_bound + 1000)
@@ -330,13 +329,14 @@ def plot_docking_potential_heatmap(view_mode="3d"):
         view_mode: "2d" 绘制热力图, "3d" 绘制三维曲面图。
     """
 
-    target_pos = 17828.0
+    target_pos = 29270.046
 
-    k_d = 10.0
+    K_L = 10.0
+    K_G = 2.0
 
     # 扩大位置与速度展示范围
-    pos_array = np.linspace(target_pos - 10000.0, target_pos + 10000.0, 1200)
-    speed_array_ms = np.linspace(0.0, 360.0 / 3.6, 1000)
+    pos_array = np.linspace(target_pos - 10000.0, target_pos + 500.0, 1200)
+    speed_array_ms = np.linspace(0.0, 480.0 / 3.6, 1000)
 
     POS, SPEED = np.meshgrid(pos_array, speed_array_ms)
 
@@ -370,7 +370,7 @@ def plot_docking_potential_heatmap(view_mode="3d"):
             cmap=cmap,
             shading="auto",
             vmin=0.0,
-            vmax=k_d,
+            vmax=K_G,
         )
 
         ax.scatter(
@@ -416,7 +416,7 @@ def plot_docking_potential_heatmap(view_mode="3d"):
             linewidth=0,
             antialiased=True,
             vmin=0.0,
-            vmax=k_d,
+            vmax=K_G,
         )
 
         ax_3d = cast(Any, ax)
@@ -436,7 +436,7 @@ def plot_docking_potential_heatmap(view_mode="3d"):
 
         ax.set_xlim(pos_array[0], pos_array[-1])
         ax.set_ylim(speed_array_kmh[0], speed_array_kmh[-1])
-        ax.set_zlim(0.0, k_d * 1.02)
+        ax.set_zlim(-K_L * 0.8, K_G * 1.02)
         ax.set_xlabel("位置 (m)")
         ax.set_ylabel("速度 (km/h)")
         ax.set_zlabel(r"势能值 $\Phi_P$")
@@ -460,7 +460,7 @@ def plot_docking_potential_slices():
     绘制停站势函数在距离维与速度维上的一维切片，便于调参。
     """
 
-    target_pos = 17828.0
+    target_pos = 29270.046
 
     scale_pos = 500.0  # m
     scale_speed = 10.0  # m/s
