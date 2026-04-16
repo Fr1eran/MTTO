@@ -22,7 +22,11 @@ def calc_potential_safety_speed(pos, speed, min_speed, max_speed, target_pos):
 
     # 基础偏离惩罚(四次方项, 引导列车走中间)
     norm_speed_diff = (speed - center_speed) / safe_margin
-    phi_base = -2.0 * (norm_speed_diff**4)
+    speed_log_arg = 1.01 - norm_speed_diff**2
+    in_speed_band = (speed >= min_speed) & (speed <= max_speed)
+    valid_mask_speed = in_speed_band & (speed_log_arg > 0.0)
+    phi_base = np.full_like(norm_speed_diff, np.nan, dtype=np.float64)
+    phi_base[valid_mask_speed] = 2.0 * np.log(speed_log_arg[valid_mask_speed])
 
     # 边界壁垒
 
@@ -32,13 +36,17 @@ def calc_potential_safety_speed(pos, speed, min_speed, max_speed, target_pos):
     return scale * phi_base
 
 
-def calc_potential_safety_spatial(pos, min_pos, max_pos, target_pos):
+def calc_potential_safety_position(pos, min_pos, max_pos, target_pos):
     distanceToTarget = np.abs(target_pos - pos)
     center_pos = (max_pos + min_pos) / 2.0
     safe_margin = (max_pos - min_pos) / 2.0
 
     norm_pos_diff = (pos - center_pos) / safe_margin
-    phi_base = -2.0 * (norm_pos_diff**4)
+    spatial_log_arg = 1.01 - norm_pos_diff**2
+    in_pos_band = (pos >= min_pos) & (pos <= max_pos)
+    valid_mask_spatial = in_pos_band & (spatial_log_arg > 0.0)
+    phi_base = np.full_like(norm_pos_diff, np.nan, dtype=np.float64)
+    phi_base[valid_mask_spatial] = 2.0 * np.log(spatial_log_arg[valid_mask_spatial])
 
     scale = 1.0 + 1.0 * np.exp(-0.001 * distanceToTarget)
 
@@ -66,8 +74,8 @@ def calc_potential_docking(
     v_hat = speed / speed_max
 
     # 增益参数
-    K_L = 10.0
-    K_G = 2.0
+    K_L = 8.0
+    K_G = 16.0
 
     # 势能
     # phi_linear = -K_L * np.sqrt(x_hat**2 + v_hat**2)
@@ -175,9 +183,8 @@ def plot_safety_potential_heatmap_speed():
     )
 
     # 生成 masking, 越界区域的值设为NAN, 使其在图上透明
-    POTENTIAL_MASKED = np.where(
-        (SPEED >= SPEED_MIN) & (SPEED <= SPEED_MAX), POTENTIAL, np.nan
-    )
+    in_speed_band = (SPEED >= SPEED_MIN) & (SPEED <= SPEED_MAX)
+    POTENTIAL_MASKED = np.where(in_speed_band, POTENTIAL, np.nan)
 
     fig, ax = plt.subplots(figsize=(12, 6), dpi=150)
 
@@ -264,10 +271,9 @@ def plot_safety_potential_heatmap_position():
     POS_LOWER = np.tile(pos_lower_1d[:, None], (1, pos_array.size))
     POS_UPPER = np.tile(pos_upper_1d[:, None], (1, pos_array.size))
 
-    POTENTIAL = calc_potential_safety_spatial(POS, POS_LOWER, POS_UPPER, target_pos)
-    POTENTIAL_MASKED = np.where(
-        (POS >= POS_LOWER) & (POS <= POS_UPPER), POTENTIAL, np.nan
-    )
+    POTENTIAL = calc_potential_safety_position(POS, POS_LOWER, POS_UPPER, target_pos)
+    in_pos_band = (POS >= POS_LOWER) & (POS <= POS_UPPER)
+    POTENTIAL_MASKED = np.where(in_pos_band, POTENTIAL, np.nan)
 
     fig, ax = plt.subplots(figsize=(12, 6), dpi=150)
 
@@ -331,8 +337,8 @@ def plot_docking_potential_heatmap(view_mode="3d"):
 
     target_pos = 29270.046
 
-    K_L = 10.0
-    K_G = 2.0
+    K_L = 8.0
+    K_G = 16.0
 
     # 扩大位置与速度展示范围
     pos_array = np.linspace(target_pos - 10000.0, target_pos + 500.0, 1200)

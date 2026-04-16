@@ -862,11 +862,22 @@ class MTTOEnv(gym.Env):
             return 0.0
 
         # 计算当前状态势能
-        phi_curr = self._potential_safety_speed(
+        # phi_curr = self._potential_safety_speed(
+        #     pos=self.current_pos,
+        #     speed=self.current_speed,
+        #     min_speed=self.current_min_speed,
+        #     max_speed=self.current_max_speed,
+        #     target_pos=self.sps.get_auxiliary_stopping_area_target_position(
+        #         sp=self.current_sp
+        #     )
+        #     if self.current_sp >= 0
+        #     else self.task.target_position,
+        # )
+
+        phi_curr = self._potential_safety_position(
             pos=self.current_pos,
-            speed=self.current_speed,
-            min_speed=self.current_min_speed,
-            max_speed=self.current_max_speed,
+            min_pos=self.current_latest_traction_intervention_point,
+            max_pos=self.current_latest_braking_intervention_point,
             target_pos=self.sps.get_auxiliary_stopping_area_target_position(
                 sp=self.current_sp
             )
@@ -874,38 +885,29 @@ class MTTOEnv(gym.Env):
             else self.task.target_position,
         )
 
-        # phi_curr = self._potential_safety_position(
-        #     pos=self.current_pos,
-        #     min_pos=self.current_latest_traction_intervention_point,
-        #     max_pos=self.current_latest_braking_intervention_point,
-        #     target_pos=self.sps.GetASATargetPointPosition(sp=self.current_sp)
-        #     if self.current_sp >= 0
+        # 计算上个状态势能
+        # phi_prev = self._potential_safety_speed(
+        #     pos=self.last_state["pos"],
+        #     speed=self.last_state["speed"],
+        #     min_speed=self.last_state["min_speed"],
+        #     max_speed=self.last_state["max_speed"],
+        #     target_pos=self.sps.get_auxiliary_stopping_area_target_position(
+        #         sp=self.last_state["stopping_point_index"]
+        #     )
+        #     if self.last_state["stopping_point_index"] >= 0
         #     else self.task.target_position,
         # )
 
-        # 计算上个状态势能
-        phi_prev = self._potential_safety_speed(
+        phi_prev = self._potential_safety_position(
             pos=self.last_state["pos"],
-            speed=self.last_state["speed"],
-            min_speed=self.last_state["min_speed"],
-            max_speed=self.last_state["max_speed"],
+            min_pos=self.last_state["latest_traction_intervention_point"],
+            max_pos=self.last_state["latest_braking_intervention_point"],
             target_pos=self.sps.get_auxiliary_stopping_area_target_position(
                 sp=self.last_state["stopping_point_index"]
             )
             if self.last_state["stopping_point_index"] >= 0
             else self.task.target_position,
         )
-
-        # phi_prev = self._potential_safety_position(
-        #     pos=self.last_state["pos"],
-        #     min_pos=self.last_state["latest_traction_intervention_point"],
-        #     max_pos=self.last_state["latest_braking_intervention_point"],
-        #     target_pos=self.sps.GetASATargetPointPosition(
-        #         sp=self.last_state["stopping_point_index"]
-        #     )
-        #     if self.last_state["stopping_point_index"] >= 0
-        #     else self.task.target_position,
-        # )
 
         return self.gamma * phi_curr - phi_prev
 
@@ -923,7 +925,7 @@ class MTTOEnv(gym.Env):
 
         # 基础偏离惩罚(二次方项, 引导列车走中间)
         norm_speed_diff = (speed - center_speed) / safe_margin
-        phi_base = -2.0 * (norm_speed_diff**4)
+        phi_base = 2.0 * np.log(1.01 - norm_speed_diff**2)
 
         # 边界壁垒
 
@@ -942,11 +944,12 @@ class MTTOEnv(gym.Env):
 
         safe_margin = max(safe_margin, 1e-3)
 
-        norm_pos = (pos - center_pos) / safe_margin
+        norm_pos_diff = (pos - center_pos) / safe_margin
+        phi_base = 2.0 * np.log(1.01 - norm_pos_diff**4)
 
-        scale = 1.0 + 1.0 * np.exp(-0.002 * distanceToTarget)
+        scale = 1.0 + 1.0 * np.exp(-0.001 * distanceToTarget)
 
-        return -10.0 * scale * (norm_pos**2)
+        return scale * phi_base
 
     def _get_reward_energy_dense(self) -> float:
         return (
@@ -965,7 +968,7 @@ class MTTOEnv(gym.Env):
         # 使用指数衰减式的钟形曲线
         norm_jerk = delta_acc / (self.task.max_acc_change)
 
-        return -0.5 * (1 - np.exp(-2.0 * norm_jerk))
+        return -0.1 * (1 - np.exp(-2.0 * norm_jerk))
 
     def _get_reward_punctuality_dense(self) -> float:
         phi_curr = self._potential_punctuality(
@@ -1020,8 +1023,8 @@ class MTTOEnv(gym.Env):
         # 基础参数
         sigma_x_hat = 0.2
         sigma_v_hat = 0.1
-        K_L = 10.0
-        K_G = 2.0
+        K_L = 8.0
+        K_G = 16.0
 
         # 正则化
         dist_error = self.task.target_position - pos
