@@ -23,7 +23,9 @@ class SPS:
         assert len(ASA_ap_list) == len(ASA_dp_list), "停车可达点与危险点数量应一致"
         self.ASA_ap_list: list[float] = ASA_ap_list  # 停车区可达点列表
         self.ASA_dp_list: list[float] = ASA_dp_list  # 停车区危险点列表
-        self.numofSPS: int = len(self.ASA_ap_list)  # 办理进路上停车区总数(加上车站)
+        self.num_of_stopping_points: int = len(
+            self.ASA_ap_list
+        )  # 办理进路上停车区总数(加上车站)
         self.T_s: float = T_s  # 步进从发起到完成的平均耗时
 
     def step_to_next_stopping_point(
@@ -48,7 +50,7 @@ class SPS:
         next_sp = current_sp + 1
         if self.IsPrevSPSReqDone:
             # 上一个步进请求已经执行
-            if next_sp <= self.numofSPS - 1:
+            if next_sp <= self.num_of_stopping_points - 1:
                 # 未步进到最后一个停车点
                 # 可以尝试发起步进请求
                 (
@@ -81,7 +83,8 @@ class SPS:
         self.SPSReqTimeStamp = 0.0
 
     def get_auxiliary_stopping_area_target_position(self, sp: int) -> float:
-        if sp < 0 or sp >= self.numofSPS:
-            raise IndexError(f"停车点编号 {sp} 超出范围 [0, {self.numofSPS - 1}]")
+        if sp < 0 or sp >= self.num_of_stopping_points:
+            raise IndexError(
+                f"停车点编号 {sp} 超出范围 [0, {self.num_of_stopping_points - 1}]"
+            )
         return (self.ASA_ap_list[sp] + self.ASA_dp_list[sp]) / 2
-

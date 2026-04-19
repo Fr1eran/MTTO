@@ -74,8 +74,8 @@ def calc_potential_docking(
     v_hat = speed / speed_max
 
     # 增益参数
-    K_L = 8.0
-    K_G = 16.0
+    K_L = 2.0
+    K_G = 20.0
 
     # 势能
     # phi_linear = -K_L * np.sqrt(x_hat**2 + v_hat**2)
@@ -337,8 +337,8 @@ def plot_docking_potential_heatmap(view_mode="3d"):
 
     target_pos = 29270.046
 
-    K_L = 8.0
-    K_G = 16.0
+    K_L = 2.0
+    K_G = 20.0
 
     # 扩大位置与速度展示范围
     pos_array = np.linspace(target_pos - 10000.0, target_pos + 500.0, 1200)

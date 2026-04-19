@@ -235,51 +235,39 @@ class MTTOEnv(gym.Env):
         )
 
         # 定义智能体能够观测的状态信息
-        self.observation_space = gym.spaces.Dict(
-            {
-                "remaining_distance": gym.spaces.Box(
-                    0.0,
-                    1.0,
-                    shape=(1,),
-                    dtype=np.float32,
-                ),
-                "current_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
-                "current_acc": gym.spaces.Box(
-                    -1.0,
-                    1.0,
-                    shape=(1,),
-                    dtype=np.float32,
-                ),
-                "remaining_schedule_time": gym.spaces.Box(
-                    -1.0,  # 最多超时10分钟
-                    1.0,
-                    shape=(1,),
-                    dtype=np.float32,  # 允许超时或提前
-                ),
-                "current_slope": gym.spaces.Box(
-                    -1.0, 1.0, shape=(1,), dtype=np.float32
-                ),
-                "current_max_speed": gym.spaces.Box(
-                    0.0, 1.0, shape=(1,), dtype=np.float32
-                ),
-                "current_min_speed": gym.spaces.Box(
-                    0.0, 1.0, shape=(1,), dtype=np.float32
-                ),
-                "next_slope": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
-                "next_max_speed": gym.spaces.Box(
-                    0.0, 1.0, shape=(1,), dtype=np.float32
-                ),
-                "next_min_speed": gym.spaces.Box(
-                    0.0, 1.0, shape=(1,), dtype=np.float32
-                ),
-                "current_latest_traction_intervention_point": gym.spaces.Box(
-                    0.0, 1.0, shape=(1,), dtype=np.float32
-                ),
-                "current_latest_braking_intervention_point": gym.spaces.Box(
-                    0.0, 1.0, shape=(1,), dtype=np.float32
-                ),
-            }
-        )
+        self.observation_space = gym.spaces.Dict({
+            "remaining_distance": gym.spaces.Box(
+                0.0,
+                1.0,
+                shape=(1,),
+                dtype=np.float32,
+            ),
+            "current_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
+            "current_acc": gym.spaces.Box(
+                -1.0,
+                1.0,
+                shape=(1,),
+                dtype=np.float32,
+            ),
+            "remaining_schedule_time": gym.spaces.Box(
+                -1.0,  # 最多超时10分钟
+                1.0,
+                shape=(1,),
+                dtype=np.float32,  # 允许超时或提前
+            ),
+            "current_slope": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
+            "current_max_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
+            "current_min_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
+            "next_slope": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
+            "next_max_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
+            "next_min_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
+            "current_latest_traction_intervention_point": gym.spaces.Box(
+                0.0, 1.0, shape=(1,), dtype=np.float32
+            ),
+            "current_latest_braking_intervention_point": gym.spaces.Box(
+                0.0, 1.0, shape=(1,), dtype=np.float32
+            ),
+        })
 
         # 定义智能体的动作空间, 归一化
         self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
@@ -810,14 +798,14 @@ class MTTOEnv(gym.Env):
 
         if not truncated:
             if terminated:
-                reward_total = self._get_reward_goal() + 20.0
+                reward_total = self._get_reward_goal() + 10.0
             else:
                 reward_total = self._get_reward_dense()
         else:
             progress = (
                 abs(self.current_pos - self.task.start_position) / self.whole_distance
             )
-            reward_total = -30.0 * (1.0 - progress)
+            reward_total = -80.0 * (1.0 - np.sqrt(progress)) - 20.0
 
         if self.enable_diagnostics:
             self.rewards_info["total"] = reward_total
@@ -834,7 +822,7 @@ class MTTOEnv(gym.Env):
         reward_energy = self._get_reward_energy_dense()
 
         # 舒适度奖励
-        reward_comfort = self._get_reward_comfort()
+        reward_comfort = self._get_reward_comfort_dense()
 
         # 运行时间奖励
         reward_punctuality = self._get_reward_punctuality_dense()
@@ -859,9 +847,11 @@ class MTTOEnv(gym.Env):
 
     def _get_reward_safety_dense(self) -> float:
         if self.current_sp != self.last_state["stopping_point_index"]:
-            return 0.0
+            progress = self.current_pos / self.whole_distance
+            return 10.0 / self.sps.num_of_stopping_points + 20.0 * progress
 
         # 计算当前状态势能
+
         # phi_curr = self._potential_safety_speed(
         #     pos=self.current_pos,
         #     speed=self.current_speed,
@@ -886,6 +876,7 @@ class MTTOEnv(gym.Env):
         )
 
         # 计算上个状态势能
+
         # phi_prev = self._potential_safety_speed(
         #     pos=self.last_state["pos"],
         #     speed=self.last_state["speed"],
@@ -945,30 +936,40 @@ class MTTOEnv(gym.Env):
         safe_margin = max(safe_margin, 1e-3)
 
         norm_pos_diff = (pos - center_pos) / safe_margin
-        phi_base = 2.0 * np.log(1.01 - norm_pos_diff**4)
+        phi_base = 2.0 * np.log(1.01 - norm_pos_diff**2)
 
         scale = 1.0 + 1.0 * np.exp(-0.001 * distanceToTarget)
 
         return scale * phi_base
 
     def _get_reward_energy_dense(self) -> float:
-        return (
-            -(
-                (
-                    self.current_energy_consumption
-                    - self.last_state["energy_consumption"]
-                )
-                / self.max_energy_consumption
-            )
-            * 15.0
-        )
+        val = (
+            -(self.current_energy_consumption - self.last_state["energy_consumption"])
+            / self.max_energy_consumption
+        ) * 15.0
 
-    def _get_reward_comfort(self) -> float:
+        if (
+            abs(self.current_pos - self.task.start_position) < 2000
+            or abs(self.current_pos - self.task.target_position) < 2000
+        ):
+            val *= 0.1
+
+        return val
+
+    def _get_reward_comfort_dense(self) -> float:
         delta_acc = abs(self.last_state["acc"] - self.current_acc)
         # 使用指数衰减式的钟形曲线
         norm_jerk = delta_acc / (self.task.max_acc_change)
 
-        return -0.1 * (1 - np.exp(-2.0 * norm_jerk))
+        val = -0.1 * (1 - np.exp(-2.0 * norm_jerk))
+
+        if (
+            abs(self.current_pos - self.task.start_position) < 2000
+            or abs(self.current_pos - self.task.target_position) < 2000
+        ):
+            val *= 0.1
+
+        return val
 
     def _get_reward_punctuality_dense(self) -> float:
         phi_curr = self._potential_punctuality(
@@ -1006,7 +1007,7 @@ class MTTOEnv(gym.Env):
         # 计算时间冗余度
         time_redundancy_norm = redundant_operation_time / self.task.schedule_time
 
-        return -2.0 * np.log1p(np.exp(-8.0 * time_redundancy_norm))
+        return -5.0 * np.log1p(np.exp(-8.0 * time_redundancy_norm))
 
     def _get_reward_docking_dense(self):
         phi_curr = self._potential_docking(
@@ -1023,8 +1024,8 @@ class MTTOEnv(gym.Env):
         # 基础参数
         sigma_x_hat = 0.2
         sigma_v_hat = 0.1
-        K_L = 8.0
-        K_G = 16.0
+        K_L = 2.0
+        K_G = 10.0
 
         # 正则化
         dist_error = self.task.target_position - pos
