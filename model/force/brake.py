@@ -27,7 +27,7 @@ def sledge_frictional_brake_force(
     # 参考文献：《高速磁浮列车精确停车控制研究》
 
     # 系数
-    MIN_V_KM = 20
+    MIN_V_KM = 18
 
     speed_km = 3.6 * np.asarray(speed, dtype=np.float64)
 

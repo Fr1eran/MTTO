@@ -112,8 +112,8 @@ class SafeGuardCurves:
             speed_km,
             [(speed_km >= 0) & (speed_km <= 100), speed_km > 100],
             [
-                lambda speed: (vehicle.max_dec - 0.1) / 100 * speed + 0.1,
-                lambda speed: vehicle.max_dec,
+                lambda speed: (vehicle.max_dec_abs - 0.1) / 100 * speed + 0.1,
+                lambda speed: vehicle.max_dec_abs,
             ],
         )
 

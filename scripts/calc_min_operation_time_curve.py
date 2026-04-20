@@ -46,7 +46,7 @@ vehicle = VehicleInfo(
     numoftrainsets=5,
     length=128.5,
     max_acc=1.0,
-    max_dec=1.0,
+    max_dec=-1.0,
     levi_power_per_mass=1.7,
 )
 train_service = TrainService(

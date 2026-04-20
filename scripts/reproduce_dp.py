@@ -4,10 +4,10 @@ from typing import TypedDict, Sequence, Any
 from numpy.typing import NDArray
 import matplotlib.pyplot as plt
 
-from model.ocs import SafeGuardUtility,TrainService
+from model.ocs import SafeGuardUtility, TrainService
 from model.vehicle import VehicleInfo
 from model.track import TrackInfo, TrackProfile
-from model.common import ECC,ORS
+from model.common import ECC, ORS
 from utils.io_utils import save_curve_and_metrics
 from utils.plot_utils import set_chinese_font
 from utils.data_loader import (
@@ -137,7 +137,7 @@ class VariableSpacingDPOptimizer:
 
                 # 基于加减速度物理边界的下一阶段速度索引剪枝
                 v2_min = max(
-                    speed_k**2 - 2.0 * self.vehicle.max_dec * abs_delta_pos, 0.0
+                    speed_k**2 + 2.0 * self.vehicle.max_dec * abs_delta_pos, 0.0
                 )
                 v2_max = max(
                     speed_k**2 + 2.0 * self.vehicle.max_acc * abs_delta_pos, 0.0
@@ -248,10 +248,7 @@ class VariableSpacingDPOptimizer:
         acc = (speed_k_1**2 - speed_k**2) / (2.0 * displacement)
 
         acc_tol = 1e-9
-        if (
-            acc > self.vehicle.max_acc + acc_tol
-            or acc < -self.vehicle.max_dec - acc_tol
-        ):
+        if acc > self.vehicle.max_acc + acc_tol or acc < self.vehicle.max_dec - acc_tol:
             return False, np.inf, np.inf
 
         sample_count = max(10, int(np.abs(displacement) / 10.0))
@@ -531,14 +528,16 @@ if __name__ == "__main__":
         factor=factor,
     )
 
-    track = TrackInfo(slopes, slope_intervals, speed_limits.tolist(), speed_limit_intervals)
+    track = TrackInfo(
+        slopes, slope_intervals, speed_limits.tolist(), speed_limit_intervals
+    )
 
     vehicle = VehicleInfo(
         mass=317.5,
         numoftrainsets=5,
         length=128.5,
         max_acc=1.0,
-        max_dec=1.0,
+        max_dec=-1.0,
         levi_power_per_mass=1.7,
     )
 
