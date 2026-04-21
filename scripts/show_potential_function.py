@@ -95,7 +95,7 @@ def calc_potential_punctuality(
     # 计算时间冗余度
     time_redundancy_norm = redundant_operation_time / schedule_time
 
-    return -2.0 * np.log1p(np.exp(-8.0 * time_redundancy_norm))
+    return -6.0 * np.log1p(np.exp(-10.0 * time_redundancy_norm))
 
 
 def infer_position_from_speed(curve_pos, curve_speed, target_speed):
@@ -568,9 +568,9 @@ def plot_punctuality_potential_curve(
 
 
 if __name__ == "__main__":
-    # plot_safety_potential_heatmap_speed()
+    plot_safety_potential_heatmap_speed()
     # plot_safety_potential_heatmap_position()
-    plot_docking_potential_heatmap(view_mode="3d")
+    # plot_docking_potential_heatmap(view_mode="3d")
     # plot_docking_potential_heatmap(view_mode="2d")
     # plot_docking_potential_slices()
     # plot_punctuality_potential_curve(

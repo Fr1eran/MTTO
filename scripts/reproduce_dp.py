@@ -1,8 +1,13 @@
 import numpy as np
 import os
-from typing import TypedDict, Sequence, Any
+from typing import TypedDict, Sequence, Any, Iterable
 from numpy.typing import NDArray
 import matplotlib.pyplot as plt
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
 
 from model.ocs import SafeGuardUtility, TrainService
 from model.vehicle import VehicleInfo
@@ -56,6 +61,8 @@ class VariableSpacingDPOptimizer:
         safeguard_utility: SafeGuardUtility,
         train_service: TrainService,
         time_tolerance: float,
+        show_precompute_progress: bool = True,
+        precompute_progress_desc: str = "状态转移图预计算",
     ) -> None:
         self.vehicle = vehicle
         self.track = track
@@ -63,6 +70,8 @@ class VariableSpacingDPOptimizer:
         self.safeguard_utility = safeguard_utility
         self.task = train_service
         self.time_tolerance = time_tolerance
+        self.show_precompute_progress = show_precompute_progress
+        self.precompute_progress_desc = precompute_progress_desc
         # self.direction = (
         #     1 if self.task.target_position >= self.task.start_position else -1
         # )
@@ -122,12 +131,13 @@ class VariableSpacingDPOptimizer:
         ] = [[None for _ in range(num_speed_states)] for _ in range(total_steps)]
         total_valid_edges = 0
 
-        for k in range(total_steps):
-            pos_k = stages[k]
-            delta_pos = stages[k + 1] - pos_k
+        for k in self._iter_precompute_steps(total_steps):
+            k_idx = int(k)
+            pos_k = float(stages[k_idx])
+            delta_pos = float(stages[k_idx + 1] - stages[k_idx])
             abs_delta_pos = abs(delta_pos)
-            current_upper = int(stage_speed_upper_idx[k])
-            next_upper = int(stage_speed_upper_idx[k + 1])
+            current_upper = int(stage_speed_upper_idx[k_idx])
+            next_upper = int(stage_speed_upper_idx[k_idx + 1])
 
             if current_upper < 0 or next_upper < 0:
                 continue
@@ -174,7 +184,7 @@ class VariableSpacingDPOptimizer:
                 if not next_indices:
                     continue
 
-                transitions[k][i] = (
+                transitions[k_idx][i] = (
                     np.asarray(next_indices, dtype=np.int_),
                     np.asarray(delta_energy_list, dtype=np.float64),
                     np.asarray(delta_time_list, dtype=np.float64),
@@ -189,6 +199,18 @@ class VariableSpacingDPOptimizer:
             "total_valid_edges": total_valid_edges,
         }
 
+    def _iter_precompute_steps(self, total_steps: int) -> Iterable[int]:
+        if self.show_precompute_progress and tqdm is not None:
+            return tqdm(
+                range(total_steps),
+                total=total_steps,
+                desc=self.precompute_progress_desc,
+                dynamic_ncols=True,
+                unit="stage",
+                mininterval=0.2,
+            )
+        return range(total_steps)
+
     def _prepare_transition_graph_cache(
         self, max_speed: float, delta_speed: float
     ) -> dict[str, Any]:
@@ -198,6 +220,8 @@ class VariableSpacingDPOptimizer:
 
         if self._graph_cache_signature != cache_signature:
             print("正在预计算状态转移图（仅首次或参数变化时执行）...")
+            if self.show_precompute_progress and tqdm is None:
+                print("未检测到 tqdm，已回退为普通循环输出。")
             self._graph_cache = self._build_transition_graph(stages, speed_states)
             self._graph_cache_signature = cache_signature
             print(
@@ -212,13 +236,11 @@ class VariableSpacingDPOptimizer:
         基于临界点的变间距阶段划分
         将线路按照临界点划分为大分区, 每个大分区等分为 sub_stage_count 个子阶段
         """
-        critical_points_position_arr = np.concatenate(
-            (
-                np.array([self.task.start_position]),
-                self.safeguard_utility.get_intersecting_dangerous_point(),
-                np.array([self.task.target_position]),
-            )
-        )
+        critical_points_position_arr = np.concatenate((
+            np.array([self.task.start_position]),
+            self.safeguard_utility.get_intersecting_dangerous_point(),
+            np.array([self.task.target_position]),
+        ))
         stages = []
 
         for i in range(len(critical_points_position_arr) - 1):
@@ -495,7 +517,7 @@ class VariableSpacingDPOptimizer:
 
 
 if __name__ == "__main__":
-    dp_result_save_dir = "output/optimial/dp"
+    dp_result_save_dir = "output/optimal/dp"
     os.makedirs(os.path.dirname(dp_result_save_dir), exist_ok=True)
 
     # 坡度，百分位
@@ -557,9 +579,11 @@ if __name__ == "__main__":
         safeguard_utility=safeguard_utility,
         train_service=train_service,
         time_tolerance=0.01,
+        show_precompute_progress=True,
+        precompute_progress_desc="状态转移图预计算",
     )
 
-    result = VSDP.optimize(max_speed=500.0 / 3.6, delta_speed=0.5, max_iters=100)
+    result = VSDP.optimize(max_speed=500.0 / 3.6, delta_speed=0.1, max_iters=100)
 
     if result is not None:
         output_file = f"{dp_result_save_dir}/optimized_speed_curve.npz"
