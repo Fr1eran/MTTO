@@ -14,6 +14,7 @@ def make_env(
     gamma: float,
     max_step_distance: float,
     enable_diagnostics: bool = True,
+    diagnostics_interval_steps: int = 1,
     render_mode: str | None = None,
 ):
     env = MTTOEnv(
@@ -24,6 +25,7 @@ def make_env(
         gamma=gamma,
         max_step_distance=max_step_distance,
         enable_diagnostics=enable_diagnostics,
+        diagnostics_interval_steps=diagnostics_interval_steps,
         render_mode=render_mode,
     )
     env = FlattenObservation(env)

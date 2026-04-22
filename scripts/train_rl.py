@@ -1,5 +1,6 @@
 import os
 import argparse
+from typing import Any, Callable
 import numpy as np
 
 from rl.callbacks import TensorboardCallback
@@ -16,7 +17,12 @@ from utils.data_loader import (
     load_stations_goal_positions,
 )
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor, VecNormalize
+from stable_baselines3.common.vec_env import (
+    DummyVecEnv,
+    SubprocVecEnv,
+    VecMonitor,
+    VecNormalize,
+)
 
 
 # 学习率线性衰减
@@ -31,6 +37,32 @@ def ensure_parent_dir(path: str) -> None:
     parent_dir = os.path.dirname(path)
     if parent_dir:
         os.makedirs(parent_dir, exist_ok=True)
+
+
+def _build_env_initializer(
+    *,
+    vehicle: VehicleInfo,
+    track: TrackInfo,
+    safeguard_utility: SafeGuardUtility,
+    train_service: TrainService,
+    gamma: float,
+    max_step_distance: float,
+    enable_diagnostics: bool,
+    diagnostics_interval_steps: int,
+) -> Callable[[], Any]:
+    def _init():
+        return make_env(
+            vehicle=vehicle,
+            track=track,
+            safeguard_utility=safeguard_utility,
+            train_service=train_service,
+            gamma=gamma,
+            max_step_distance=max_step_distance,
+            enable_diagnostics=enable_diagnostics,
+            diagnostics_interval_steps=diagnostics_interval_steps,
+        )
+
+    return _init
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -118,6 +150,38 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Environment max_step_distance.",
     )
     parser.add_argument(
+        "--num-envs",
+        type=int,
+        default=1,
+        help="Number of parallel training environments.",
+    )
+    parser.add_argument(
+        "--vec-env-type",
+        type=str,
+        choices=["dummy", "subproc"],
+        default="subproc",
+        help="Vectorized environment backend. subproc enables parallel sampling when num_envs > 1.",
+    )
+    parser.add_argument(
+        "--subproc-start-method",
+        type=str,
+        choices=["spawn", "forkserver"],
+        default="spawn",
+        help="Multiprocessing start method for SubprocVecEnv.",
+    )
+    parser.add_argument(
+        "--rollout-steps-per-update",
+        type=int,
+        default=2048,
+        help="Target rollout steps collected per PPO update across all envs.",
+    )
+    parser.add_argument(
+        "--n-steps-per-env",
+        type=int,
+        default=None,
+        help="Override PPO n_steps for each environment. If omitted, it is derived from rollout-steps-per-update and num-envs.",
+    )
+    parser.add_argument(
         "--model-save-path",
         type=str,
         default="output/optimal/rl/ppo_mtto",
@@ -160,10 +224,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Minimum timesteps between callback TensorBoard records.",
     )
     parser.add_argument(
+        "--env-diagnostics-interval-steps",
+        type=int,
+        default=None,
+        help="Minimum env steps between diagnostics snapshot emission. Defaults to tb-sample-interval-steps.",
+    )
+    parser.add_argument(
         "--force-dump-interval-steps",
         type=int,
-        default=1,
-        help="Force logger.dump every N timesteps in callback (<=0 disables).",
+        default=0,
+        help="Force a buffered TensorBoard flush every N timesteps in callback (<=0 disables).",
+    )
+    parser.add_argument(
+        "--tb-batch-dump-records",
+        type=int,
+        default=0,
+        help="Flush buffered TensorBoard events after this many sampled callback records (<=0 disables).",
     )
     parser.add_argument(
         "--device",
@@ -256,6 +332,14 @@ def _normalize_optional_positive_int(value: int | None) -> int | None:
     return None if int(value) <= 0 else int(value)
 
 
+def resolve_n_steps_per_env(args: argparse.Namespace, num_envs: int) -> int:
+    if args.n_steps_per_env is not None:
+        return max(1, int(args.n_steps_per_env))
+
+    target_rollout_steps = max(1, int(args.rollout_steps_per_update))
+    return max(1, int(np.ceil(target_rollout_steps / max(1, int(num_envs)))))
+
+
 def build_scenario() -> tuple[VehicleInfo, TrackInfo, SafeGuardUtility, TrainService]:
     slopes, slope_intervals = load_slopes()
     speed_limits, speed_limit_intervals = load_speed_limits(
@@ -317,9 +401,24 @@ def main() -> None:
     ) = resolve_run_mode(args)
     log_interval = resolve_log_interval(args, run_mode, enable_tb)
     tb_sample_interval_steps = max(1, int(args.tb_sample_interval_steps))
+    env_diagnostics_interval_steps = max(
+        1,
+        int(
+            args.env_diagnostics_interval_steps
+            if args.env_diagnostics_interval_steps is not None
+            else tb_sample_interval_steps
+        ),
+    )
     force_dump_interval_steps = _normalize_optional_positive_int(
         args.force_dump_interval_steps
     )
+    tb_batch_dump_records = _normalize_optional_positive_int(args.tb_batch_dump_records)
+    num_envs = max(1, int(args.num_envs))
+    n_steps_per_env = resolve_n_steps_per_env(args, num_envs)
+    rollout_steps_per_update = n_steps_per_env * num_envs
+
+    use_subproc = num_envs > 1 and args.vec_env_type == "subproc"
+    resolved_vec_env_type = "subproc" if use_subproc else "dummy"
 
     print("Training runtime switches:")
     print(f"- run_mode={run_mode}")
@@ -330,6 +429,12 @@ def main() -> None:
     print(f"- enable_auto_analysis={enable_auto_analysis}")
     print(f"- reward_discount={reward_discount}")
     print(f"- step_distance={ds}")
+    print(f"- num_envs={num_envs}")
+    print(f"- vec_env_type={resolved_vec_env_type}")
+    if use_subproc:
+        print(f"- subproc_start_method={args.subproc_start_method}")
+    print(f"- n_steps_per_env={n_steps_per_env}")
+    print(f"- rollout_steps_per_update={rollout_steps_per_update}")
     print(f"- model_save_path={model_save_path}")
     print(f"- vecnormalize_save_path={vecnormalize_save_path}")
     print(f"- total_timesteps={args.total_timesteps}")
@@ -340,7 +445,9 @@ def main() -> None:
     else:
         print("- log_interval=ignored (logging disabled by current switches)")
     print(f"- tb_sample_interval_steps={tb_sample_interval_steps}")
+    print(f"- env_diagnostics_interval_steps={env_diagnostics_interval_steps}")
     print(f"- force_dump_interval_steps={force_dump_interval_steps}")
+    print(f"- tb_batch_dump_records={tb_batch_dump_records}")
     print(f"- device={args.device}")
     if enable_auto_analysis and not enable_tb:
         print(
@@ -351,19 +458,27 @@ def main() -> None:
     vehicle, track, safeguard_utility, train_service = build_scenario()
 
     # 创建训练环境
-    venv_train = DummyVecEnv(
-        [
-            lambda: make_env(
-                vehicle=vehicle,
-                track=track,
-                safeguard_utility=safeguard_utility,
-                train_service=train_service,
-                gamma=reward_discount,
-                max_step_distance=ds,
-                enable_diagnostics=enable_env_diagnostics,
-            )
-        ]
-    )
+    env_initializers: list[Callable[[], Any]] = [
+        _build_env_initializer(
+            vehicle=vehicle,
+            track=track,
+            safeguard_utility=safeguard_utility,
+            train_service=train_service,
+            gamma=reward_discount,
+            max_step_distance=ds,
+            enable_diagnostics=enable_env_diagnostics,
+            diagnostics_interval_steps=env_diagnostics_interval_steps,
+        )
+        for _ in range(num_envs)
+    ]
+    if use_subproc:
+        venv_train = SubprocVecEnv(
+            env_initializers,
+            start_method=args.subproc_start_method,
+        )
+    else:
+        venv_train = DummyVecEnv(env_initializers)
+
     if enable_monitor:
         venv_train = VecMonitor(venv_train)
     venv_train = VecNormalize(
@@ -376,7 +491,7 @@ def main() -> None:
         device=args.device,
         verbose=0,
         learning_rate=linear_schedule(3e-4),
-        n_steps=2048,
+        n_steps=n_steps_per_env,
         batch_size=256,
         n_epochs=15,
         gamma=reward_discount,  # 提高折扣因子
@@ -395,8 +510,9 @@ def main() -> None:
 
     callback = (
         TensorboardCallback(
-            min_tb_sample_interval_steps=tb_sample_interval_steps,
+            tb_sample_interval_steps=tb_sample_interval_steps,
             force_dump_interval_steps=force_dump_interval_steps,
+            batch_dump_records=tb_batch_dump_records,
         )
         if enable_callback
         else None

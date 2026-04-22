@@ -16,7 +16,7 @@ def calc_potential_safety_speed(pos, speed, min_speed, max_speed, target_pos):
 
     速度带中间位置势能最大
     """
-    distanceToTarget = abs(target_pos - pos)
+    distance_to_target = abs(target_pos - pos)
     center_speed = (max_speed + min_speed) / 2.0
     safe_margin = np.maximum((max_speed - min_speed) / 2.0, 0.5)
 
@@ -31,24 +31,47 @@ def calc_potential_safety_speed(pos, speed, min_speed, max_speed, target_pos):
     # 边界壁垒
 
     # 靠近目标位置时，适当增大惩罚力度
-    scale = 1.0 + 1.0 * np.exp(-0.001 * distanceToTarget)
+    scale = 1.0 + 1.0 * np.exp(-0.001 * distance_to_target)
 
     return scale * phi_base
 
 
 def calc_potential_safety_position(pos, min_pos, max_pos, target_pos):
-    distanceToTarget = np.abs(target_pos - pos)
+    distance_to_target = np.abs(target_pos - pos)
     center_pos = (max_pos + min_pos) / 2.0
     safe_margin = (max_pos - min_pos) / 2.0
 
     norm_pos_diff = (pos - center_pos) / safe_margin
-    spatial_log_arg = 1.01 - norm_pos_diff**2
+    spatial_log_arg = 1.1 - norm_pos_diff**2
     in_pos_band = (pos >= min_pos) & (pos <= max_pos)
     valid_mask_spatial = in_pos_band & (spatial_log_arg > 0.0)
     phi_base = np.full_like(norm_pos_diff, np.nan, dtype=np.float64)
     phi_base[valid_mask_spatial] = 2.0 * np.log(spatial_log_arg[valid_mask_spatial])
 
-    scale = 1.0 + 1.0 * np.exp(-0.001 * distanceToTarget)
+    scale = 1.0 + 1.0 * np.exp(-0.001 * distance_to_target)
+
+    return scale * phi_base
+
+
+def calc_potential_safety_speed_adaptive(pos, speed, min_speed, max_speed, target_pos):
+    distance_to_target = np.abs(target_pos - pos)
+    scale = 1.0 + 1.0 * np.exp(-0.001 * distance_to_target)
+
+    v_star = np.where(min_speed > 0.0, (max_speed + min_speed) / 2.0, 0.0)
+    L = np.where(
+        min_speed > 0,
+        np.clip((max_speed - min_speed) / 2.0, 1.0, None),
+        np.clip(max_speed, 1.0, None),
+    )
+
+    norm_speed_diff = (speed - v_star) / L
+    speed_log_arg = 1.01 - norm_speed_diff**2
+
+    in_speed_band = (speed >= min_speed) & (speed <= max_speed)
+    valid_mask_speed = in_speed_band & (speed_log_arg > 0.0)
+
+    phi_base = np.full_like(norm_speed_diff, np.nan, dtype=np.float64)
+    phi_base[valid_mask_speed] = 2.0 * np.log(speed_log_arg[valid_mask_speed])
 
     return scale * phi_base
 
@@ -95,7 +118,7 @@ def calc_potential_punctuality(
     # 计算时间冗余度
     time_redundancy_norm = redundant_operation_time / schedule_time
 
-    return -6.0 * np.log1p(np.exp(-10.0 * time_redundancy_norm))
+    return -10.0 * np.log1p(np.exp(-12.0 * time_redundancy_norm))
 
 
 def infer_position_from_speed(curve_pos, curve_speed, target_speed):
@@ -178,7 +201,14 @@ def plot_safety_potential_heatmap_speed():
     SPEED_MAX = np.tile(speed_max_1d, (speed_array_ms.size, 1))
 
     # 计算整个网络的势能值
-    POTENTIAL = calc_potential_safety_speed(
+
+    # 原始版本
+    # POTENTIAL = calc_potential_safety_speed(
+    #     POS, SPEED, SPEED_MIN, SPEED_MAX, target_pos
+    # )
+
+    # 自适应安全目标势能场
+    POTENTIAL = calc_potential_safety_speed_adaptive(
         POS, SPEED, SPEED_MIN, SPEED_MAX, target_pos
     )
 
@@ -568,13 +598,13 @@ def plot_punctuality_potential_curve(
 
 
 if __name__ == "__main__":
-    plot_safety_potential_heatmap_speed()
+    # plot_safety_potential_heatmap_speed()
     # plot_safety_potential_heatmap_position()
     # plot_docking_potential_heatmap(view_mode="3d")
     # plot_docking_potential_heatmap(view_mode="2d")
     # plot_docking_potential_slices()
-    # plot_punctuality_potential_curve(
-    #     schedule_time=440.0,
-    #     redundant_time_upper=150.0,
-    #     redundant_time_lower=-200.0,
-    # )
+    plot_punctuality_potential_curve(
+        schedule_time=440.0,
+        redundant_time_upper=150.0,
+        redundant_time_lower=-200.0,
+    )

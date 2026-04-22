@@ -302,8 +302,30 @@ class _FakeLogger:
         self.dumps.append(int(step))
 
 
+class _FakeTensorboardWriter:
+    def __init__(self):
+        self.scalars: list[tuple[str, float, int]] = []
+        self.flush_count: int = 0
+
+    def add_scalar(self, key: str, value: float, step: int) -> None:
+        self.scalars.append((key, float(value), int(step)))
+
+    def flush(self) -> None:
+        self.flush_count += 1
+
+
+class _FakeTensorboardOutputFormat:
+    def __init__(self, writer: _FakeTensorboardWriter):
+        self.writer = writer
+
+
+class _FakeTensorboardLogger:
+    def __init__(self, writer: _FakeTensorboardWriter):
+        self.output_formats = [_FakeTensorboardOutputFormat(writer)]
+
+
 class _FakeModel:
-    def __init__(self, env: _FakeEnv, logger: _FakeLogger):
+    def __init__(self, env: _FakeEnv, logger: Any):
         self._env = env
         self.logger = logger
 
@@ -311,13 +333,15 @@ class _FakeModel:
         return self._env
 
 
-def _make_callback_locals(*, truncated: float = 0.0) -> dict[str, Any]:
+def _make_callback_locals(
+    *, truncated: float = 0.0, reward_total: float = 1.0
+) -> dict[str, Any]:
     return {
         "infos": [
             {
                 "tb_diagnostics": {
-                    "rewards": {"total": 1.0},
-                    "state": {},
+                    "rewards": {"total": reward_total},
+                    "state": {"episode_id": 0.0},
                     "constraint": {"is_truncated": truncated},
                     "event": {"episode_truncated_count": truncated},
                 }
@@ -331,7 +355,7 @@ def test_callback_sampling_throttle():
     env = _FakeEnv()
     logger = _FakeLogger()
     model = _FakeModel(env, logger)
-    callback = TensorboardCallback(min_tb_sample_interval_steps=3)
+    callback = TensorboardCallback(tb_sample_interval_steps=3)
     callback.init_callback(cast(Any, model))
 
     for step in range(1, 7):
@@ -349,7 +373,7 @@ def test_callback_force_dump_interval():
     logger = _FakeLogger()
     model = _FakeModel(env, logger)
     callback = TensorboardCallback(
-        min_tb_sample_interval_steps=100,
+        tb_sample_interval_steps=100,
         force_dump_interval_steps=5,
     )
     callback.init_callback(cast(Any, model))
@@ -366,7 +390,7 @@ def test_callback_reads_terminal_step_diagnostics_from_infos():
     env = _FakeEnv()
     logger = _FakeLogger()
     model = _FakeModel(env, logger)
-    callback = TensorboardCallback(min_tb_sample_interval_steps=1)
+    callback = TensorboardCallback(tb_sample_interval_steps=1)
     callback.init_callback(cast(Any, model))
 
     callback.num_timesteps = 1
@@ -378,11 +402,36 @@ def test_callback_reads_terminal_step_diagnostics_from_infos():
     assert records["event/episode_truncated_count"] == 1.0
 
 
+def test_callback_event_buffer_preserves_intermediate_steps():
+    env = _FakeEnv()
+    writer = _FakeTensorboardWriter()
+    logger = _FakeTensorboardLogger(writer)
+    model = _FakeModel(env, logger)
+    callback = TensorboardCallback(
+        tb_sample_interval_steps=1,
+        batch_dump_records=2,
+        force_dump_interval_steps=None,
+    )
+    callback.init_callback(cast(Any, model))
+
+    callback.num_timesteps = 1
+    callback.locals = _make_callback_locals(reward_total=1.0, truncated=0.0)
+    assert callback._on_step() is True
+
+    callback.num_timesteps = 2
+    callback.locals = _make_callback_locals(reward_total=2.0, truncated=1.0)
+    assert callback._on_step() is True
+
+    reward_entries = [entry for entry in writer.scalars if entry[0] == "rewards/total"]
+    assert reward_entries == [("rewards/total", 1.0, 1), ("rewards/total", 2.0, 2)]
+    assert writer.flush_count == 1
+
+
 def test_callback_tracks_episode_id_from_dones():
     env = _FakeEnv()
     logger = _FakeLogger()
     model = _FakeModel(env, logger)
-    callback = TensorboardCallback(min_tb_sample_interval_steps=1)
+    callback = TensorboardCallback(tb_sample_interval_steps=1)
     callback.init_callback(cast(Any, model))
 
     callback.num_timesteps = 1

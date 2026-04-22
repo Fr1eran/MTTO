@@ -23,11 +23,11 @@ def sledge_frictional_brake_force(
         列车受到的滑橇摩擦阻力(单位: kN)
     """
 
-    # u: 滑动摩擦系数，随速度变化而变化，这里考虑速度在0~20km/h范围内的变化情况
+    # u: 滑动摩擦系数，随速度变化而变化，这里考虑速度在0~10km/h范围内的变化情况
     # 参考文献：《高速磁浮列车精确停车控制研究》
 
     # 系数
-    MIN_V_KM = 18
+    MIN_V_KM = 10
 
     speed_km = 3.6 * np.asarray(speed, dtype=np.float64)
 
