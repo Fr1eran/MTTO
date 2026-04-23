@@ -1,6 +1,10 @@
+import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing as mp
+import signal
 import numpy as np
 import os
-from typing import TypedDict, Sequence, Any, Iterable
+from typing import TypedDict, Sequence, Any, Iterable, Literal
 from numpy.typing import NDArray
 import matplotlib.pyplot as plt
 
@@ -28,6 +32,235 @@ class OptimalSpeedProfile(TypedDict):
     speed: Sequence[float] | NDArray
     total_time: float
     total_energy: float
+
+
+class ParallelPrecomputeExitedError(RuntimeError):
+    """Raised when parallel precompute exits and DP should stop immediately."""
+
+
+TransitionPayload = tuple[NDArray[np.int_], NDArray[np.float64], NDArray[np.float64]]
+SparseTransitionEntry = tuple[
+    int,
+    NDArray[np.int_],
+    NDArray[np.float64],
+    NDArray[np.float64],
+]
+SparseTransitionRows = list[tuple[int, list[SparseTransitionEntry]]]
+TransitionBatchResult = tuple[SparseTransitionRows, int, int]
+
+_DP_PARALLEL_CONTEXT: dict[str, Any] | None = None
+
+
+def _calculate_transition_with_context(
+    *,
+    pos_k: float,
+    speed_k: float,
+    displacement: float,
+    speed_k_1: float,
+    vehicle: VehicleInfo,
+    safeguard_utility: SafeGuardUtility,
+    ecc: ECC,
+    trackprofile: TrackProfile,
+) -> tuple[bool, float, float]:
+    if np.isclose(displacement, 0.0):
+        return False, np.inf, np.inf
+
+    if np.isclose(speed_k + speed_k_1, 0.0):
+        return False, np.inf, np.inf
+
+    # 匀变速模型: a = (v1^2 - v0^2) / (2 * ds)
+    acc = (speed_k_1**2 - speed_k**2) / (2.0 * displacement)
+
+    acc_tol = 1e-9
+    if acc > vehicle.max_acc + acc_tol or acc < vehicle.max_dec - acc_tol:
+        return False, np.inf, np.inf
+
+    sample_count = max(10, int(np.abs(displacement) / 10.0))
+    distance_sample = np.linspace(0.0, displacement, sample_count, dtype=np.float64)
+    pos_sample = distance_sample + pos_k
+
+    # 由匀变速公式采样速度，保证与端点速度一致
+    speed_sq_sample = 2.0 * acc * distance_sample + speed_k**2
+    speed_sample = np.sqrt(np.maximum(speed_sq_sample, 0.0))
+
+    # 检查是否进入危险速度域
+    if safeguard_utility.detect_danger(pos=pos_sample, speed=speed_sample).any():
+        return False, np.inf, np.inf
+
+    if np.abs(acc) < 1e-9:
+        time = np.abs(displacement) / speed_k
+    else:
+        time = (speed_k_1 - speed_k) / acc
+
+    propulsion_energy, leviation_energy = ecc.calc_energy(
+        begin_pos=pos_k,
+        begin_speed=speed_k,
+        acc=acc,
+        distance=abs(displacement),
+        direction=1 if displacement > 0 else -1,
+        operation_time=time,
+        vehicle=vehicle,
+        trackprofile=trackprofile,
+    )
+
+    return True, propulsion_energy + leviation_energy, time
+
+
+def _compute_transition_batch(
+    *,
+    k_start: int,
+    k_end: int,
+    stages: NDArray[np.float64],
+    speed_states: NDArray[np.float64],
+    stage_speed_upper_idx: NDArray[np.int_],
+    vehicle: VehicleInfo,
+    safeguard_utility: SafeGuardUtility,
+    ecc: ECC,
+    trackprofile: TrackProfile,
+) -> TransitionBatchResult:
+    batch_rows: SparseTransitionRows = []
+    total_valid_edges = 0
+
+    for k_idx in range(k_start, k_end):
+        pos_k = float(stages[k_idx])
+        delta_pos = float(stages[k_idx + 1] - stages[k_idx])
+        abs_delta_pos = abs(delta_pos)
+        current_upper = int(stage_speed_upper_idx[k_idx])
+        next_upper = int(stage_speed_upper_idx[k_idx + 1])
+
+        if current_upper < 0 or next_upper < 0:
+            continue
+
+        row_entries: list[SparseTransitionEntry] = []
+
+        for i in range(current_upper + 1):
+            speed_k = float(speed_states[i])
+
+            # 基于加减速度物理边界的下一阶段速度索引剪枝
+            v2_min = max(speed_k**2 + 2.0 * vehicle.max_dec * abs_delta_pos, 0.0)
+            v2_max = max(speed_k**2 + 2.0 * vehicle.max_acc * abs_delta_pos, 0.0)
+            v_next_min = np.sqrt(v2_min)
+            v_next_max = np.sqrt(v2_max)
+
+            j_min = int(np.searchsorted(speed_states, v_next_min, side="left"))
+            j_max = int(np.searchsorted(speed_states, v_next_max, side="right") - 1)
+            j_max = min(j_max, next_upper)
+
+            if j_min > j_max:
+                continue
+
+            next_indices: list[int] = []
+            delta_energy_list: list[float] = []
+            delta_time_list: list[float] = []
+
+            for j in range(j_min, j_max + 1):
+                speed_next = float(speed_states[j])
+                is_valid, delta_energy, delta_time = _calculate_transition_with_context(
+                    pos_k=pos_k,
+                    speed_k=speed_k,
+                    displacement=delta_pos,
+                    speed_k_1=speed_next,
+                    vehicle=vehicle,
+                    safeguard_utility=safeguard_utility,
+                    ecc=ecc,
+                    trackprofile=trackprofile,
+                )
+                if not is_valid:
+                    continue
+
+                next_indices.append(j)
+                delta_energy_list.append(delta_energy)
+                delta_time_list.append(delta_time)
+
+            if not next_indices:
+                continue
+
+            row_entries.append(
+                (
+                    i,
+                    np.asarray(next_indices, dtype=np.int_),
+                    np.asarray(delta_energy_list, dtype=np.float64),
+                    np.asarray(delta_time_list, dtype=np.float64),
+                )
+            )
+            total_valid_edges += len(next_indices)
+
+        if row_entries:
+            batch_rows.append((k_idx, row_entries))
+
+    return batch_rows, total_valid_edges, k_end - k_start
+
+
+def _init_transition_worker(context: dict[str, Any]) -> None:
+    global _DP_PARALLEL_CONTEXT
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(signal.SIGBREAK, signal.SIG_IGN)
+    except ValueError, AttributeError:
+        # 非主进程/不支持的平台上忽略注册错误
+        pass
+    _DP_PARALLEL_CONTEXT = context
+
+
+def _compute_transition_batch_worker(k_start: int, k_end: int) -> TransitionBatchResult:
+    if _DP_PARALLEL_CONTEXT is None:
+        raise RuntimeError("worker context is not initialized")
+
+    return _compute_transition_batch(
+        k_start=k_start,
+        k_end=k_end,
+        stages=_DP_PARALLEL_CONTEXT["stages"],
+        speed_states=_DP_PARALLEL_CONTEXT["speed_states"],
+        stage_speed_upper_idx=_DP_PARALLEL_CONTEXT["stage_speed_upper_idx"],
+        vehicle=_DP_PARALLEL_CONTEXT["vehicle"],
+        safeguard_utility=_DP_PARALLEL_CONTEXT["safeguard_utility"],
+        ecc=_DP_PARALLEL_CONTEXT["ecc"],
+        trackprofile=_DP_PARALLEL_CONTEXT["trackprofile"],
+    )
+
+
+def _cancel_parallel_futures(
+    executor: ProcessPoolExecutor | None,
+    futures: list[Any],
+    *,
+    force_terminate_running: bool = False,
+) -> None:
+    for future in futures:
+        future.cancel()
+
+    if executor is not None:
+        if force_terminate_running:
+            _force_terminate_executor_processes(executor)
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _force_terminate_executor_processes(executor: ProcessPoolExecutor) -> None:
+    # ProcessPoolExecutor 没有公开 API 直接终止正在运行的任务，这里在 Ctrl+C 场景下
+    # 使用私有进程句柄进行强制终止，确保并行预计算能尽快停止。
+    processes = getattr(executor, "_processes", None)
+    if not isinstance(processes, dict):
+        return
+
+    for process in list(processes.values()):
+        if process is None:
+            continue
+        try:
+            if process.is_alive():
+                process.terminate()
+        except Exception:
+            continue
+
+    for process in list(processes.values()):
+        if process is None:
+            continue
+        try:
+            process.join(timeout=0.5)
+            if process.is_alive() and hasattr(process, "kill"):
+                process.kill()
+                process.join(timeout=0.5)
+        except Exception:
+            continue
 
 
 class VariableSpacingDPOptimizer:
@@ -63,7 +296,20 @@ class VariableSpacingDPOptimizer:
         time_tolerance: float,
         show_precompute_progress: bool = True,
         precompute_progress_desc: str = "状态转移图预计算",
+        precompute_mode: Literal["serial", "parallel"] = "serial",
+        precompute_workers: int | None = None,
+        precompute_chunk_size: int | None = None,
+        mp_start_method: str | None = None,
     ) -> None:
+        if precompute_mode not in ("serial", "parallel"):
+            raise ValueError("precompute_mode must be 'serial' or 'parallel'")
+        if precompute_workers is not None and precompute_workers < 1:
+            raise ValueError("precompute_workers must be >= 1")
+        if precompute_chunk_size is not None and precompute_chunk_size < 1:
+            raise ValueError("precompute_chunk_size must be >= 1")
+        if mp_start_method is None and os.name == "nt":
+            mp_start_method = "spawn"
+
         self.vehicle = vehicle
         self.track = track
         self.trackprofile = TrackProfile(track=self.track)
@@ -72,6 +318,10 @@ class VariableSpacingDPOptimizer:
         self.time_tolerance = time_tolerance
         self.show_precompute_progress = show_precompute_progress
         self.precompute_progress_desc = precompute_progress_desc
+        self.precompute_mode = precompute_mode
+        self.precompute_workers = precompute_workers
+        self.precompute_chunk_size = precompute_chunk_size
+        self.mp_start_method = mp_start_method
         # self.direction = (
         #     1 if self.task.target_position >= self.task.start_position else -1
         # )
@@ -124,72 +374,22 @@ class VariableSpacingDPOptimizer:
             stages, speed_states
         )
 
-        transitions: list[
-            list[
-                tuple[NDArray[np.int_], NDArray[np.float64], NDArray[np.float64]] | None
-            ]
-        ] = [[None for _ in range(num_speed_states)] for _ in range(total_steps)]
-        total_valid_edges = 0
-
-        for k in self._iter_precompute_steps(total_steps):
-            k_idx = int(k)
-            pos_k = float(stages[k_idx])
-            delta_pos = float(stages[k_idx + 1] - stages[k_idx])
-            abs_delta_pos = abs(delta_pos)
-            current_upper = int(stage_speed_upper_idx[k_idx])
-            next_upper = int(stage_speed_upper_idx[k_idx + 1])
-
-            if current_upper < 0 or next_upper < 0:
-                continue
-
-            for i in range(current_upper + 1):
-                speed_k = float(speed_states[i])
-
-                # 基于加减速度物理边界的下一阶段速度索引剪枝
-                v2_min = max(
-                    speed_k**2 + 2.0 * self.vehicle.max_dec * abs_delta_pos, 0.0
-                )
-                v2_max = max(
-                    speed_k**2 + 2.0 * self.vehicle.max_acc * abs_delta_pos, 0.0
-                )
-                v_next_min = np.sqrt(v2_min)
-                v_next_max = np.sqrt(v2_max)
-
-                j_min = int(np.searchsorted(speed_states, v_next_min, side="left"))
-                j_max = int(np.searchsorted(speed_states, v_next_max, side="right") - 1)
-                j_max = min(j_max, next_upper)
-
-                if j_min > j_max:
-                    continue
-
-                next_indices: list[int] = []
-                delta_energy_list: list[float] = []
-                delta_time_list: list[float] = []
-
-                for j in range(j_min, j_max + 1):
-                    speed_next = float(speed_states[j])
-                    is_valid, delta_energy, delta_time = self._calculate_transition(
-                        pos_k=pos_k,
-                        speed_k=speed_k,
-                        displacement=delta_pos,
-                        speed_k_1=speed_next,
-                    )
-                    if not is_valid:
-                        continue
-
-                    next_indices.append(j)
-                    delta_energy_list.append(delta_energy)
-                    delta_time_list.append(delta_time)
-
-                if not next_indices:
-                    continue
-
-                transitions[k_idx][i] = (
-                    np.asarray(next_indices, dtype=np.int_),
-                    np.asarray(delta_energy_list, dtype=np.float64),
-                    np.asarray(delta_time_list, dtype=np.float64),
-                )
-                total_valid_edges += len(next_indices)
+        if self.precompute_mode == "parallel":
+            transitions, total_valid_edges = self._build_transition_graph_parallel(
+                stages=stages,
+                speed_states=speed_states,
+                stage_speed_upper_idx=stage_speed_upper_idx,
+                total_steps=total_steps,
+                num_speed_states=num_speed_states,
+            )
+        else:
+            transitions, total_valid_edges = self._build_transition_graph_serial(
+                stages=stages,
+                speed_states=speed_states,
+                stage_speed_upper_idx=stage_speed_upper_idx,
+                total_steps=total_steps,
+                num_speed_states=num_speed_states,
+            )
 
         return {
             "stages": stages,
@@ -198,6 +398,222 @@ class VariableSpacingDPOptimizer:
             "transitions": transitions,
             "total_valid_edges": total_valid_edges,
         }
+
+    def _build_transition_graph_serial(
+        self,
+        *,
+        stages: NDArray[np.float64],
+        speed_states: NDArray[np.float64],
+        stage_speed_upper_idx: NDArray[np.int_],
+        total_steps: int,
+        num_speed_states: int,
+    ) -> tuple[list[list[TransitionPayload | None]], int]:
+        transitions: list[list[TransitionPayload | None]] = [
+            [None for _ in range(num_speed_states)] for _ in range(total_steps)
+        ]
+        total_valid_edges = 0
+
+        step_iter = self._iter_precompute_steps(total_steps)
+        try:
+            for k in step_iter:
+                k_idx = int(k)
+                pos_k = float(stages[k_idx])
+                delta_pos = float(stages[k_idx + 1] - stages[k_idx])
+                abs_delta_pos = abs(delta_pos)
+                current_upper = int(stage_speed_upper_idx[k_idx])
+                next_upper = int(stage_speed_upper_idx[k_idx + 1])
+
+                if current_upper < 0 or next_upper < 0:
+                    continue
+
+                for i in range(current_upper + 1):
+                    speed_k = float(speed_states[i])
+
+                    # 基于加减速度物理边界的下一阶段速度索引剪枝
+                    v2_min = max(
+                        speed_k**2 + 2.0 * self.vehicle.max_dec * abs_delta_pos, 0.0
+                    )
+                    v2_max = max(
+                        speed_k**2 + 2.0 * self.vehicle.max_acc * abs_delta_pos, 0.0
+                    )
+                    v_next_min = np.sqrt(v2_min)
+                    v_next_max = np.sqrt(v2_max)
+
+                    j_min = int(np.searchsorted(speed_states, v_next_min, side="left"))
+                    j_max = int(
+                        np.searchsorted(speed_states, v_next_max, side="right") - 1
+                    )
+                    j_max = min(j_max, next_upper)
+
+                    if j_min > j_max:
+                        continue
+
+                    next_indices: list[int] = []
+                    delta_energy_list: list[float] = []
+                    delta_time_list: list[float] = []
+
+                    for j in range(j_min, j_max + 1):
+                        speed_next = float(speed_states[j])
+                        is_valid, delta_energy, delta_time = self._calculate_transition(
+                            pos_k=pos_k,
+                            speed_k=speed_k,
+                            displacement=delta_pos,
+                            speed_k_1=speed_next,
+                        )
+                        if not is_valid:
+                            continue
+
+                        next_indices.append(j)
+                        delta_energy_list.append(delta_energy)
+                        delta_time_list.append(delta_time)
+
+                    if not next_indices:
+                        continue
+
+                    transitions[k_idx][i] = (
+                        np.asarray(next_indices, dtype=np.int_),
+                        np.asarray(delta_energy_list, dtype=np.float64),
+                        np.asarray(delta_time_list, dtype=np.float64),
+                    )
+                    total_valid_edges += len(next_indices)
+        except KeyboardInterrupt:
+            print("\n检测到 Ctrl+C，正在终止串行预计算任务...")
+            raise
+        finally:
+            close_fn = getattr(step_iter, "close", None)
+            if callable(close_fn):
+                close_fn()
+
+        return transitions, total_valid_edges
+
+    def _resolve_parallel_config(self, total_steps: int) -> tuple[int, int]:
+        workers = self.precompute_workers
+        if workers is None:
+            workers = max(1, (os.cpu_count() or 1) - 1)
+
+        chunk_size = self.precompute_chunk_size
+        if chunk_size is None:
+            chunk_size = max(1, (total_steps + workers * 4 - 1) // (workers * 4))
+
+        return workers, chunk_size
+
+    def _build_transition_graph_parallel(
+        self,
+        *,
+        stages: NDArray[np.float64],
+        speed_states: NDArray[np.float64],
+        stage_speed_upper_idx: NDArray[np.int_],
+        total_steps: int,
+        num_speed_states: int,
+    ) -> tuple[list[list[TransitionPayload | None]], int]:
+        workers, chunk_size = self._resolve_parallel_config(total_steps)
+        if workers <= 1 or total_steps < 2:
+            raise ParallelPrecomputeExitedError(
+                "并行预计算条件不满足（workers<=1 或 total_steps<2）。"
+            )
+
+        task_ranges = [
+            (k_start, min(k_start + chunk_size, total_steps))
+            for k_start in range(0, total_steps, chunk_size)
+        ]
+        if len(task_ranges) <= 1:
+            raise ParallelPrecomputeExitedError("并行预计算任务过少，无法有效并行。")
+
+        print(
+            "并行预计算配置: "
+            f"workers={workers}, chunk_size={chunk_size}, tasks={len(task_ranges)}"
+        )
+
+        transitions: list[list[TransitionPayload | None]] = [
+            [None for _ in range(num_speed_states)] for _ in range(total_steps)
+        ]
+        total_valid_edges = 0
+
+        worker_context: dict[str, Any] = {
+            "stages": stages,
+            "speed_states": speed_states,
+            "stage_speed_upper_idx": stage_speed_upper_idx,
+            "vehicle": self.vehicle,
+            "safeguard_utility": self.safeguard_utility,
+            "ecc": self.ecc,
+            "trackprofile": self.trackprofile,
+        }
+
+        progress_bar = None
+        if self.show_precompute_progress and tqdm is not None:
+            progress_bar = tqdm(
+                total=total_steps,
+                desc=f"{self.precompute_progress_desc}(并行)",
+                dynamic_ncols=True,
+                unit="stage",
+                mininterval=0.2,
+            )
+
+        executor: ProcessPoolExecutor | None = None
+        futures: list[Any] = []
+        shutdown_called = False
+
+        try:
+            mp_context = (
+                mp.get_context(self.mp_start_method)
+                if self.mp_start_method is not None
+                else mp.get_context()
+            )
+            executor = ProcessPoolExecutor(
+                max_workers=workers,
+                mp_context=mp_context,
+                initializer=_init_transition_worker,
+                initargs=(worker_context,),
+            )
+            futures = [
+                executor.submit(_compute_transition_batch_worker, k_start, k_end)
+                for k_start, k_end in task_ranges
+            ]
+            for future in as_completed(futures):
+                batch_rows, batch_valid_edges, batch_steps = future.result()
+                total_valid_edges += batch_valid_edges
+
+                for k_idx, row_entries in batch_rows:
+                    for i, next_idx, delta_energy, delta_time in row_entries:
+                        transitions[k_idx][i] = (
+                            next_idx,
+                            delta_energy,
+                            delta_time,
+                        )
+
+                if progress_bar is not None:
+                    progress_bar.update(batch_steps)
+        except KeyboardInterrupt:
+            if progress_bar is not None:
+                progress_bar.close()
+                progress_bar = None
+            print("\n检测到 Ctrl+C，正在终止并行预计算任务...")
+            _cancel_parallel_futures(
+                executor=executor,
+                futures=futures,
+                force_terminate_running=True,
+            )
+            shutdown_called = True
+            raise
+        except Exception as exc:
+            if progress_bar is not None:
+                progress_bar.close()
+                progress_bar = None
+            print(f"并行预计算失败，准备终止动态规划。原因: {exc}")
+            _cancel_parallel_futures(
+                executor=executor,
+                futures=futures,
+                force_terminate_running=True,
+            )
+            shutdown_called = True
+            raise ParallelPrecomputeExitedError(f"并行预计算异常退出: {exc}") from exc
+        finally:
+            if progress_bar is not None:
+                progress_bar.close()
+            if executor is not None and not shutdown_called:
+                executor.shutdown(wait=True, cancel_futures=False)
+
+        return transitions, total_valid_edges
 
     def _iter_precompute_steps(self, total_steps: int) -> Iterable[int]:
         if self.show_precompute_progress and tqdm is not None:
@@ -222,7 +638,15 @@ class VariableSpacingDPOptimizer:
             print("正在预计算状态转移图（仅首次或参数变化时执行）...")
             if self.show_precompute_progress and tqdm is None:
                 print("未检测到 tqdm，已回退为普通循环输出。")
-            self._graph_cache = self._build_transition_graph(stages, speed_states)
+            print(f"预计算执行模式: {self.precompute_mode}")
+            try:
+                self._graph_cache = self._build_transition_graph(stages, speed_states)
+            except KeyboardInterrupt:
+                print("检测到 Ctrl+C，预计算已终止。")
+                raise
+            except ParallelPrecomputeExitedError:
+                print("并行预计算流程已退出，动态规划将终止。")
+                raise
             self._graph_cache_signature = cache_signature
             print(
                 f"转移图预计算完成: 可行转移边数量 {self._graph_cache['total_valid_edges']}"
@@ -236,11 +660,13 @@ class VariableSpacingDPOptimizer:
         基于临界点的变间距阶段划分
         将线路按照临界点划分为大分区, 每个大分区等分为 sub_stage_count 个子阶段
         """
-        critical_points_position_arr = np.concatenate((
-            np.array([self.task.start_position]),
-            self.safeguard_utility.get_intersecting_dangerous_point(),
-            np.array([self.task.target_position]),
-        ))
+        critical_points_position_arr = np.concatenate(
+            (
+                np.array([self.task.start_position]),
+                self.safeguard_utility.get_intersecting_dangerous_point(),
+                np.array([self.task.target_position]),
+            )
+        )
         stages = []
 
         for i in range(len(critical_points_position_arr) - 1):
@@ -260,50 +686,16 @@ class VariableSpacingDPOptimizer:
     def _calculate_transition(
         self, pos_k: float, speed_k: float, displacement: float, speed_k_1: float
     ) -> tuple[bool, float, float]:
-        if np.isclose(displacement, 0.0):
-            return False, np.inf, np.inf
-
-        if np.isclose(speed_k + speed_k_1, 0.0):
-            return False, np.inf, np.inf
-
-        # 匀变速模型: a = (v1^2 - v0^2) / (2 * ds)
-        acc = (speed_k_1**2 - speed_k**2) / (2.0 * displacement)
-
-        acc_tol = 1e-9
-        if acc > self.vehicle.max_acc + acc_tol or acc < self.vehicle.max_dec - acc_tol:
-            return False, np.inf, np.inf
-
-        sample_count = max(10, int(np.abs(displacement) / 10.0))
-        distance_sample = np.linspace(0.0, displacement, sample_count, dtype=np.float64)
-        pos_sample = pos_k + distance_sample
-
-        # 由匀变速公式采样速度，保证与端点速度一致
-        speed_sq_sample = speed_k**2 + 2.0 * acc * distance_sample
-        speed_sample = np.sqrt(np.maximum(speed_sq_sample, 0.0))
-
-        # 检查是否进入危险速度域
-        if self.safeguard_utility.detect_danger(
-            pos=pos_sample, speed=speed_sample
-        ).any():
-            return False, np.inf, np.inf
-
-        if np.abs(acc) < 1e-9:
-            time = np.abs(displacement) / speed_k
-        else:
-            time = (speed_k_1 - speed_k) / acc
-
-        propulsion_energy, leviation_energy = self.ecc.calc_energy(
-            begin_pos=pos_k,
-            begin_speed=speed_k,
-            acc=acc,
-            distance=abs(displacement),
-            direction=1 if displacement > 0 else -1,
-            operation_time=time,
+        return _calculate_transition_with_context(
+            pos_k=pos_k,
+            speed_k=speed_k,
+            displacement=displacement,
+            speed_k_1=speed_k_1,
             vehicle=self.vehicle,
+            safeguard_utility=self.safeguard_utility,
+            ecc=self.ecc,
             trackprofile=self.trackprofile,
         )
-
-        return True, propulsion_energy + leviation_energy, time
 
     def BuildSmoothedDisplayCurve(
         self,
@@ -342,9 +734,9 @@ class VariableSpacingDPOptimizer:
             # 对每个阶段采用匀变速方程重建速度曲线
             acc = (v1**2 - v0**2) / (2.0 * ds)
             s_local = np.linspace(0.0, ds, n_local, endpoint=True, dtype=np.float64)
-            v_sq_local = v0**2 + 2.0 * acc * s_local
+            v_sq_local = 2.0 * acc * s_local + v0**2
             v_local = np.sqrt(np.maximum(v_sq_local, 0.0))
-            p_local = p0 + s_local
+            p_local = s_local + p0
 
             dense_pos.extend(p_local[1:].tolist())
             dense_speed.extend(v_local[1:].tolist())
@@ -461,7 +853,7 @@ class VariableSpacingDPOptimizer:
         """
         target_time = self.task.schedule_time
         print(
-            f"开始双层寻优: 目标时间为{target_time:.2f}s, 时间误差容忍率为 {self.time_tolerance}"
+            f"开始双层寻优: 目标时间为{target_time:.2f}s, 时间误差容忍率为 {self.time_tolerance}, 速度步长为 {delta_speed:.2f}m/s"
         )
 
         lambda_time = 1e5
@@ -516,7 +908,45 @@ class VariableSpacingDPOptimizer:
         return best_result
 
 
+def _build_cli_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="复现变间距动态规划速度曲线，并支持状态转移图并行预计算。"
+    )
+    parser.add_argument(
+        "--precompute-mode",
+        choices=("serial", "parallel"),
+        default="serial",
+        help="状态转移图预计算模式。serial 为单进程，parallel 为多进程。",
+    )
+    parser.add_argument(
+        "--precompute-workers",
+        type=int,
+        default=None,
+        help="并行模式下的进程数。未指定时自动使用 (CPU-1)。",
+    )
+    parser.add_argument(
+        "--precompute-chunk-size",
+        type=int,
+        default=None,
+        help="并行模式下每个任务块包含的阶段数。未指定时自动估计。",
+    )
+    parser.add_argument(
+        "--mp-start-method",
+        choices=("spawn", "fork", "forkserver"),
+        default=None,
+        help="多进程启动方式。Windows 默认使用 spawn。",
+    )
+    parser.add_argument(
+        "--hide-precompute-progress",
+        action="store_true",
+        help="关闭状态转移图预计算进度显示。",
+    )
+    return parser
+
+
 if __name__ == "__main__":
+    cli_args = _build_cli_parser().parse_args()
+
     dp_result_save_dir = "output/optimal/dp"
     os.makedirs(os.path.dirname(dp_result_save_dir), exist_ok=True)
 
@@ -579,11 +1009,22 @@ if __name__ == "__main__":
         safeguard_utility=safeguard_utility,
         train_service=train_service,
         time_tolerance=0.01,
-        show_precompute_progress=True,
+        show_precompute_progress=not cli_args.hide_precompute_progress,
         precompute_progress_desc="状态转移图预计算",
+        precompute_mode=cli_args.precompute_mode,
+        precompute_workers=cli_args.precompute_workers,
+        precompute_chunk_size=cli_args.precompute_chunk_size,
+        mp_start_method=cli_args.mp_start_method,
     )
 
-    result = VSDP.optimize(max_speed=500.0 / 3.6, delta_speed=0.1, max_iters=100)
+    try:
+        result = VSDP.optimize(max_speed=500.0 / 3.6, delta_speed=0.1, max_iters=100)
+    except KeyboardInterrupt:
+        print("\n检测到 Ctrl+C，已停止预计算/优化流程。")
+        raise SystemExit(130)
+    except ParallelPrecomputeExitedError as exc:
+        print(f"并行预计算流程已退出，程序结束。原因: {exc}")
+        raise SystemExit(1)
 
     if result is not None:
         output_file = f"{dp_result_save_dir}/optimized_speed_curve.npz"
