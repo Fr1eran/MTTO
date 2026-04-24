@@ -25,7 +25,6 @@ class RewardInfoForTB(TypedDict, total=False):
 
 
 class StateInfoForTB(TypedDict, total=False):
-    episode_id: float
     pos_m: float
     speed_mps: float
     current_sp: float
@@ -47,11 +46,22 @@ class EventInfoForTB(TypedDict, total=False):
     episode_high_violation_count: float
 
 
+class BasicInfo(TypedDict, total=False):
+    energy_consumption: float
+    operation_time: float
+    position: float
+    stopping_point_index: float
+    comfort_tav: float
+    comfort_er_pct: float
+    comfort_rms: float
+
+
 class DiagnosticsSnapshotForTB(TypedDict, total=False):
     rewards: RewardInfoForTB
     state: StateInfoForTB
     constraint: ConstraintInfoForTB
     event: EventInfoForTB
+    runtime: BasicInfo
 
 
 class TrainState(TypedDict, total=True):
@@ -317,7 +327,7 @@ class MTTOEnv(gym.Env):
         self.state_info: StateInfoForTB = {}
         self.constraint_info: ConstraintInfoForTB = {}
         self.event_info: EventInfoForTB = {}
-        self.episode_id: int = -1
+        self.runtime_info: BasicInfo = {}
         self.episode_truncated_count: int = 0
         self.episode_low_violation_count: int = 0
         self.episode_high_violation_count: int = 0
@@ -356,6 +366,11 @@ class MTTOEnv(gym.Env):
 
         # 动画配置
         self.animation_interval = 15  # 动画更新间隔(ms)
+
+        # 舒适度指标累积量
+        self._comfort_tav: float = 0.0
+        self._comfort_sum_sq_delta_acc: float = 0.0
+        self._comfort_exceedance_count: int = 0
 
     def _get_obs(self):
         """
@@ -445,27 +460,12 @@ class MTTOEnv(gym.Env):
 
     def _get_info(self):
         """
-        计算用于调试的辅助信息
-
-        Returns:
-            dict: 智能体当前消耗的总能量和当前运行时间
+        获取反映轨迹性能指标的信息
         """
-        margin_to_vmax = self.current_max_speed - self.current_speed
-        margin_to_vmin = self.current_speed - self.current_min_speed
-        return {
-            "current_energy_consumption": self.current_energy_consumption,
-            "current_operation_time": self.current_operation_time,
-            "docking_position": self.current_pos,
-            "current_sp": self.current_sp,
-            "current_min_speed": self.current_min_speed,
-            "current_max_speed": self.current_max_speed,
-            "margin_to_vmax": margin_to_vmax,
-            "margin_to_vmin": margin_to_vmin,
-            "constraint_is_truncated": self.last_constraint_is_truncated,
-            "constraint_violation_code": self.last_constraint_violation_code,
-            "speed_limit_segment": self.current_speed_limit_segment,
-            "speed_limit_mps": self.current_speed_limit_mps,
-        }
+        runtime_snapshot = dict(self.runtime_info)
+        if not runtime_snapshot:
+            return {}
+        return {"runtime": runtime_snapshot}
 
     def _get_speed_limit_segment(self, pos: float) -> int:
         segment_idx = get_interval_index(pos, self.track.speed_limit_intervals)
@@ -479,8 +479,21 @@ class MTTOEnv(gym.Env):
     def _should_collect_step_diagnostics(self) -> bool:
         if not self.enable_diagnostics:
             return False
-        next_step_idx = self.current_steps + 1
-        return next_step_idx % self.diagnostics_interval_steps == 0
+        return self.current_steps % self.diagnostics_interval_steps == 0
+
+    def _record_runtime_info(self) -> None:
+        self.runtime_info["energy_consumption"] = float(self.current_energy_consumption)
+        self.runtime_info["operation_time"] = float(self.current_operation_time)
+        self.runtime_info["position"] = float(self.current_pos)
+        self.runtime_info["stopping_point_index"] = float(self.current_sp)
+        self.runtime_info["comfort_tav"] = self._comfort_tav
+        if self.current_steps > 0:
+            self.runtime_info["comfort_er_pct"] = (
+                self._comfort_exceedance_count / self.current_steps * 100.0
+            )
+            self.runtime_info["comfort_rms"] = math.sqrt(
+                self._comfort_sum_sq_delta_acc / self.current_steps
+            )
 
     def _record_step_diagnostics(
         self,
@@ -494,9 +507,6 @@ class MTTOEnv(gym.Env):
         self.last_constraint_is_truncated = truncated
         self.last_constraint_violation_code = violation_code
 
-        if not self.enable_diagnostics or not self._collect_step_diagnostics:
-            return
-
         if truncated:
             self.episode_truncated_count += 1
             if violation_code == 1:
@@ -508,7 +518,6 @@ class MTTOEnv(gym.Env):
             margin_to_vmin <= near_miss_margin_mps
         )
 
-        self.state_info["episode_id"] = float(self.episode_id)
         self.state_info["pos_m"] = float(self.current_pos)
         self.state_info["speed_mps"] = float(self.current_speed)
         self.state_info["current_sp"] = float(self.current_sp)
@@ -552,8 +561,10 @@ class MTTOEnv(gym.Env):
         """
         # 首先调用此超类方法设置随机数生成器
         super().reset(seed=seed, options=options)
-        self.episode_id += 1
         self._reset_episode_counters()
+        self._comfort_tav = 0.0
+        self._comfort_sum_sq_delta_acc = 0.0
+        self._comfort_exceedance_count = 0
 
         # 重新初始化运行状态
         self.current_pos = self.task.start_position
@@ -621,6 +632,7 @@ class MTTOEnv(gym.Env):
         self.state_info = {}
         self.constraint_info = {}
         self.event_info = {}
+        self.runtime_info = {}
         self._collect_step_diagnostics = False
 
         observation = self._get_obs()
@@ -633,25 +645,25 @@ class MTTOEnv(gym.Env):
         在环境中执行一个时间步
 
         Args:
-            action: 需要执行的动作，即列车运行加速度
+            action: 需要执行的动作，即列车运行加速度百分比
 
         Returns:
             tuple: (observation, reward, terminated, truncated, info)
         """
+        self.current_steps += 1
         self._record_history()
-        self._collect_step_diagnostics = self._should_collect_step_diagnostics()
-        if self._collect_step_diagnostics:
-            self.rewards_info = {}
-            self.state_info = {}
-            self.constraint_info = {}
-            self.event_info = {}
-
         self.current_acc = self._get_action_denormalized(action[0])
+
+        # 累积舒适度指标
+        _delta_acc = abs(self.current_acc - self.last_state["acc"])
+        self._comfort_tav += _delta_acc
+        self._comfort_sum_sq_delta_acc += _delta_acc**2
+        if _delta_acc > self.task.max_acc_change:
+            self._comfort_exceedance_count += 1
 
         # 根据当前速度大小、加速度、状态转移最大位移量
         # 计算转移至下一状态的速度大小、位移量和运行时间
         next_speed, distance, operation_time = self._update_motion()
-        self.current_steps += 1
 
         # 计算当前列车在参考运行模式下的能耗和运行时间
         # ref_mec, ref_lec, ref_operation_time = self.ors.CalRefEnergyAndOperationTime(
@@ -728,7 +740,7 @@ class MTTOEnv(gym.Env):
         # 判断智能体是否到达目标区域
         terminated = (
             abs(self.task.target_position - self.current_pos)
-            <= self.task.max_stop_error * 10
+            <= self.task.max_stop_error
             and math.isclose(self.current_speed, 0.0, abs_tol=0.1)
         ) or self.current_steps == self.max_episode_steps
 
@@ -740,21 +752,24 @@ class MTTOEnv(gym.Env):
             else False
         )
 
-        if self.current_speed < self.current_min_speed:
-            violation_code = 1
-        elif self.current_speed >= self.current_max_speed:
-            violation_code = 2
-        else:
-            violation_code = 0
+        self._record_runtime_info()
+        self._collect_step_diagnostics = self._should_collect_step_diagnostics()
+        if self.enable_diagnostics and self._collect_step_diagnostics:
+            if self.current_speed < self.current_min_speed:
+                violation_code = 1
+            elif self.current_speed >= self.current_max_speed:
+                violation_code = 2
+            else:
+                violation_code = 0
 
-        margin_to_vmax = self.current_max_speed - self.current_speed
-        margin_to_vmin = self.current_speed - self.current_min_speed
-        self._record_step_diagnostics(
-            truncated=truncated,
-            violation_code=violation_code,
-            margin_to_vmax=margin_to_vmax,
-            margin_to_vmin=margin_to_vmin,
-        )
+            margin_to_vmax = self.current_max_speed - self.current_speed
+            margin_to_vmin = self.current_speed - self.current_min_speed
+            self._record_step_diagnostics(
+                truncated=truncated,
+                violation_code=violation_code,
+                margin_to_vmax=margin_to_vmax,
+                margin_to_vmin=margin_to_vmin,
+            )
 
         # 计算奖励
         reward = self._get_reward(
@@ -776,17 +791,10 @@ class MTTOEnv(gym.Env):
         observation = self._get_obs()
         info = self._get_info()
         if self.enable_diagnostics and self._collect_step_diagnostics:
-            state_snapshot = dict(self.state_info)
-            state_snapshot.pop("episode_id", None)
-            info["tb_diagnostics"] = cast(
-                DiagnosticsSnapshotForTB,
-                {
-                    "rewards": dict(self.rewards_info),
-                    "state": cast(StateInfoForTB, state_snapshot),
-                    "constraint": dict(self.constraint_info),
-                    "event": dict(self.event_info),
-                },
-            )
+            info["rewards"] = dict(self.rewards_info)
+            info["state"] = dict(self.state_info)
+            info["constraint"] = dict(self.constraint_info)
+            info["event"] = dict(self.event_info)
 
         return (observation, reward, terminated, truncated, info)
 
@@ -1022,11 +1030,11 @@ class MTTOEnv(gym.Env):
         return scale * phi_base
 
     def _get_reward_energy_dense(self) -> float:
-        if (
-            abs(self.current_pos - self.task.start_position) < 3000.0
-            or abs(self.current_pos - self.task.target_position) < 3000.0
-        ):
-            return 0.0
+        # if (
+        #     abs(self.current_pos - self.task.start_position) < 3000.0
+        #     or abs(self.current_pos - self.task.target_position) < 3000.0
+        # ):
+        #     return 0.0
 
         val = (
             -(self.current_energy_consumption - self.last_state["energy_consumption"])
@@ -1036,17 +1044,17 @@ class MTTOEnv(gym.Env):
         return val
 
     def _get_reward_comfort_dense(self) -> float:
-        if (
-            abs(self.current_pos - self.task.start_position) < 3000.0
-            or abs(self.current_pos - self.task.target_position) < 3000.0
-        ):
-            return 0.0
+        # if (
+        #     abs(self.current_pos - self.task.start_position) < 3000.0
+        #     or abs(self.current_pos - self.task.target_position) < 3000.0
+        # ):
+        #     return 0.0
 
         delta_acc = abs(self.last_state["acc"] - self.current_acc)
         # 使用指数衰减式的钟形曲线
         norm_jerk = delta_acc / (self.task.max_acc_change)
 
-        val = -0.06 * (1 - np.exp(-3.0 * norm_jerk))
+        val = -0.1 * (1 - np.exp(-3.0 * norm_jerk))
 
         return val
 

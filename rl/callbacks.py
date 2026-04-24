@@ -69,10 +69,7 @@ class TensorboardCallback(BaseCallback):
         for info in infos:
             if not isinstance(info, dict):
                 continue
-            diagnostics = info.get("tb_diagnostics")
-            if not isinstance(diagnostics, dict):
-                continue
-            namespace_payload = diagnostics.get(namespace)
+            namespace_payload = info.get(namespace)
             if isinstance(namespace_payload, dict):
                 payloads.append(namespace_payload)
 
@@ -84,13 +81,12 @@ class TensorboardCallback(BaseCallback):
         enriched_payloads: list[dict[str, float]] = []
         for env_idx, payload in enumerate(payloads):
             payload_copy = dict(payload)
-            if "episode_id" not in payload_copy:
-                episode_id = (
-                    self._episode_ids_by_env[env_idx]
-                    if env_idx < len(self._episode_ids_by_env)
-                    else 0
-                )
-                payload_copy["episode_id"] = float(episode_id)
+            episode_id = (
+                self._episode_ids_by_env[env_idx]
+                if env_idx < len(self._episode_ids_by_env)
+                else 0
+            )
+            payload_copy["episode_id"] = float(episode_id)
             enriched_payloads.append(payload_copy)
 
         return enriched_payloads
@@ -121,7 +117,7 @@ class TensorboardCallback(BaseCallback):
 
     def _build_sample_event(self, step: int) -> BufferedScalarEvent | None:
         scalars: dict[str, float] = {}
-        for namespace in ("rewards", "state", "constraint", "event"):
+        for namespace in ("rewards", "state", "constraint", "event", "runtime"):
             namespace_scalars = self._collect_namespace_scalars(namespace)
             if namespace_scalars:
                 scalars.update(namespace_scalars)
@@ -190,6 +186,7 @@ class TensorboardCallback(BaseCallback):
                 self._record_namespace_legacy(namespace="state")
                 self._record_namespace_legacy(namespace="constraint")
                 self._record_namespace_legacy(namespace="event")
+                self._record_namespace_legacy(namespace="runtime")
                 self._pending_sample_records += 1
             else:
                 sample_event = self._build_sample_event(step=current_step)

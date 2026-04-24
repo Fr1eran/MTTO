@@ -107,19 +107,7 @@ def test_reset(mtto_env: MTTOEnv):
     np.testing.assert_allclose(obs["next_slope"], 0.0)
     np.testing.assert_allclose(obs["next_max_speed"], 0.032199375331401825, rtol=1e-6)
     np.testing.assert_allclose(obs["next_min_speed"], 0.0)
-    assert "current_energy_consumption" in info, (
-        "Missing key in info: current_energy_consumption"
-    )
-    assert "current_operation_time" in info, (
-        "Missing key in info: current_operation_time"
-    )
-    assert "docking_position" in info, "Missing key in info: docking_position"
-    assert isinstance(info["current_energy_consumption"], float)
-    assert isinstance(info["current_operation_time"], float)
-    assert isinstance(info["docking_position"], float)
-    np.testing.assert_allclose(info["current_energy_consumption"], 0.0)
-    np.testing.assert_allclose(info["current_operation_time"], 0.0)
-    np.testing.assert_allclose(info["docking_position"], 135.0)
+    assert info == {}
 
 
 def test_cal_energy_consumption(mtto_env: MTTOEnv):
@@ -163,14 +151,62 @@ def test_step_without_diagnostics_keeps_tb_dicts_empty(mtto_env: MTTOEnv):
     try:
         mtto_env.reset()
         action = mtto_env.action_space.sample()
-        mtto_env.step(action)
+        _, _, _, _, info = mtto_env.step(action)
 
         assert mtto_env.rewards_info == {}
         assert mtto_env.state_info == {}
         assert mtto_env.constraint_info == {}
         assert mtto_env.event_info == {}
+
+        expected_runtime_keys = {
+            "energy_consumption",
+            "operation_time",
+            "position",
+            "stopping_point_index",
+        }
+        assert "runtime" in info
+        runtime = info["runtime"]
+        assert isinstance(runtime, dict)
+        assert expected_runtime_keys.issubset(set(runtime.keys()))
+        assert expected_runtime_keys.issubset(set(mtto_env.runtime_info.keys()))
+        assert "rewards" not in info
+        assert "state" not in info
+        assert "constraint" not in info
+        assert "event" not in info
+        assert "tb_diagnostics" not in info
     finally:
         mtto_env.enable_diagnostics = True
+
+
+def test_step_with_diagnostics_puts_namespaces_at_info_top_level(
+    mtto_env: MTTOEnv,
+):
+    mtto_env.enable_diagnostics = True
+    mtto_env.diagnostics_interval_steps = 1
+
+    mtto_env.reset()
+    action = mtto_env.action_space.sample()
+    _, _, _, _, info = mtto_env.step(action)
+
+    assert "tb_diagnostics" not in info
+    assert "runtime" in info
+    assert "rewards" in info
+    assert "state" in info
+    assert "constraint" in info
+    assert "event" in info
+
+    runtime = info["runtime"]
+    assert isinstance(runtime, dict)
+    assert "position" in runtime
+    assert "docking_position" not in runtime
+
+    expected_runtime_keys = {
+        "energy_consumption",
+        "operation_time",
+        "position",
+        "stopping_point_index",
+    }
+    assert expected_runtime_keys.issubset(set(runtime.keys()))
 
 
 def test_no_render_tracking_data_when_render_mode_is_none(mtto_env: MTTOEnv):

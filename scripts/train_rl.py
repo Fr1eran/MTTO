@@ -373,8 +373,8 @@ def build_scenario() -> tuple[VehicleInfo, TrackInfo, SafeGuardUtility, TrainSer
         target_position=putong_end_position,
         schedule_time=440.0,
         max_acc_change=0.75,
-        max_arr_time_error=120,
-        max_stop_error=0.3,
+        max_arr_time_error=60.0,
+        max_stop_error=2.0,
     )
 
     return vehicle, track, safeguard_utility, train_service

@@ -187,7 +187,10 @@ def main() -> None:
     reward_after = 0.0
     energy_consumption = 0.0
     operation_time = 0.0
-    docking_position = 0.0
+    position = 0.0
+    comfort_tav = 0.0
+    comfort_er_pct = 0.0
+    comfort_rms = 0.0
 
     obs = venv_eval.reset()
     episode_over = False
@@ -201,11 +204,18 @@ def main() -> None:
         episode_over = bool(dones[0])
         if episode_over:
             final_info = infos[0]
-            energy_consumption = float(
-                final_info.get("current_energy_consumption", 0.0)
-            )
-            operation_time = float(final_info.get("current_operation_time", 0.0))
-            docking_position = float(final_info.get("docking_position", 0.0))
+            runtime_info: dict[str, object] = {}
+            if isinstance(final_info, dict):
+                runtime_candidate = final_info.get("runtime", {})
+                if isinstance(runtime_candidate, dict):
+                    runtime_info = runtime_candidate
+
+            energy_consumption = float(runtime_info.get("energy_consumption", 0.0))
+            operation_time = float(runtime_info.get("operation_time", 0.0))
+            position = float(runtime_info.get("position", 0.0))
+            comfort_tav = float(runtime_info.get("comfort_tav", 0.0))
+            comfort_er_pct = float(runtime_info.get("comfort_er_pct", 0.0))
+            comfort_rms = float(runtime_info.get("comfort_rms", 0.0))
 
     venv_eval.close()
 
@@ -215,7 +225,10 @@ def main() -> None:
     if (energy_consumption != 0.0) and (operation_time != 0.0):
         print(f"Total energy consumption:{energy_consumption}")
         print(f"Operation time:{operation_time}")
-        print(f"Docking position: {docking_position}")
+        print(f"Position: {position}")
+        print(f"Comfort TAV: {comfort_tav:.4f} m/s\u00b2")
+        print(f"Comfort ER:  {comfort_er_pct:.2f} %")
+        print(f"Comfort RMS: {comfort_rms:.4f} m/s\u00b2")
 
 
 if __name__ == "__main__":

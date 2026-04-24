@@ -334,19 +334,25 @@ class _FakeModel:
 
 
 def _make_callback_locals(
-    *, truncated: float = 0.0, reward_total: float = 1.0
+    *,
+    truncated: float = 0.0,
+    reward_total: float = 1.0,
+    position: float | None = None,
 ) -> dict[str, Any]:
+    diagnostics: dict[str, dict[str, float]] = {
+        "rewards": {"total": reward_total},
+        "state": {},
+        "constraint": {"is_truncated": truncated},
+        "event": {"episode_truncated_count": truncated},
+    }
+    if position is not None:
+        diagnostics["runtime"] = {
+            "position": position,
+            "operation_time": 12.0,
+        }
+
     return {
-        "infos": [
-            {
-                "tb_diagnostics": {
-                    "rewards": {"total": reward_total},
-                    "state": {"episode_id": 0.0},
-                    "constraint": {"is_truncated": truncated},
-                    "event": {"episode_truncated_count": truncated},
-                }
-            }
-        ],
+        "infos": [diagnostics],
         "dones": [False],
     }
 
@@ -402,6 +408,22 @@ def test_callback_reads_terminal_step_diagnostics_from_infos():
     assert records["event/episode_truncated_count"] == 1.0
 
 
+def test_callback_reads_runtime_step_diagnostics_from_infos():
+    env = _FakeEnv()
+    logger = _FakeLogger()
+    model = _FakeModel(env, logger)
+    callback = TensorboardCallback(tb_sample_interval_steps=1)
+    callback.init_callback(cast(Any, model))
+
+    callback.num_timesteps = 1
+    callback.locals = _make_callback_locals(position=321.0)
+    assert callback._on_step() is True
+
+    records = dict(logger.records)
+    assert records["runtime/position"] == 321.0
+    assert records["runtime/operation_time"] == 12.0
+
+
 def test_callback_event_buffer_preserves_intermediate_steps():
     env = _FakeEnv()
     writer = _FakeTensorboardWriter()
@@ -438,12 +460,10 @@ def test_callback_tracks_episode_id_from_dones():
     callback.locals = {
         "infos": [
             {
-                "tb_diagnostics": {
-                    "rewards": {},
-                    "state": {},
-                    "constraint": {},
-                    "event": {},
-                }
+                "rewards": {},
+                "state": {},
+                "constraint": {},
+                "event": {},
             }
         ],
         "dones": [False],
@@ -454,12 +474,10 @@ def test_callback_tracks_episode_id_from_dones():
     callback.locals = {
         "infos": [
             {
-                "tb_diagnostics": {
-                    "rewards": {},
-                    "state": {},
-                    "constraint": {},
-                    "event": {},
-                }
+                "rewards": {},
+                "state": {},
+                "constraint": {},
+                "event": {},
             }
         ],
         "dones": [True],
@@ -470,12 +488,10 @@ def test_callback_tracks_episode_id_from_dones():
     callback.locals = {
         "infos": [
             {
-                "tb_diagnostics": {
-                    "rewards": {},
-                    "state": {},
-                    "constraint": {},
-                    "event": {},
-                }
+                "rewards": {},
+                "state": {},
+                "constraint": {},
+                "event": {},
             }
         ],
         "dones": [False],
