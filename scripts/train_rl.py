@@ -3,7 +3,8 @@ import argparse
 from typing import Any, Callable
 import numpy as np
 
-from rl.callbacks import TensorboardCallback
+from rl.callbacks import BestTrajectoryEvalCallback, TensorboardCallback
+from rl.evaluation import build_single_eval_env
 from rl.env_factory import make_env
 from rl.training_analysis import AnalysisConfig, run_training_analysis
 from model.vehicle import VehicleInfo
@@ -17,6 +18,7 @@ from utils.data_loader import (
     load_stations_goal_positions,
 )
 from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.vec_env import (
     DummyVecEnv,
     SubprocVecEnv,
@@ -107,6 +109,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Override post-training analysis switch.",
     )
     parser.add_argument(
+        "--enable-best-eval",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable single-environment best trajectory evaluation during training.",
+    )
+    parser.add_argument(
         "--analysis-output-root",
         type=str,
         default="mtto_train_reports",
@@ -184,13 +192,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model-save-path",
         type=str,
-        default="output/optimal/rl/ppo_mtto",
+        default="output/optimal/rl/final/ppo_mtto",
         help="Path prefix for saving PPO model (without .zip suffix).",
     )
     parser.add_argument(
         "--vecnormalize-save-path",
         type=str,
-        default="output/optimal/rl/vecnormalize.pkl",
+        default="output/optimal/rl/final/vecnormalize.pkl",
         help="Path for saving VecNormalize stats.",
     )
     parser.add_argument(
@@ -242,6 +250,31 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Flush buffered TensorBoard events after this many sampled callback records (<=0 disables).",
     )
     parser.add_argument(
+        "--best-eval-trigger-mode",
+        type=str,
+        choices=["steps", "episodes"],
+        default="steps",
+        help="Trigger best-eval callback by global timesteps or completed episodes.",
+    )
+    parser.add_argument(
+        "--best-eval-interval",
+        type=int,
+        default=100_000,
+        help="Best-eval interval in timesteps or episodes, depending on best-eval-trigger-mode.",
+    )
+    parser.add_argument(
+        "--best-eval-output-dir",
+        type=str,
+        default="output/optimal/rl/best",
+        help="Directory used to save best model, VecNormalize stats, and trajectory artifacts.",
+    )
+    parser.add_argument(
+        "--best-eval-deterministic",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use deterministic policy when running best-eval rollouts.",
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default="cpu",
@@ -252,7 +285,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def resolve_run_mode(
     args: argparse.Namespace,
-) -> tuple[str, bool, bool, bool, bool, bool]:
+) -> tuple[str, bool, bool, bool, bool, bool, bool]:
     run_mode = args.run_mode
     defaults_by_mode = {
         "tune": {
@@ -261,6 +294,7 @@ def resolve_run_mode(
             "monitor": True,
             "env_diagnostics": True,
             "analysis": True,
+            "best_eval": True,
         },
         "reproduce": {
             "tb": False,
@@ -268,6 +302,7 @@ def resolve_run_mode(
             "monitor": False,
             "env_diagnostics": False,
             "analysis": False,
+            "best_eval": False,
         },
         "eval": {
             "tb": False,
@@ -275,6 +310,7 @@ def resolve_run_mode(
             "monitor": False,
             "env_diagnostics": False,
             "analysis": False,
+            "best_eval": False,
         },
     }
     mode_defaults = defaults_by_mode[run_mode]
@@ -297,6 +333,11 @@ def resolve_run_mode(
         if args.enable_analysis is None
         else args.enable_analysis
     )
+    enable_best_eval = (
+        mode_defaults["best_eval"]
+        if args.enable_best_eval is None
+        else args.enable_best_eval
+    )
 
     if not enable_tb:
         enable_callback = False
@@ -308,6 +349,7 @@ def resolve_run_mode(
         enable_monitor,
         enable_env_diagnostics,
         enable_auto_analysis,
+        enable_best_eval,
     )
 
 
@@ -398,6 +440,7 @@ def main() -> None:
         enable_monitor,
         enable_env_diagnostics,
         enable_auto_analysis,
+        enable_best_eval,
     ) = resolve_run_mode(args)
     log_interval = resolve_log_interval(args, run_mode, enable_tb)
     tb_sample_interval_steps = max(1, int(args.tb_sample_interval_steps))
@@ -427,6 +470,7 @@ def main() -> None:
     print(f"- enable_monitor={enable_monitor}")
     print(f"- enable_env_diagnostics={enable_env_diagnostics}")
     print(f"- enable_auto_analysis={enable_auto_analysis}")
+    print(f"- enable_best_eval={enable_best_eval}")
     print(f"- reward_discount={reward_discount}")
     print(f"- step_distance={ds}")
     print(f"- num_envs={num_envs}")
@@ -448,6 +492,10 @@ def main() -> None:
     print(f"- env_diagnostics_interval_steps={env_diagnostics_interval_steps}")
     print(f"- force_dump_interval_steps={force_dump_interval_steps}")
     print(f"- tb_batch_dump_records={tb_batch_dump_records}")
+    print(f"- best_eval_trigger_mode={args.best_eval_trigger_mode}")
+    print(f"- best_eval_interval={args.best_eval_interval}")
+    print(f"- best_eval_output_dir={args.best_eval_output_dir}")
+    print(f"- best_eval_deterministic={args.best_eval_deterministic}")
     print(f"- device={args.device}")
     if enable_auto_analysis and not enable_tb:
         print(
@@ -508,15 +556,37 @@ def main() -> None:
         ),
     )
 
-    callback = (
-        TensorboardCallback(
-            tb_sample_interval_steps=tb_sample_interval_steps,
-            force_dump_interval_steps=force_dump_interval_steps,
-            batch_dump_records=tb_batch_dump_records,
+    callbacks: list[BaseCallback] = []
+    if enable_callback:
+        callbacks.append(
+            TensorboardCallback(
+                tb_sample_interval_steps=tb_sample_interval_steps,
+                force_dump_interval_steps=force_dump_interval_steps,
+                batch_dump_records=tb_batch_dump_records,
+            )
         )
-        if enable_callback
-        else None
-    )
+
+    if enable_best_eval:
+        callbacks.append(
+            BestTrajectoryEvalCallback(
+                eval_env=build_single_eval_env(
+                    vehicle=vehicle,
+                    track=track,
+                    safeguard_utility=safeguard_utility,
+                    train_service=train_service,
+                    gamma=reward_discount,
+                    max_step_distance=ds,
+                    enable_diagnostics=False,
+                    enable_trajectory_tracking=True,
+                ),
+                output_dir=args.best_eval_output_dir,
+                trigger_mode=args.best_eval_trigger_mode,
+                trigger_interval=max(1, int(args.best_eval_interval)),
+                deterministic=args.best_eval_deterministic,
+            )
+        )
+
+    callback = CallbackList(callbacks) if callbacks else None
 
     # 训练，并使用tensorboard记录回报和网络损失变化
     model.learn(
@@ -533,6 +603,8 @@ def main() -> None:
     print("Training finished.")
     print(f"Model saved to: {model_save_path}.zip")
     print(f"VecNormalize stats saved to: {vecnormalize_save_path}")
+    if enable_best_eval:
+        print(f"Best trajectory artifacts saved under: {args.best_eval_output_dir}")
     print("Run python -m scripts.evaluate_rl to evaluate the trained policy.")
 
     if enable_auto_analysis:

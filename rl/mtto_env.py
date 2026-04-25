@@ -90,6 +90,7 @@ class MTTOEnv(gym.Env):
         max_step_distance: float,
         enable_diagnostics: bool = True,
         diagnostics_interval_steps: int = 1,
+        enable_trajectory_tracking: bool = False,
         render_mode: str | None = None,
         use_animation: bool = False,
     ):
@@ -250,58 +251,46 @@ class MTTOEnv(gym.Env):
         )
 
         # 定义智能体能够观测的状态信息
-        self.observation_space = gym.spaces.Dict(
-            {
-                "remaining_distance": gym.spaces.Box(
-                    0.0,
-                    1.0,
-                    shape=(1,),
-                    dtype=np.float32,
-                ),
-                "current_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
-                "current_acc": gym.spaces.Box(
-                    -1.0,
-                    1.0,
-                    shape=(1,),
-                    dtype=np.float32,
-                ),
-                "remaining_schedule_time": gym.spaces.Box(
-                    -1.0,  # 最多超时10分钟
-                    1.0,
-                    shape=(1,),
-                    dtype=np.float32,  # 允许超时或提前
-                ),
-                "current_slope": gym.spaces.Box(
-                    -1.0, 1.0, shape=(1,), dtype=np.float32
-                ),
-                "current_max_speed": gym.spaces.Box(
-                    0.0, 1.0, shape=(1,), dtype=np.float32
-                ),
-                "current_min_speed": gym.spaces.Box(
-                    0.0, 1.0, shape=(1,), dtype=np.float32
-                ),
-                "next_slope": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
-                "next_max_speed": gym.spaces.Box(
-                    0.0, 1.0, shape=(1,), dtype=np.float32
-                ),
-                "next_min_speed": gym.spaces.Box(
-                    0.0, 1.0, shape=(1,), dtype=np.float32
-                ),
-                "current_latest_traction_intervention_point": gym.spaces.Box(
-                    0.0, 1.0, shape=(1,), dtype=np.float32
-                ),
-                "current_latest_braking_intervention_point": gym.spaces.Box(
-                    0.0, 1.0, shape=(1,), dtype=np.float32
-                ),
-                "is_final_approach": gym.spaces.Box(
-                    -1.0, 1.0, shape=(1,), dtype=np.float32
-                ),
-                "rel_dist_to_target": gym.spaces.Box(
-                    -1.0, 1.0, shape=(1,), dtype=np.float32
-                ),
-                "required_dec": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
-            }
-        )
+        self.observation_space = gym.spaces.Dict({
+            "remaining_distance": gym.spaces.Box(
+                0.0,
+                1.0,
+                shape=(1,),
+                dtype=np.float32,
+            ),
+            "current_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
+            "current_acc": gym.spaces.Box(
+                -1.0,
+                1.0,
+                shape=(1,),
+                dtype=np.float32,
+            ),
+            "remaining_schedule_time": gym.spaces.Box(
+                -1.0,  # 最多超时10分钟
+                1.0,
+                shape=(1,),
+                dtype=np.float32,  # 允许超时或提前
+            ),
+            "current_slope": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
+            "current_max_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
+            "current_min_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
+            "next_slope": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
+            "next_max_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
+            "next_min_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
+            "current_latest_traction_intervention_point": gym.spaces.Box(
+                0.0, 1.0, shape=(1,), dtype=np.float32
+            ),
+            "current_latest_braking_intervention_point": gym.spaces.Box(
+                0.0, 1.0, shape=(1,), dtype=np.float32
+            ),
+            "is_final_approach": gym.spaces.Box(
+                -1.0, 1.0, shape=(1,), dtype=np.float32
+            ),
+            "rel_dist_to_target": gym.spaces.Box(
+                -1.0, 1.0, shape=(1,), dtype=np.float32
+            ),
+            "required_dec": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
+        })
 
         # 定义智能体的动作空间, 归一化
         self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
@@ -327,7 +316,7 @@ class MTTOEnv(gym.Env):
         self.state_info: StateInfoForTB = {}
         self.constraint_info: ConstraintInfoForTB = {}
         self.event_info: EventInfoForTB = {}
-        self.runtime_info: BasicInfo = {}
+        self.basic_info: BasicInfo = {}
         self.episode_truncated_count: int = 0
         self.episode_low_violation_count: int = 0
         self.episode_high_violation_count: int = 0
@@ -348,13 +337,13 @@ class MTTOEnv(gym.Env):
         self.render_mode = render_mode
         # 是否启用动画
         self.use_animation = use_animation
-        # 仅在开启渲染时维护轨迹缓存，避免训练时无意义的列表扩容
-        self.enable_render_tracking: bool = self.render_mode is not None
+        # 轨迹缓存与渲染解耦，训练和评估都可按需启用轨迹记录。
+        self.enable_trajectory_tracking = enable_trajectory_tracking
 
         # 列车运行轨迹
         self.trajectory_pos: list[float] | None = None
-        self.trajectory_speed_km_h: list[float] | None = None
-        if self.enable_render_tracking:
+        self.trajectory_speed_mps: list[float] | None = None
+        if self.enable_trajectory_tracking:
             self._reset_trajectory()
 
         # 可视化时需要的绘图实例
@@ -458,14 +447,14 @@ class MTTOEnv(gym.Env):
         )
         return float(np.clip(normalized, -1.0, 1.0))
 
-    def _get_info(self):
+    def _get_basic_info(self):
         """
         获取反映轨迹性能指标的信息
         """
-        runtime_snapshot = dict(self.runtime_info)
+        runtime_snapshot = dict(self.basic_info)
         if not runtime_snapshot:
             return {}
-        return {"runtime": runtime_snapshot}
+        return {"basic": runtime_snapshot}
 
     def _get_speed_limit_segment(self, pos: float) -> int:
         segment_idx = get_interval_index(pos, self.track.speed_limit_intervals)
@@ -482,16 +471,16 @@ class MTTOEnv(gym.Env):
         return self.current_steps % self.diagnostics_interval_steps == 0
 
     def _record_runtime_info(self) -> None:
-        self.runtime_info["energy_consumption"] = float(self.current_energy_consumption)
-        self.runtime_info["operation_time"] = float(self.current_operation_time)
-        self.runtime_info["position"] = float(self.current_pos)
-        self.runtime_info["stopping_point_index"] = float(self.current_sp)
-        self.runtime_info["comfort_tav"] = self._comfort_tav
+        self.basic_info["energy_consumption"] = float(self.current_energy_consumption)
+        self.basic_info["operation_time"] = float(self.current_operation_time)
+        self.basic_info["position"] = float(self.current_pos)
+        self.basic_info["stopping_point_index"] = float(self.current_sp)
+        self.basic_info["comfort_tav"] = self._comfort_tav
         if self.current_steps > 0:
-            self.runtime_info["comfort_er_pct"] = (
+            self.basic_info["comfort_er_pct"] = (
                 self._comfort_exceedance_count / self.current_steps * 100.0
             )
-            self.runtime_info["comfort_rms"] = math.sqrt(
+            self.basic_info["comfort_rms"] = math.sqrt(
                 self._comfort_sum_sq_delta_acc / self.current_steps
             )
 
@@ -621,7 +610,7 @@ class MTTOEnv(gym.Env):
         self._reset_history()
 
         # 重置轨迹数据
-        if self.enable_render_tracking:
+        if self.enable_trajectory_tracking:
             self._reset_trajectory()
 
         # 重置仿真步数
@@ -632,11 +621,11 @@ class MTTOEnv(gym.Env):
         self.state_info = {}
         self.constraint_info = {}
         self.event_info = {}
-        self.runtime_info = {}
+        self.basic_info = {}
         self._collect_step_diagnostics = False
 
         observation = self._get_obs()
-        info = self._get_info()
+        info = self._get_basic_info()
 
         return observation, info
 
@@ -738,22 +727,41 @@ class MTTOEnv(gym.Env):
         )
 
         # 判断智能体是否到达目标区域
-        terminated = (
-            abs(self.task.target_position - self.current_pos)
-            <= self.task.max_stop_error
-            and math.isclose(self.current_speed, 0.0, abs_tol=0.1)
-        ) or self.current_steps == self.max_episode_steps
-
-        # 若智能体违反安全约束，则截断训练进程
-        truncated = (
-            True
-            if self.current_speed < self.current_min_speed
-            or self.current_speed > self.current_max_speed
-            else False
+        terminated = abs(
+            self.task.target_position - self.current_pos
+        ) <= self.task.max_stop_error and math.isclose(
+            self.current_speed, 0.0, abs_tol=0.1
         )
 
-        self._record_runtime_info()
+        # 若智能体违反安全约束或者达到最大步数，则截断训练进程
+        truncated = (
+            (self.current_speed < self.current_min_speed)
+            or (self.current_speed > self.current_max_speed)
+            or self.current_steps == self.max_episode_steps
+        )
+
+        # 计算奖励
+        reward = self._get_reward(
+            terminated=terminated,
+            truncated=truncated,
+        )
+
+        if self.enable_trajectory_tracking:
+            # 记录轨迹数据
+            self._record_trajectory(
+                pos=self.last_state["pos"],
+                speed=self.last_state["speed"],
+                acc=self.current_acc,
+                displacement=distance,
+                operation_time=operation_time,
+            )
+
+        # 获取可观测状态和信息
+        observation = self._get_obs()
+
         self._collect_step_diagnostics = self._should_collect_step_diagnostics()
+        self._record_runtime_info()
+        info = self._get_basic_info()
         if self.enable_diagnostics and self._collect_step_diagnostics:
             if self.current_speed < self.current_min_speed:
                 violation_code = 1
@@ -771,26 +779,6 @@ class MTTOEnv(gym.Env):
                 margin_to_vmin=margin_to_vmin,
             )
 
-        # 计算奖励
-        reward = self._get_reward(
-            terminated=terminated,
-            truncated=truncated,
-        )
-
-        if self.enable_render_tracking:
-            # 记录轨迹数据
-            self._record_trajectory(
-                pos=self.last_state["pos"],
-                speed=self.last_state["speed"],
-                acc=self.current_acc,
-                displacement=distance,
-                operation_time=operation_time,
-            )
-
-        # 获取可观测状态和信息
-        observation = self._get_obs()
-        info = self._get_info()
-        if self.enable_diagnostics and self._collect_step_diagnostics:
             info["rewards"] = dict(self.rewards_info)
             info["state"] = dict(self.state_info)
             info["constraint"] = dict(self.constraint_info)
@@ -1195,16 +1183,16 @@ class MTTOEnv(gym.Env):
         operation_time: float = 0.0,
     ):
         """记录完整的匀变速运动轨迹"""
-        if not self.enable_render_tracking:
+        if not self.enable_trajectory_tracking:
             return
 
         assert self.trajectory_pos is not None
-        assert self.trajectory_speed_km_h is not None
+        assert self.trajectory_speed_mps is not None
 
         # 如果是初始状态或者没有运动，只记录当前点
         if abs(operation_time) < 1e-6 or abs(displacement) < 1e-6:
             self.trajectory_pos.append(pos)
-            self.trajectory_speed_km_h.append(abs(speed * 3.6))
+            self.trajectory_speed_mps.append(abs(speed))
             return
 
         # 生成中间轨迹点数量（基于运动时间动态调整）
@@ -1222,17 +1210,17 @@ class MTTOEnv(gym.Env):
 
         # 批量添加到历史记录中
         self.trajectory_pos.extend(pos_array.tolist())
-        self.trajectory_speed_km_h.extend(np.abs(vel_array * 3.6).tolist())
+        self.trajectory_speed_mps.extend(np.abs(vel_array).tolist())
 
     def _reset_trajectory(self):
         """重置轨迹历史数据并记录初始状态"""
-        if not self.enable_render_tracking:
+        if not self.enable_trajectory_tracking:
             self.trajectory_pos = None
-            self.trajectory_speed_km_h = None
+            self.trajectory_speed_mps = None
             return
 
         self.trajectory_pos = [self.task.start_position]
-        self.trajectory_speed_km_h = [abs(self.task.start_speed * 3.6)]
+        self.trajectory_speed_mps = [abs(self.task.start_speed)]
 
     def render(self):
         if self.render_mode is None:
@@ -1360,10 +1348,11 @@ class MTTOEnv(gym.Env):
         # 更新轨迹
         if (
             self.trajectory_pos is not None
-            and self.trajectory_speed_km_h is not None
+            and self.trajectory_speed_mps is not None
             and len(self.trajectory_pos) > 1
         ):
-            self.traj_line.set_data(self.trajectory_pos, self.trajectory_speed_km_h)
+            trajectory_speed_km_h = [speed * 3.6 for speed in self.trajectory_speed_mps]
+            self.traj_line.set_data(self.trajectory_pos, trajectory_speed_km_h)
 
     def close(self):
         """清理资源"""

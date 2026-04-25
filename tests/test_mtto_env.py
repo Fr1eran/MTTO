@@ -50,8 +50,8 @@ def mtto_env():
         target_position=putong_end_position,
         schedule_time=440.0,
         max_acc_change=0.75,
-        max_arr_time_error=120,
-        max_stop_error=0.3,
+        max_arr_time_error=60.0,
+        max_stop_error=2.0,
     )
 
     maglevttoenv = MTTOEnv(
@@ -168,7 +168,7 @@ def test_step_without_diagnostics_keeps_tb_dicts_empty(mtto_env: MTTOEnv):
         runtime = info["runtime"]
         assert isinstance(runtime, dict)
         assert expected_runtime_keys.issubset(set(runtime.keys()))
-        assert expected_runtime_keys.issubset(set(mtto_env.runtime_info.keys()))
+        assert expected_runtime_keys.issubset(set(mtto_env.basic_info.keys()))
         assert "rewards" not in info
         assert "state" not in info
         assert "constraint" not in info
@@ -209,13 +209,30 @@ def test_step_with_diagnostics_puts_namespaces_at_info_top_level(
     assert expected_runtime_keys.issubset(set(runtime.keys()))
 
 
-def test_no_render_tracking_data_when_render_mode_is_none(mtto_env: MTTOEnv):
+def test_no_trajectory_tracking_data_when_disabled(mtto_env: MTTOEnv):
     assert mtto_env.render_mode is None
-    assert mtto_env.enable_render_tracking is False
+    assert mtto_env.enable_trajectory_tracking is False
 
     mtto_env.reset()
     action = mtto_env.action_space.sample()
     mtto_env.step(action)
 
     assert mtto_env.trajectory_pos is None
-    assert mtto_env.trajectory_speed_km_h is None
+    assert mtto_env.trajectory_speed_mps is None
+
+
+def test_trajectory_tracking_can_be_enabled_without_rendering(mtto_env: MTTOEnv):
+    mtto_env.enable_trajectory_tracking = True
+    try:
+        mtto_env.reset()
+        action = mtto_env.action_space.sample()
+        mtto_env.step(action)
+
+        assert mtto_env.render_mode is None
+        assert mtto_env.trajectory_pos is not None
+        assert mtto_env.trajectory_speed_mps is not None
+        assert len(mtto_env.trajectory_pos) >= 1
+        assert len(mtto_env.trajectory_speed_mps) >= 1
+    finally:
+        mtto_env.enable_trajectory_tracking = False
+        mtto_env.reset()

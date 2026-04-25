@@ -51,6 +51,74 @@ TransitionBatchResult = tuple[SparseTransitionRows, int, int]
 _DP_PARALLEL_CONTEXT: dict[str, Any] | None = None
 
 
+def _compute_segment_accelerations(
+    pos_arr: Sequence[float] | NDArray,
+    speed_arr: Sequence[float] | NDArray,
+) -> NDArray[np.float64]:
+    """由离散位置/速度序列反推每段加速度。"""
+    pos = np.asarray(pos_arr, dtype=np.float64)
+    speed = np.asarray(speed_arr, dtype=np.float64)
+
+    if pos.ndim != 1 or speed.ndim != 1:
+        raise ValueError("pos_arr and speed_arr must be 1-D arrays")
+    if pos.size != speed.size:
+        raise ValueError("pos_arr and speed_arr must have equal length")
+    if pos.size < 2:
+        return np.asarray([], dtype=np.float64)
+
+    ds = np.diff(pos)
+    delta_speed_sq = np.square(speed[1:]) - np.square(speed[:-1])
+    return np.divide(
+        delta_speed_sq,
+        2.0 * ds,
+        out=np.zeros_like(delta_speed_sq, dtype=np.float64),
+        where=np.abs(ds) > 1e-9,
+    )
+
+
+def compute_comfort_metrics_from_trajectory(
+    pos_arr: Sequence[float] | NDArray,
+    speed_arr: Sequence[float] | NDArray,
+    *,
+    max_acc_change: float,
+) -> dict[str, float]:
+    """
+    按 MTTOEnv 口径计算舒适度指标。
+
+    指标定义:
+    - delta_acc_t = |a_t - a_{t-1}|, 且 a_0 = 0
+    - comfort_tav = sum(delta_acc_t)
+    - comfort_rms = sqrt(sum(delta_acc_t^2) / N)
+    - comfort_er_pct = count(delta_acc_t > max_acc_change) / N * 100
+    """
+    if max_acc_change <= 0.0:
+        raise ValueError("max_acc_change must be positive")
+
+    acc_arr = _compute_segment_accelerations(pos_arr=pos_arr, speed_arr=speed_arr)
+    if acc_arr.size == 0:
+        return {
+            "comfort_tav": 0.0,
+            "comfort_rms": 0.0,
+            "comfort_er_pct": 0.0,
+        }
+
+    prev_acc = np.empty_like(acc_arr)
+    prev_acc[0] = 0.0
+    prev_acc[1:] = acc_arr[:-1]
+    delta_acc = np.abs(acc_arr - prev_acc)
+
+    num_steps = int(delta_acc.size)
+    comfort_tav = float(np.sum(delta_acc))
+    comfort_rms = float(np.sqrt(np.sum(delta_acc**2) / num_steps))
+    comfort_er_pct = float(np.sum(delta_acc > max_acc_change) / num_steps * 100.0)
+
+    return {
+        "comfort_tav": comfort_tav,
+        "comfort_rms": comfort_rms,
+        "comfort_er_pct": comfort_er_pct,
+    }
+
+
 def _calculate_transition_with_context(
     *,
     pos_k: float,
@@ -175,14 +243,12 @@ def _compute_transition_batch(
             if not next_indices:
                 continue
 
-            row_entries.append(
-                (
-                    i,
-                    np.asarray(next_indices, dtype=np.int_),
-                    np.asarray(delta_energy_list, dtype=np.float64),
-                    np.asarray(delta_time_list, dtype=np.float64),
-                )
-            )
+            row_entries.append((
+                i,
+                np.asarray(next_indices, dtype=np.int_),
+                np.asarray(delta_energy_list, dtype=np.float64),
+                np.asarray(delta_time_list, dtype=np.float64),
+            ))
             total_valid_edges += len(next_indices)
 
         if row_entries:
@@ -660,13 +726,11 @@ class VariableSpacingDPOptimizer:
         基于临界点的变间距阶段划分
         将线路按照临界点划分为大分区, 每个大分区等分为 sub_stage_count 个子阶段
         """
-        critical_points_position_arr = np.concatenate(
-            (
-                np.array([self.task.start_position]),
-                self.safeguard_utility.get_intersecting_dangerous_point(),
-                np.array([self.task.target_position]),
-            )
-        )
+        critical_points_position_arr = np.concatenate((
+            np.array([self.task.start_position]),
+            self.safeguard_utility.get_intersecting_dangerous_point(),
+            np.array([self.task.target_position]),
+        ))
         stages = []
 
         for i in range(len(critical_points_position_arr) - 1):
@@ -695,6 +759,18 @@ class VariableSpacingDPOptimizer:
             safeguard_utility=self.safeguard_utility,
             ecc=self.ecc,
             trackprofile=self.trackprofile,
+        )
+
+    def compute_comfort_metrics(
+        self,
+        pos_arr: Sequence[float] | NDArray,
+        speed_arr: Sequence[float] | NDArray,
+    ) -> dict[str, float]:
+        """对 DP 优化得到的整条轨迹计算舒适度指标。"""
+        return compute_comfort_metrics_from_trajectory(
+            pos_arr=pos_arr,
+            speed_arr=speed_arr,
+            max_acc_change=self.task.max_acc_change,
         )
 
     def BuildSmoothedDisplayCurve(
@@ -1027,6 +1103,11 @@ if __name__ == "__main__":
         raise SystemExit(1)
 
     if result is not None:
+        comfort_metrics = VSDP.compute_comfort_metrics(
+            pos_arr=result["pos"],
+            speed_arr=result["speed"],
+        )
+
         output_file = f"{dp_result_save_dir}/optimized_speed_curve.npz"
         saved_npz_path, saved_metrics_path = save_curve_and_metrics(
             pos_arr=result["pos"],
@@ -1038,10 +1119,17 @@ if __name__ == "__main__":
                 "total_energy_kj": float(result["total_energy"]),
                 "start_position_m": float(train_service.start_position),
                 "target_position_m": float(train_service.target_position),
+                **comfort_metrics,
             },
         )
         print(f"优化速度曲线已保存到: {saved_npz_path}")
         print(f"性能指标已保存到: {saved_metrics_path}")
+        print(
+            "舒适度指标: "
+            f"TAV={comfort_metrics['comfort_tav']:.4f} m/s^2, "
+            f"ER={comfort_metrics['comfort_er_pct']:.2f} %, "
+            f"RMS={comfort_metrics['comfort_rms']:.4f} m/s^2"
+        )
 
         set_chinese_font()
 

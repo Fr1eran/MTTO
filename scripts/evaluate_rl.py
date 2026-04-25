@@ -55,8 +55,8 @@ def build_scenario() -> tuple[VehicleInfo, TrackInfo, SafeGuardUtility, TrainSer
         target_position=putong_end_position,
         schedule_time=440.0,
         max_acc_change=0.75,
-        max_arr_time_error=120,
-        max_stop_error=0.3,
+        max_arr_time_error=60.0,
+        max_stop_error=2.0,
     )
 
     return vehicle, track, safeguard_utility, train_service
@@ -69,13 +69,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model-path",
         type=str,
-        default="output/optimal/rl/ppo_mtto",
+        default="output/optimal/rl/final/ppo_mtto",
         help="Path prefix of PPO model zip file (without .zip suffix).",
     )
     parser.add_argument(
         "--vecnormalize-path",
         type=str,
-        default="output/optimal/rl/vecnormalize.pkl",
+        default="output/optimal/rl/final/vecnormalize.pkl",
         help="Path of VecNormalize stats file.",
     )
     parser.add_argument(
@@ -153,20 +153,19 @@ def main() -> None:
 
     vehicle, track, safeguard_utility, task = build_scenario()
 
-    venv_eval = DummyVecEnv(
-        [
-            lambda: make_env(
-                vehicle=vehicle,
-                track=track,
-                safeguard_utility=safeguard_utility,
-                train_service=task,
-                gamma=reward_discount,
-                max_step_distance=ds,
-                enable_diagnostics=args.enable_env_diagnostics,
-                render_mode="rgb_array" if args.record_video else None,
-            )
-        ]
-    )
+    venv_eval = DummyVecEnv([
+        lambda: make_env(
+            vehicle=vehicle,
+            track=track,
+            safeguard_utility=safeguard_utility,
+            train_service=task,
+            gamma=reward_discount,
+            max_step_distance=ds,
+            enable_diagnostics=args.enable_env_diagnostics,
+            enable_trajectory_tracking=args.record_video,
+            render_mode="rgb_array" if args.record_video else None,
+        )
+    ])
 
     venv_eval = VecNormalize.load(vecnormalize_save_path, venv_eval)
     venv_eval.training = False
@@ -204,18 +203,18 @@ def main() -> None:
         episode_over = bool(dones[0])
         if episode_over:
             final_info = infos[0]
-            runtime_info: dict[str, object] = {}
+            basic_info: dict[str, object] = {}
             if isinstance(final_info, dict):
-                runtime_candidate = final_info.get("runtime", {})
-                if isinstance(runtime_candidate, dict):
-                    runtime_info = runtime_candidate
+                basic_info_candidate = final_info.get("basic", {})
+                if isinstance(basic_info_candidate, dict):
+                    basic_info = basic_info_candidate
 
-            energy_consumption = float(runtime_info.get("energy_consumption", 0.0))
-            operation_time = float(runtime_info.get("operation_time", 0.0))
-            position = float(runtime_info.get("position", 0.0))
-            comfort_tav = float(runtime_info.get("comfort_tav", 0.0))
-            comfort_er_pct = float(runtime_info.get("comfort_er_pct", 0.0))
-            comfort_rms = float(runtime_info.get("comfort_rms", 0.0))
+            energy_consumption = float(basic_info.get("energy_consumption", 0.0))
+            operation_time = float(basic_info.get("operation_time", 0.0))
+            position = float(basic_info.get("position", 0.0))
+            comfort_tav = float(basic_info.get("comfort_tav", 0.0))
+            comfort_er_pct = float(basic_info.get("comfort_er_pct", 0.0))
+            comfort_rms = float(basic_info.get("comfort_rms", 0.0))
 
     venv_eval.close()
 

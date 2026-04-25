@@ -10,7 +10,7 @@ from utils.io_utils import load_optimized_curve_and_metrics
 from utils.plot_utils import set_chinese_font
 
 
-def _build_safeguard_utility(factor: float = 0.99) -> SafeGuardUtility:
+def _build_safeguard_utility(factor: float = 0.95) -> SafeGuardUtility:
     with open("data/rail/raw/speed_limits.json", "r", encoding="utf-8") as f:
         speedlimit_data = json.load(f)
         speed_limits = (
@@ -32,36 +32,54 @@ def _build_safeguard_utility(factor: float = 0.99) -> SafeGuardUtility:
     )
 
 
-def _print_metrics(metrics: dict) -> None:
+def _print_metrics(metrics: dict[str, object]) -> None:
     if not metrics:
         print("No metrics file found.")
         return
 
     print("Loaded metrics:")
     for key in [
+        "success",
+        "total_reward",
         "target_time_s",
         "total_time_s",
+        "time_error_s",
+        "stop_error_m",
         "total_energy_kj",
+        "total_energy_j",
         "comfort_tav",
         "comfort_er_pct",
         "comfort_rms",
-        "total_energy_j",
+        "num_timesteps",
+        "trigger_mode",
+        "trigger_value",
+        "episode_steps",
+        "terminated",
+        "truncated",
         "start_position_m",
         "target_position_m",
+        "final_position_m",
+        "final_speed_mps",
         "created_at",
     ]:
         if key in metrics:
             print(f"  {key}: {metrics[key]}")
 
 
+def _as_float(value: object) -> float | None:
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return float(value)
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Load and display saved DP optimized speed curve."
+        description="Load and display saved RL best trajectory."
     )
     parser.add_argument(
         "--npz",
-        default="output/optimal/dp/optimized_speed_curve.npz",
-        help="Path to optimized curve npz file.",
+        default="output/optimal/rl/best/best_trajectory.npz",
+        help="Path to RL best trajectory npz file.",
     )
     parser.add_argument(
         "--metrics",
@@ -76,7 +94,7 @@ def main() -> None:
     parser.add_argument(
         "--factor",
         type=float,
-        default=0.99,
+        default=0.95,
         help="Safeguard factor used for rendering when safeguard is enabled.",
     )
     args = parser.parse_args()
@@ -100,15 +118,20 @@ def main() -> None:
     ax.plot(
         pos_arr,
         speed_arr * 3.6,
-        color="blue",
-        alpha=0.8,
+        color="darkorange",
+        alpha=0.85,
         linewidth=2,
-        label="DP optimized speed curve",
+        label="RL best trajectory",
     )
 
-    if "start_position_m" in metrics:
+    start_position = _as_float(metrics.get("start_position_m"))
+    target_position = _as_float(metrics.get("target_position_m"))
+    final_position = _as_float(metrics.get("final_position_m"))
+    final_speed_mps = _as_float(metrics.get("final_speed_mps"))
+
+    if start_position is not None:
         ax.scatter(
-            metrics["start_position_m"],
+            start_position,
             0.0,
             marker="o",
             color="green",
@@ -119,9 +142,9 @@ def main() -> None:
             edgecolors="black",
             linewidths=1.2,
         )
-    if "target_position_m" in metrics:
+    if target_position is not None:
         ax.scatter(
-            metrics["target_position_m"],
+            target_position,
             0.0,
             marker="o",
             color="red",
@@ -132,6 +155,32 @@ def main() -> None:
             edgecolors="black",
             linewidths=1.2,
         )
+    if final_position is not None and final_speed_mps is not None:
+        should_draw_final_point = (
+            target_position is None
+            or abs(final_position - target_position) > 1e-6
+            or abs(final_speed_mps) > 1e-6
+        )
+        if should_draw_final_point:
+            ax.scatter(
+                final_position,
+                final_speed_mps * 3.6,
+                marker="X",
+                color="orange",
+                s=90,
+                alpha=0.9,
+                label="终止点",
+                zorder=6,
+                edgecolors="black",
+                linewidths=1.0,
+            )
+
+    success_value = metrics.get("success")
+    if isinstance(success_value, bool):
+        title = (
+            "RL 最优轨迹（成功到达）" if success_value else "RL 最优轨迹（未成功到达）"
+        )
+        ax.set_title(title)
 
     ax.set_xlabel(r"里程 $s\left( m \right)$")
     ax.set_ylabel(r"速度 $v\left( km/h \right)$")
