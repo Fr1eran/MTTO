@@ -1,6 +1,6 @@
 import os
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 from stable_baselines3.common.callbacks import BaseCallback
 
@@ -255,12 +255,14 @@ class BestTrajectoryEvalCallback(BaseCallback):
         *,
         eval_env: Any,
         output_dir: str,
-        trigger_mode: Literal["steps", "episodes"] = "steps",
+        trigger_mode: str = "steps",
         trigger_interval: int = 10_000,
         deterministic: bool = True,
         verbose: int = 0,
     ):
         super().__init__(verbose)
+        if trigger_mode not in ("steps", "episodes"):
+            raise ValueError("trigger mode must be 'steps' or 'episodes'")
         if trigger_interval <= 0:
             raise ValueError("trigger_interval must be positive")
 

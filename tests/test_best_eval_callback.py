@@ -74,7 +74,7 @@ def _prepare_callback(
         trigger_interval=trigger_interval,
         deterministic=True,
     )
-    callback.init_callback(DummyModel(training_env=training_env, logger=logger))
+    callback.init_callback(DummyModel(training_env=training_env, logger=logger))  # type: ignore
     callback.locals = {}
     return callback
 

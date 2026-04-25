@@ -243,12 +243,14 @@ def _compute_transition_batch(
             if not next_indices:
                 continue
 
-            row_entries.append((
-                i,
-                np.asarray(next_indices, dtype=np.int_),
-                np.asarray(delta_energy_list, dtype=np.float64),
-                np.asarray(delta_time_list, dtype=np.float64),
-            ))
+            row_entries.append(
+                (
+                    i,
+                    np.asarray(next_indices, dtype=np.int_),
+                    np.asarray(delta_energy_list, dtype=np.float64),
+                    np.asarray(delta_time_list, dtype=np.float64),
+                )
+            )
             total_valid_edges += len(next_indices)
 
         if row_entries:
@@ -261,8 +263,10 @@ def _init_transition_worker(context: dict[str, Any]) -> None:
     global _DP_PARALLEL_CONTEXT
     try:
         signal.signal(signal.SIGINT, signal.SIG_IGN)
-        if hasattr(signal, "SIGBREAK"):
-            signal.signal(signal.SIGBREAK, signal.SIG_IGN)
+        # Windows平台使用SIGBREAK
+        sigbreak = getattr(signal, "SIGBREAK", None)
+        if sigbreak is not None:
+            signal.signal(sigbreak, signal.SIG_IGN)
     except ValueError, AttributeError:
         # 非主进程/不支持的平台上忽略注册错误
         pass
@@ -726,11 +730,13 @@ class VariableSpacingDPOptimizer:
         基于临界点的变间距阶段划分
         将线路按照临界点划分为大分区, 每个大分区等分为 sub_stage_count 个子阶段
         """
-        critical_points_position_arr = np.concatenate((
-            np.array([self.task.start_position]),
-            self.safeguard_utility.get_intersecting_dangerous_point(),
-            np.array([self.task.target_position]),
-        ))
+        critical_points_position_arr = np.concatenate(
+            (
+                np.array([self.task.start_position]),
+                self.safeguard_utility.get_intersecting_dangerous_point(),
+                np.array([self.task.target_position]),
+            )
+        )
         stages = []
 
         for i in range(len(critical_points_position_arr) - 1):
