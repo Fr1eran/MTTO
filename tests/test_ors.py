@@ -41,7 +41,7 @@ def operation_reference_system():
         target_position=pa_zp,
         schedule_time=440.0,
         max_acc_change=0.75,
-        max_arr_time_error=120.0,
+        max_arr_time_error_ratio=120.0,
         max_stop_error=0.3,
     )
     return ORS(vehicle=vehicle, track=track, factor=0.95)

@@ -55,7 +55,7 @@ def build_scenario() -> tuple[VehicleInfo, TrackInfo, SafeGuardUtility, TrainSer
         target_position=putong_end_position,
         schedule_time=440.0,
         max_acc_change=0.75,
-        max_arr_time_error=60.0,
+        max_arr_time_error_ratio=60.0,
         max_stop_error=2.0,
     )
 
@@ -153,19 +153,21 @@ def main() -> None:
 
     vehicle, track, safeguard_utility, task = build_scenario()
 
-    venv_eval = DummyVecEnv([
-        lambda: make_env(
-            vehicle=vehicle,
-            track=track,
-            safeguard_utility=safeguard_utility,
-            train_service=task,
-            gamma=reward_discount,
-            max_step_distance=ds,
-            enable_diagnostics=args.enable_env_diagnostics,
-            enable_trajectory_tracking=args.record_video,
-            render_mode="rgb_array" if args.record_video else None,
-        )
-    ])
+    venv_eval = DummyVecEnv(
+        [
+            lambda: make_env(
+                vehicle=vehicle,
+                track=track,
+                safeguard_utility=safeguard_utility,
+                train_service=task,
+                gamma=reward_discount,
+                max_step_distance=ds,
+                enable_diagnostics=args.enable_env_diagnostics,
+                enable_trajectory_tracking=args.record_video,
+                render_mode="rgb_array" if args.record_video else None,
+            )
+        ]
+    )
 
     venv_eval = VecNormalize.load(vecnormalize_save_path, venv_eval)
     venv_eval.training = False

@@ -50,7 +50,7 @@ def mtto_env():
         target_position=putong_end_position,
         schedule_time=440.0,
         max_acc_change=0.75,
-        max_arr_time_error=60.0,
+        max_arr_time_error_ratio=60.0,
         max_stop_error=2.0,
     )
 

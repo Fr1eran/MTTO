@@ -107,7 +107,7 @@ class MTTOEnv(gym.Env):
         self.safeguard_utility = safeguard_utility
 
         # 运行任务约束
-        self.task = train_service
+        self.train_service = train_service
 
         # 回报折扣因子
         self.gamma = gamma
@@ -123,7 +123,10 @@ class MTTOEnv(gym.Env):
         # 最大转移步数
         self.max_episode_steps: int = (
             math.ceil(
-                abs(self.task.target_position - self.task.start_position)
+                abs(
+                    self.train_service.target_position
+                    - self.train_service.start_position
+                )
                 / self.max_step_distance
             )
             + 3
@@ -135,10 +138,12 @@ class MTTOEnv(gym.Env):
         # - 运动方向
         # - 目标速度, 单位: m/s
         self.whole_distance: float = abs(
-            self.task.target_position - self.task.start_position
+            self.train_service.target_position - self.train_service.start_position
         )
         self.direction: int = (
-            1 if self.task.start_position < self.task.target_position else -1
+            1
+            if self.train_service.start_position < self.train_service.target_position
+            else -1
         )
         self.goal_speed: float = 0.0
 
@@ -163,9 +168,10 @@ class MTTOEnv(gym.Env):
         # 计算最短运行时间参考曲线 - 速度上限曲线
         self.upper_speed_profile_pos_arr, self.upper_speed_profile_speed_arr = (
             self.ors.calc_min_operation_time_curve(
-                begin_pos=self.task.start_position,
-                begin_speed=self.task.start_speed,
-                end_pos=self.task.target_position + 10.0,
+                begin_pos=self.train_service.start_position,
+                begin_speed=self.train_service.start_speed,
+                end_pos=self.train_service.target_position
+                + self.train_service.max_stop_error * 20,
                 end_speed=0.0,
             )
         )
@@ -179,20 +185,19 @@ class MTTOEnv(gym.Env):
         # 计算最大能耗和最短运行时间
         mec, lec, self.min_operation_time = (
             self.ors.calc_max_energy_and_min_operation_time(
-                begin_pos=self.task.start_position,
-                begin_speed=self.task.start_speed,
-                end_pos=self.task.target_position + 10.0,
+                begin_pos=self.train_service.start_position,
+                begin_speed=self.train_service.start_speed,
+                end_pos=self.train_service.target_position,
                 end_speed=0.0,
-                distance=self.task.target_position
-                + self.task.max_stop_error
-                - self.task.start_position,
+                distance=self.train_service.target_position
+                - self.train_service.start_position,
                 energy_con_calc=self.ecc,
             )
         )
         self.max_energy_consumption = mec + lec
 
         # 计算参考曲线上每个位置对应的最短累计耗时
-        self.ref_curve_cum_time = self._calc_ref_cum_time()
+        # self.ref_curve_cum_time = self._calc_ref_cum_time()
 
         # 初始化状态
         # 包含:
@@ -210,8 +215,8 @@ class MTTOEnv(gym.Env):
         # - 下步状态转移后可能位置对应的最小运行速度大小, 单位: m/s
         # - 当前状态所对应的最迟牵引干预位置, 单位: m/s
         # - 当前状态所对应的最迟制动干预位置, 单位: m/s
-        self.current_pos: float = self.task.start_position
-        self.current_speed: float = self.task.start_speed
+        self.current_pos: float = self.train_service.start_position
+        self.current_speed: float = self.train_service.start_speed
         self.current_acc: float = 0.0
         self.current_operation_time: float = 0.0
         self.current_energy_consumption: float = 0.0
@@ -251,46 +256,58 @@ class MTTOEnv(gym.Env):
         )
 
         # 定义智能体能够观测的状态信息
-        self.observation_space = gym.spaces.Dict({
-            "remaining_distance": gym.spaces.Box(
-                0.0,
-                1.0,
-                shape=(1,),
-                dtype=np.float32,
-            ),
-            "current_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
-            "current_acc": gym.spaces.Box(
-                -1.0,
-                1.0,
-                shape=(1,),
-                dtype=np.float32,
-            ),
-            "remaining_schedule_time": gym.spaces.Box(
-                -1.0,  # 最多超时10分钟
-                1.0,
-                shape=(1,),
-                dtype=np.float32,  # 允许超时或提前
-            ),
-            "current_slope": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
-            "current_max_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
-            "current_min_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
-            "next_slope": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
-            "next_max_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
-            "next_min_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
-            "current_latest_traction_intervention_point": gym.spaces.Box(
-                0.0, 1.0, shape=(1,), dtype=np.float32
-            ),
-            "current_latest_braking_intervention_point": gym.spaces.Box(
-                0.0, 1.0, shape=(1,), dtype=np.float32
-            ),
-            "is_final_approach": gym.spaces.Box(
-                -1.0, 1.0, shape=(1,), dtype=np.float32
-            ),
-            "rel_dist_to_target": gym.spaces.Box(
-                -1.0, 1.0, shape=(1,), dtype=np.float32
-            ),
-            "required_dec": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
-        })
+        self.observation_space = gym.spaces.Dict(
+            {
+                "remaining_distance": gym.spaces.Box(
+                    0.0,
+                    1.0,
+                    shape=(1,),
+                    dtype=np.float32,
+                ),
+                "current_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
+                "current_acc": gym.spaces.Box(
+                    -1.0,
+                    1.0,
+                    shape=(1,),
+                    dtype=np.float32,
+                ),
+                "remaining_schedule_time": gym.spaces.Box(
+                    -1.0,  # 最多超时10分钟
+                    1.0,
+                    shape=(1,),
+                    dtype=np.float32,  # 允许超时或提前
+                ),
+                "current_slope": gym.spaces.Box(
+                    -1.0, 1.0, shape=(1,), dtype=np.float32
+                ),
+                "current_max_speed": gym.spaces.Box(
+                    0.0, 1.0, shape=(1,), dtype=np.float32
+                ),
+                "current_min_speed": gym.spaces.Box(
+                    0.0, 1.0, shape=(1,), dtype=np.float32
+                ),
+                "next_slope": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
+                "next_max_speed": gym.spaces.Box(
+                    0.0, 1.0, shape=(1,), dtype=np.float32
+                ),
+                "next_min_speed": gym.spaces.Box(
+                    0.0, 1.0, shape=(1,), dtype=np.float32
+                ),
+                "current_latest_traction_intervention_point": gym.spaces.Box(
+                    0.0, 1.0, shape=(1,), dtype=np.float32
+                ),
+                "current_latest_braking_intervention_point": gym.spaces.Box(
+                    0.0, 1.0, shape=(1,), dtype=np.float32
+                ),
+                "is_final_approach": gym.spaces.Box(
+                    -1.0, 1.0, shape=(1,), dtype=np.float32
+                ),
+                "rel_dist_to_target": gym.spaces.Box(
+                    -1.0, 1.0, shape=(1,), dtype=np.float32
+                ),
+                "required_dec": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
+            }
+        )
 
         # 定义智能体的动作空间, 归一化
         self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
@@ -370,7 +387,7 @@ class MTTOEnv(gym.Env):
             dict: Observation with agent and target positions
         """
 
-        dist_to_target = self.task.target_position - self.current_pos
+        dist_to_target = self.train_service.target_position - self.current_pos
         is_final_approach = True if abs(dist_to_target) <= 3000.0 else False
         rel_dist_to_target = 0.0
         required_dec_normalized = 0.0
@@ -392,8 +409,8 @@ class MTTOEnv(gym.Env):
             "current_acc": np.array([self.current_acc], dtype=np.float32),
             "remaining_schedule_time": np.array(
                 [
-                    (self.task.schedule_time - self.current_operation_time)
-                    / self.task.schedule_time
+                    (self.train_service.schedule_time - self.current_operation_time)
+                    / self.train_service.schedule_time
                 ],
                 dtype=np.float32,
             ),
@@ -556,8 +573,8 @@ class MTTOEnv(gym.Env):
         self._comfort_exceedance_count = 0
 
         # 重新初始化运行状态
-        self.current_pos = self.task.start_position
-        self.current_speed = self.task.start_speed
+        self.current_pos = self.train_service.start_position
+        self.current_speed = self.train_service.start_speed
         self.current_acc = 0.0
         self.current_operation_time = 0.0
         self.current_energy_consumption = 0.0
@@ -647,20 +664,12 @@ class MTTOEnv(gym.Env):
         _delta_acc = abs(self.current_acc - self.last_state["acc"])
         self._comfort_tav += _delta_acc
         self._comfort_sum_sq_delta_acc += _delta_acc**2
-        if _delta_acc > self.task.max_acc_change:
+        if _delta_acc > self.train_service.max_acc_change:
             self._comfort_exceedance_count += 1
 
         # 根据当前速度大小、加速度、状态转移最大位移量
         # 计算转移至下一状态的速度大小、位移量和运行时间
         next_speed, distance, operation_time = self._update_motion()
-
-        # 计算当前列车在参考运行模式下的能耗和运行时间
-        # ref_mec, ref_lec, ref_operation_time = self.ors.CalRefEnergyAndOperationTime(
-        #     begin_pos=prev_pos,
-        #     begin_speed=prev_speed,
-        #     displacement=displacement,
-        # )
-        # ref_energy_consumption = ref_mec + ref_lec
 
         # 计算当前能耗
         current_mec, current_lec = self.ecc.calc_energy(
@@ -728,8 +737,8 @@ class MTTOEnv(gym.Env):
 
         # 判断智能体是否到达目标区域
         terminated = abs(
-            self.task.target_position - self.current_pos
-        ) <= self.task.max_stop_error and math.isclose(
+            self.train_service.target_position - self.current_pos
+        ) <= self.train_service.max_stop_error * 10 and math.isclose(
             self.current_speed, 0.0, abs_tol=0.1
         )
 
@@ -867,9 +876,11 @@ class MTTOEnv(gym.Env):
                 reward_total = self._get_reward_dense()
         else:
             progress = (
-                abs(self.current_pos - self.task.start_position) / self.whole_distance
+                abs(self.current_pos - self.train_service.start_position)
+                / self.whole_distance
             )
-            reward_total = -150.0 * (1.0 - np.sqrt(progress)) - 50.0
+            # reward_total = -150.0 * (1.0 - np.sqrt(progress)) - 50.0
+            reward_total = -50.0 * (1.0 - np.sqrt(progress))
 
         if self.enable_diagnostics and self._collect_step_diagnostics:
             self.rewards_info["total"] = reward_total
@@ -926,7 +937,7 @@ class MTTOEnv(gym.Env):
                 sp=self.current_sp
             )
             if self.current_sp >= 0
-            else self.task.target_position,
+            else self.train_service.target_position,
         )
 
         # phi_curr = self._potential_safety_position(
@@ -956,7 +967,7 @@ class MTTOEnv(gym.Env):
                 sp=self.current_sp
             )
             if self.current_sp >= 0
-            else self.task.target_position,
+            else self.train_service.target_position,
         )
 
         # phi_prev = self._potential_safety_position(
@@ -992,8 +1003,6 @@ class MTTOEnv(gym.Env):
         # 基础偏离惩罚(二次方项, 引导列车走中间)
         norm_speed_diff = (speed - center_speed) / safe_margin
         phi_base = 2.0 * np.log(1.01 - norm_speed_diff**2)
-
-        # 边界壁垒
 
         # 靠近目标位置时，适当增大惩罚力度
         scale = 1.0 + 1.0 * np.exp(-0.001 * distanceToTarget)
@@ -1040,9 +1049,9 @@ class MTTOEnv(gym.Env):
 
         delta_acc = abs(self.last_state["acc"] - self.current_acc)
         # 使用指数衰减式的钟形曲线
-        norm_jerk = delta_acc / (self.task.max_acc_change)
+        norm_jerk = delta_acc / (self.train_service.max_acc_change)
 
-        val = -0.1 * (1 - np.exp(-3.0 * norm_jerk))
+        val = -0.08 * (1 - np.exp(-3.0 * norm_jerk))
 
         return val
 
@@ -1067,12 +1076,14 @@ class MTTOEnv(gym.Env):
         min_remaining_operation_time = self.ors.calc_min_operation_time(
             begin_pos=pos,
             begin_speed=speed,
-            end_pos=self.task.target_position,
+            end_pos=self.train_service.target_position,
             end_speed=0.0,
         )
 
         # 计算实际剩余规划运行时间
-        actual_remaining_operation_time = self.task.schedule_time - operation_time
+        actual_remaining_operation_time = (
+            self.train_service.schedule_time - operation_time
+        )
 
         # 计算冗余运行时间
         redundant_operation_time = (
@@ -1080,7 +1091,9 @@ class MTTOEnv(gym.Env):
         )
 
         # 计算时间冗余度
-        time_redundancy_norm = redundant_operation_time / self.task.schedule_time
+        time_redundancy_norm = (
+            redundant_operation_time / self.train_service.schedule_time
+        )
 
         return -10.0 * np.log1p(np.exp(-12.0 * time_redundancy_norm))
 
@@ -1103,7 +1116,7 @@ class MTTOEnv(gym.Env):
         K_G = 12.0
 
         # 正则化
-        dist_error = self.task.target_position - pos
+        dist_error = self.train_service.target_position - pos
         x_hat = dist_error / self.whole_distance
         v_hat = speed / self.vehicle.max_speed
 
@@ -1118,8 +1131,8 @@ class MTTOEnv(gym.Env):
     def _get_reward_goal(
         self,
     ) -> float:
-        reward_docking = self._get_reward_docking_goal() * 8
-        reward_punctuality = self._get_reward_punctuality_goal() * 5
+        reward_docking = self._get_reward_docking_goal() * 8.0
+        reward_punctuality = self._get_reward_punctuality_goal() * 5.0
 
         if self.enable_diagnostics and self._collect_step_diagnostics:
             self.rewards_info["docking"] = reward_docking
@@ -1129,17 +1142,26 @@ class MTTOEnv(gym.Env):
 
     def _get_reward_docking_goal(self) -> float:
         # 停站位置误差不超过0.3m
-        docking_pos_error = abs(self.task.target_position - self.current_pos)
+        docking_pos_error = abs(self.train_service.target_position - self.current_pos)
 
         return self._gaussian_kernel(A=2, B=-1, k=2.310490602, x=docking_pos_error)
-        # return -abs(self.current_pos - self.task.target_position)
 
     def _get_reward_punctuality_goal(self) -> float:
         # 列车到站时刻误差不超过2min
-        ontime_error = abs(self.task.schedule_time - self.current_operation_time)
+        ontime_error = abs(
+            self.train_service.schedule_time - self.current_operation_time
+        )
 
-        return self._gaussian_kernel(A=2, B=-1, k=0.005776227, x=ontime_error)
-        # return -abs(self.remaining_schedule_time) / self.task.schedule_time
+        return self._gaussian_kernel(
+            A=2,
+            B=-1,
+            k=69.314718056
+            / (
+                self.train_service.schedule_time
+                * self.train_service.max_arr_time_error_ratio
+            ),
+            x=ontime_error,
+        )
 
     def _gaussian_kernel(self, A: float, B: float, k: float, x: float) -> float:
         return A * np.exp(-k * x) + B
@@ -1219,8 +1241,8 @@ class MTTOEnv(gym.Env):
             self.trajectory_speed_mps = None
             return
 
-        self.trajectory_pos = [self.task.start_position]
-        self.trajectory_speed_mps = [abs(self.task.start_speed)]
+        self.trajectory_pos = [self.train_service.start_position]
+        self.trajectory_speed_mps = [abs(self.train_service.start_speed)]
 
     def render(self):
         if self.render_mode is None:
@@ -1270,17 +1292,17 @@ class MTTOEnv(gym.Env):
         self.fig.suptitle("磁悬浮列车智能体训练过程", fontsize=14)
 
         # 设置坐标轴范围
-        pos_margin = abs(self.task.target_position - self.current_pos) * 0.1
+        pos_margin = abs(self.train_service.target_position - self.current_pos) * 0.1
         self.ax.set_xlim(
-            min(self.current_pos, self.task.target_position) - pos_margin,
-            max(self.current_pos, self.task.target_position) + pos_margin,
+            min(self.current_pos, self.train_service.target_position) - pos_margin,
+            max(self.current_pos, self.train_service.target_position) + pos_margin,
         )
         self.ax.set_ylim(0, 600.0)  # 速度范围，单位：km/h
 
         # 绘制起点和终点
         self.ax.scatter(
-            self.task.start_position,
-            abs(self.task.start_speed * 3.6),
+            self.train_service.start_position,
+            abs(self.train_service.start_speed * 3.6),
             marker="o",
             color="blue",
             s=60,
@@ -1289,7 +1311,7 @@ class MTTOEnv(gym.Env):
             zorder=5,
         )
         self.ax.scatter(
-            x=self.task.target_position,
+            x=self.train_service.target_position,
             y=0.0,
             marker="o",
             color="red",

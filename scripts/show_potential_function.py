@@ -3,11 +3,7 @@ import matplotlib.pyplot as plt
 from typing import Any, cast
 
 from utils.data_loader import load_safeguard_curves
-from utils.plot_utils import set_chinese_font
-
-set_chinese_font()
-# SimHei 缺少 U+2212 负号字形，关闭 Unicode 负号可避免告警。
-plt.rcParams["axes.unicode_minus"] = False
+from utils.plot_utils import set_global_plot_style
 
 
 def calc_potential_safety_speed(pos, speed, min_speed, max_speed, target_pos):
@@ -27,8 +23,6 @@ def calc_potential_safety_speed(pos, speed, min_speed, max_speed, target_pos):
     valid_mask_speed = in_speed_band & (speed_log_arg > 0.0)
     phi_base = np.full_like(norm_speed_diff, np.nan, dtype=np.float64)
     phi_base[valid_mask_speed] = 2.0 * np.log(speed_log_arg[valid_mask_speed])
-
-    # 边界壁垒
 
     # 靠近目标位置时，适当增大惩罚力度
     scale = 1.0 + 1.0 * np.exp(-0.001 * distance_to_target)
@@ -171,8 +165,8 @@ def plot_safety_potential_heatmap_speed():
     )
     pos_right_bound = max_curves_list[7][0, -1]
 
-    pos_array = np.linspace(pos_left_bound, pos_right_bound, 800)
-    speed_array_ms = np.linspace(lower_speed, upper_speed, 1000)
+    pos_array = np.linspace(pos_left_bound, pos_right_bound, 2000)
+    speed_array_ms = np.linspace(lower_speed, upper_speed, 2000)
 
     POS, SPEED = np.meshgrid(pos_array, speed_array_ms)
 
@@ -203,14 +197,14 @@ def plot_safety_potential_heatmap_speed():
     # 计算整个网络的势能值
 
     # 原始版本
-    # POTENTIAL = calc_potential_safety_speed(
-    #     POS, SPEED, SPEED_MIN, SPEED_MAX, target_pos
-    # )
-
-    # 自适应安全目标势能场
-    POTENTIAL = calc_potential_safety_speed_adaptive(
+    POTENTIAL = calc_potential_safety_speed(
         POS, SPEED, SPEED_MIN, SPEED_MAX, target_pos
     )
+
+    # 自适应安全目标势能场
+    # POTENTIAL = calc_potential_safety_speed_adaptive(
+    #     POS, SPEED, SPEED_MIN, SPEED_MAX, target_pos
+    # )
 
     # 生成 masking, 越界区域的值设为NAN, 使其在图上透明
     in_speed_band = (SPEED >= SPEED_MIN) & (SPEED <= SPEED_MAX)
@@ -235,26 +229,25 @@ def plot_safety_potential_heatmap_speed():
         speed_max_1d_masked * 3.6,
         color="red",
         linewidth=1,
-        label=r"速度上限($V_{max}$)",
+        label=r"Upper Speed Curve",
     )
     ax.plot(
         pos_array,
         speed_min_1d_masked * 3.6,
         color="blue",
         linewidth=1,
-        label=r"速度下限($V_{min}$)",
+        label=r"Lower Speed Curve",
     )
 
     # 添加色标
-    cbar = fig.colorbar(c, ax=ax, extend="min")
-    cbar.set_label(r"安全势能值 $\Phi_{S}$", fontsize=12)
+    fig.colorbar(c, ax=ax, extend="min")
 
     # 图表格式化
-    ax.set_xlim(pos_left_bound - 1000, pos_right_bound + 1000)
-    ax.set_ylim(lower_speed * 3.6, upper_speed * 3.6)
-    ax.set_xlabel("位置 (m)")
-    ax.set_ylabel("速度 (km/h)")
-    ax.set_title("磁浮列车运行安全势能场空间分布热力图", fontsize=14, pad=15)
+    ax.set_xlim(pos_left_bound + 5000, pos_right_bound + 1000)
+    ax.set_ylim(lower_speed * 3.6, upper_speed * 3.6 * 0.75)
+    ax.set_xlabel("Position ($m$)")
+    ax.set_ylabel("Speed ($km/h$)")
+    ax.tick_params(axis="both", which="major")
     ax.legend(loc="lower left", framealpha=0.9)
     ax.grid(True, alpha=0.3, linestyle=":")
 
@@ -279,7 +272,7 @@ def plot_safety_potential_heatmap_position():
     max_curve_speed = max_curves_list[7][1, :]
 
     # 这里将速度视为自变量，按速度从 0 到 200 km/h 反算位置边界。
-    speed_array_ms = np.linspace(lower_speed, upper_speed, 1000)
+    speed_array_ms = np.linspace(lower_speed, upper_speed, 2000)
     pos_from_min_curve = infer_position_from_speed(
         min_curve_pos, min_curve_speed, speed_array_ms
     )
@@ -295,7 +288,7 @@ def plot_safety_potential_heatmap_position():
     pos_left_bound = float(np.min(pos_lower_1d))
     pos_right_bound = float(np.max(pos_upper_1d))
 
-    pos_array = np.linspace(pos_left_bound, pos_right_bound, 800)
+    pos_array = np.linspace(pos_left_bound, pos_right_bound, 2000)
 
     POS, SPEED = np.meshgrid(pos_array, speed_array_ms)
     POS_LOWER = np.tile(pos_lower_1d[:, None], (1, pos_array.size))
@@ -324,32 +317,30 @@ def plot_safety_potential_heatmap_position():
         speed_array_ms * 3.6,
         color="red",
         linewidth=1,
-        label=r"速度上限($V_{max}$)",
+        label="Upper Speed Curve",
     )
     ax.plot(
         pos_from_min_curve,
         speed_array_ms * 3.6,
         color="blue",
         linewidth=1,
-        label=r"速度下限($V_{min}$)",
+        label="Lower Speed Curve",
     )
     ax.plot(
         safe_center_pos_array,
         speed_array_ms * 3.6,
         color="black",
         linestyle="--",
-        linewidth=2,
-        label=r"安全中心带",
+        linewidth=1.5,
+        label="Safe Center",
     )
 
-    cbar = fig.colorbar(c, ax=ax, extend="min")
-    cbar.set_label(r"安全势能值 $\Phi_{safety}$", fontsize=12)
+    fig.colorbar(c, ax=ax, extend="min")
 
     ax.set_xlim(pos_left_bound - 1000, pos_right_bound + 1000)
     ax.set_ylim(lower_speed * 3.6, upper_speed * 3.6)
-    ax.set_xlabel("位置 (m)")
-    ax.set_ylabel("速度 (km/h)")
-    ax.set_title("磁浮列车运行位置安全势能场空间分布热力图", fontsize=14, pad=15)
+    ax.set_xlabel("Position (m)")
+    ax.set_ylabel("Speed (km/h)")
     ax.legend(loc="lower left", framealpha=0.9)
     ax.grid(True, alpha=0.3, linestyle=":")
 
@@ -420,18 +411,12 @@ def plot_docking_potential_heatmap(view_mode="3d"):
             label="目标停车点",
         )
 
-        cbar = fig.colorbar(c, ax=ax)
-        cbar.set_label(r"停站势能值 $\Phi_P$", fontsize=12)
+        fig.colorbar(c, ax=ax)
 
         ax.set_xlim(pos_array[0], pos_array[-1])
         ax.set_ylim(speed_array_kmh[0], speed_array_kmh[-1])
-        ax.set_xlabel("位置 (m)")
-        ax.set_ylabel("速度 (km/h)")
-        ax.set_title(
-            "停站势函数热力图",
-            fontsize=13,
-            pad=12,
-        )
+        ax.set_xlabel("Position (m)")
+        ax.set_ylabel("Speed (km/h)")
         ax.legend(loc="upper right", framealpha=0.9)
         ax.grid(True, alpha=0.3, linestyle=":")
 
@@ -464,23 +449,17 @@ def plot_docking_potential_heatmap(view_mode="3d"):
             s=55,
             marker="o",
             depthshade=False,
-            label="目标停车点",
+            label="Target Point",
         )
 
-        cbar = fig.colorbar(surface, ax=ax, shrink=0.72, pad=0.08)
-        cbar.set_label(r"停站势能值 $\Phi_P$", fontsize=12)
+        fig.colorbar(surface, ax=ax, shrink=0.72, pad=0.08)
 
         ax.set_xlim(pos_array[0], pos_array[-1])
         ax.set_ylim(speed_array_kmh[0], speed_array_kmh[-1])
         ax.set_zlim(-K_L * 0.8, K_G * 1.02)
-        ax.set_xlabel("位置 (m)")
-        ax.set_ylabel("速度 (km/h)")
-        ax.set_zlabel(r"势能值 $\Phi_P$")
-        ax.set_title(
-            "停站势函数三维曲面图",
-            fontsize=13,
-            pad=12,
-        )
+        ax.set_xlabel("Position (m)")
+        ax.set_ylabel("Speed (km/h)")
+        ax.set_zlabel(r"$\Phi_D$")
         ax.view_init(elev=28, azim=-130)
         ax.legend(loc="upper right")
 
@@ -578,18 +557,12 @@ def plot_punctuality_potential_curve(
         potential_array,
         color="tab:green",
         linewidth=2,
-        label=r"准点势函数 $\Phi_{punctuality}$",
     )
     ax.axvline(0.0, color="black", linestyle="--", linewidth=1.2, label="零冗余")
 
     ax.set_xlim(redundant_time_upper, redundant_time_lower)
-    ax.set_xlabel("冗余运行时间 (s)")
-    ax.set_ylabel(r"准点势能值 $\Phi_{punctuality}$")
-    ax.set_title(
-        "准点势函数曲线",
-        fontsize=13,
-        pad=12,
-    )
+    ax.set_xlabel("Redunctant Operation Time (s)")
+    ax.set_ylabel(r"$\Phi_{T}$")
     ax.legend(loc="upper right", framealpha=0.9)
     ax.grid(True, alpha=0.3, linestyle=":")
 
@@ -598,13 +571,23 @@ def plot_punctuality_potential_curve(
 
 
 if __name__ == "__main__":
+    set_global_plot_style(
+        font_preset="sci",
+        preferred_font="Calibri",
+        title_font_size=8.0,
+        axis_label_font_size=8.0,
+        tick_font_size=8.0,
+        legend_font_size=8.0,
+        figure_dpi=300.0,
+        savefig_dpi=600.0,
+    )
     # plot_safety_potential_heatmap_speed()
-    # plot_safety_potential_heatmap_position()
+    plot_safety_potential_heatmap_position()
     # plot_docking_potential_heatmap(view_mode="3d")
     # plot_docking_potential_heatmap(view_mode="2d")
     # plot_docking_potential_slices()
-    plot_punctuality_potential_curve(
-        schedule_time=440.0,
-        redundant_time_upper=150.0,
-        redundant_time_lower=-200.0,
-    )
+    # plot_punctuality_potential_curve(
+    #     schedule_time=440.0,
+    #     redundant_time_upper=150.0,
+    #     redundant_time_lower=-200.0,
+    # )

@@ -1,10 +1,10 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-from model.ocs import SafeGuardUtility,TrainService
+from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo, TrackProfile
 from model.vehicle import VehicleInfo
-from model.common import ORS,ECC
+from model.common import ORS, ECC
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_safeguard_curves,
@@ -55,7 +55,7 @@ train_service = TrainService(
     target_position=putong_end_position,
     schedule_time=440.0,
     max_acc_change=0.75,
-    max_arr_time_error=120.0,
+    max_arr_time_error_ratio=120.0,
     max_stop_error=0.3,
 )
 ors = ORS(vehicle=vehicle, track=track, factor=factor)

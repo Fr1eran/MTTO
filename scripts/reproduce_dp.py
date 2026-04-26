@@ -363,7 +363,6 @@ class VariableSpacingDPOptimizer:
         track: TrackInfo,
         safeguard_utility: SafeGuardUtility,
         train_service: TrainService,
-        time_tolerance: float,
         show_precompute_progress: bool = True,
         precompute_progress_desc: str = "状态转移图预计算",
         precompute_mode: Literal["serial", "parallel"] = "serial",
@@ -384,8 +383,7 @@ class VariableSpacingDPOptimizer:
         self.track = track
         self.trackprofile = TrackProfile(track=self.track)
         self.safeguard_utility = safeguard_utility
-        self.task = train_service
-        self.time_tolerance = time_tolerance
+        self.train_service = train_service
         self.show_precompute_progress = show_precompute_progress
         self.precompute_progress_desc = precompute_progress_desc
         self.precompute_mode = precompute_mode
@@ -410,9 +408,9 @@ class VariableSpacingDPOptimizer:
         # 计算最短运行时间参考曲线
         self.ref_curve_pos, self.ref_curve_speed = (
             self.ors.calc_min_operation_time_curve(
-                begin_pos=self.task.start_position,
-                begin_speed=self.task.start_speed,
-                end_pos=self.task.target_position,
+                begin_pos=self.train_service.start_position,
+                begin_speed=self.train_service.start_speed,
+                end_pos=self.train_service.target_position,
                 end_speed=0.0,
             )
         )
@@ -732,9 +730,9 @@ class VariableSpacingDPOptimizer:
         """
         critical_points_position_arr = np.concatenate(
             (
-                np.array([self.task.start_position]),
+                np.array([self.train_service.start_position]),
                 self.safeguard_utility.get_intersecting_dangerous_point(),
-                np.array([self.task.target_position]),
+                np.array([self.train_service.target_position]),
             )
         )
         stages = []
@@ -776,7 +774,7 @@ class VariableSpacingDPOptimizer:
         return compute_comfort_metrics_from_trajectory(
             pos_arr=pos_arr,
             speed_arr=speed_arr,
-            max_acc_change=self.task.max_acc_change,
+            max_acc_change=self.train_service.max_acc_change,
         )
 
     def BuildSmoothedDisplayCurve(
@@ -933,9 +931,10 @@ class VariableSpacingDPOptimizer:
         """
         二分法调整运行时间乘子, 从而使结果逼近规定的运行时间
         """
-        target_time = self.task.schedule_time
+        target_time = self.train_service.schedule_time
+        time_tolerance_ratio = self.train_service.max_arr_time_error_ratio
         print(
-            f"开始双层寻优: 目标时间为{target_time:.2f}s, 时间误差容忍率为 {self.time_tolerance}, 速度步长为 {delta_speed:.2f}m/s"
+            f"开始双层寻优: 目标时间为{target_time:.2f}s, 时间误差容忍率为 {time_tolerance_ratio}%, 速度步长为 {delta_speed:.2f}m/s"
         )
 
         lambda_time = 1e5
@@ -964,10 +963,10 @@ class VariableSpacingDPOptimizer:
             best_result = result
 
             # 判断时间误差率是否满足约束
-            time_error_ratio = abs(total_time - target_time) / target_time
-            if time_error_ratio <= self.time_tolerance:
+            time_error_ratio = abs(total_time - target_time) / target_time * 100.0
+            if time_error_ratio <= time_tolerance_ratio:
                 print(
-                    f"成功收敛! 运行时间误差率为{time_error_ratio * 100:.4f}%, 满足精度要求"
+                    f"成功收敛! 运行时间误差率为{time_error_ratio:.4f}%, 满足精度要求"
                 )
                 break
 
@@ -1081,7 +1080,7 @@ if __name__ == "__main__":
         target_position=putong_target,
         schedule_time=440.0,
         max_acc_change=0.75,
-        max_arr_time_error=120.0,
+        max_arr_time_error_ratio=5.0,
         max_stop_error=0.3,
     )
 
@@ -1090,7 +1089,6 @@ if __name__ == "__main__":
         track=track,
         safeguard_utility=safeguard_utility,
         train_service=train_service,
-        time_tolerance=0.01,
         show_precompute_progress=not cli_args.hide_precompute_progress,
         precompute_progress_desc="状态转移图预计算",
         precompute_mode=cli_args.precompute_mode,
