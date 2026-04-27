@@ -70,8 +70,8 @@ def _prepare_callback(
     callback = BestTrajectoryEvalCallback(
         eval_env=DummyEvalEnv(),
         output_dir=str(tmp_path),
-        trigger_mode=trigger_mode,
-        trigger_interval=trigger_interval,
+        eval_trigger_mode=trigger_mode,
+        eval_trigger_interval=trigger_interval,
         deterministic=True,
     )
     callback.init_callback(DummyModel(training_env=training_env, logger=logger))  # type: ignore

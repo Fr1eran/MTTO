@@ -26,13 +26,20 @@ def build_scenario() -> tuple[VehicleInfo, TrackInfo, SafeGuardUtility, TrainSer
     )
     accessible_points, dangerous_points = load_auxiliary_stopping_areas_ap_and_dp()
     longyang_start_position, putong_end_position = load_stations_goal_positions()
-    min_curves_list, max_curves_list = load_safeguard_curves(
-        "min_curves_list", "max_curves_list"
+    levi_curves_list, brake_curves_list, min_curves_list, max_curves_list = (
+        load_safeguard_curves(
+            "levi_curves_list",
+            "brake_curves_list",
+            "min_curves_list",
+            "max_curves_list",
+        )
     )
 
     safeguard_utility = SafeGuardUtility(
         speed_limits=speed_limits,
         speed_limit_intervals=speed_limit_intervals,
+        levi_curves_list=levi_curves_list,
+        brake_curves_list=brake_curves_list,
         min_curves_list=min_curves_list,
         max_curves_list=max_curves_list,
         factor=0.95,
@@ -69,7 +76,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model-path",
         type=str,
-        default="output/optimal/rl/final/ppo_mtto",
+        default="output/optimal/rl/final/ppo_mtto_model",
         help="Path prefix of PPO model zip file (without .zip suffix).",
     )
     parser.add_argument(
@@ -153,21 +160,19 @@ def main() -> None:
 
     vehicle, track, safeguard_utility, task = build_scenario()
 
-    venv_eval = DummyVecEnv(
-        [
-            lambda: make_env(
-                vehicle=vehicle,
-                track=track,
-                safeguard_utility=safeguard_utility,
-                train_service=task,
-                gamma=reward_discount,
-                max_step_distance=ds,
-                enable_diagnostics=args.enable_env_diagnostics,
-                enable_trajectory_tracking=args.record_video,
-                render_mode="rgb_array" if args.record_video else None,
-            )
-        ]
-    )
+    venv_eval = DummyVecEnv([
+        lambda: make_env(
+            vehicle=vehicle,
+            track=track,
+            safeguard_utility=safeguard_utility,
+            train_service=task,
+            gamma=reward_discount,
+            max_step_distance=ds,
+            enable_diagnostics=args.enable_env_diagnostics,
+            enable_trajectory_tracking=args.record_video,
+            render_mode="rgb_array" if args.record_video else None,
+        )
+    ])
 
     venv_eval = VecNormalize.load(vecnormalize_save_path, venv_eval)
     venv_eval.training = False

@@ -22,13 +22,20 @@ def mtto_env():
     speed_limits, speed_limit_intervals = load_speed_limits(to_mps=True)
     accessible_points, dangerous_points = load_auxiliary_stopping_areas_ap_and_dp()
     longyang_start_position, putong_end_position = load_stations_goal_positions()
-    min_curves_list, max_curves_list = load_safeguard_curves(
-        "min_curves_list", "max_curves_list"
+    levi_curves_list, brake_curves_list, min_curves_list, max_curves_list = (
+        load_safeguard_curves(
+            "levi_curves_list",
+            "brake_curves_list",
+            "min_curves_list",
+            "max_curves_list",
+        )
     )
 
     safeguard_utility = SafeGuardUtility(
         speed_limits=speed_limits,
         speed_limit_intervals=speed_limit_intervals,
+        levi_curves_list=levi_curves_list,
+        brake_curves_list=brake_curves_list,
         min_curves_list=min_curves_list,
         max_curves_list=max_curves_list,
         factor=0.95,
@@ -164,8 +171,9 @@ def test_step_without_diagnostics_keeps_tb_dicts_empty(mtto_env: MTTOEnv):
             "position",
             "stopping_point_index",
         }
-        assert "runtime" in info
-        runtime = info["runtime"]
+        runtime_namespace = "basic" if "basic" in info else "runtime"
+        assert runtime_namespace in info
+        runtime = info[runtime_namespace]
         assert isinstance(runtime, dict)
         assert expected_runtime_keys.issubset(set(runtime.keys()))
         assert expected_runtime_keys.issubset(set(mtto_env.basic_info.keys()))
@@ -189,13 +197,14 @@ def test_step_with_diagnostics_puts_namespaces_at_info_top_level(
     _, _, _, _, info = mtto_env.step(action)
 
     assert "tb_diagnostics" not in info
-    assert "runtime" in info
+    runtime_namespace = "basic" if "basic" in info else "runtime"
+    assert runtime_namespace in info
     assert "rewards" in info
     assert "state" in info
     assert "constraint" in info
     assert "event" in info
 
-    runtime = info["runtime"]
+    runtime = info[runtime_namespace]
     assert isinstance(runtime, dict)
     assert "position" in runtime
     assert "docking_position" not in runtime

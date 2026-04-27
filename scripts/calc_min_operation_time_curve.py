@@ -18,8 +18,13 @@ slopes, slope_intervals = load_slopes()
 speed_limits, speed_limit_intervals = load_speed_limits(to_mps=True)
 accessible_points, dangerous_points = load_auxiliary_stopping_areas_ap_and_dp()
 longyang_start_position, putong_end_position = load_stations_goal_positions()
-min_curves_list, max_curves_list = load_safeguard_curves(
-    "min_curves_list", "max_curves_list"
+levi_curves_list, brake_curves_list, min_curves_list, max_curves_list = (
+    load_safeguard_curves(
+        "levi_curves_list",
+        "brake_curves_list",
+        "min_curves_list",
+        "max_curves_list",
+    )
 )
 
 
@@ -27,6 +32,8 @@ factor: float = 0.99
 safeguard_utility = SafeGuardUtility(
     speed_limits=speed_limits,
     speed_limit_intervals=speed_limit_intervals,
+    levi_curves_list=levi_curves_list,
+    brake_curves_list=brake_curves_list,
     min_curves_list=min_curves_list,
     max_curves_list=max_curves_list,
     factor=factor,
@@ -86,7 +93,7 @@ set_chinese_font()
 fig, ax = plt.subplots(figsize=(12, 7))
 
 # 绘制静态元素（区间限速、危险速度域和终点等）
-safeguard_utility.render(ax=ax)
+safeguard_utility.render(ax=ax, layers=SafeGuardUtility.DANGER_VIEW_LAYERS)
 
 ax.scatter(
     end_pos,

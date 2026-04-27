@@ -18,7 +18,7 @@ from model.vehicle import VehicleInfo
 from model.track import TrackInfo, TrackProfile
 from model.common import ECC, ORS
 from utils.io_utils import save_curve_and_metrics
-from utils.plot_utils import set_chinese_font
+from utils.plot_utils import set_global_plot_style
 from utils.data_loader import (
     load_slopes,
     load_safeguard_curves,
@@ -243,14 +243,12 @@ def _compute_transition_batch(
             if not next_indices:
                 continue
 
-            row_entries.append(
-                (
-                    i,
-                    np.asarray(next_indices, dtype=np.int_),
-                    np.asarray(delta_energy_list, dtype=np.float64),
-                    np.asarray(delta_time_list, dtype=np.float64),
-                )
-            )
+            row_entries.append((
+                i,
+                np.asarray(next_indices, dtype=np.int_),
+                np.asarray(delta_energy_list, dtype=np.float64),
+                np.asarray(delta_time_list, dtype=np.float64),
+            ))
             total_valid_edges += len(next_indices)
 
         if row_entries:
@@ -728,13 +726,11 @@ class VariableSpacingDPOptimizer:
         基于临界点的变间距阶段划分
         将线路按照临界点划分为大分区, 每个大分区等分为 sub_stage_count 个子阶段
         """
-        critical_points_position_arr = np.concatenate(
-            (
-                np.array([self.train_service.start_position]),
-                self.safeguard_utility.get_intersecting_dangerous_point(),
-                np.array([self.train_service.target_position]),
-            )
-        )
+        critical_points_position_arr = np.concatenate((
+            np.array([self.train_service.start_position]),
+            self.safeguard_utility.get_intersecting_dangerous_point(),
+            np.array([self.train_service.target_position]),
+        ))
         stages = []
 
         for i in range(len(critical_points_position_arr) - 1):
@@ -994,6 +990,30 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         description="复现变间距动态规划速度曲线，并支持状态转移图并行预计算。"
     )
     parser.add_argument(
+        "--output-root",
+        type=str,
+        default="output/optimal/dp",
+        help="优化结果输出根目录。",
+    )
+    parser.add_argument(
+        "--schedule-time-s",
+        type=float,
+        default=440.0,
+        help="规划运行时间(s)。",
+    )
+    parser.add_argument(
+        "--delta-speed-mps",
+        type=float,
+        default=0.1,
+        help="速度搜索步长(m/s)。",
+    )
+    parser.add_argument(
+        "--max-outer-iterations",
+        type=int,
+        default=100,
+        help="外层二分搜索最大迭代次数。",
+    )
+    parser.add_argument(
         "--precompute-mode",
         choices=("serial", "parallel"),
         default="serial",
@@ -1025,12 +1045,60 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     return parser
 
 
-if __name__ == "__main__":
-    cli_args = _build_cli_parser().parse_args()
+def _format_float_token(value: float, *, decimals: int = 10) -> str:
+    if not np.isfinite(value):
+        raise ValueError("value must be finite")
 
-    dp_result_save_dir = "output/optimal/dp"
-    os.makedirs(os.path.dirname(dp_result_save_dir), exist_ok=True)
+    token = f"{round(float(value), decimals):.{decimals}f}".rstrip("0").rstrip(".")
+    if token in {"", "-0", "0"}:
+        token = "0"
+    if "." not in token:
+        token = f"{token}.0"
+    return token.replace("-", "neg").replace(".", "p")
 
+
+def _resolve_output_dir(
+    *,
+    output_root: str,
+    schedule_time_s: float,
+    delta_speed_mps: float,
+) -> str:
+    schedule_token = _format_float_token(schedule_time_s)
+    delta_token = _format_float_token(delta_speed_mps)
+    return os.path.join(output_root, f"{schedule_token}_{delta_token}")
+
+
+def _validate_cli_args(cli_args: argparse.Namespace) -> None:
+    if not cli_args.output_root.strip():
+        raise ValueError("--output-root must not be empty")
+    if cli_args.schedule_time_s <= 0.0:
+        raise ValueError("--schedule-time-s must be > 0")
+    if cli_args.delta_speed_mps <= 0.0:
+        raise ValueError("--delta-speed-mps must be > 0")
+    if cli_args.max_outer_iterations < 1:
+        raise ValueError("--max-outer-iterations must be >= 1")
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = _build_cli_parser()
+    cli_args = parser.parse_args(argv)
+
+    try:
+        _validate_cli_args(cli_args)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    output_dir = _resolve_output_dir(
+        output_root=cli_args.output_root,
+        schedule_time_s=cli_args.schedule_time_s,
+        delta_speed_mps=cli_args.delta_speed_mps,
+    )
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"优化结果输出目录: {output_dir}")
+    return _run_optimization(cli_args=cli_args, output_dir=output_dir)
+
+
+def _run_optimization(*, cli_args: argparse.Namespace, output_dir: str) -> int:
     # 坡度，百分位
     slopes, slope_intervals = load_slopes()
 
@@ -1039,23 +1107,25 @@ if __name__ == "__main__":
 
     # 车站
     stations_data = load_stations()
-    longyang_start = stations_data["start_station"]["start"]
     longyang_target = stations_data["start_station"]["target"]
-    longyang_end = stations_data["start_station"]["end"]
-    putong_start = stations_data["end_station"]["start"]
     putong_target = stations_data["end_station"]["target"]
-    putong_end = stations_data["end_station"]["end"]
 
     # 防护曲线
-    min_curves_list, max_curves_list = load_safeguard_curves(
-        "min_curves_list",
-        "max_curves_list",
+    levi_curves_list, brake_curves_list, min_curves_list, max_curves_list = (
+        load_safeguard_curves(
+            "levi_curves_list",
+            "brake_curves_list",
+            "min_curves_list",
+            "max_curves_list",
+        )
     )
 
     factor: float = 0.99
     safeguard_utility = SafeGuardUtility(
         speed_limits=speed_limits,
         speed_limit_intervals=speed_limit_intervals,
+        levi_curves_list=levi_curves_list,
+        brake_curves_list=brake_curves_list,
         min_curves_list=min_curves_list,
         max_curves_list=max_curves_list,
         factor=factor,
@@ -1078,7 +1148,7 @@ if __name__ == "__main__":
         start_position=longyang_target,
         start_speed=0.0,
         target_position=putong_target,
-        schedule_time=440.0,
+        schedule_time=cli_args.schedule_time_s,
         max_acc_change=0.75,
         max_arr_time_error_ratio=5.0,
         max_stop_error=0.3,
@@ -1098,13 +1168,17 @@ if __name__ == "__main__":
     )
 
     try:
-        result = VSDP.optimize(max_speed=500.0 / 3.6, delta_speed=0.1, max_iters=100)
+        result = VSDP.optimize(
+            max_speed=vehicle.max_speed,
+            delta_speed=cli_args.delta_speed_mps,
+            max_iters=cli_args.max_outer_iterations,
+        )
     except KeyboardInterrupt:
         print("\n检测到 Ctrl+C，已停止预计算/优化流程。")
-        raise SystemExit(130)
+        return 130
     except ParallelPrecomputeExitedError as exc:
         print(f"并行预计算流程已退出，程序结束。原因: {exc}")
-        raise SystemExit(1)
+        return 1
 
     if result is not None:
         comfort_metrics = VSDP.compute_comfort_metrics(
@@ -1112,7 +1186,7 @@ if __name__ == "__main__":
             speed_arr=result["speed"],
         )
 
-        output_file = f"{dp_result_save_dir}/optimized_speed_curve.npz"
+        output_file = os.path.join(output_dir, "optimized_speed_curve.npz")
         saved_npz_path, saved_metrics_path = save_curve_and_metrics(
             pos_arr=result["pos"],
             speed_arr=result["speed"],
@@ -1120,6 +1194,9 @@ if __name__ == "__main__":
             metrics={
                 "target_time_s": float(train_service.schedule_time),
                 "total_time_s": float(result["total_time"]),
+                "time_error_s": float(
+                    train_service.schedule_time - result["total_time"]
+                ),
                 "total_energy_kj": float(result["total_energy"]),
                 "start_position_m": float(train_service.start_position),
                 "target_position_m": float(train_service.target_position),
@@ -1135,12 +1212,21 @@ if __name__ == "__main__":
             f"RMS={comfort_metrics['comfort_rms']:.4f} m/s^2"
         )
 
-        set_chinese_font()
+        set_global_plot_style(
+            font_preset="sci",
+            preferred_font="Calibri",
+            title_font_size=8.0,
+            axis_label_font_size=8.0,
+            tick_font_size=8.0,
+            legend_font_size=8.0,
+            figure_dpi=150.0,
+            savefig_dpi=300.0,
+        )
 
         fig, ax = plt.subplots(figsize=(12, 7))
 
         # 绘制静态元素（区间限速、危险速度域和终点等）
-        safeguard_utility.render(ax=ax)
+        safeguard_utility.render(ax=ax, layers=SafeGuardUtility.DANGER_VIEW_LAYERS)
 
         smooth_pos, smooth_speed = VSDP.BuildSmoothedDisplayCurve(
             pos_arr=result["pos"],
@@ -1156,7 +1242,7 @@ if __name__ == "__main__":
             color="green",
             s=100,
             alpha=0.8,
-            label="起点",
+            label="start",
             zorder=5,
             edgecolors="black",
             linewidths=1.5,
@@ -1170,7 +1256,7 @@ if __name__ == "__main__":
             color="red",
             s=100,
             alpha=0.8,
-            label="终点",
+            label="end",
             zorder=5,
             edgecolors="black",
             linewidths=1.5,
@@ -1179,7 +1265,7 @@ if __name__ == "__main__":
         ax.plot(
             smooth_pos,
             smooth_speed * 3.6,
-            label="优化速度曲线(平滑展示)",
+            label="optimal curve",
             color="blue",
             alpha=0.7,
             linewidth=2,
@@ -1187,9 +1273,15 @@ if __name__ == "__main__":
 
         ax.set_xlim((0.0, 30000.0))
         ax.set_ylim((0.0, 500.0))
-        ax.set_xlabel(r"里程$s\left( m \right)$")
-        ax.set_ylabel(r"速度$v\left( km/h \right)$")
+        ax.set_xlabel("Position (m)")
+        ax.set_ylabel("Speed km/h")
         ax.grid(True, alpha=0.3)
         ax.legend(loc="upper right")
 
         plt.show()
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

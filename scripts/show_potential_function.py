@@ -91,8 +91,8 @@ def calc_potential_docking(
     v_hat = speed / speed_max
 
     # 增益参数
-    K_L = 2.0
-    K_G = 20.0
+    K_L = 1.0
+    K_G = 10.0
 
     # 势能
     # phi_linear = -K_L * np.sqrt(x_hat**2 + v_hat**2)
@@ -112,7 +112,7 @@ def calc_potential_punctuality(
     # 计算时间冗余度
     time_redundancy_norm = redundant_operation_time / schedule_time
 
-    return -10.0 * np.log1p(np.exp(-12.0 * time_redundancy_norm))
+    return -5.0 * np.log1p(np.exp(-3.0 * time_redundancy_norm))
 
 
 def infer_position_from_speed(curve_pos, curve_speed, target_speed):
@@ -197,20 +197,20 @@ def plot_safety_potential_heatmap_speed():
     # 计算整个网络的势能值
 
     # 原始版本
-    POTENTIAL = calc_potential_safety_speed(
-        POS, SPEED, SPEED_MIN, SPEED_MAX, target_pos
-    )
-
-    # 自适应安全目标势能场
-    # POTENTIAL = calc_potential_safety_speed_adaptive(
+    # POTENTIAL = calc_potential_safety_speed(
     #     POS, SPEED, SPEED_MIN, SPEED_MAX, target_pos
     # )
+
+    # 自适应安全目标势能场
+    POTENTIAL = calc_potential_safety_speed_adaptive(
+        POS, SPEED, SPEED_MIN, SPEED_MAX, target_pos
+    )
 
     # 生成 masking, 越界区域的值设为NAN, 使其在图上透明
     in_speed_band = (SPEED >= SPEED_MIN) & (SPEED <= SPEED_MAX)
     POTENTIAL_MASKED = np.where(in_speed_band, POTENTIAL, np.nan)
 
-    fig, ax = plt.subplots(figsize=(12, 6), dpi=150)
+    fig, ax = plt.subplots(figsize=(12, 6))
 
     cmap = plt.get_cmap("Spectral")
 
@@ -229,14 +229,14 @@ def plot_safety_potential_heatmap_speed():
         speed_max_1d_masked * 3.6,
         color="red",
         linewidth=1,
-        label=r"Upper Speed Curve",
+        label=r"upper speed curve",
     )
     ax.plot(
         pos_array,
         speed_min_1d_masked * 3.6,
         color="blue",
         linewidth=1,
-        label=r"Lower Speed Curve",
+        label=r"lower speed curve",
     )
 
     # 添加色标
@@ -245,8 +245,8 @@ def plot_safety_potential_heatmap_speed():
     # 图表格式化
     ax.set_xlim(pos_left_bound + 5000, pos_right_bound + 1000)
     ax.set_ylim(lower_speed * 3.6, upper_speed * 3.6 * 0.75)
-    ax.set_xlabel("Position ($m$)")
-    ax.set_ylabel("Speed ($km/h$)")
+    ax.set_xlabel("Position (m)")
+    ax.set_ylabel("Speed (km/h)")
     ax.tick_params(axis="both", which="major")
     ax.legend(loc="lower left", framealpha=0.9)
     ax.grid(True, alpha=0.3, linestyle=":")
@@ -298,7 +298,7 @@ def plot_safety_potential_heatmap_position():
     in_pos_band = (POS >= POS_LOWER) & (POS <= POS_UPPER)
     POTENTIAL_MASKED = np.where(in_pos_band, POTENTIAL, np.nan)
 
-    fig, ax = plt.subplots(figsize=(12, 6), dpi=150)
+    fig, ax = plt.subplots(figsize=(12, 6))
 
     cmap = plt.get_cmap("Spectral")
 
@@ -317,14 +317,14 @@ def plot_safety_potential_heatmap_position():
         speed_array_ms * 3.6,
         color="red",
         linewidth=1,
-        label="Upper Speed Curve",
+        label="upper speed curve",
     )
     ax.plot(
         pos_from_min_curve,
         speed_array_ms * 3.6,
         color="blue",
         linewidth=1,
-        label="Lower Speed Curve",
+        label="lower speed curve",
     )
     ax.plot(
         safe_center_pos_array,
@@ -332,7 +332,7 @@ def plot_safety_potential_heatmap_position():
         color="black",
         linestyle="--",
         linewidth=1.5,
-        label="Safe Center",
+        label="safe center",
     )
 
     fig.colorbar(c, ax=ax, extend="min")
@@ -358,8 +358,8 @@ def plot_docking_potential_heatmap(view_mode="3d"):
 
     target_pos = 29270.046
 
-    K_L = 2.0
-    K_G = 20.0
+    K_L = 1.0
+    K_G = 10.0
 
     # 扩大位置与速度展示范围
     pos_array = np.linspace(target_pos - 10000.0, target_pos + 500.0, 1200)
@@ -387,7 +387,7 @@ def plot_docking_potential_heatmap(view_mode="3d"):
     )
 
     if mode == "2d":
-        fig, ax = plt.subplots(figsize=(12, 6), dpi=150)
+        fig, ax = plt.subplots(figsize=(12, 6))
 
         cmap = plt.get_cmap("YlOrRd")
         c = ax.pcolormesh(
@@ -408,7 +408,7 @@ def plot_docking_potential_heatmap(view_mode="3d"):
             marker="o",
             edgecolor="white",
             linewidth=0.8,
-            label="目标停车点",
+            label="target point",
         )
 
         fig.colorbar(c, ax=ax)
@@ -425,7 +425,7 @@ def plot_docking_potential_heatmap(view_mode="3d"):
         return
 
     if mode == "3d":
-        fig = plt.figure(figsize=(12, 6), dpi=150)
+        fig = plt.figure(figsize=(12, 6))
         ax = fig.add_subplot(111, projection="3d")
 
         cmap = plt.get_cmap("YlOrRd")
@@ -495,27 +495,27 @@ def plot_docking_potential_slices():
         target_pos=target_pos,
     )
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), dpi=150)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
 
     axes[0].plot(distance_error_array, potential_vs_distance, color="tab:orange")
     axes[0].axvline(0.0, color="black", linestyle="--", linewidth=1.2)
     axes[0].axvline(scale_pos, color="gray", linestyle=":", linewidth=1.2)
     axes[0].axvline(-scale_pos, color="gray", linestyle=":", linewidth=1.2)
-    axes[0].set_xlabel("停站距离误差 d (m)")
-    axes[0].set_ylabel(r"势能值 $\Phi_P$")
-    axes[0].set_title("v = 0 时的距离维切片 (|d| 指数衰减)")
+    axes[0].set_xlabel("docking error (m)")
+    axes[0].set_ylabel(r"$\Phi_D$")
+    axes[0].set_title("v = 0")
     axes[0].grid(True, alpha=0.3, linestyle=":")
 
     axes[1].plot(speed_array_ms * 3.6, potential_vs_speed, color="tab:red")
     axes[1].axvline(0.0, color="black", linestyle="--", linewidth=1.2)
     axes[1].axvline(scale_speed * 3.6, color="gray", linestyle=":", linewidth=1.2)
-    axes[1].set_xlabel("速度 v (km/h)")
-    axes[1].set_ylabel(r"势能值 $\Phi_P$")
-    axes[1].set_title("d = 0 时的速度维切片 (速度指数衰减)")
+    axes[1].set_xlabel("speed (km/h)")
+    axes[1].set_ylabel(r"$\Phi_D$")
+    axes[1].set_title("d = 0")
     axes[1].grid(True, alpha=0.3, linestyle=":")
 
     fig.suptitle(
-        "停站势函数一维切片",
+        r"$\Phi_D$ slice",
         fontsize=13,
     )
     plt.tight_layout()
@@ -550,7 +550,7 @@ def plot_punctuality_potential_curve(
         schedule_time=float(schedule_time),
     )
 
-    fig, ax = plt.subplots(figsize=(12, 6), dpi=150)
+    fig, ax = plt.subplots(figsize=(12, 6))
 
     ax.plot(
         redundant_operation_time_array,
@@ -558,12 +558,11 @@ def plot_punctuality_potential_curve(
         color="tab:green",
         linewidth=2,
     )
-    ax.axvline(0.0, color="black", linestyle="--", linewidth=1.2, label="零冗余")
+    ax.axvline(0.0, color="black", linestyle="--", linewidth=1.2)
 
     ax.set_xlim(redundant_time_upper, redundant_time_lower)
     ax.set_xlabel("Redunctant Operation Time (s)")
     ax.set_ylabel(r"$\Phi_{T}$")
-    ax.legend(loc="upper right", framealpha=0.9)
     ax.grid(True, alpha=0.3, linestyle=":")
 
     plt.tight_layout()
@@ -578,12 +577,12 @@ if __name__ == "__main__":
         axis_label_font_size=8.0,
         tick_font_size=8.0,
         legend_font_size=8.0,
-        figure_dpi=300.0,
-        savefig_dpi=600.0,
+        figure_dpi=150.0,
+        savefig_dpi=300.0,
     )
     # plot_safety_potential_heatmap_speed()
-    plot_safety_potential_heatmap_position()
-    # plot_docking_potential_heatmap(view_mode="3d")
+    # plot_safety_potential_heatmap_position()
+    plot_docking_potential_heatmap(view_mode="3d")
     # plot_docking_potential_heatmap(view_mode="2d")
     # plot_docking_potential_slices()
     # plot_punctuality_potential_curve(

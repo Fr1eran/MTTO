@@ -49,35 +49,33 @@ class PolicyEvaluationResult:
         self,
         *,
         num_timesteps: int | None = None,
-        trigger_mode: str | None = None,
-        trigger_value: int | None = None,
+        eval_trigger_mode: str | None = None,
+        eval_trigger_interval: int | None = None,
     ) -> dict[str, Any]:
         metrics: dict[str, Any] = {
-            "success": self.success,
             "total_reward": self.total_reward,
             "target_time_s": self.target_time_s,
             "total_time_s": self.total_time_s,
-            "total_energy_j": self.total_energy_j,
-            "total_energy_kj": self.total_energy_kj,
+            "time_error_s": self.time_error_s,
             "start_position_m": self.start_position_m,
             "target_position_m": self.target_position_m,
             "final_position_m": self.final_position_m,
-            "final_speed_mps": self.final_speed_mps,
             "stop_error_m": self.stop_error_m,
-            "time_error_s": self.time_error_s,
+            "total_energy_kj": self.total_energy_kj,
+            "total_energy_j": self.total_energy_j,
+            "final_speed_mps": self.final_speed_mps,
             "comfort_tav": self.comfort_tav,
             "comfort_er_pct": self.comfort_er_pct,
             "comfort_rms": self.comfort_rms,
-            "terminated": self.terminated,
-            "truncated": self.truncated,
             "episode_steps": self.episode_steps,
+            "success": self.success,
         }
         if num_timesteps is not None:
             metrics["num_timesteps"] = int(num_timesteps)
-        if trigger_mode is not None:
-            metrics["trigger_mode"] = trigger_mode
-        if trigger_value is not None:
-            metrics["trigger_value"] = int(trigger_value)
+        if eval_trigger_mode is not None:
+            metrics["eval_trigger_mode"] = eval_trigger_mode
+        if eval_trigger_interval is not None:
+            metrics["eval_trigger_interval"] = int(eval_trigger_interval)
 
         return metrics
 

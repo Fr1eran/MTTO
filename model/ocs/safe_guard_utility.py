@@ -14,26 +14,84 @@ class SafeGuardUtility:
     Attributes:
         speed_limits : 限速值
         speed_limit_intervals : 限速区间
+        levi_curves_list : 安全悬浮曲线集合
+        brake_curves_list : 安全制动曲线集合
         min_curves_list : 最小速度曲线集合
         max_curves_list : 最大速度曲线集合
         factor : 限速因子
 
     Methods:
-        GetMinAndMaxPosition() : 根据速度反查最小位置和最大位置
-        DetectDanger() : 检查速度是否超出限速或落入危险速度域
+        get_latest_traction_and_braking_intervention_points() : 根据速度反查最小位置和最大位置
+        detect_danger() : 检查速度是否超出限速或落入危险速度域
+        render() : 按图层选择性绘制原有和新增防护曲线/危险点
     """
+
+    # 默认危险域视图：使用交叉点后的局部 min/max 曲线与危险区域。
+    DANGER_VIEW_LAYERS: tuple[str, ...] = (
+        "speed_limit",
+        "danger_region",
+        "min_curve_part",
+        "max_curve_part",
+        "idp_points",
+    )
+    # 默认全量曲线视图：展示完整 levi/brake/min/max 曲线。
+    FULL_CURVE_VIEW_LAYERS: tuple[str, ...] = (
+        "speed_limit",
+        "levi_curve_full",
+        "brake_curve_full",
+        "min_curve_full",
+        "max_curve_full",
+    )
+    # 固定绘制顺序：避免图层遮挡关系因调用顺序变化而不稳定。
+    _LAYER_RENDER_ORDER: tuple[str, ...] = (
+        "speed_limit",
+        "danger_region",
+        "min_curve_part",
+        "max_curve_part",
+        "levi_curve_full",
+        "brake_curve_full",
+        "min_curve_full",
+        "max_curve_full",
+        "idp_points",
+    )
+    _REGION_RENDER_LAYERS: frozenset[str] = frozenset({
+        "danger_region",
+        "min_curve_part",
+        "max_curve_part",
+        "idp_points",
+    })
+    _FULL_CURVE_RENDER_LAYERS: frozenset[str] = frozenset({
+        "levi_curve_full",
+        "brake_curve_full",
+        "min_curve_full",
+        "max_curve_full",
+    })
+    # 同名曲线“局部段”和“全量曲线”互斥，避免语义冲突与重复绘制。
+    _MUTUALLY_EXCLUSIVE_LAYER_PAIRS: tuple[tuple[str, str], ...] = (
+        ("min_curve_part", "min_curve_full"),
+        ("max_curve_part", "max_curve_full"),
+    )
+    _VALID_RENDER_LAYERS: frozenset[str] = frozenset(_LAYER_RENDER_ORDER)
 
     def __init__(
         self,
         *,
         speed_limits: Sequence[float] | NDArray[np.floating],
         speed_limit_intervals: Sequence[float] | NDArray[np.floating],
+        levi_curves_list: list[NDArray],
+        brake_curves_list: list[NDArray],
         min_curves_list: list[NDArray],
         max_curves_list: list[NDArray],
         factor: float,
     ):
-        self.speed_limits = np.asarray(speed_limits)
-        self.speed_limit_intervals = np.asarray(speed_limit_intervals)
+        self.speed_limits = np.asarray(speed_limits, dtype=np.float64)
+        self.speed_limit_intervals = np.asarray(speed_limit_intervals, dtype=np.float64)
+        self.levi_curves_list = self._sanitize_curve_list(
+            levi_curves_list, curve_name="levi_curves_list"
+        )
+        self.brake_curves_list = self._sanitize_curve_list(
+            brake_curves_list, curve_name="brake_curves_list"
+        )
         self.min_curves_list = self._sanitize_curve_list(
             min_curves_list, curve_name="min_curves_list"
         )
@@ -53,30 +111,36 @@ class SafeGuardUtility:
             np.asarray(curve[1, :], dtype=np.float64) for curve in self.max_curves_list
         ]
 
-        # 计算危险交叉点和危险交叉点之后的部分防护曲线
-        idp_points, self.min_curves_part_list, self.max_curves_part_list = cal_regions(
-            min_curves_list, max_curves_list[:-1]
-        )
-        self.idp_points_x = idp_points[0, :]
-        self.idp_points_y = idp_points[1, :]
-
-        self.min_curves_part_list_padded, self.max_curves_part_list_padded = (
-            pad_2curve_lists(self.min_curves_part_list, self.max_curves_part_list)
-        )
-        self.min_curves_part_x_padded = [
-            curve[0, :] for curve in self.min_curves_part_list_padded
-        ]
-        self.min_curves_part_y_padded = [
-            curve[1, :] for curve in self.min_curves_part_list_padded
-        ]
-        self.max_curves_part_x_padded = [
-            curve[0, :] for curve in self.max_curves_part_list_padded
-        ]
-        self.max_curves_part_y_padded = [
-            curve[1, :] for curve in self.max_curves_part_list_padded
-        ]
-        self.numofregions = idp_points.shape[1]
         self.gamma = factor
+
+        # render/detect 所需的区域缓存，首次使用时按需计算
+        self._region_cache_ready = False
+        self._idp_points_x = np.asarray([], dtype=np.float64)
+        self._idp_points_y = np.asarray([], dtype=np.float64)
+        self._min_curves_part_list: list[NDArray[np.float64]] = []
+        self._max_curves_part_list: list[NDArray[np.float64]] = []
+        self._min_curves_part_list_padded: list[NDArray[np.float64]] = []
+        self._max_curves_part_list_padded: list[NDArray[np.float64]] = []
+        self._min_curves_part_x_padded: list[NDArray[np.float64]] = []
+        self._min_curves_part_y_padded: list[NDArray[np.float64]] = []
+        self._max_curves_part_x_padded: list[NDArray[np.float64]] = []
+        self._max_curves_part_y_padded: list[NDArray[np.float64]] = []
+        self._min_curves_parts_pos_con = np.asarray([], dtype=np.float64)
+        self._min_curves_parts_speed_con = np.asarray([], dtype=np.float64)
+        self._max_curves_parts_pos_con = np.asarray([], dtype=np.float64)
+        self._max_curves_parts_speed_con = np.asarray([], dtype=np.float64)
+        self._num_regions = 0
+
+        # 完整曲线渲染缓存，首次渲染完整曲线时按需计算
+        self._full_curve_cache_ready = False
+        self._levi_curves_pos_con = np.asarray([], dtype=np.float64)
+        self._levi_curves_speed_con = np.asarray([], dtype=np.float64)
+        self._brake_curves_pos_con = np.asarray([], dtype=np.float64)
+        self._brake_curves_speed_con = np.asarray([], dtype=np.float64)
+        self._min_curves_pos_con = np.asarray([], dtype=np.float64)
+        self._min_curves_speed_con = np.asarray([], dtype=np.float64)
+        self._max_curves_pos_con = np.asarray([], dtype=np.float64)
+        self._max_curves_speed_con = np.asarray([], dtype=np.float64)
 
     @staticmethod
     def _sanitize_curve(curve: NDArray[np.floating]) -> NDArray[np.float64]:
@@ -116,8 +180,140 @@ class SafeGuardUtility:
                 raise ValueError(f"{curve_name}[{idx}] is invalid: {exc}") from exc
         return sanitized_curves
 
+    @staticmethod
+    def _get_speed_scale(speed_unit: str) -> float:
+        if speed_unit == "km/h":
+            return 3.6
+        if speed_unit == "m/s":
+            return 1.0
+        raise ValueError("speed_unit must be either 'm/s' or 'km/h'")
+
+    def _normalize_render_layers(self, layers: Sequence[str] | None) -> tuple[str, ...]:
+        """规范化图层参数并执行合法性校验。
+
+        规则：
+            1. layers 为 None 时，使用默认危险域视图。
+            2. 拒绝未知图层名。
+            3. 拒绝互斥图层组合（min/max 的 part 与 full 不可并存）。
+        """
+        if layers is None:
+            return self.DANGER_VIEW_LAYERS
+
+        normalized_layers = tuple(layers)
+        normalized_layer_set = set(normalized_layers)
+        unknown_layers = [
+            layer
+            for layer in normalized_layers
+            if layer not in self._VALID_RENDER_LAYERS
+        ]
+        if unknown_layers:
+            raise ValueError(
+                "Unknown render layers: "
+                f"{unknown_layers}. Supported layers: {sorted(self._VALID_RENDER_LAYERS)}"
+            )
+
+        for layer_a, layer_b in self._MUTUALLY_EXCLUSIVE_LAYER_PAIRS:
+            if layer_a in normalized_layer_set and layer_b in normalized_layer_set:
+                raise ValueError(
+                    f"Render layers '{layer_a}' and '{layer_b}' are mutually exclusive"
+                )
+
+        return normalized_layers
+
+    def _ensure_region_cache(self) -> None:
+        """按需构建危险域相关缓存（render/detect 共用）。"""
+        if self._region_cache_ready:
+            return
+
+        idp_points, min_curves_part_list, max_curves_part_list = cal_regions(
+            self.min_curves_list,
+            self.max_curves_list[:-1],
+        )
+        self._idp_points_x = np.asarray(idp_points[0, :], dtype=np.float64)
+        self._idp_points_y = np.asarray(idp_points[1, :], dtype=np.float64)
+
+        self._min_curves_part_list = [
+            np.asarray(curve, dtype=np.float64) for curve in min_curves_part_list
+        ]
+        self._max_curves_part_list = [
+            np.asarray(curve, dtype=np.float64) for curve in max_curves_part_list
+        ]
+
+        self._min_curves_part_list_padded, self._max_curves_part_list_padded = (
+            pad_2curve_lists(self._min_curves_part_list, self._max_curves_part_list)
+        )
+        self._min_curves_part_x_padded = [
+            np.asarray(curve[0, :], dtype=np.float64)
+            for curve in self._min_curves_part_list_padded
+        ]
+        self._min_curves_part_y_padded = [
+            np.asarray(curve[1, :], dtype=np.float64)
+            for curve in self._min_curves_part_list_padded
+        ]
+        self._max_curves_part_x_padded = [
+            np.asarray(curve[0, :], dtype=np.float64)
+            for curve in self._max_curves_part_list_padded
+        ]
+        self._max_curves_part_y_padded = [
+            np.asarray(curve[1, :], dtype=np.float64)
+            for curve in self._max_curves_part_list_padded
+        ]
+        (
+            self._min_curves_parts_pos_con,
+            self._min_curves_parts_speed_con,
+        ) = concatenate_curves_with_NaN(self._min_curves_part_list)
+        (
+            self._max_curves_parts_pos_con,
+            self._max_curves_parts_speed_con,
+        ) = concatenate_curves_with_NaN(self._max_curves_part_list)
+        self._num_regions = int(idp_points.shape[1])
+        self._region_cache_ready = True
+
+    def _ensure_full_curve_cache(self) -> None:
+        """按需构建完整曲线渲染缓存。"""
+        if self._full_curve_cache_ready:
+            return
+
+        self._levi_curves_pos_con, self._levi_curves_speed_con = (
+            concatenate_curves_with_NaN(self.levi_curves_list)
+        )
+        self._brake_curves_pos_con, self._brake_curves_speed_con = (
+            concatenate_curves_with_NaN(self.brake_curves_list)
+        )
+        self._min_curves_pos_con, self._min_curves_speed_con = (
+            concatenate_curves_with_NaN(self.min_curves_list)
+        )
+        self._max_curves_pos_con, self._max_curves_speed_con = (
+            concatenate_curves_with_NaN(self.max_curves_list)
+        )
+        self._full_curve_cache_ready = True
+
+    def _plot_curve(
+        self,
+        ax: Axes,
+        *,
+        pos: NDArray[np.float64],
+        speed: NDArray[np.float64],
+        speed_scale: float,
+        label: str,
+        color: str,
+        linestyle: str = "solid",
+        alpha: float = 0.7,
+        linewidth: float = 2.0,
+    ) -> None:
+        ax.plot(
+            pos,
+            speed * speed_scale,
+            label=label,
+            color=color,
+            linestyle=linestyle,
+            alpha=alpha,
+            linewidth=linewidth,
+        )
+
     def get_intersecting_dangerous_point(self) -> NDArray:
-        return self.idp_points_x
+        self._ensure_region_cache()
+        return self._idp_points_x
 
     def get_current_stopping_point(
         self, current_pos: float, current_speed: float
@@ -343,22 +539,24 @@ class SafeGuardUtility:
     def _detect_dangerous_region_enter(
         self, pos: float | np.number | NDArray, speed: float | np.number | NDArray
     ) -> bool | NDArray[np.bool_]:
+        self._ensure_region_cache()
+
         result = np.zeros_like(pos, dtype=bool)
-        for i in range(self.numofregions):
+        for i in range(self._num_regions):
             # 区间判断
-            mask = (pos > self.idp_points_x[i]) & (
-                pos < self.min_curves_part_x_padded[i][-1]
+            mask = (pos > self._idp_points_x[i]) & (
+                pos < self._min_curves_part_x_padded[i][-1]
             )
             # 上下界插值
             above_v = np.interp(
                 pos,  # type: ignore[arg-type]
-                self.min_curves_part_x_padded[i],
-                self.min_curves_part_y_padded[i],
+                self._min_curves_part_x_padded[i],
+                self._min_curves_part_y_padded[i],
             )
             below_v = np.interp(
                 pos,  # type: ignore[arg-type]
-                self.max_curves_part_x_padded[i],
-                self.max_curves_part_y_padded[i],
+                self._max_curves_part_x_padded[i],
+                self._max_curves_part_y_padded[i],
             )
             # 速度判断
             mask = mask & (speed <= above_v) & (speed >= below_v)
@@ -368,49 +566,127 @@ class SafeGuardUtility:
         else:
             return result
 
-    def render(self, ax: Axes) -> None:
-        """绘制区间限速、危险交叉点、部分安全防护曲线和围成的危险速度域"""
-        ax.step(
-            self.speed_limit_intervals[:-1],
-            self.speed_limits * 3.6,
-            where="post",
-            color="red",
-            linestyle="dashdot",
-            label="区间限速",
-        )
-        min_curves_parts_pos_con, min_curves_parts_speed_con = (
-            concatenate_curves_with_NaN(self.min_curves_part_list)
-        )
-        max_curves_parts_pos_con, max_curves_parts_speed_con = (
-            concatenate_curves_with_NaN(self.max_curves_part_list)
-        )
-        ax.plot(
-            min_curves_parts_pos_con,
-            min_curves_parts_speed_con * 3.6,
-            label="最小速度曲线",
-            color="blue",
-            alpha=0.7,
-        )
-        ax.plot(
-            max_curves_parts_pos_con,
-            max_curves_parts_speed_con * 3.6,
-            label="最大速度曲线",
-            color="red",
-            alpha=0.7,
-        )
-        draw_regions(
-            ax=ax,
-            above_curves_list=self.min_curves_part_list_padded,
-            below_curves_list=self.max_curves_part_list_padded,
-            label="危险速度域",
-            color="red",
-            alpha=0.5,
-        )
-        # 绘制危险交叉点
-        ax.scatter(
-            x=self.idp_points_x,
-            y=self.idp_points_y * 3.6,
-            color="black",
-            label="危险交叉点",
-            linewidths=0.5,
-        )
+    def render(
+        self,
+        ax: Axes,
+        *,
+        layers: Sequence[str] | None = None,
+        speed_unit: str = "km/h",
+    ) -> None:
+        """按图层绘制防护曲线和危险域。
+
+        Args:
+            ax: Matplotlib 坐标轴。
+            layers: 需要绘制的图层序列。
+                - None 时使用 `DANGER_VIEW_LAYERS`。
+                - 允许混合选择危险域图层和完整曲线图层。
+                - 互斥约束：`min_curve_part` 与 `min_curve_full` 不能同时出现；
+                  `max_curve_part` 与 `max_curve_full` 不能同时出现。
+            speed_unit: 速度显示单位，仅支持 "m/s" 与 "km/h"。
+        """
+        selected_layers = self._normalize_render_layers(layers)
+        if not selected_layers:
+            return
+
+        # 仅在需要时触发对应预处理缓存，避免不必要的计算开销。
+        if any(layer in self._REGION_RENDER_LAYERS for layer in selected_layers):
+            self._ensure_region_cache()
+        if any(layer in self._FULL_CURVE_RENDER_LAYERS for layer in selected_layers):
+            self._ensure_full_curve_cache()
+
+        speed_scale = self._get_speed_scale(speed_unit)
+        selected_layer_set = set(selected_layers)
+
+        for layer in self._LAYER_RENDER_ORDER:
+            if layer not in selected_layer_set:
+                continue
+
+            if layer == "speed_limit":
+                ax.step(
+                    self.speed_limit_intervals[:-1],
+                    self.speed_limits * speed_scale,
+                    where="post",
+                    color="red",
+                    linestyle="dashdot",
+                    label="speed limit",
+                    linewidth=1.5,
+                )
+            elif layer == "danger_region":
+                draw_regions(
+                    ax=ax,
+                    above_curves_list=self._min_curves_part_list_padded,
+                    below_curves_list=self._max_curves_part_list_padded,
+                    label="dangerous speed region",
+                    color="red",
+                    alpha=0.5,
+                )
+            elif layer == "min_curve_part":
+                self._plot_curve(
+                    ax=ax,
+                    pos=self._min_curves_parts_pos_con,
+                    speed=self._min_curves_parts_speed_con,
+                    speed_scale=speed_scale,
+                    label="minimum speed curve",
+                    color="blue",
+                    linewidth=1.5,
+                )
+            elif layer == "max_curve_part":
+                self._plot_curve(
+                    ax=ax,
+                    pos=self._max_curves_parts_pos_con,
+                    speed=self._max_curves_parts_speed_con,
+                    speed_scale=speed_scale,
+                    label="maximum speed curve",
+                    color="red",
+                    linewidth=1.5,
+                )
+            elif layer == "levi_curve_full":
+                self._plot_curve(
+                    ax=ax,
+                    pos=self._levi_curves_pos_con,
+                    speed=self._levi_curves_speed_con,
+                    speed_scale=speed_scale,
+                    label="levitation safety curve",
+                    color="blue",
+                    linestyle="dashed",
+                    linewidth=1.5,
+                )
+            elif layer == "brake_curve_full":
+                self._plot_curve(
+                    ax=ax,
+                    pos=self._brake_curves_pos_con,
+                    speed=self._brake_curves_speed_con,
+                    speed_scale=speed_scale,
+                    label="braking safety curve",
+                    color="red",
+                    linestyle="dashed",
+                    linewidth=1.5,
+                )
+            elif layer == "min_curve_full":
+                self._plot_curve(
+                    ax=ax,
+                    pos=self._min_curves_pos_con,
+                    speed=self._min_curves_speed_con,
+                    speed_scale=speed_scale,
+                    label="minimum speed curve (full)",
+                    color="blue",
+                    linewidth=1.5,
+                )
+            elif layer == "max_curve_full":
+                self._plot_curve(
+                    ax=ax,
+                    pos=self._max_curves_pos_con,
+                    speed=self._max_curves_speed_con,
+                    speed_scale=speed_scale,
+                    label="maximum speed curve (full)",
+                    color="red",
+                    linewidth=1.5,
+                )
+            elif layer == "idp_points":
+                ax.scatter(
+                    x=self._idp_points_x,
+                    y=self._idp_points_y * speed_scale,
+                    color="black",
+                    label="intersecting dangerous point",
+                    linewidths=0.2,
+                )

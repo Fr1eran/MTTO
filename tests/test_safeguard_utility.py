@@ -1,24 +1,94 @@
 import numpy as np
 import pytest
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 from model.ocs import SafeGuardUtility
 from utils.data_loader import load_safeguard_curves, load_speed_limits
 
 
-@pytest.fixture(scope="module")
-def safeguard_utility():
+def _build_safeguard_utility() -> SafeGuardUtility:
     speed_limits, speed_limit_intervals = load_speed_limits(
         to_mps=True, dtype=np.float64
     )
-    min_curves_list, max_curves_list = load_safeguard_curves(
-        "min_curves_list", "max_curves_list"
+    levi_curves_list, brake_curves_list, min_curves_list, max_curves_list = (
+        load_safeguard_curves(
+            "levi_curves_list",
+            "brake_curves_list",
+            "min_curves_list",
+            "max_curves_list",
+        )
     )
     return SafeGuardUtility(
         speed_limits=speed_limits,
         speed_limit_intervals=speed_limit_intervals,
+        levi_curves_list=levi_curves_list,
+        brake_curves_list=brake_curves_list,
         min_curves_list=min_curves_list,
         max_curves_list=max_curves_list,
         factor=0.95,
     )
+
+
+@pytest.fixture(scope="module")
+def safeguard_utility():
+    return _build_safeguard_utility()
+
+
+def test_render_cache_is_not_built_in_constructor():
+    sgu = _build_safeguard_utility()
+    assert sgu._region_cache_ready is False
+    assert sgu._full_curve_cache_ready is False
+
+
+def test_render_builds_region_cache_lazily():
+    sgu = _build_safeguard_utility()
+    fig, ax = plt.subplots()
+    try:
+        sgu.render(ax=ax, layers=SafeGuardUtility.DANGER_VIEW_LAYERS)
+        assert sgu._region_cache_ready is True
+        assert sgu._full_curve_cache_ready is False
+    finally:
+        plt.close(fig)
+
+
+def test_render_builds_full_curve_cache_lazily():
+    sgu = _build_safeguard_utility()
+    fig, ax = plt.subplots()
+    try:
+        sgu.render(ax=ax, layers=SafeGuardUtility.FULL_CURVE_VIEW_LAYERS)
+        assert sgu._full_curve_cache_ready is True
+    finally:
+        plt.close(fig)
+
+
+def test_render_raises_for_unknown_layer():
+    sgu = _build_safeguard_utility()
+    fig, ax = plt.subplots()
+    try:
+        with pytest.raises(ValueError, match="Unknown render layers"):
+            sgu.render(ax=ax, layers=("unknown-layer",))
+    finally:
+        plt.close(fig)
+
+
+@pytest.mark.parametrize(
+    "layers",
+    [
+        ("min_curve_part", "min_curve_full"),
+        ("max_curve_part", "max_curve_full"),
+    ],
+)
+def test_render_raises_for_mutually_exclusive_layers(layers: tuple[str, str]):
+    sgu = _build_safeguard_utility()
+    fig, ax = plt.subplots()
+    try:
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            sgu.render(ax=ax, layers=layers)
+    finally:
+        plt.close(fig)
 
 
 def test_detect_danger(safeguard_utility):
@@ -47,24 +117,22 @@ def test_detect_danger(safeguard_utility):
         )
         / 3.6
     )
-    expected_result = np.array(
-        [
-            False,
-            True,
-            False,
-            True,
-            True,
-            True,
-            False,
-            True,
-            False,
-            True,
-            False,
-            True,
-            True,
-            False,
-        ]
-    )
+    expected_result = np.array([
+        False,
+        True,
+        False,
+        True,
+        True,
+        True,
+        False,
+        True,
+        False,
+        True,
+        False,
+        True,
+        True,
+        False,
+    ])
     result = safeguard_utility.detect_danger(pos, speed)
     np.testing.assert_array_equal(result, expected_result)
 

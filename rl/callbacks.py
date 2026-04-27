@@ -255,21 +255,21 @@ class BestTrajectoryEvalCallback(BaseCallback):
         *,
         eval_env: Any,
         output_dir: str,
-        trigger_mode: str = "steps",
-        trigger_interval: int = 10_000,
+        eval_trigger_mode: str = "steps",
+        eval_trigger_interval: int = 10_000,
         deterministic: bool = True,
         verbose: int = 0,
     ):
         super().__init__(verbose)
-        if trigger_mode not in ("steps", "episodes"):
+        if eval_trigger_mode not in ("steps", "episodes"):
             raise ValueError("trigger mode must be 'steps' or 'episodes'")
-        if trigger_interval <= 0:
+        if eval_trigger_interval <= 0:
             raise ValueError("trigger_interval must be positive")
 
         self.eval_env = eval_env
         self.output_dir = output_dir
-        self.trigger_mode = trigger_mode
-        self.trigger_interval = int(trigger_interval)
+        self.eval_trigger_mode = eval_trigger_mode
+        self.trigger_interval = int(eval_trigger_interval)
         self.deterministic = deterministic
         self.best_result: PolicyEvaluationResult | None = None
         self.best_trigger_value: int | None = None
@@ -302,7 +302,7 @@ class BestTrajectoryEvalCallback(BaseCallback):
         self,
         result: PolicyEvaluationResult,
         *,
-        trigger_value: int,
+        eval_trigger_interval: int,
     ) -> None:
         model_path = os.path.join(self.output_dir, "best_model")
         vecnormalize_path = os.path.join(self.output_dir, "best_vecnormalize.pkl")
@@ -320,8 +320,8 @@ class BestTrajectoryEvalCallback(BaseCallback):
 
         extra_metrics = result.to_metrics(
             num_timesteps=int(self.num_timesteps),
-            trigger_mode=self.trigger_mode,
-            trigger_value=trigger_value,
+            eval_trigger_mode=self.eval_trigger_mode,
+            eval_trigger_interval=eval_trigger_interval,
         )
         save_policy_evaluation_curve(
             result,
@@ -329,7 +329,7 @@ class BestTrajectoryEvalCallback(BaseCallback):
             extra_metrics=extra_metrics,
         )
 
-    def _run_evaluation(self, *, trigger_value: int) -> None:
+    def _run_evaluation(self, *, eval_trigger_interval: int) -> None:
         result = evaluate_policy_once(
             self.model,
             self.eval_env,
@@ -345,9 +345,9 @@ class BestTrajectoryEvalCallback(BaseCallback):
         if not self._is_new_best(result):
             return
 
-        self._save_best_artifacts(result, trigger_value=trigger_value)
+        self._save_best_artifacts(result, eval_trigger_interval=eval_trigger_interval)
         self.best_result = result
-        self.best_trigger_value = trigger_value
+        self.best_trigger_value = eval_trigger_interval
 
         self.logger.record("best_eval/best_success", float(result.success))
         self.logger.record("best_eval/best_total_reward", result.total_reward)
@@ -358,12 +358,12 @@ class BestTrajectoryEvalCallback(BaseCallback):
         if self.verbose > 0:
             print(
                 "New best trajectory saved: "
-                f"mode={self.trigger_mode}, trigger_value={trigger_value}, "
+                f"mode={self.eval_trigger_mode}, trigger_value={eval_trigger_interval}, "
                 f"success={result.success}, total_reward={result.total_reward:.6f}"
             )
 
     def _on_step(self) -> bool:
-        if self.trigger_mode == "episodes":
+        if self.eval_trigger_mode == "episodes":
             self._episodes_seen += self._count_completed_episodes()
             current_value = self._episodes_seen
         else:
@@ -372,7 +372,7 @@ class BestTrajectoryEvalCallback(BaseCallback):
         if current_value < self._next_trigger_value:
             return True
 
-        self._run_evaluation(trigger_value=current_value)
+        self._run_evaluation(eval_trigger_interval=current_value)
         self._advance_trigger_threshold(current_value)
         return True
 

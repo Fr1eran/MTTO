@@ -121,15 +121,9 @@ class MTTOEnv(gym.Env):
         self.max_step_distance: float = max_step_distance
 
         # 最大转移步数
-        self.max_episode_steps: int = (
-            math.ceil(
-                abs(
-                    self.train_service.target_position
-                    - self.train_service.start_position
-                )
-                / self.max_step_distance
-            )
-            + 3
+        self.max_episode_steps: int = math.ceil(
+            abs(self.train_service.target_position - self.train_service.start_position)
+            / self.max_step_distance
         )
 
         # 定义常量
@@ -256,58 +250,46 @@ class MTTOEnv(gym.Env):
         )
 
         # 定义智能体能够观测的状态信息
-        self.observation_space = gym.spaces.Dict(
-            {
-                "remaining_distance": gym.spaces.Box(
-                    0.0,
-                    1.0,
-                    shape=(1,),
-                    dtype=np.float32,
-                ),
-                "current_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
-                "current_acc": gym.spaces.Box(
-                    -1.0,
-                    1.0,
-                    shape=(1,),
-                    dtype=np.float32,
-                ),
-                "remaining_schedule_time": gym.spaces.Box(
-                    -1.0,  # 最多超时10分钟
-                    1.0,
-                    shape=(1,),
-                    dtype=np.float32,  # 允许超时或提前
-                ),
-                "current_slope": gym.spaces.Box(
-                    -1.0, 1.0, shape=(1,), dtype=np.float32
-                ),
-                "current_max_speed": gym.spaces.Box(
-                    0.0, 1.0, shape=(1,), dtype=np.float32
-                ),
-                "current_min_speed": gym.spaces.Box(
-                    0.0, 1.0, shape=(1,), dtype=np.float32
-                ),
-                "next_slope": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
-                "next_max_speed": gym.spaces.Box(
-                    0.0, 1.0, shape=(1,), dtype=np.float32
-                ),
-                "next_min_speed": gym.spaces.Box(
-                    0.0, 1.0, shape=(1,), dtype=np.float32
-                ),
-                "current_latest_traction_intervention_point": gym.spaces.Box(
-                    0.0, 1.0, shape=(1,), dtype=np.float32
-                ),
-                "current_latest_braking_intervention_point": gym.spaces.Box(
-                    0.0, 1.0, shape=(1,), dtype=np.float32
-                ),
-                "is_final_approach": gym.spaces.Box(
-                    -1.0, 1.0, shape=(1,), dtype=np.float32
-                ),
-                "rel_dist_to_target": gym.spaces.Box(
-                    -1.0, 1.0, shape=(1,), dtype=np.float32
-                ),
-                "required_dec": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
-            }
-        )
+        self.observation_space = gym.spaces.Dict({
+            "remaining_distance": gym.spaces.Box(
+                0.0,
+                1.0,
+                shape=(1,),
+                dtype=np.float32,
+            ),
+            "current_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
+            "current_acc": gym.spaces.Box(
+                -1.0,
+                1.0,
+                shape=(1,),
+                dtype=np.float32,
+            ),
+            "remaining_schedule_time": gym.spaces.Box(
+                -1.0,  # 最多超时10分钟
+                1.0,
+                shape=(1,),
+                dtype=np.float32,  # 允许超时或提前
+            ),
+            "current_slope": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
+            "current_max_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
+            "current_min_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
+            "next_slope": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
+            "next_max_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
+            "next_min_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
+            "current_latest_traction_intervention_point": gym.spaces.Box(
+                0.0, 1.0, shape=(1,), dtype=np.float32
+            ),
+            "current_latest_braking_intervention_point": gym.spaces.Box(
+                0.0, 1.0, shape=(1,), dtype=np.float32
+            ),
+            "is_final_approach": gym.spaces.Box(
+                -1.0, 1.0, shape=(1,), dtype=np.float32
+            ),
+            "rel_dist_to_target": gym.spaces.Box(
+                -1.0, 1.0, shape=(1,), dtype=np.float32
+            ),
+            "required_dec": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
+        })
 
         # 定义智能体的动作空间, 归一化
         self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
@@ -948,7 +930,19 @@ class MTTOEnv(gym.Env):
         #         sp=self.current_sp
         #     )
         #     if self.current_sp >= 0
-        #     else self.task.target_position,
+        #     else self.train_service.target_position,
+        # )
+
+        # phi_curr = self._potential_safety_speed_adaptive(
+        #     pos=self.current_pos,
+        #     speed=self.current_speed,
+        #     min_speed=self.current_min_speed,
+        #     max_speed=self.current_max_speed,
+        #     target_pos=self.sps.get_auxiliary_stopping_area_target_position(
+        #         sp=self.current_sp
+        #     )
+        #     if self.current_sp >= 0
+        #     else self.train_service.target_position,
         # )
 
         # 计算上个状态势能
@@ -983,7 +977,24 @@ class MTTOEnv(gym.Env):
         #         sp=self.current_sp
         #     )
         #     if self.current_sp >= 0
-        #     else self.task.target_position,
+        #     else self.train_service.target_position,
+        # )
+
+        # phi_prev = self._potential_safety_speed_adaptive(
+        #     pos=self.last_state["pos"],
+        #     speed=self.last_state["speed"],
+        #     min_speed=self.last_state["min_speed"],
+        #     max_speed=self.last_state["max_speed"],
+        #     # target_pos=self.sps.get_auxiliary_stopping_area_target_position(
+        #     #     sp=self.last_state["stopping_point_index"]
+        #     # )
+        #     # if self.last_state["stopping_point_index"] >= 0
+        #     # else self.task.target_position,
+        #     target_pos=self.sps.get_auxiliary_stopping_area_target_position(
+        #         sp=self.current_sp
+        #     )
+        #     if self.current_sp >= 0
+        #     else self.train_service.target_position,
         # )
 
         return self.gamma * phi_curr - phi_prev + small_bonus
@@ -996,7 +1007,7 @@ class MTTOEnv(gym.Env):
         max_speed: float,
         target_pos: float,
     ) -> float:
-        distanceToTarget = abs(target_pos - pos)
+        distance_to_target = abs(target_pos - pos)
         center_speed = (max_speed + min_speed) / 2.0
         safe_margin = max((max_speed - min_speed) / 2.0, 0.5)
 
@@ -1005,14 +1016,38 @@ class MTTOEnv(gym.Env):
         phi_base = 2.0 * np.log(1.01 - norm_speed_diff**2)
 
         # 靠近目标位置时，适当增大惩罚力度
-        scale = 1.0 + 1.0 * np.exp(-0.001 * distanceToTarget)
+        scale = 1.0 + 1.0 * np.exp(-0.001 * distance_to_target)
+
+        return scale * phi_base
+
+    def _potential_safety_speed_adaptive(
+        self,
+        pos: float,
+        speed: float,
+        min_speed: float,
+        max_speed: float,
+        target_pos: float,
+    ):
+        distance_to_target = abs(target_pos - pos)
+
+        speed_star = (max_speed + min_speed) / 2.0 if min_speed > 0.0 else 0.0
+        safe_margin = (
+            max((max_speed - min_speed) / 2.0, 0.5)
+            if min_speed > 0.0
+            else max(max_speed, 0.5)
+        )
+
+        norm_speed_diff = (speed - speed_star) / safe_margin
+        phi_base = 2.0 * np.log(1.01 - norm_speed_diff**2)
+
+        scale = 1.0 + 1.0 * np.exp(-0.001 * distance_to_target)
 
         return scale * phi_base
 
     def _potential_safety_position(
         self, pos: float, min_pos: float, max_pos: float, target_pos: float
     ):
-        distanceToTarget = np.abs(target_pos - pos)
+        distance_to_target = abs(target_pos - pos)
 
         center_pos = (max_pos + min_pos) / 2.0
         safe_margin = (max_pos - min_pos) / 2.0
@@ -1022,7 +1057,7 @@ class MTTOEnv(gym.Env):
         norm_pos_diff = (pos - center_pos) / safe_margin
         phi_base = 2.0 * np.log(1.1 - norm_pos_diff**2)
 
-        scale = 1.0 + 1.0 * np.exp(-0.001 * distanceToTarget)
+        scale = 1.0 + 1.0 * np.exp(-0.001 * distance_to_target)
 
         return scale * phi_base
 
@@ -1051,7 +1086,7 @@ class MTTOEnv(gym.Env):
         # 使用指数衰减式的钟形曲线
         norm_jerk = delta_acc / (self.train_service.max_acc_change)
 
-        val = -0.08 * (1 - np.exp(-3.0 * norm_jerk))
+        val = -0.06 * (1 - np.exp(-2.0 * norm_jerk))
 
         return val
 
@@ -1095,7 +1130,7 @@ class MTTOEnv(gym.Env):
             redundant_operation_time / self.train_service.schedule_time
         )
 
-        return -10.0 * np.log1p(np.exp(-12.0 * time_redundancy_norm))
+        return -7.0 * np.log1p(np.exp(-3.0 * time_redundancy_norm))
 
     def _get_reward_docking_dense(self):
         phi_curr = self._potential_docking(
@@ -1112,8 +1147,8 @@ class MTTOEnv(gym.Env):
         # 基础参数
         sigma_x_hat = 0.1
         sigma_v_hat = 0.2
-        K_L = 4.0
-        K_G = 12.0
+        K_L = 2.0
+        K_G = 20.0
 
         # 正则化
         dist_error = self.train_service.target_position - pos
@@ -1121,7 +1156,8 @@ class MTTOEnv(gym.Env):
         v_hat = speed / self.vehicle.max_speed
 
         # 势能项
-        phi_linear = -K_L * np.sqrt(x_hat**2 + v_hat**2)
+        # phi_linear = -K_L * np.sqrt(x_hat**2 + v_hat**2)
+        phi_linear = -K_L * x_hat
         phi_strong = K_G * np.exp(
             -np.abs(x_hat) / sigma_x_hat - np.abs(v_hat) / sigma_v_hat
         )
@@ -1131,7 +1167,7 @@ class MTTOEnv(gym.Env):
     def _get_reward_goal(
         self,
     ) -> float:
-        reward_docking = self._get_reward_docking_goal() * 8.0
+        reward_docking = self._get_reward_docking_goal() * 10.0
         reward_punctuality = self._get_reward_punctuality_goal() * 5.0
 
         if self.enable_diagnostics and self._collect_step_diagnostics:

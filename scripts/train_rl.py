@@ -26,6 +26,9 @@ from stable_baselines3.common.vec_env import (
     VecNormalize,
 )
 
+_RL_MODEL_FILENAME = "ppo_mtto_model.zip"
+_RL_VECNORMALIZE_FILENAME = "vecnormalize.pkl"
+
 
 # 学习率线性衰减
 def linear_schedule(initial_value: float):
@@ -69,216 +72,210 @@ def _build_env_initializer(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Train MTTO PPO policy with configurable logging and analysis switches.",
+        description="使用可配置的日志记录和分析开关训练 MTTO PPO 策略",
+    )
+    parser.add_argument(
+        "--output-root",
+        type=str,
+        default="output/optimal/rl/",
+        help="训练结果输出根目录。",
+    )
+    parser.add_argument(
+        "--schedule-time-s",
+        type=float,
+        default=440.0,
+        help="规划运行时间(s)",
+    )
+    parser.add_argument(
+        "--max-step-distance",
+        type=float,
+        default=100.0,
+        help="训练环境相邻状态转移间的最大移动距离。",
     )
     parser.add_argument(
         "--run-mode",
         type=str,
         choices=["tune", "reproduce", "eval"],
         default="tune",
-        help="Preset runtime mode. tune enables logging+analysis, reproduce/eval favor efficiency.",
+        help="算法运行模式。'tune'启用日志分析与分析，'reproduce/eval'更注重效率。",
     )
     parser.add_argument(
         "--enable-tb",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Override TensorBoard logging switch.",
+        help="启用 Tensorboard 日志记录。",
     )
     parser.add_argument(
         "--enable-callback",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Override TensorboardCallback switch.",
+        help="启用 Tensorboard 回调。",
     )
     parser.add_argument(
         "--enable-monitor",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Override VecMonitor switch.",
+        help="启用 VecMonitor 包装器。",
     )
     parser.add_argument(
         "--enable-env-diagnostics",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Override MTTOEnv diagnostics collection switch.",
+        help="启用训练过程诊断信息收集功能。",
     )
     parser.add_argument(
-        "--enable-analysis",
+        "--enable-auto-analysis",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Override post-training analysis switch.",
+        help="启用训练后自动分析。",
     )
     parser.add_argument(
         "--enable-best-eval",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Enable single-environment best trajectory evaluation during training.",
+        help="启用最佳轨迹评估。",
     )
     parser.add_argument(
         "--analysis-output-root",
         type=str,
         default="mtto_train_reports",
-        help="Output directory for post-training analysis artifacts.",
+        help="训练后分析结果的输出目录。仅在启用日志记录功能时生效。",
     )
     parser.add_argument(
         "--analysis-min-points-per-10k-steps",
         type=float,
         default=5.0,
-        help="Minimum acceptable mean samples per 10k steps for auto-analysis quality gate.",
+        help="每1万步最低可接受平均样本数。仅在启用日志记录功能时生效。",
     )
     parser.add_argument(
         "--analysis-min-unique-episodes",
         type=int,
         default=100,
-        help="Minimum acceptable unique episodes for auto-analysis quality gate.",
+        help="最低可接受唯一回合数。仅在启用日志记录功能时生效。",
     )
     parser.add_argument(
         "--analysis-max-mean-step-gap",
         type=float,
         default=2048.0,
-        help="Maximum acceptable mean step gap for auto-analysis quality gate.",
+        help="最大平均训练步间隔。仅在启用日志记录功能时生效。",
     )
     parser.add_argument(
         "--analysis-sampling-quality-mode",
         type=str,
         choices=["warn_only", "strict_fail"],
         default="warn_only",
-        help="Sampling quality gate mode for auto-analysis.",
+        help="自动分析的采样质量门控模式。仅在启用日志记录功能时生效。",
     )
     parser.add_argument(
         "--reward-discount",
         type=float,
         default=0.99,
-        help="Discount factor used by env and PPO.",
-    )
-    parser.add_argument(
-        "--step-distance",
-        type=float,
-        default=100.0,
-        help="Environment max_step_distance.",
+        help="回报折扣因子。",
     )
     parser.add_argument(
         "--num-envs",
         type=int,
         default=1,
-        help="Number of parallel training environments.",
+        help="训练环境数量。",
     )
     parser.add_argument(
         "--vec-env-type",
         type=str,
         choices=["dummy", "subproc"],
         default="subproc",
-        help="Vectorized environment backend. subproc enables parallel sampling when num_envs > 1.",
+        help="向量化环境后端。subproc 在 num_envs > 1 时启用并行采样。",
     )
     parser.add_argument(
         "--subproc-start-method",
         type=str,
         choices=["spawn", "forkserver"],
         default="spawn",
-        help="Multiprocessing start method for SubprocVecEnv.",
+        help="SubprocVecEnv 的多进程启动方法。",
     )
     parser.add_argument(
         "--rollout-steps-per-update",
         type=int,
         default=2048,
-        help="Target rollout steps collected per PPO update across all envs.",
+        help="PPO rollout 步数。",
     )
     parser.add_argument(
         "--n-steps-per-env",
         type=int,
         default=None,
-        help="Override PPO n_steps for each environment. If omitted, it is derived from rollout-steps-per-update and num-envs.",
-    )
-    parser.add_argument(
-        "--model-save-path",
-        type=str,
-        default="output/optimal/rl/final/ppo_mtto",
-        help="Path prefix for saving PPO model (without .zip suffix).",
-    )
-    parser.add_argument(
-        "--vecnormalize-save-path",
-        type=str,
-        default="output/optimal/rl/final/vecnormalize.pkl",
-        help="Path for saving VecNormalize stats.",
+        help="PPO n_steps 步数。如果未指定，则根据 rollout-steps-per-update 和 num-envs 计算得出。",
     )
     parser.add_argument(
         "--total-timesteps",
         type=int,
         default=200_000,
-        help="Total timesteps for PPO training.",
+        help="PPO 总训练步数。",
     )
     parser.add_argument(
         "--tensorboard-log-dir",
         type=str,
         default="mtto_ppo_tensorboard_logs",
-        help="TensorBoard log root directory.",
+        help="TensorBoard 日志输出根目录。",
     )
     parser.add_argument(
         "--tb-log-name",
         type=str,
         default="trainning_log",
-        help="TensorBoard run name used by model.learn.",
+        help="TensorBoard 日志文件名称。",
     )
     parser.add_argument(
         "--log-interval",
         type=int,
         default=None,
-        help="Override PPO log_interval. Effective when logging is enabled; default is tune=1 and reproduce/eval are ignored under default no-logging switches.",
+        help="PPO log_interval。仅在启用日志记录功能时生效。`tune`模式下默认为1。",
     )
     parser.add_argument(
         "--tb-sample-interval-steps",
         type=int,
         default=1,
-        help="Minimum timesteps between callback TensorBoard records.",
+        help="Tensorboard 回调记录数据的最小间隔步数。",
     )
     parser.add_argument(
         "--env-diagnostics-interval-steps",
         type=int,
         default=None,
-        help="Minimum env steps between diagnostics snapshot emission. Defaults to tb-sample-interval-steps.",
+        help="环境诊断信息的记录间隔。默认与 tb-sample-interval-steps 一致。",
     )
     parser.add_argument(
         "--force-dump-interval-steps",
         type=int,
         default=0,
-        help="Force a buffered TensorBoard flush every N timesteps in callback (<=0 disables).",
+        help="(legacy)Tensorboard 回调中强制刷新数据缓存的间隔步数。",
     )
     parser.add_argument(
         "--tb-batch-dump-records",
         type=int,
         default=0,
-        help="Flush buffered TensorBoard events after this many sampled callback records (<=0 disables).",
+        help="Tensorboard 事件缓冲区的记录上限。达到上限后，将刷写文件；如果设置为0，则会在训练结束后一次刷写全部内容。",
     )
     parser.add_argument(
         "--best-eval-trigger-mode",
         type=str,
         choices=["steps", "episodes"],
         default="steps",
-        help="Trigger best-eval callback by global timesteps or completed episodes.",
+        help="最优评估回调的触发模式。",
     )
     parser.add_argument(
-        "--best-eval-interval",
+        "--best-eval-trigger-interval",
         type=int,
         default=100_000,
-        help="Best-eval interval in timesteps or episodes, depending on best-eval-trigger-mode.",
-    )
-    parser.add_argument(
-        "--best-eval-output-dir",
-        type=str,
-        default="output/optimal/rl/best",
-        help="Directory used to save best model, VecNormalize stats, and trajectory artifacts.",
+        help="根据 best-eval-trigger-mode 的设置，以步数或回合数为单位的最佳评估触发间隔。",
     )
     parser.add_argument(
         "--best-eval-deterministic",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Use deterministic policy when running best-eval rollouts.",
+        help="在运行最佳评估回放时，使用确定性策略。",
     )
     parser.add_argument(
         "--device",
         type=str,
         default="cpu",
-        help="Training device for PPO, e.g. cpu or cuda.",
+        help="指定运行 PPO 算法的硬件设备，例如 'cpu' 或 'cuda'。",
     )
     return parser
 
@@ -330,8 +327,8 @@ def resolve_run_mode(
     )
     enable_auto_analysis = (
         mode_defaults["analysis"]
-        if args.enable_analysis is None
-        else args.enable_analysis
+        if args.enable_auto_analysis is None
+        else args.enable_auto_analysis
     )
     enable_best_eval = (
         mode_defaults["best_eval"]
@@ -382,20 +379,29 @@ def resolve_n_steps_per_env(args: argparse.Namespace, num_envs: int) -> int:
     return max(1, int(np.ceil(target_rollout_steps / max(1, int(num_envs)))))
 
 
-def build_scenario() -> tuple[VehicleInfo, TrackInfo, SafeGuardUtility, TrainService]:
+def build_scenario(
+    *, schedule_time_s: float
+) -> tuple[VehicleInfo, TrackInfo, SafeGuardUtility, TrainService]:
     slopes, slope_intervals = load_slopes()
     speed_limits, speed_limit_intervals = load_speed_limits(
         to_mps=True, dtype=np.float64
     )
     accessible_points, dangerous_points = load_auxiliary_stopping_areas_ap_and_dp()
     longyang_start_position, putong_end_position = load_stations_goal_positions()
-    min_curves_list, max_curves_list = load_safeguard_curves(
-        "min_curves_list", "max_curves_list"
+    levi_curves_list, brake_curves_list, min_curves_list, max_curves_list = (
+        load_safeguard_curves(
+            "levi_curves_list",
+            "brake_curves_list",
+            "min_curves_list",
+            "max_curves_list",
+        )
     )
 
     safeguard_utility = SafeGuardUtility(
         speed_limits=speed_limits,
         speed_limit_intervals=speed_limit_intervals,
+        levi_curves_list=levi_curves_list,
+        brake_curves_list=brake_curves_list,
         min_curves_list=min_curves_list,
         max_curves_list=max_curves_list,
         factor=0.95,
@@ -413,7 +419,7 @@ def build_scenario() -> tuple[VehicleInfo, TrackInfo, SafeGuardUtility, TrainSer
         start_position=longyang_start_position,
         start_speed=0.0,
         target_position=putong_end_position,
-        schedule_time=440.0,
+        schedule_time=schedule_time_s,
         max_acc_change=0.75,
         max_arr_time_error_ratio=5.0,
         max_stop_error=0.3,
@@ -422,16 +428,51 @@ def build_scenario() -> tuple[VehicleInfo, TrackInfo, SafeGuardUtility, TrainSer
     return vehicle, track, safeguard_utility, train_service
 
 
+def _format_float_token(value: float, *, decimals: int = 10) -> str:
+    if not np.isfinite(value):
+        raise ValueError("value must be finite")
+
+    token = f"{round(float(value), decimals):.{decimals}f}".rstrip("0").rstrip(".")
+    if token in {"", "-0", "0"}:
+        token = "0"
+    if "." not in token:
+        token = f"{token}.0"
+    return token.replace("-", "neg").replace(".", "p")
+
+
+def _resolve_output_dir(
+    *, output_root: str, schedule_time_s: float, max_step_distance: float
+) -> str:
+    schedule_token = _format_float_token(schedule_time_s)
+    max_step_token = _format_float_token(max_step_distance)
+    return os.path.join(output_root, f"{schedule_token}_{max_step_token}")
+
+
 def main() -> None:
     args = build_arg_parser().parse_args()
 
+    schedule_time_s = args.schedule_time_s
+    ds = args.max_step_distance
     reward_discount = args.reward_discount
-    ds = args.step_distance
-    model_save_path = args.model_save_path
-    vecnormalize_save_path = args.vecnormalize_save_path
 
-    ensure_parent_dir(model_save_path)
-    ensure_parent_dir(vecnormalize_save_path)
+    output_root = args.output_root
+    output_dir = _resolve_output_dir(
+        output_root=output_root,
+        schedule_time_s=schedule_time_s,
+        max_step_distance=ds,
+    )
+    os.makedirs(output_dir, exist_ok=True)
+
+    final_output_dir = os.path.join(output_dir, "final")
+    os.makedirs(final_output_dir, exist_ok=True)
+    final_model_save_path = os.path.join(final_output_dir, _RL_MODEL_FILENAME)
+    final_vecnormalize_save_path = os.path.join(
+        final_output_dir,
+        _RL_VECNORMALIZE_FILENAME,
+    )
+    best_eval_output_dir = os.path.join(
+        output_dir, f"best_{args.best_eval_trigger_mode}"
+    )
 
     (
         run_mode,
@@ -472,15 +513,15 @@ def main() -> None:
     print(f"- enable_auto_analysis={enable_auto_analysis}")
     print(f"- enable_best_eval={enable_best_eval}")
     print(f"- reward_discount={reward_discount}")
-    print(f"- step_distance={ds}")
+    print(f"- schedule_time_s={schedule_time_s}")
+    print(f"- max_step_distance={ds}")
     print(f"- num_envs={num_envs}")
     print(f"- vec_env_type={resolved_vec_env_type}")
     if use_subproc:
         print(f"- subproc_start_method={args.subproc_start_method}")
     print(f"- n_steps_per_env={n_steps_per_env}")
     print(f"- rollout_steps_per_update={rollout_steps_per_update}")
-    print(f"- model_save_path={model_save_path}")
-    print(f"- vecnormalize_save_path={vecnormalize_save_path}")
+    print(f"- output_dir={output_dir}")
     print(f"- total_timesteps={args.total_timesteps}")
     print(f"- tensorboard_log_dir={args.tensorboard_log_dir}")
     print(f"- tb_log_name={args.tb_log_name}")
@@ -493,8 +534,8 @@ def main() -> None:
     print(f"- force_dump_interval_steps={force_dump_interval_steps}")
     print(f"- tb_batch_dump_records={tb_batch_dump_records}")
     print(f"- best_eval_trigger_mode={args.best_eval_trigger_mode}")
-    print(f"- best_eval_interval={args.best_eval_interval}")
-    print(f"- best_eval_output_dir={args.best_eval_output_dir}")
+    print(f"- best_eval_trigger_interval={args.best_eval_trigger_interval}")
+    print(f"- best_eval_output_dir={best_eval_output_dir}")
     print(f"- best_eval_deterministic={args.best_eval_deterministic}")
     print(f"- device={args.device}")
     if enable_auto_analysis and not enable_tb:
@@ -503,7 +544,9 @@ def main() -> None:
             f"analysis will use existing logs in {args.tensorboard_log_dir} if available."
         )
 
-    vehicle, track, safeguard_utility, train_service = build_scenario()
+    vehicle, track, safeguard_utility, train_service = build_scenario(
+        schedule_time_s=schedule_time_s
+    )
 
     # 创建训练环境
     env_initializers: list[Callable[[], Any]] = [
@@ -579,9 +622,9 @@ def main() -> None:
                     enable_diagnostics=False,
                     enable_trajectory_tracking=True,
                 ),
-                output_dir=args.best_eval_output_dir,
-                trigger_mode=args.best_eval_trigger_mode,
-                trigger_interval=max(1, int(args.best_eval_interval)),
+                output_dir=best_eval_output_dir,
+                eval_trigger_mode=args.best_eval_trigger_mode,
+                eval_trigger_interval=max(1, int(args.best_eval_trigger_interval)),
                 deterministic=args.best_eval_deterministic,
             )
         )
@@ -596,15 +639,15 @@ def main() -> None:
         tb_log_name=args.tb_log_name,
         progress_bar=True,
     )
-    model.save(model_save_path)
-    venv_train.save(vecnormalize_save_path)
+    model.save(final_model_save_path)
+    venv_train.save(final_vecnormalize_save_path)
     venv_train.close()
 
     print("Training finished.")
-    print(f"Model saved to: {model_save_path}.zip")
-    print(f"VecNormalize stats saved to: {vecnormalize_save_path}")
+    print(f"Final Model saved to: {final_model_save_path}")
+    print(f"Final VecNormalize stats saved to: {final_vecnormalize_save_path}")
     if enable_best_eval:
-        print(f"Best trajectory artifacts saved under: {args.best_eval_output_dir}")
+        print(f"Best trajectory artifacts saved under: {best_eval_output_dir}")
     print("Run python -m scripts.evaluate_rl to evaluate the trained policy.")
 
     if enable_auto_analysis:

@@ -35,8 +35,13 @@ class TestSPSIntegration:
         slopes, slope_intervals = load_slopes()
         speed_limits, speed_limit_intervals = load_speed_limits(to_mps=True)
         accessible_points, dangerous_points = load_auxiliary_stopping_areas_ap_and_dp()
-        min_curves_list, max_curves_list = load_safeguard_curves(
-            "min_curves_list", "max_curves_list"
+        levi_curves_list, brake_curves_list, min_curves_list, max_curves_list = (
+            load_safeguard_curves(
+                "levi_curves_list",
+                "brake_curves_list",
+                "min_curves_list",
+                "max_curves_list",
+            )
         )
 
         return {
@@ -49,6 +54,8 @@ class TestSPSIntegration:
             "speed_limit_intervals": speed_limit_intervals,
             "accessible_points": accessible_points,
             "dangerous_points": dangerous_points,
+            "levi_curves_list": levi_curves_list,
+            "brake_curves_list": brake_curves_list,
             "min_curves_list": min_curves_list,
             "max_curves_list": max_curves_list,
         }
@@ -60,6 +67,8 @@ class TestSPSIntegration:
         safeguard_utility = SafeGuardUtility(
             speed_limits=setup_data["speed_limits"],
             speed_limit_intervals=setup_data["speed_limit_intervals"],
+            levi_curves_list=setup_data["levi_curves_list"],
+            brake_curves_list=setup_data["brake_curves_list"],
             min_curves_list=setup_data["min_curves_list"],
             max_curves_list=setup_data["max_curves_list"],
             factor=0.9,
