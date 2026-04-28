@@ -67,7 +67,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--critical-point-radius-m",
         type=float,
         default=300.0,
-        help="Radius for slope transition and SPS critical-point attribution.",
+        help="Radius for SPS zone-center neighborhood risk attribution.",
     )
     parser.add_argument(
         "--top-k-spatial-bins",

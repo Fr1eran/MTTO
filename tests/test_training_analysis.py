@@ -420,8 +420,8 @@ def test_callback_reads_runtime_step_diagnostics_from_infos():
     assert callback._on_step() is True
 
     records = dict(logger.records)
-    assert records["runtime/position"] == 321.0
-    assert records["runtime/operation_time"] == 12.0
+    assert records["basic/position"] == 321.0
+    assert records["basic/operation_time"] == 12.0
 
 
 def test_callback_event_buffer_preserves_intermediate_steps():
@@ -694,7 +694,7 @@ def test_write_outputs_includes_extended_risk_columns(tmp_path):
             "critical_point_risk": {
                 "top_risky_points": [
                     {
-                        "type": "slope_transition",
+                        "type": "sps_zone_center",
                         "point_m": 1000.0,
                         "exposure_count": 10,
                         "near_miss_count": 4,

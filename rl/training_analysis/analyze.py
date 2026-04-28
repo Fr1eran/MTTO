@@ -4,7 +4,7 @@ from typing import Any
 
 import numpy as np
 
-from utils.data_loader import load_auxiliary_stopping_areas_ap_and_dp, load_slopes
+from utils.data_loader import load_auxiliary_stopping_areas_ap_and_dp, load_stations
 
 from .collect import ScalarSeries
 from .process import (
@@ -455,30 +455,32 @@ def compute_reward_component_impact(
 
 
 def _load_critical_points() -> dict[str, np.ndarray]:
-    slope_points = np.asarray([], dtype=np.float64)
-    sps_switch_points = np.asarray([], dtype=np.float64)
+    sps_zone_center_points = np.asarray([], dtype=np.float64)
 
     try:
-        _, slope_intervals = load_slopes()
-        slope_intervals = np.asarray(slope_intervals, dtype=np.float64)
-        if slope_intervals.size >= 3:
-            slope_points = np.unique(slope_intervals[1:-1])
-
         aps, dps = load_auxiliary_stopping_areas_ap_and_dp()
         if len(aps) == len(dps) and len(aps) > 0:
-            sps_switch_points = np.asarray(
+            sps_zone_center_points = np.asarray(
                 [(float(ap) + float(dp)) / 2.0 for ap, dp in zip(aps, dps)],
                 dtype=np.float64,
             )
+
+            # 终点站停车区不应被当作 SPS 步进关键点。
+            stations = load_stations()
+            end_station = stations.get("end_station", {})
+            end_start = float(end_station.get("start"))
+            end_end = float(end_station.get("end"))
+            lower, upper = sorted((end_start, end_end))
+            sps_zone_center_points = sps_zone_center_points[
+                (sps_zone_center_points < lower) | (sps_zone_center_points > upper)
+            ]
     except Exception:
         return {
-            "slope_transition_points_m": slope_points,
-            "sps_switch_points_m": sps_switch_points,
+            "sps_zone_center_points_m": sps_zone_center_points,
         }
 
     return {
-        "slope_transition_points_m": slope_points,
-        "sps_switch_points_m": sps_switch_points,
+        "sps_zone_center_points_m": sps_zone_center_points,
     }
 
 
@@ -828,27 +830,18 @@ def compute_constraint_diagnostic(
 
     critical_points = _load_critical_points()
     radius_m = max(1.0, float(critical_point_radius_m))
-    slope_entries = _build_critical_point_entries(
-        positions=positions,
-        failure_mask=truncated_mask,
-        violation_mask=violation_mask,
-        near_miss_mask=near_miss_event_mask,
-        points_m=critical_points["slope_transition_points_m"],
-        point_type="slope_transition",
-        radius_m=radius_m,
-    )
     sps_entries = _build_critical_point_entries(
         positions=positions,
         failure_mask=truncated_mask,
         violation_mask=violation_mask,
         near_miss_mask=near_miss_event_mask,
-        points_m=critical_points["sps_switch_points_m"],
-        point_type="sps_switch",
+        points_m=critical_points["sps_zone_center_points_m"],
+        point_type="sps_zone_center",
         radius_m=radius_m,
     )
 
     combined_entries = sorted(
-        slope_entries + sps_entries,
+        sps_entries,
         key=lambda item: (
             item["failure_risk"],
             item["violation_risk"],
@@ -863,8 +856,7 @@ def compute_constraint_diagnostic(
 
     critical_point_risk = {
         "radius_m": radius_m,
-        "slope_transition_points": slope_entries[:top_k_points],
-        "sps_switch_points": sps_entries[:top_k_points],
+        "sps_zone_center_points": sps_entries[:top_k_points],
         "top_risky_points": combined_entries[:top_k_points],
     }
 

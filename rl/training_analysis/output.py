@@ -396,17 +396,24 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
             )
 
     top_risky_points = critical_points.get("top_risky_points", [])
-    if isinstance(top_risky_points, list) and top_risky_points:
+    sps_top_risky_points = []
+    if isinstance(top_risky_points, list):
+        sps_top_risky_points = [
+            item
+            for item in top_risky_points
+            if isinstance(item, dict)
+            and item.get("type") in {"sps_zone_center", "sps_switch"}
+        ]
+
+    if sps_top_risky_points:
         lines.append("")
-        lines.append("### Critical Point Attribution")
+        lines.append("### SPS Zone Center Neighborhood Risk Attribution")
         lines.append("")
         lines.append(
             "| type | point_m | exposure | near_miss | violation | failure | near_miss_risk | violation_risk | failure_risk |"
         )
         lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
-        for item in top_risky_points[:10]:
-            if not isinstance(item, dict):
-                continue
+        for item in sps_top_risky_points[:10]:
             failure_risk = item.get("failure_risk", item.get("risk"))
             lines.append(
                 "| "
