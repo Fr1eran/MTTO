@@ -70,6 +70,79 @@ def calc_potential_safety_speed_adaptive(pos, speed, min_speed, max_speed, targe
     return scale * phi_base
 
 
+def calc_potential_safety_speed_asymmetric_v1(
+    pos,
+    speed,
+    min_speed,
+    max_speed,
+    target_pos,
+) -> float:
+    distance_to_target = np.abs(target_pos - pos)
+
+    # 设定一个危险缓冲距离 (m/s)，仅当距离边界小于该值时才触发惩罚
+    upper_bound = 8.0
+    lower_bound = 5.0
+
+    # 1. 上限惩罚 (始终激活)
+    margin_max = max_speed - speed
+    phi_max = np.where(
+        margin_max < upper_bound,
+        2.0 * np.log(1.01 - (1.0 - np.maximum(margin_max, 0.0) / upper_bound) ** 2),
+        0.0,
+    )
+
+    # 2. 下限惩罚 (条件激活：仅当存在实质性的最小速度约束时才惩罚)
+    margin_min = speed - min_speed
+    # 当 min_speed 极小 (例如接近 0) 时，说明当前允许停车，直接关闭下限惩罚
+    activate_min = (min_speed > 0.0) & (margin_min < lower_bound)
+    phi_min = np.where(
+        activate_min,
+        2.0 * np.log(1.01 - (1.0 - np.maximum(margin_min, 0.0) / lower_bound) ** 2),
+        0.0,
+    )
+
+    # 距离缩放系数
+    scale = 1.0 + 1.0 * np.exp(-0.001 * distance_to_target)
+
+    # 最终势能为两侧惩罚之和
+    return scale * (phi_max + phi_min)
+
+
+def calc_potential_safety_speed_asymmetric_v2(
+    pos,
+    speed,
+    min_speed,
+    max_speed,
+    target_pos,
+) -> float:
+    distance_to_target = np.abs(target_pos - pos)
+
+    # 设定一个危险缓冲距离 (m/s)，仅当距离边界小于该值时才触发惩罚
+    upper_bound = 8.0
+    lower_bound = 5.0
+
+    # 1. 上限惩罚 (始终激活)
+    margin_max = max_speed - speed
+    norm_margin_max = np.maximum(1.0 - margin_max / upper_bound, 0.0)
+    phi_max = -(norm_margin_max**2)
+
+    # 2. 下限惩罚 (条件激活：仅当存在实质性的最小速度约束时才惩罚)
+    margin_min = speed - min_speed
+    norm_margin_min = np.maximum(1.0 - margin_min / lower_bound, 0.0)
+    # 当 min_speed 极小 (例如接近 0) 时，说明当前允许停车，直接关闭下限惩罚
+    phi_min = np.where(
+        min_speed > 0.0,
+        -(norm_margin_min**2),
+        0.0,
+    )
+
+    # 距离缩放系数
+    scale = 1.0 + 1.0 * np.exp(-0.001 * distance_to_target)
+
+    # 最终势能为两侧惩罚之和
+    return scale * (phi_max + phi_min) * 4.0
+
+
 def calc_potential_docking(
     pos,
     speed,
@@ -82,8 +155,8 @@ def calc_potential_docking(
     d_scale = 30000.0
     speed_max = 500.0 / 3.6
 
-    sigma_x_hat = 0.2
-    sigma_v_hat = 0.1
+    sigma_x_hat = 0.1
+    sigma_v_hat = 0.2
 
     # 正则化项
     dist_error = np.abs(target_pos - pos)
@@ -91,18 +164,19 @@ def calc_potential_docking(
     v_hat = speed / speed_max
 
     # 增益参数
-    K_L = 1.0
-    K_G = 10.0
+    # K_L = 1.0
+    K_G = 20.0
 
     # 势能
     # phi_linear = -K_L * np.sqrt(x_hat**2 + v_hat**2)
-    phi_linear = -K_L * np.sqrt(x_hat**2)
+    # phi_linear = -K_L * np.sqrt(x_hat**2)
 
     phi_strong = K_G * np.exp(
         -np.abs(x_hat) / sigma_x_hat - np.abs(v_hat) / sigma_v_hat
     )
 
-    return phi_linear + phi_strong
+    # return phi_linear + phi_strong
+    return phi_strong
 
 
 def calc_potential_punctuality(
@@ -202,7 +276,17 @@ def plot_safety_potential_heatmap_speed():
     # )
 
     # 自适应安全目标势能场
-    POTENTIAL = calc_potential_safety_speed_adaptive(
+    # POTENTIAL = calc_potential_safety_speed_adaptive(
+    #     POS, SPEED, SPEED_MIN, SPEED_MAX, target_pos
+    # )
+
+    # 非对称解耦势能场 v1
+    # POTENTIAL = calc_potential_safety_speed_asymmetric_v1(
+    #     POS, SPEED, SPEED_MIN, SPEED_MAX, target_pos
+    # )
+
+    # 非对称解耦势能场 v2
+    POTENTIAL = calc_potential_safety_speed_asymmetric_v2(
         POS, SPEED, SPEED_MIN, SPEED_MAX, target_pos
     )
 
@@ -220,7 +304,7 @@ def plot_safety_potential_heatmap_speed():
         POTENTIAL_MASKED,
         cmap=cmap,
         shading="auto",
-        vmin=-8.0,
+        vmin=-4.0,
         vmax=0.0,
     )
 
@@ -358,8 +442,8 @@ def plot_docking_potential_heatmap(view_mode="3d"):
 
     target_pos = 29270.046
 
-    K_L = 1.0
-    K_G = 10.0
+    # K_L = 1.0
+    K_G = 20.0
 
     # 扩大位置与速度展示范围
     pos_array = np.linspace(target_pos - 10000.0, target_pos + 500.0, 1200)
@@ -456,7 +540,7 @@ def plot_docking_potential_heatmap(view_mode="3d"):
 
         ax.set_xlim(pos_array[0], pos_array[-1])
         ax.set_ylim(speed_array_kmh[0], speed_array_kmh[-1])
-        ax.set_zlim(-K_L * 0.8, K_G * 1.02)
+        ax.set_zlim(0, K_G * 1.02)
         ax.set_xlabel("Position (m)")
         ax.set_ylabel("Speed (km/h)")
         ax.set_zlabel(r"$\Phi_D$")
@@ -580,9 +664,9 @@ if __name__ == "__main__":
         figure_dpi=150.0,
         savefig_dpi=300.0,
     )
-    # plot_safety_potential_heatmap_speed()
+    plot_safety_potential_heatmap_speed()
     # plot_safety_potential_heatmap_position()
-    plot_docking_potential_heatmap(view_mode="3d")
+    # plot_docking_potential_heatmap(view_mode="3d")
     # plot_docking_potential_heatmap(view_mode="2d")
     # plot_docking_potential_slices()
     # plot_punctuality_potential_curve(

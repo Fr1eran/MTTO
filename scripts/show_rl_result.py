@@ -9,8 +9,8 @@ from utils.io_utils import load_optimized_curve_and_metrics
 from utils.plot_utils import set_global_plot_style
 from utils.data_loader import load_speed_limits, load_safeguard_curves
 
-_RL_CURVE_FILENAME = "best_trajectory.npz"
-_RL_METRICS_FILENAME = "best_trajectory_metrics.json"
+_RL_CURVE_GLOB = "*trajectory.npz"
+_RL_METRICS_GLOB = "*_metrics.json"
 _RL_DEFAULT_SEARCH_DIR = "output/optimal/rl/best"
 
 
@@ -82,8 +82,8 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         "--curve-dir",
         default=_RL_DEFAULT_SEARCH_DIR,
         help=(
-            "Directory to recursively search for both "
-            f"{_RL_CURVE_FILENAME} and {_RL_METRICS_FILENAME}."
+            "Directory to recursively search for files matching "
+            f"'{_RL_CURVE_GLOB}' and '{_RL_METRICS_GLOB}'."
         ),
     )
     parser.add_argument(
@@ -101,41 +101,47 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _find_latest_named_file(*, search_dir: str, file_name: str) -> Path:
+def _find_latest_matching_file(*, search_dir: str, glob_pattern: str) -> Path:
     search_root = Path(search_dir)
     if not search_root.is_dir():
         raise FileNotFoundError(f"Search directory does not exist: {search_dir}")
 
     matches = sorted(
-        (path for path in search_root.rglob(file_name) if path.is_file()),
+        (path for path in search_root.rglob(glob_pattern) if path.is_file()),
         key=lambda path: (path.stat().st_mtime, str(path)),
         reverse=True,
     )
     if not matches:
         raise FileNotFoundError(
-            f"Could not find '{file_name}' under directory: {search_dir}"
+            f"Could not find files matching '{glob_pattern}' under directory: {search_dir}"
         )
 
     if len(matches) > 1:
         print(
-            f"Found {len(matches)} '{file_name}' files under '{search_dir}', "
+            f"Found {len(matches)} '{glob_pattern}' files under '{search_dir}', "
             f"using latest: {matches[0]}"
         )
     return matches[0]
 
 
 def _resolve_curve_and_metrics_paths(*, curve_dir: str) -> tuple[str, str]:
-    curve_path = _find_latest_named_file(
+    curve_path = _find_latest_matching_file(
         search_dir=curve_dir,
-        file_name=_RL_CURVE_FILENAME,
+        glob_pattern=_RL_CURVE_GLOB,
     )
 
-    metrics_path = curve_path.with_name(_RL_METRICS_FILENAME)
-    if not metrics_path.is_file():
+    # 在 curve 文件所在目录查找匹配的 metrics 文件
+    curve_dir_path = curve_path.parent
+    metrics_matches = sorted(
+        (p for p in curve_dir_path.glob(_RL_METRICS_GLOB) if p.is_file()),
+        key=lambda p: (p.stat().st_mtime, str(p)),
+        reverse=True,
+    )
+    if not metrics_matches:
         raise FileNotFoundError(
-            f"Could not find '{_RL_CURVE_FILENAME}' in the same directory as "
-            f"curve file: {curve_path}"
+            f"Could not find files matching '{_RL_METRICS_GLOB}' in directory: {curve_dir_path}"
         )
+    metrics_path = metrics_matches[0]
 
     return str(curve_path), str(metrics_path)
 

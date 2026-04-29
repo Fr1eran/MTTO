@@ -26,8 +26,8 @@ from stable_baselines3.common.vec_env import (
     VecNormalize,
 )
 
-_RL_MODEL_FILENAME = "ppo_mtto_model.zip"
-_RL_VECNORMALIZE_FILENAME = "vecnormalize.pkl"
+_RL_FINAL_MODEL_FILENAME = "final_model.zip"
+_RL_FINAL_VECNORMALIZE_FILENAME = "final_vecnormalize.pkl"
 
 
 # 学习率线性衰减
@@ -465,10 +465,10 @@ def main() -> None:
 
     final_output_dir = os.path.join(output_dir, "final")
     os.makedirs(final_output_dir, exist_ok=True)
-    final_model_save_path = os.path.join(final_output_dir, _RL_MODEL_FILENAME)
+    final_model_save_path = os.path.join(final_output_dir, _RL_FINAL_MODEL_FILENAME)
     final_vecnormalize_save_path = os.path.join(
         final_output_dir,
-        _RL_VECNORMALIZE_FILENAME,
+        _RL_FINAL_VECNORMALIZE_FILENAME,
     )
     best_eval_output_dir = os.path.join(
         output_dir, f"best_{args.best_eval_trigger_mode}"

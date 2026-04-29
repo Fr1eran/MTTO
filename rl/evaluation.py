@@ -160,7 +160,7 @@ def evaluate_policy_once(
         start_position_m=float(mtto_env.train_service.start_position),
         target_position_m=float(mtto_env.train_service.target_position),
         final_position_m=final_position,
-        final_speed_mps=float(mtto_env.current_speed),
+        final_speed_mps=float(basic_info.get("speed", mtto_env.current_speed)),
         stop_error_m=abs(
             float(mtto_env.train_service.target_position) - final_position
         ),
