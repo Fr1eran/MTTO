@@ -10,6 +10,7 @@ from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
 from rl.env_factory import make_env
+from rl.evaluation import is_success_within_train_service_limits
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_safeguard_curves,
@@ -245,10 +246,10 @@ def main() -> None:
     comfort_er_pct = float(basic_snapshot.get("comfort_er_pct", 0.0))
     comfort_rms = float(basic_snapshot.get("comfort_rms", 0.0))
 
-    # 判断是否成功到达: 位置在目标范围内 且 速度接近零
-    success = (
-        stop_error_m <= train_service.max_stop_error * 10
-        and abs(final_speed_mps) <= 0.1
+    success = is_success_within_train_service_limits(
+        stop_error_m=stop_error_m,
+        time_error_s=time_error_s,
+        train_service=train_service,
     )
 
     saved_npz_path = ""

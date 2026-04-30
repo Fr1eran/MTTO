@@ -95,9 +95,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--run-mode",
         type=str,
-        choices=["tune", "reproduce", "eval"],
+        choices=["tune", "reproduce", "monitor_best", "best_only"],
         default="tune",
-        help="算法运行模式。'tune'启用日志分析与分析，'reproduce/eval'更注重效率。",
+        help=(
+            "算法运行模式。"
+            "tune=全量调参与分析；"
+            "reproduce=高效复现；"
+            "monitor_best=基础监控+best-eval；"
+            "best_only=仅保留best-eval。"
+        ),
     )
     parser.add_argument(
         "--enable-tb",
@@ -301,13 +307,21 @@ def resolve_run_mode(
             "analysis": False,
             "best_eval": False,
         },
-        "eval": {
+        "monitor_best": {
+            "tb": True,
+            "callback": False,
+            "monitor": True,
+            "env_diagnostics": False,
+            "analysis": False,
+            "best_eval": True,
+        },
+        "best_only": {
             "tb": False,
             "callback": False,
             "monitor": False,
             "env_diagnostics": False,
             "analysis": False,
-            "best_eval": False,
+            "best_eval": True,
         },
     }
     mode_defaults = defaults_by_mode[run_mode]
@@ -356,7 +370,8 @@ def resolve_log_interval(
     defaults_by_mode = {
         "tune": 1,
         "reproduce": 5,
-        "eval": 10,
+        "monitor_best": 1,
+        "best_only": 10,
     }
     if args.log_interval is not None:
         return max(1, int(args.log_interval))
@@ -483,6 +498,7 @@ def main() -> None:
         enable_auto_analysis,
         enable_best_eval,
     ) = resolve_run_mode(args)
+
     log_interval = resolve_log_interval(args, run_mode, enable_tb)
     tb_sample_interval_steps = max(1, int(args.tb_sample_interval_steps))
     env_diagnostics_interval_steps = max(
@@ -542,6 +558,11 @@ def main() -> None:
         print(
             "- warning: enable_auto_analysis=True while enable_tb=False; "
             f"analysis will use existing logs in {args.tensorboard_log_dir} if available."
+        )
+    if enable_auto_analysis and not enable_callback:
+        print(
+            "- warning: enable_auto_analysis=True while enable_callback=False; "
+            "analysis may miss high-frequency state/constraint diagnostics."
         )
 
     vehicle, track, safeguard_utility, train_service = build_scenario(

@@ -112,6 +112,22 @@ def unwrap_mtto_env(env: gym.Env[Any, Any]) -> MTTOEnv:
     return mtto_env
 
 
+def is_success_within_train_service_limits(
+    *,
+    stop_error_m: float,
+    time_error_s: float,
+    train_service: TrainService,
+) -> bool:
+    schedule_time_s = float(train_service.schedule_time)
+    if schedule_time_s <= 0.0:
+        return False
+
+    time_error_ratio_pct = abs(float(time_error_s)) / schedule_time_s * 100.0
+    return float(stop_error_m) <= float(
+        train_service.max_stop_error
+    ) and time_error_ratio_pct <= float(train_service.max_arr_time_error_ratio)
+
+
 def evaluate_policy_once(
     model: Any,
     env: gym.Env[Any, Any],
@@ -143,28 +159,34 @@ def evaluate_policy_once(
     )
 
     final_position = float(basic_info.get("position", mtto_env.current_pos))
+    target_time_s = float(mtto_env.train_service.schedule_time)
     total_time_s = float(
         basic_info.get("operation_time", mtto_env.current_operation_time)
     )
     total_energy_kj = float(
         basic_info.get("energy_consumption", mtto_env.current_energy_consumption)
     )
+    stop_error_m = abs(float(mtto_env.train_service.target_position) - final_position)
+    time_error_s = total_time_s - target_time_s
+    success = is_success_within_train_service_limits(
+        stop_error_m=stop_error_m,
+        time_error_s=time_error_s,
+        train_service=mtto_env.train_service,
+    )
 
     return PolicyEvaluationResult(
-        success=bool(terminated and not truncated),
+        success=success,
         total_reward=float(total_reward),
         total_time_s=total_time_s,
-        target_time_s=float(mtto_env.train_service.schedule_time),
+        target_time_s=target_time_s,
         total_energy_j=total_energy_kj * 1000.0,
         total_energy_kj=total_energy_kj,
         start_position_m=float(mtto_env.train_service.start_position),
         target_position_m=float(mtto_env.train_service.target_position),
         final_position_m=final_position,
         final_speed_mps=float(basic_info.get("speed", mtto_env.current_speed)),
-        stop_error_m=abs(
-            float(mtto_env.train_service.target_position) - final_position
-        ),
-        time_error_s=total_time_s - float(mtto_env.train_service.schedule_time),
+        stop_error_m=stop_error_m,
+        time_error_s=time_error_s,
         comfort_tav=float(basic_info.get("comfort_tav", 0.0)),
         comfort_er_pct=float(basic_info.get("comfort_er_pct", 0.0)),
         comfort_rms=float(basic_info.get("comfort_rms", 0.0)),

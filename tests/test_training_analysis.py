@@ -16,8 +16,12 @@ from rl.training_analysis.collect import ScalarSeries, compute_sampling_health
 from rl.training_analysis.pipeline import AnalysisConfig, run_training_analysis
 from rl.training_analysis.output import build_analysis_payload, write_analysis_outputs
 from rl.training_analysis.process import build_episode_snapshots
-from scripts.analyze_training_data import build_arg_parser
-from scripts.train_rl import resolve_log_interval
+from scripts.analyze_training_data import build_arg_parser as build_analyze_arg_parser
+from scripts.train_rl import (
+    build_arg_parser as build_train_rl_arg_parser,
+    resolve_log_interval,
+    resolve_run_mode,
+)
 
 
 def _make_series(tag: str, values: list[float], step_start: int = 0) -> ScalarSeries:
@@ -621,19 +625,17 @@ def test_sampling_gate_warn_mode_outputs_data_quality(monkeypatch, tmp_path):
 
 
 def test_analyze_cli_sampling_quality_args():
-    parser = build_arg_parser()
-    args = parser.parse_args(
-        [
-            "--min-points-per-10k-steps",
-            "6.5",
-            "--min-unique-episodes",
-            "80",
-            "--max-mean-step-gap",
-            "1500",
-            "--sampling-quality-mode",
-            "strict_fail",
-        ]
-    )
+    parser = build_analyze_arg_parser()
+    args = parser.parse_args([
+        "--min-points-per-10k-steps",
+        "6.5",
+        "--min-unique-episodes",
+        "80",
+        "--max-mean-step-gap",
+        "1500",
+        "--sampling-quality-mode",
+        "strict_fail",
+    ])
 
     assert args.min_points_per_10k_steps == 6.5
     assert args.min_unique_episodes == 80
@@ -645,13 +647,88 @@ def test_resolve_log_interval_defaults_and_override():
     args = argparse.Namespace(log_interval=None)
     assert resolve_log_interval(args, "tune", True) == 1
     assert resolve_log_interval(args, "reproduce", True) == 5
-    assert resolve_log_interval(args, "eval", True) == 10
+    assert resolve_log_interval(args, "monitor_best", True) == 1
+    assert resolve_log_interval(args, "best_only", True) == 10
     assert resolve_log_interval(args, "reproduce", False) == 1
-    assert resolve_log_interval(args, "eval", False) == 1
+    assert resolve_log_interval(args, "best_only", False) == 1
 
     args.log_interval = 3
     assert resolve_log_interval(args, "tune", True) == 3
-    assert resolve_log_interval(args, "eval", False) == 3
+    assert resolve_log_interval(args, "monitor_best", False) == 3
+
+
+@pytest.mark.parametrize(
+    "run_mode, expected",
+    [
+        ("tune", (True, True, True, True, True, True)),
+        ("reproduce", (False, False, False, False, False, False)),
+        ("monitor_best", (True, False, True, False, False, True)),
+        ("best_only", (False, False, False, False, False, True)),
+    ],
+)
+def test_resolve_run_mode_defaults(run_mode: str, expected: tuple[bool, ...]) -> None:
+    args = argparse.Namespace(
+        run_mode=run_mode,
+        enable_tb=None,
+        enable_callback=None,
+        enable_monitor=None,
+        enable_env_diagnostics=None,
+        enable_auto_analysis=None,
+        enable_best_eval=None,
+    )
+    (
+        _,
+        enable_tb,
+        enable_callback,
+        enable_monitor,
+        enable_env_diagnostics,
+        enable_auto_analysis,
+        enable_best_eval,
+    ) = resolve_run_mode(args)
+
+    assert (
+        enable_tb,
+        enable_callback,
+        enable_monitor,
+        enable_env_diagnostics,
+        enable_auto_analysis,
+        enable_best_eval,
+    ) == expected
+
+
+def test_resolve_run_mode_forces_callback_off_when_tb_disabled() -> None:
+    args = argparse.Namespace(
+        run_mode="tune",
+        enable_tb=False,
+        enable_callback=True,
+        enable_monitor=None,
+        enable_env_diagnostics=None,
+        enable_auto_analysis=None,
+        enable_best_eval=None,
+    )
+    _, enable_tb, enable_callback, *_rest = resolve_run_mode(args)
+
+    assert enable_tb is False
+    assert enable_callback is False
+
+
+def test_train_rl_cli_rejects_removed_eval_mode() -> None:
+    parser = build_train_rl_arg_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--run-mode", "eval"])
+
+
+def test_train_rl_cli_accepts_new_run_modes() -> None:
+    parser = build_train_rl_arg_parser()
+    for mode in ("tune", "reproduce", "monitor_best", "best_only"):
+        args = parser.parse_args(["--run-mode", mode])
+        assert args.run_mode == mode
+
+
+def test_train_rl_cli_rejects_removed_monitor_log_dir_option() -> None:
+    parser = build_train_rl_arg_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--monitor-log-dir", "output/tmp/monitor"])
 
 
 def test_write_outputs_includes_extended_risk_columns(tmp_path):

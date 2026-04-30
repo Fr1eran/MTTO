@@ -13,6 +13,7 @@ from model.track import TrackInfo, TrackProfile
 from model.common import ECC, ORS
 from utils.indexing_utils import get_interval_index
 from utils.plot_utils import set_chinese_font
+from utils.score_function import SigmoidVariant
 
 
 class RewardInfoForTB(TypedDict, total=False):
@@ -127,6 +128,18 @@ class MTTOEnv(gym.Env):
             / self.max_step_distance
         )
 
+        self._docking_score_func = SigmoidVariant(
+            x1=self.train_service.max_stop_error, x2=30.0, c=10.0
+        )
+
+        self._punctuality_score_func = SigmoidVariant(
+            x1=self.train_service.schedule_time
+            * self.train_service.max_arr_time_error_ratio
+            / 100.0,
+            x2=120.0,
+            c=7.0,
+        )
+
         # 定义常量
         # 包含：
         # - 运行总距离, 单位: m
@@ -194,7 +207,10 @@ class MTTOEnv(gym.Env):
         self.max_energy_consumption = mec + lec
 
         # 计算参考曲线上每个位置对应的最短累计耗时
-        # self.ref_curve_cum_time = self._calc_ref_cum_time()
+        self.ref_curve_cum_time = self._calc_ref_cum_time()
+        self.ref_total_operation_time = self._get_reference_cum_time(
+            self.train_service.target_position
+        )
 
         # 初始化状态
         # 包含:
@@ -732,11 +748,7 @@ class MTTOEnv(gym.Env):
         )
 
         # 判断智能体是否到达目标区域
-        terminated = abs(
-            self.train_service.target_position - self.current_pos
-        ) <= self.train_service.max_stop_error * 30 and math.isclose(
-            self.current_speed, 0.0, abs_tol=0.1
-        )
+        terminated = math.isclose(self.current_speed, 0.0, abs_tol=0.01)
 
         # 若智能体违反安全约束或者达到最大步数，则截断训练进程
         truncated = (
@@ -834,7 +846,7 @@ class MTTOEnv(gym.Env):
     def _calc_ref_cum_time(self):
         """计算最短运行模式下, 到达每个参考位置的累计运行时间"""
 
-        ds = np.diff(self.upper_speed_profile_pos_arr)
+        ds = np.abs(np.diff(self.upper_speed_profile_pos_arr))
         speed_avg = 0.5 * (
             self.upper_speed_profile_speed_arr[1:]
             + self.upper_speed_profile_speed_arr[:-1]
@@ -854,6 +866,41 @@ class MTTOEnv(gym.Env):
 
         return ref_cum_time
 
+    def _get_reference_cum_time(self, pos: float | np.floating) -> float:
+        """根据位置在最短运行参考曲线上插值累计运行时间。"""
+        if self.upper_speed_profile_pos_arr.size == 0:
+            return 0.0
+
+        if self.upper_speed_profile_pos_arr[0] <= self.upper_speed_profile_pos_arr[-1]:
+            interp_pos = self.upper_speed_profile_pos_arr
+            interp_time = self.ref_curve_cum_time
+        else:
+            interp_pos = self.upper_speed_profile_pos_arr[::-1]
+            interp_time = self.ref_curve_cum_time[::-1]
+
+        return float(
+            np.interp(
+                float(pos),
+                interp_pos,
+                interp_time,
+                left=float(interp_time[0]),
+                right=float(interp_time[-1]),
+            )
+        )
+
+    def _get_reference_remaining_operation_time(
+        self, pos: float | np.floating
+    ) -> float:
+        """根据位置估计沿最短运行参考曲线抵达终点的剩余时间。"""
+        reference_cum_time = self._get_reference_cum_time(pos)
+        return float(
+            np.clip(
+                self.ref_total_operation_time - reference_cum_time,
+                0.0,
+                self.ref_total_operation_time,
+            )
+        )
+
     def _get_upper_speed(self, pos: float | np.floating):
         return max(0.0, self.upper_speed_profile_interp_func(pos))
 
@@ -867,15 +914,11 @@ class MTTOEnv(gym.Env):
 
         if not truncated:
             if terminated:
-                reward_total = self._get_reward_goal() + 20.0
+                reward_total = self._get_reward_goal()
             else:
                 reward_total = self._get_reward_dense()
         else:
-            progress = (
-                abs(self.current_pos - self.train_service.start_position)
-                / self.whole_distance
-            )
-            reward_total = -20.0 * (1.5 - np.sqrt(progress))
+            reward_total = -15.0
 
         if self.enable_diagnostics and self._collect_step_diagnostics:
             self.rewards_info["total"] = reward_total
@@ -917,9 +960,7 @@ class MTTOEnv(gym.Env):
 
     def _get_reward_safety_dense(self) -> float:
         # 里程碑式奖励
-        small_bonus = 0.0
-        if self.current_sp != self.last_state["stopping_point_index"]:
-            small_bonus = 5.0 / self.sps.num_of_stopping_points
+        small_bonus = 100.0 / self.max_episode_steps
 
         # 计算当前状态势能
 
@@ -1182,9 +1223,12 @@ class MTTOEnv(gym.Env):
         phi_max = -(norm_margin_max**2)
 
         # 2. 下限惩罚 (条件激活：仅当存在实质性的最小速度约束时才惩罚)
-        margin_min = speed - min_speed
-        norm_margin_min = max(1.0 - margin_min / lower_bound, 0.0)
-        phi_min = -(norm_margin_min**2)
+        if min_speed > 0.0:
+            margin_min = speed - min_speed
+            norm_margin_min = max(1.0 - margin_min / lower_bound, 0.0)
+            phi_min = -(norm_margin_min**2)
+        else:
+            phi_min = 0
 
         # global_dist_to_end = abs(self.train_service.target_position - pos)
         # fade_factor = 1.0
@@ -1200,7 +1244,7 @@ class MTTOEnv(gym.Env):
         scale = 1.0 + 1.0 * np.exp(-0.001 * distance_to_target)
 
         # 最终势能为两侧惩罚之和
-        return scale * (phi_max + phi_min) * 4.0
+        return scale * (phi_max + phi_min) * 5.0
 
     def _potential_safety_position(
         self, pos: float, min_pos: float, max_pos: float, target_pos: float
@@ -1220,11 +1264,6 @@ class MTTOEnv(gym.Env):
         return scale * phi_base
 
     def _get_reward_energy_dense(self) -> float:
-        # if (
-        #     abs(self.current_pos - self.task.start_position) < 3000.0
-        #     or abs(self.current_pos - self.task.target_position) < 3000.0
-        # ):
-        #     return 0.0
 
         val = (
             -(self.current_energy_consumption - self.last_state["energy_consumption"])
@@ -1237,35 +1276,28 @@ class MTTOEnv(gym.Env):
         delta_acc = abs(self.last_state["acc"] - self.current_acc)
         norm_jerk = delta_acc / (self.train_service.max_acc_change)
 
-        # val = -0.08 * (1 - np.exp(-1.5 * norm_jerk))
-        val = -0.08 * norm_jerk**2
+        val = -10.0 / self.max_episode_steps * norm_jerk**2
 
         return val
 
     def _get_reward_punctuality_dense(self) -> float:
         phi_curr = self._potential_punctuality(
             pos=self.current_pos,
-            speed=self.current_speed,
             operation_time=self.current_operation_time,
         )
 
         phi_prev = self._potential_punctuality(
             pos=self.last_state["pos"],
-            speed=self.last_state["speed"],
             operation_time=self.last_state["operation_time"],
         )
 
         return self.gamma * phi_curr - phi_prev
 
-    # 基于连续非线性衰减的冗余时间势能场
-    def _potential_punctuality(self, pos: float, speed: float, operation_time: float):
-        # 计算理论上跑完剩余路程的最短运行时间
-        min_remaining_operation_time = self.ors.calc_min_operation_time(
-            begin_pos=pos,
-            begin_speed=speed,
-            end_pos=self.train_service.target_position,
-            end_speed=0.0,
-        )
+    # 基于参考曲线累计时间的冗余时间势能场
+    def _potential_punctuality(self, pos: float, operation_time: float):
+        # 以位置为基准估计沿最短运行参考曲线到终点的剩余时间，避免
+        # 当前速度同时影响本步耗时和未来最短剩余时间而产生奖励黑客。
+        min_remaining_operation_time = self._get_reference_remaining_operation_time(pos)
 
         # 计算实际剩余规划运行时间
         actual_remaining_operation_time = (
@@ -1282,35 +1314,59 @@ class MTTOEnv(gym.Env):
             redundant_operation_time / self.train_service.schedule_time
         )
 
-        return -5.0 * np.log1p(np.exp(-1.0 * time_redundancy_norm))
+        return -4.0 * np.log1p(np.exp(-1.0 * time_redundancy_norm))
 
     def _get_reward_docking_dense(self):
-        phi_curr = self._potential_docking(
+        # phi_curr = self._potential_docking_v1(
+        #     pos=self.current_pos, speed=self.current_speed
+        # )
+
+        # phi_prev = self._potential_docking_v1(
+        #     pos=self.last_state["pos"], speed=self.last_state["speed"]
+        # )
+
+        if not self.is_final_approach:
+            return 0.0
+
+        phi_curr = self._potential_docking_v2(
             pos=self.current_pos, speed=self.current_speed
         )
 
-        phi_prev = self._potential_docking(
+        phi_prev = self._potential_docking_v2(
             pos=self.last_state["pos"], speed=self.last_state["speed"]
         )
 
         return self.gamma * phi_curr - phi_prev
 
-    def _potential_docking(self, pos: float, speed: float):
+    def _potential_docking_v1(self, pos: float, speed: float):
         # 正则化
         dist_error_abs = abs(self.train_service.target_position - pos)
+
         x_hat = dist_error_abs / self.target_attraction_domain_radius
         v_hat = speed / self.vehicle.max_speed
 
-        phi_linear = -0.2 * np.sqrt(x_hat**2 + v_hat**2)
         phi_strong = 20.0 * np.exp(-x_hat / 0.1 - v_hat / 0.1)
 
-        return phi_linear + phi_strong
+        return phi_strong
+
+    def _potential_docking_v2(self, pos: float, speed: float):
+        dist_error_abs = abs(self.train_service.target_position - pos)
+
+        x_hat = dist_error_abs / self.target_attraction_domain_radius
+        v_hat = speed / self.vehicle.max_speed
+
+        phi_pos = np.exp(-(x_hat**2) / (2 * 0.05**2))
+        phi_speed = np.exp(-(v_hat**2) / (2 * 0.05**2))
+
+        return 20.0 * phi_pos * phi_speed
 
     def _get_reward_goal(
         self,
     ) -> float:
-        reward_docking = self._get_reward_docking_goal() * 10.0
-        reward_punctuality = self._get_reward_punctuality_goal() * 5.0
+        _docking = self._calc_docking_score()
+        _punctuality = self._calc_punctuality_score()
+        reward_docking = _docking * 10.0
+        reward_punctuality = _docking * _punctuality * 5.0
 
         if self.enable_diagnostics and self._collect_step_diagnostics:
             self.rewards_info["docking"] = reward_docking
@@ -1318,28 +1374,15 @@ class MTTOEnv(gym.Env):
 
         return reward_docking + reward_punctuality
 
-    def _get_reward_docking_goal(self) -> float:
-        # 停站位置误差不超过0.3m
+    def _calc_docking_score(self) -> float:
         docking_pos_error = abs(self.train_service.target_position - self.current_pos)
+        return self._docking_score_func(docking_pos_error)
 
-        return self._gaussian_kernel(A=2, B=-1, k=2.310490602, x=docking_pos_error)
-
-    def _get_reward_punctuality_goal(self) -> float:
-        # 列车到站时刻误差不超过2min
+    def _calc_punctuality_score(self) -> float:
         ontime_error = abs(
             self.train_service.schedule_time - self.current_operation_time
         )
-
-        return self._gaussian_kernel(
-            A=2,
-            B=-1,
-            k=69.314718056
-            / (
-                self.train_service.schedule_time
-                * self.train_service.max_arr_time_error_ratio
-            ),
-            x=ontime_error,
-        )
+        return self._punctuality_score_func(ontime_error)
 
     def _gaussian_kernel(self, A: float, B: float, k: float, x: float) -> float:
         return A * np.exp(-k * x) + B

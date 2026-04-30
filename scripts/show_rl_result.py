@@ -249,7 +249,7 @@ def main() -> None:
     success_value = metrics.get("success")
     if isinstance(success_value, bool):
         print(
-            "RL 最优轨迹（成功到达）" if success_value else "RL 最优轨迹（未成功到达）"
+            "RL 最优轨迹（完成任务）" if success_value else "RL 最优轨迹（未完成任务）"
         )
 
     ax.set_xlabel("Position (m)")

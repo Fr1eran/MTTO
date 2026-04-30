@@ -3,8 +3,9 @@ from pathlib import Path
 
 import numpy as np
 
+from model.ocs import TrainService
 from rl.callbacks import BestTrajectoryEvalCallback
-from rl.evaluation import PolicyEvaluationResult
+from rl.evaluation import PolicyEvaluationResult, is_success_within_train_service_limits
 
 
 class DummyLogger:
@@ -32,6 +33,18 @@ class DummyTrainingEnv:
 class DummyEvalEnv:
     def close(self) -> None:
         return
+
+
+def _build_train_service(*, schedule_time: float = 440.0) -> TrainService:
+    return TrainService(
+        start_position=0.0,
+        start_speed=0.0,
+        target_position=100.0,
+        schedule_time=schedule_time,
+        max_acc_change=0.75,
+        max_arr_time_error_ratio=5.0,
+        max_stop_error=0.3,
+    )
 
 
 def _build_result(*, success: bool, total_reward: float) -> PolicyEvaluationResult:
@@ -110,8 +123,8 @@ def test_best_eval_callback_triggers_on_episode_interval(
     metrics = json.loads(
         (tmp_path / "best_trajectory_metrics.json").read_text(encoding="utf-8")
     )
-    assert metrics["trigger_mode"] == "episodes"
-    assert metrics["trigger_value"] == 3
+    assert metrics["eval_trigger_mode"] == "episodes"
+    assert metrics["eval_trigger_interval"] == 3
 
 
 def test_best_eval_callback_prefers_success_over_reward(
@@ -148,3 +161,53 @@ def test_best_eval_callback_prefers_success_over_reward(
     )
     assert metrics["success"] is True
     assert metrics["total_reward"] == 1.0
+
+
+def test_success_within_train_service_limits_allows_threshold_boundary() -> None:
+    train_service = _build_train_service()
+    assert (
+        is_success_within_train_service_limits(
+            stop_error_m=0.3,
+            time_error_s=22.0,
+            train_service=train_service,
+        )
+        is True
+    )
+
+
+def test_success_within_train_service_limits_rejects_stop_error_outside_limit() -> None:
+    train_service = _build_train_service()
+    assert (
+        is_success_within_train_service_limits(
+            stop_error_m=0.30001,
+            time_error_s=0.0,
+            train_service=train_service,
+        )
+        is False
+    )
+
+
+def test_success_within_train_service_limits_rejects_time_error_outside_limit() -> None:
+    train_service = _build_train_service()
+    assert (
+        is_success_within_train_service_limits(
+            stop_error_m=0.0,
+            time_error_s=22.0001,
+            train_service=train_service,
+        )
+        is False
+    )
+
+
+def test_success_within_train_service_limits_returns_false_when_schedule_time_invalid() -> (
+    None
+):
+    train_service = _build_train_service(schedule_time=0.0)
+    assert (
+        is_success_within_train_service_limits(
+            stop_error_m=0.0,
+            time_error_s=0.0,
+            train_service=train_service,
+        )
+        is False
+    )

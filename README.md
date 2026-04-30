@@ -83,7 +83,8 @@ MTTO/
 |------|------|
 | `tune`（默认） | 启用 TensorBoard、采样回调、best-eval、训练后自动分析 |
 | `reproduce` | 关闭所有日志与分析，最大化训练效率 |
-| `eval` | 同 `reproduce`，关闭日志相关功能 |
+| `monitor_best` | 关闭高频采样回调，保留 VecMonitor 基础监控与 best-eval（rollout 指标写入 TensorBoard） |
+| `best_only` | 仅保留 best-eval，适合低开销筛选最优模型 |
 
 #### 训练环境与并行
 
@@ -111,13 +112,13 @@ MTTO/
 |------|------|--------|------|
 | `--tensorboard-log-dir` | `str` | `mtto_ppo_tensorboard_logs` | TensorBoard 日志根目录 |
 | `--tb-log-name` | `str` | `trainning_log` | TensorBoard 日志子目录名 |
-| `--log-interval` | `int` | `1`（tune）/ `5`（reproduce） | PPO 日志打印间隔 |
+| `--log-interval` | `int` | `1`（tune）/ `5`（reproduce）/ `1`（monitor_best）/ `10`（best_only） | PPO 日志打印间隔 |
 | `--tb-sample-interval-steps` | `int` | `1` | 回调最小采样步长 |
 | `--env-diagnostics-interval-steps` | `int` | 同 `--tb-sample-interval-steps` | 环境诊断快照记录间隔 |
 | `--force-dump-interval-steps` | `int` | `0`（关闭） | 按步长强制刷新 TensorBoard 缓冲区 |
 | `--tb-batch-dump-records` | `int` | `0`（关闭） | 按采样记录数批量刷新 TensorBoard 缓冲区 |
 | `--output-root` | `str` | `output/optimal/rl/` | 训练结果输出根目录 |
-| `--run-mode` | `str` | `tune` | `tune` / `reproduce` / `eval` |
+| `--run-mode` | `str` | `tune` | `tune` / `reproduce` / `monitor_best` / `best_only` |
 | `--enable-tb` | `bool` | 取决于 run-mode | 启用 TensorBoard 日志 |
 | `--enable-callback` | `bool` | 取决于 run-mode | 启用 TensorBoard 回调 |
 | `--enable-monitor` | `bool` | 取决于 run-mode | 启用 VecMonitor 包装器 |
@@ -156,6 +157,12 @@ python -m scripts.train_rl --run-mode tune
 
 # 高效复现（关闭日志）
 python -m scripts.train_rl --run-mode reproduce
+
+# 关闭高频回调，保留基础监控 + best-eval
+python -m scripts.train_rl --run-mode monitor_best
+
+# 低开销训练，仅保留 best-eval
+python -m scripts.train_rl --run-mode best_only
 
 # 自定义 PPO 超参 + 输出路径
 python -m scripts.train_rl --run-mode tune \

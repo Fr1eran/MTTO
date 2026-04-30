@@ -149,6 +149,42 @@ def test_cal_energy_consumption(mtto_env: MTTOEnv):
     assert energy_consumption2 >= 0, "Energy consumption should be non-negative"
 
 
+def test_reference_remaining_operation_time_matches_endpoints(mtto_env: MTTOEnv):
+    mtto_env.reset()
+
+    start_remaining = mtto_env._get_reference_remaining_operation_time(
+        mtto_env.train_service.start_position
+    )
+    target_remaining = mtto_env._get_reference_remaining_operation_time(
+        mtto_env.train_service.target_position
+    )
+
+    assert start_remaining == pytest.approx(
+        mtto_env.ref_total_operation_time,
+        rel=1e-3,
+    )
+    assert target_remaining == pytest.approx(0.0, abs=0.5)
+
+
+def test_punctuality_reward_depends_on_position_and_time_only(mtto_env: MTTOEnv):
+    mtto_env.reset()
+
+    mtto_env.current_pos = mtto_env.train_service.start_position + 5000.0
+    mtto_env.current_operation_time = 120.0
+    mtto_env.last_state["pos"] = mtto_env.current_pos - 100.0
+    mtto_env.last_state["operation_time"] = 118.0
+
+    mtto_env.current_speed = 5.0
+    mtto_env.last_state["speed"] = 8.0
+    reward_low_speed = mtto_env._get_reward_punctuality_dense()
+
+    mtto_env.current_speed = 25.0
+    mtto_env.last_state["speed"] = 30.0
+    reward_high_speed = mtto_env._get_reward_punctuality_dense()
+
+    np.testing.assert_allclose(reward_low_speed, reward_high_speed)
+
+
 def test_whole_env(mtto_env: MTTOEnv):
     check_env(mtto_env)
 
