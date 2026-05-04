@@ -5,9 +5,9 @@ from utils.score_function import SigmoidVariant
 
 
 def visualize_docking_score_function():
-    docking_score_func = SigmoidVariant(x1=0.3, x2=30.0, c=10.0)
+    docking_score_func = SigmoidVariant(x1=0.3, x2=3.0, c=6.0)
 
-    x_values = np.linspace(0, 40.0, 1000)
+    x_values = np.linspace(0, 4.0, 1000)
 
     rewards = docking_score_func(x_values)
     gradients = docking_score_func.gradient(x_values)
@@ -48,8 +48,8 @@ def visualize_docking_score_function():
     plt.legend(loc="upper right", fontsize=11)
 
     # 限制 y 轴范围便于观察
-    plt.ylim(-0.1, 1.2)
-    plt.xlim(0, 40.0)
+    # plt.ylim(-0.1, 1.2)
+    plt.xlim(0, 4.0)
 
     plt.tight_layout()
     plt.show()

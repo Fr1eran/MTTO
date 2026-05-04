@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 
 from .analyze import (
+    compute_best_eval_metrics,
     compute_constraint_diagnostic,
     compute_evolution_metrics,
     compute_regular_training_metrics,
@@ -41,6 +42,34 @@ class AnalysisConfig:
     max_mean_step_gap: float = 2048.0
     sampling_quality_mode: str = "warn_only"
     output_root: str = "mtto_train_reports"
+    sampling_health_tags: list[str] | None = None
+
+    def __post_init__(self):
+        if not 0 < self.ema_alpha <= 1.0:
+            raise ValueError(
+                f"ema_alpha must be in (0, 1], got {self.ema_alpha}"
+            )
+        if self.episode_window_size < 1:
+            raise ValueError(
+                f"episode_window_size must be >= 1, got {self.episode_window_size}"
+            )
+        if self.step_window_size < 1:
+            raise ValueError(
+                f"step_window_size must be >= 1, got {self.step_window_size}"
+            )
+        if self.sampling_quality_mode not in ("warn_only", "strict_fail"):
+            raise ValueError(
+                f"sampling_quality_mode must be 'warn_only' or 'strict_fail', "
+                f"got {self.sampling_quality_mode}"
+            )
+        if self.position_bin_size_m <= 0:
+            raise ValueError(
+                f"position_bin_size_m must be > 0, got {self.position_bin_size_m}"
+            )
+        if self.critical_point_radius_m <= 0:
+            raise ValueError(
+                f"critical_point_radius_m must be > 0, got {self.critical_point_radius_m}"
+            )
 
 
 DEFAULT_SNAPSHOT_TAGS = [
@@ -181,7 +210,10 @@ def run_training_analysis(
     cfg = config or AnalysisConfig()
     run_dir = resolve_run_directory(log_root=log_root, run_name=run_name)
     series_map = load_scalar_series_from_run(run_dir)
-    sampling_health = compute_sampling_health(series_map)
+    sampling_health = compute_sampling_health(
+        series_map,
+        key_tags=cfg.sampling_health_tags,
+    )
     sampling_quality = _evaluate_sampling_quality(
         series_map=series_map,
         sampling_health=sampling_health,
@@ -204,6 +236,7 @@ def run_training_analysis(
         ema_alpha=cfg.ema_alpha,
         kl_threshold=cfg.kl_threshold,
     )
+    best_eval_metrics = compute_best_eval_metrics(series_map)
     reward_component_impact = compute_reward_component_impact(
         series_map,
         episode_window_size=cfg.episode_window_size,
@@ -252,6 +285,7 @@ def run_training_analysis(
         run_directory=str(run_dir),
         available_tags=list(series_map.keys()),
         regular_metrics=regular_metrics,
+        best_eval_metrics=best_eval_metrics,
         reward_component_impact=reward_component_impact,
         constraint_diagnostic=constraint_diagnostic,
         evolution_metrics=evolution_metrics,

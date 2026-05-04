@@ -1,16 +1,45 @@
-import numpy as np
-from numpy.typing import NDArray
-from typing import Union
+from __future__ import annotations
 
-Numeric = Union[float, np.floating, NDArray]
+from typing import overload
+
+import numpy as np
+from numpy.typing import ArrayLike, NDArray
+
+ScalarNumeric = float | np.floating
+
+
+def _restore_output_type(
+    values: NDArray[np.float64],
+) -> np.floating | NDArray[np.float64]:
+    if values.ndim == 0:
+        return np.float64(values.item())
+    return values
+
+
+@overload
+def sledge_frictional_brake_force(
+    speed: ScalarNumeric,
+    mass: ScalarNumeric,
+    slope: ScalarNumeric,
+    k: ScalarNumeric = 0.1,
+) -> np.floating: ...
+
+
+@overload
+def sledge_frictional_brake_force(
+    speed: ArrayLike,
+    mass: ScalarNumeric,
+    slope: ArrayLike,
+    k: ScalarNumeric = 0.1,
+) -> NDArray[np.float64]: ...
 
 
 def sledge_frictional_brake_force(
-    speed: Numeric,
-    mass: Numeric,
-    slope: Numeric,
-    k: Numeric = 0.1,
-) -> NDArray[np.float64]:
+    speed: ScalarNumeric | ArrayLike,
+    mass: ScalarNumeric,
+    slope: ScalarNumeric | ArrayLike,
+    k: ScalarNumeric = 0.1,
+) -> np.floating | NDArray[np.float64]:
     """
     计算滑橇摩擦制动力
 
@@ -26,24 +55,40 @@ def sledge_frictional_brake_force(
     # u: 滑动摩擦系数，随速度变化而变化，这里考虑速度在0~10km/h范围内的变化情况
     # 参考文献：《高速磁浮列车精确停车控制研究》
 
-    # 系数
     MIN_V_KM = 10
 
     speed_km = 3.6 * np.asarray(speed, dtype=np.float64)
+    slope = np.asarray(slope, np.float64)
 
     u = -0.003 * speed_km + 0.27
     sledge_frictional_resis_force = np.where(
         speed_km <= MIN_V_KM, k * u * mass * 100 / np.sqrt(100**2 + slope**2) * 9.8, 0.0
     )
 
-    return sledge_frictional_resis_force
+    return _restore_output_type(sledge_frictional_resis_force)
+
+
+@overload
+def vortex_brake_force(
+    speed: ScalarNumeric,
+    numoftrainsets: int,
+    level: int,
+) -> np.floating: ...
+
+
+@overload
+def vortex_brake_force(
+    speed: ArrayLike,
+    numoftrainsets: int,
+    level: int,
+) -> NDArray[np.float64]: ...
 
 
 def vortex_brake_force(
-    speed: Numeric,
+    speed: ScalarNumeric | ArrayLike,
     numoftrainsets: int,
     level: int,
-) -> NDArray[np.float64]:
+) -> np.floating | NDArray[np.float64]:
     """
     计算磁浮列车的涡流制动阻力
 
@@ -57,7 +102,6 @@ def vortex_brake_force(
 
     # 参考文献：《基于涡流制动技术的高速磁悬浮列车安全制动控制研究》
 
-    # 系数定义
     COEFF = 147.8
     DENOM = 200.0
     MIN_V_KM = 10
@@ -75,13 +119,27 @@ def vortex_brake_force(
         0.0,
     )
 
-    return vortex_break_force
+    return _restore_output_type(vortex_break_force)
+
+
+@overload
+def wear_plate_frictional_brake_force(
+    speed: ScalarNumeric,
+    numoftrainsets: int,
+) -> np.floating: ...
+
+
+@overload
+def wear_plate_frictional_brake_force(
+    speed: ArrayLike,
+    numoftrainsets: int,
+) -> NDArray[np.float64]: ...
 
 
 def wear_plate_frictional_brake_force(
-    speed: Numeric,
+    speed: ScalarNumeric | ArrayLike,
     numoftrainsets: int,
-) -> NDArray[np.float64]:
+) -> np.floating | NDArray[np.float64]:
     """
     计算磁浮列车的制动磨耗板的摩擦制动力
 
@@ -95,7 +153,6 @@ def wear_plate_frictional_brake_force(
     # u: 干燥条件下的磨耗板与导向轨之间的摩擦系数，通过曲线拟合得到
     # 参考文献：《磁浮列车涡流制动系统建模及紧急制动控制策略的研究》
 
-    # 系数定义
     A = 580.32
     B = 312384.47
     C = 3.0816
@@ -134,4 +191,4 @@ def wear_plate_frictional_brake_force(
     )
     wearplate_frictional_resis_force[mask] = tmp
 
-    return wearplate_frictional_resis_force
+    return _restore_output_type(wearplate_frictional_resis_force)

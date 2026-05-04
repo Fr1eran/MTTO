@@ -123,9 +123,15 @@ class MTTOEnv(gym.Env):
         self.max_step_distance: float = max_step_distance
 
         # 最大转移步数
-        self.max_episode_steps: int = math.ceil(
-            abs(self.train_service.target_position - self.train_service.start_position)
-            / self.max_step_distance
+        self.max_episode_steps: int = (
+            math.ceil(
+                abs(
+                    self.train_service.target_position
+                    - self.train_service.start_position
+                )
+                / self.max_step_distance
+            )
+            + 1
         )
 
         self._docking_score_func = SigmoidVariant(
@@ -750,11 +756,11 @@ class MTTOEnv(gym.Env):
         # 判断智能体是否到达目标区域
         terminated = math.isclose(self.current_speed, 0.0, abs_tol=0.01)
 
-        # 若智能体违反安全约束或者达到最大步数，则截断训练进程
+        # 若智能体违反安全约束或者超过最大步数，则截断训练进程
         truncated = (
             (self.current_speed < self.current_min_speed)
             or (self.current_speed > self.current_max_speed)
-            or self.current_steps == self.max_episode_steps
+            or self.current_steps > self.max_episode_steps
         )
 
         # 计算奖励
@@ -1317,35 +1323,32 @@ class MTTOEnv(gym.Env):
         return -4.0 * np.log1p(np.exp(-1.0 * time_redundancy_norm))
 
     def _get_reward_docking_dense(self):
-        # phi_curr = self._potential_docking_v1(
-        #     pos=self.current_pos, speed=self.current_speed
-        # )
 
-        # phi_prev = self._potential_docking_v1(
-        #     pos=self.last_state["pos"], speed=self.last_state["speed"]
-        # )
-
-        if not self.is_final_approach:
-            return 0.0
-
-        phi_curr = self._potential_docking_v2(
+        phi_curr = self._potential_docking_v1(
             pos=self.current_pos, speed=self.current_speed
         )
 
-        phi_prev = self._potential_docking_v2(
+        phi_prev = self._potential_docking_v1(
             pos=self.last_state["pos"], speed=self.last_state["speed"]
         )
+
+        # phi_curr = self._potential_docking_v2(
+        #     pos=self.current_pos, speed=self.current_speed
+        # )
+
+        # phi_prev = self._potential_docking_v2(
+        #     pos=self.last_state["pos"], speed=self.last_state["speed"]
+        # )
 
         return self.gamma * phi_curr - phi_prev
 
     def _potential_docking_v1(self, pos: float, speed: float):
-        # 正则化
         dist_error_abs = abs(self.train_service.target_position - pos)
 
         x_hat = dist_error_abs / self.target_attraction_domain_radius
         v_hat = speed / self.vehicle.max_speed
 
-        phi_strong = 20.0 * np.exp(-x_hat / 0.1 - v_hat / 0.1)
+        phi_strong = 20.0 * np.exp(-x_hat / 0.05 - v_hat / 0.2)
 
         return phi_strong
 
@@ -1355,8 +1358,8 @@ class MTTOEnv(gym.Env):
         x_hat = dist_error_abs / self.target_attraction_domain_radius
         v_hat = speed / self.vehicle.max_speed
 
-        phi_pos = np.exp(-(x_hat**2) / (2 * 0.05**2))
-        phi_speed = np.exp(-(v_hat**2) / (2 * 0.05**2))
+        phi_pos = np.exp(-(x_hat**2) / (2 * 0.1**2))
+        phi_speed = np.exp(-(v_hat**2) / (2 * 0.1**2))
 
         return 20.0 * phi_pos * phi_speed
 

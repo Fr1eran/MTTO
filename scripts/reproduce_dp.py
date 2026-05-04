@@ -1,7 +1,13 @@
 import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import gzip
+import hashlib
+import json
 import multiprocessing as mp
+import pickle
 import signal
+from datetime import datetime, timezone
+from pathlib import Path
 import numpy as np
 import os
 from typing import TypedDict, Sequence, Any, Iterable, Literal
@@ -355,6 +361,8 @@ class VariableSpacingDPOptimizer:
 
     """
 
+    _CACHE_BASE_DIR: str = "output/_dp_transition_graph_cache"
+
     def __init__(
         self,
         vehicle: VehicleInfo,
@@ -367,6 +375,10 @@ class VariableSpacingDPOptimizer:
         precompute_workers: int | None = None,
         precompute_chunk_size: int | None = None,
         mp_start_method: str | None = None,
+        stage_division: Literal["variable", "uniform"] = "variable",
+        uniform_step_size: float = 10.0,
+        sub_stage_count: int = 30,
+        skip_disk_cache: bool = False,
     ) -> None:
         if precompute_mode not in ("serial", "parallel"):
             raise ValueError("precompute_mode must be 'serial' or 'parallel'")
@@ -376,6 +388,12 @@ class VariableSpacingDPOptimizer:
             raise ValueError("precompute_chunk_size must be >= 1")
         if mp_start_method is None and os.name == "nt":
             mp_start_method = "spawn"
+        if stage_division not in ("variable", "uniform"):
+            raise ValueError("stage_division must be 'variable' or 'uniform'")
+        if uniform_step_size <= 0.0:
+            raise ValueError("uniform_step_size must be > 0")
+        if sub_stage_count < 1:
+            raise ValueError("sub_stage_count must be >= 1")
 
         self.vehicle = vehicle
         self.track = track
@@ -388,6 +406,10 @@ class VariableSpacingDPOptimizer:
         self.precompute_workers = precompute_workers
         self.precompute_chunk_size = precompute_chunk_size
         self.mp_start_method = mp_start_method
+        self.stage_division = stage_division
+        self.uniform_step_size = uniform_step_size
+        self.sub_stage_count = sub_stage_count
+        self.skip_disk_cache = skip_disk_cache
         # self.direction = (
         #     1 if self.task.target_position >= self.task.start_position else -1
         # )
@@ -412,7 +434,9 @@ class VariableSpacingDPOptimizer:
                 end_speed=0.0,
             )
         )
-        self._graph_cache_signature: tuple[float, float, int] | None = None
+        self._graph_cache_signature: (
+            tuple[float, float, str, int, float, str] | None
+        ) = None
         self._graph_cache: dict[str, Any] | None = None
 
     def _get_ref_speed(self, pos: float) -> float:
@@ -696,32 +720,65 @@ class VariableSpacingDPOptimizer:
     def _prepare_transition_graph_cache(
         self, max_speed: float, delta_speed: float
     ) -> dict[str, Any]:
-        stages = self._generate_variable_spacing_stages().astype(np.float64)
+        stages = self._generate_stages().astype(np.float64)
         speed_states = np.arange(0, max_speed, delta_speed, dtype=np.float64)
-        cache_signature = (float(max_speed), float(delta_speed), len(stages))
+        stage_speed_upper_idx = self._get_stage_speed_upper_indices(
+            stages, speed_states
+        )
+        content_hash = self._compute_cache_input_hash(
+            stages, speed_states, stage_speed_upper_idx
+        )
+        cache_signature = (
+            float(max_speed),
+            float(delta_speed),
+            self.stage_division,
+            self.sub_stage_count,
+            self.uniform_step_size,
+            content_hash,
+        )
 
-        if self._graph_cache_signature != cache_signature:
-            print("正在预计算状态转移图（仅首次或参数变化时执行）...")
-            if self.show_precompute_progress and tqdm is None:
-                print("未检测到 tqdm，已回退为普通循环输出。")
-            print(f"预计算执行模式: {self.precompute_mode}")
-            try:
-                self._graph_cache = self._build_transition_graph(stages, speed_states)
-            except KeyboardInterrupt:
-                print("检测到 Ctrl+C，预计算已终止。")
-                raise
-            except ParallelPrecomputeExitedError:
-                print("并行预计算流程已退出，动态规划将终止。")
-                raise
-            self._graph_cache_signature = cache_signature
-            print(
-                f"转移图预计算完成: 可行转移边数量 {self._graph_cache['total_valid_edges']}"
+        if self._graph_cache_signature == cache_signature:
+            assert self._graph_cache is not None
+            return self._graph_cache
+
+        # 1) 尝试从磁盘加载
+        if not self.skip_disk_cache:
+            cached = self._load_transition_graph_from_disk(
+                delta_speed, content_hash
+            )
+            if cached is not None:
+                self._graph_cache = cached
+                self._graph_cache_signature = cache_signature
+                return self._graph_cache
+
+        # 2) 重新计算
+        print("正在预计算状态转移图（仅首次或参数变化时执行）...")
+        if self.show_precompute_progress and tqdm is None:
+            print("未检测到 tqdm，已回退为普通循环输出。")
+        print(f"预计算执行模式: {self.precompute_mode}")
+        try:
+            self._graph_cache = self._build_transition_graph(stages, speed_states)
+        except KeyboardInterrupt:
+            print("检测到 Ctrl+C，预计算已终止。")
+            raise
+        except ParallelPrecomputeExitedError:
+            print("并行预计算流程已退出，动态规划将终止。")
+            raise
+        self._graph_cache_signature = cache_signature
+        print(
+            f"转移图预计算完成: 可行转移边数量 {self._graph_cache['total_valid_edges']}"
+        )
+
+        # 3) 写入磁盘缓存
+        if not self.skip_disk_cache:
+            self._save_transition_graph_to_disk(
+                self._graph_cache, delta_speed, content_hash
             )
 
         assert self._graph_cache is not None
         return self._graph_cache
 
-    def _generate_variable_spacing_stages(self, sub_stage_count: int = 30) -> NDArray:
+    def _generate_variable_spacing_stages(self) -> NDArray:
         """
         基于临界点的变间距阶段划分
         将线路按照临界点划分为大分区, 每个大分区等分为 sub_stage_count 个子阶段
@@ -736,9 +793,8 @@ class VariableSpacingDPOptimizer:
         for i in range(len(critical_points_position_arr) - 1):
             interval_start_pos = critical_points_position_arr[i]
             interval_end_pos = critical_points_position_arr[i + 1]
-            # 对每个大区间进行等分，生成子阶段边界
             partition_stages = np.linspace(
-                interval_start_pos, interval_end_pos, sub_stage_count + 1
+                interval_start_pos, interval_end_pos, self.sub_stage_count + 1
             )
             if i == 0:
                 stages.extend(partition_stages)
@@ -746,6 +802,190 @@ class VariableSpacingDPOptimizer:
                 stages.extend(partition_stages[1:])
 
         return np.array(stages)
+
+    def _generate_uniform_spacing_stages(self) -> NDArray:
+        """基于等间距的阶段划分，从起点到终点按 uniform_step_size 等分。"""
+        start = self.train_service.start_position
+        end = self.train_service.target_position
+        num_steps = max(1, int(np.ceil((end - start) / self.uniform_step_size)))
+        return np.linspace(start, end, num_steps + 1)
+
+    def _generate_stages(self) -> NDArray:
+        """根据 stage_division 配置调度对应的阶段划分方法。"""
+        if self.stage_division == "uniform":
+            return self._generate_uniform_spacing_stages()
+        return self._generate_variable_spacing_stages()
+
+    def _compute_cache_input_hash(
+        self,
+        stages: NDArray[np.float64],
+        speed_states: NDArray[np.float64],
+        stage_speed_upper_idx: NDArray[np.int_],
+    ) -> str:
+        """计算影响状态转移图的所有输入的 SHA256 哈希，用作磁盘缓存键。"""
+        hasher = hashlib.sha256()
+
+        # 离散化网格
+        hasher.update(stages.tobytes())
+        hasher.update(speed_states.tobytes())
+        hasher.update(stage_speed_upper_idx.tobytes())
+
+        # 车辆参数（影响加速度约束与能耗）
+        v = self.vehicle
+        for val in (
+            v.mass,
+            v.numoftrainsets,
+            v.length,
+            v.max_speed,
+            v.max_acc,
+            v.max_dec,
+            v.levi_power_per_mass,
+        ):
+            hasher.update(str(val).encode())
+
+        # ECC 参数（影响能耗）
+        ecc = self.ecc
+        for val in (ecc.R_m, ecc.L_d, ecc.R_k, ecc.L_k, ecc.Tau, ecc.Psi_fd, ecc.k_c):
+            hasher.update(str(val).encode())
+
+        # SafeGuard 防护曲线与限速（影响危险域检测）
+        su = self.safeguard_utility
+        hasher.update(su.speed_limits.tobytes())
+        hasher.update(su.speed_limit_intervals.tobytes())
+        hasher.update(str(su.gamma).encode())
+        for curve_list in (
+            su.levi_curves_list,
+            su.brake_curves_list,
+            su.min_curves_list,
+            su.max_curves_list,
+        ):
+            for curve in curve_list:
+                hasher.update(curve.tobytes())
+
+        # 线路坡度（影响能耗）
+        hasher.update(self.trackprofile.slopes.tobytes())
+        hasher.update(self.trackprofile.slope_intervals.tobytes())
+
+        return hasher.hexdigest()
+
+    def _make_cache_folder_name(
+        self, delta_speed: float, content_hash: str
+    ) -> str:
+        """生成可读的缓存文件夹名，包含关键参数与前缀哈希。"""
+        delta_token = _format_float_token(delta_speed)
+        hash_prefix = content_hash[:12]
+        if self.stage_division == "uniform":
+            div_token = f"uni{_format_float_token(self.uniform_step_size)}"
+        else:
+            div_token = f"var{self.sub_stage_count}"
+        return f"{div_token}_{delta_token}_{hash_prefix}"
+
+    def _get_disk_cache_dir(
+        self, delta_speed: float, content_hash: str
+    ) -> Path:
+        return Path(self._CACHE_BASE_DIR) / self._make_cache_folder_name(
+            delta_speed, content_hash
+        )
+
+    def _save_transition_graph_to_disk(
+        self,
+        graph_cache: dict[str, Any],
+        delta_speed: float,
+        content_hash: str,
+    ) -> None:
+        cache_dir = self._get_disk_cache_dir(delta_speed, content_hash)
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            print(f"无法创建缓存目录 {cache_dir}: {exc}")
+            return
+
+        graph_path = cache_dir / "graph_data.pkl.gz"
+        meta_path = cache_dir / "metadata.json"
+
+        graph_bytes: bytes | None = None
+        try:
+            graph_bytes = gzip.compress(
+                pickle.dumps(graph_cache, protocol=5), compresslevel=5
+            )
+            graph_path.write_bytes(graph_bytes)
+        except Exception as exc:
+            print(f"写入缓存文件失败 ({graph_path}): {exc}")
+            # 清理不完整的文件
+            if graph_path.exists():
+                try:
+                    graph_path.unlink()
+                except OSError:
+                    pass
+            return
+
+        file_hash = hashlib.sha256(graph_bytes).hexdigest()
+        max_speed_val = float(np.max(graph_cache["speed_states"]))
+        metadata = {
+            "content_hash": content_hash,
+            "file_sha256": file_hash,
+            "stage_division": self.stage_division,
+            "sub_stage_count": self.sub_stage_count,
+            "uniform_step_size": self.uniform_step_size,
+            "max_speed": max_speed_val,
+            "delta_speed": delta_speed,
+            "num_stages": int(len(graph_cache["stages"])),
+            "num_speed_states": int(len(graph_cache["speed_states"])),
+            "total_valid_edges": int(graph_cache["total_valid_edges"]),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False))
+        except OSError as exc:
+            print(f"写入缓存元数据失败 ({meta_path}): {exc}")
+
+    def _load_transition_graph_from_disk(
+        self, delta_speed: float, content_hash: str
+    ) -> dict[str, Any] | None:
+        cache_dir = self._get_disk_cache_dir(delta_speed, content_hash)
+        graph_path = cache_dir / "graph_data.pkl.gz"
+        meta_path = cache_dir / "metadata.json"
+
+        if not graph_path.is_file() or not meta_path.is_file():
+            return None
+
+        try:
+            metadata = json.loads(meta_path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"缓存元数据损坏，将重新计算 ({meta_path}): {exc}")
+            return None
+
+        if metadata.get("content_hash") != content_hash:
+            print("缓存参数签名不匹配（数据可能已更新），将重新计算。")
+            return None
+
+        try:
+            graph_bytes = graph_path.read_bytes()
+        except OSError as exc:
+            print(f"读取缓存文件失败 ({graph_path}): {exc}")
+            return None
+
+        expected_file_hash = metadata.get("file_sha256", "")
+        actual_file_hash = hashlib.sha256(graph_bytes).hexdigest()
+        if expected_file_hash and actual_file_hash != expected_file_hash:
+            print(f"缓存文件完整性校验失败 ({graph_path})，将重新计算。")
+            return None
+
+        try:
+            graph_cache = pickle.loads(gzip.decompress(graph_bytes))
+        except Exception as exc:
+            print(f"缓存文件反序列化失败 ({graph_path}): {exc}")
+            return None
+
+        if not isinstance(graph_cache, dict) or "transitions" not in graph_cache:
+            print(f"缓存文件结构异常 ({graph_path})，将重新计算。")
+            return None
+
+        print(
+            f"从磁盘缓存加载状态转移图: {cache_dir.name} "
+            f"({graph_cache['total_valid_edges']} 条可行转移边)"
+        )
+        return graph_cache
 
     def _calculate_transition(
         self, pos_k: float, speed_k: float, displacement: float, speed_k_1: float
@@ -998,7 +1238,7 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--schedule-time-s",
         type=float,
-        default=440.0,
+        default=430.0,
         help="规划运行时间(s)。",
     )
     parser.add_argument(
@@ -1042,6 +1282,29 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="关闭状态转移图预计算进度显示。",
     )
+    parser.add_argument(
+        "--stage-division",
+        choices=("variable", "uniform"),
+        default="variable",
+        help="阶段划分方式。variable 为基于临界点的变间距划分，uniform 为等间距划分。",
+    )
+    parser.add_argument(
+        "--uniform-step-size",
+        type=float,
+        default=100.0,
+        help="等间距划分时的阶段步长(m)，仅 --stage-division uniform 时生效。",
+    )
+    parser.add_argument(
+        "--sub-stage-count",
+        type=int,
+        default=30,
+        help="变间距划分时每个临界区间的子阶段数量。",
+    )
+    parser.add_argument(
+        "--skip-disk-cache",
+        action="store_true",
+        help="跳过磁盘缓存，每次强制重新计算状态转移图。",
+    )
     return parser
 
 
@@ -1062,10 +1325,17 @@ def _resolve_output_dir(
     output_root: str,
     schedule_time_s: float,
     delta_speed_mps: float,
+    stage_division: str,
+    sub_stage_count: int,
+    uniform_step_size: float,
 ) -> str:
     schedule_token = _format_float_token(schedule_time_s)
     delta_token = _format_float_token(delta_speed_mps)
-    return os.path.join(output_root, f"{schedule_token}_{delta_token}")
+    if stage_division == "uniform":
+        div_token = f"uni{_format_float_token(uniform_step_size)}"
+    else:
+        div_token = f"var{sub_stage_count}"
+    return os.path.join(output_root, f"{schedule_token}_{delta_token}_{div_token}")
 
 
 def _validate_cli_args(cli_args: argparse.Namespace) -> None:
@@ -1077,6 +1347,10 @@ def _validate_cli_args(cli_args: argparse.Namespace) -> None:
         raise ValueError("--delta-speed-mps must be > 0")
     if cli_args.max_outer_iterations < 1:
         raise ValueError("--max-outer-iterations must be >= 1")
+    if cli_args.uniform_step_size <= 0.0:
+        raise ValueError("--uniform-step-size must be > 0")
+    if cli_args.sub_stage_count < 1:
+        raise ValueError("--sub-stage-count must be >= 1")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1092,6 +1366,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_root=cli_args.output_root,
         schedule_time_s=cli_args.schedule_time_s,
         delta_speed_mps=cli_args.delta_speed_mps,
+        stage_division=cli_args.stage_division,
+        sub_stage_count=cli_args.sub_stage_count,
+        uniform_step_size=cli_args.uniform_step_size,
     )
     os.makedirs(output_dir, exist_ok=True)
     print(f"优化结果输出目录: {output_dir}")
@@ -1165,6 +1442,10 @@ def _run_optimization(*, cli_args: argparse.Namespace, output_dir: str) -> int:
         precompute_workers=cli_args.precompute_workers,
         precompute_chunk_size=cli_args.precompute_chunk_size,
         mp_start_method=cli_args.mp_start_method,
+        stage_division=cli_args.stage_division,
+        uniform_step_size=cli_args.uniform_step_size,
+        sub_stage_count=cli_args.sub_stage_count,
+        skip_disk_cache=cli_args.skip_disk_cache,
     )
 
     try:

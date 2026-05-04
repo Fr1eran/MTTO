@@ -155,7 +155,7 @@ MTTO/
 # 默认调优训练
 python -m scripts.train_rl --run-mode tune
 
-# 高效复现（关闭日志）
+# 高效复现（关闭日志，不进行 best model 评估，仅得到最终训练模型）
 python -m scripts.train_rl --run-mode reproduce
 
 # 关闭高频回调，保留基础监控 + best-eval
@@ -164,30 +164,14 @@ python -m scripts.train_rl --run-mode monitor_best
 # 低开销训练，仅保留 best-eval
 python -m scripts.train_rl --run-mode best_only
 
-# 自定义 PPO 超参 + 输出路径
-python -m scripts.train_rl --run-mode tune \
-    --reward-discount 0.995 --max-step-distance 80 \
-    --total-timesteps 300000 --output-root output/optimal/rl/
+# 430s tune + steps 触发 best-eval
+python -m scripts.train_rl --output-root output/optimal/rl/ --schedule-time-s 430.0 --max-step-distance 100.0 --run-mode tune --total-timesteps 1000000 --num-envs 4 --vec-env-type subproc --tb-sample-interval-steps 10 --env-diagnostics-interval-steps 10 --tb-batch-dump-records 10240 --best-eval-trigger-mode steps --best-eval-trigger-interval 100000 --best-eval-deterministic --device cpu
 
-# 4 环境并行 + 批量日志落盘
-python -m scripts.train_rl --run-mode tune \
-    --num-envs 4 --vec-env-type subproc \
-    --tb-sample-interval-steps 10 --tb-batch-dump-records 128
+# 430s tune + episodes 触发 best-eval
+python -m scripts.train_rl --output-root output/optimal/rl/ --schedule-time-s 440.0 --max-step-distance 100.0 --run-mode tune --total-timesteps 1000000 --num-envs 4 --vec-env-type subproc --tb-sample-interval-steps 10 --env-diagnostics-interval-steps 10 --tb-batch-dump-records 10240 --best-eval-trigger-mode episodes --best-eval-trigger-interval 1000 --best-eval-deterministic --device cpu
 
-# 按步数触发 best-eval
-python -m scripts.train_rl --run-mode tune \
-    --enable-best-eval --best-eval-trigger-mode steps \
-    --best-eval-trigger-interval 100000
-
-# 按回合数触发 best-eval
-python -m scripts.train_rl --run-mode tune \
-    --enable-best-eval --best-eval-trigger-mode episodes \
-    --best-eval-trigger-interval 1000
-
-# 严格采样质量闸门
-python -m scripts.train_rl --run-mode tune \
-    --log-interval 1 --tb-sample-interval-steps 1 \
-    --analysis-sampling-quality-mode strict_fail
+# 430s monitor_best + safety_speed 输出
+python -m scripts.train_rl --output-root output/optimal/rl/safety_speed/ --schedule-time-s 430.0 --max-step-distance 100.0 --run-mode monitor_best --total-timesteps 1000000 --num-envs 4 --vec-env-type subproc --best-eval-trigger-mode episodes --best-eval-trigger-interval 1000 --best-eval-deterministic --device cpu
 ```
 
 ---
@@ -198,29 +182,29 @@ python -m scripts.train_rl --run-mode tune \
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `--model-path` | `str` | `output/optimal/rl/final/ppo_mtto_model` | 模型路径前缀（不含 `.zip`） |
-| `--vecnormalize-path` | `str` | `output/optimal/rl/final/vecnormalize.pkl` | VecNormalize 统计文件路径 |
+| `--load-dir` | `str` | `output/optimal/rl/final/` | 模型与 VecNormalize 文件所在目录 |
 | `--reward-discount` | `float` | `0.99` | 折扣因子（重建环境用） |
 | `--step-distance` | `float` | `100.0` | 环境最大步距 (m) |
 | `--device` | `str` | `cpu` | 推理设备 |
 | `--deterministic` | `bool` | `True` | 是否使用确定性策略 |
-| `--record-video` | `bool` | `True` | 是否录制评估视频 |
+| `--record-video` | `bool` | `False` | 是否录制评估视频 |
+| `--save-trajectory` | `bool` | `True` | 是否保存轨迹 NPZ 与指标 JSON |
 | `--video-folder` | `str` | `mtto_eval_video` | 视频输出目录 |
+| `--output-dir` | `str` | `None` | 轨迹文件输出目录（默认回退到 `--load-dir`） |
 | `--video-length` | `int` | `10000` | 最大录制步数 |
 | `--video-trigger-step` | `int` | `0` | 视频录制触发步数 |
 | `--enable-env-diagnostics` | `bool` | `False` | 启用环境诊断信息采集 |
 
 ```bash
-# 默认评估（录制视频）
+# 默认评估
 python -m scripts.evaluate_rl
 
-# 不录制视频
-python -m scripts.evaluate_rl --no-record-video
+# 录制视频
+python -m scripts.evaluate_rl --record-video
 
-# 指定模型与设备
+# 指定模型目录与设备
 python -m scripts.evaluate_rl \
-    --model-path output/optimal/rl/.../final/ppo_mtto_model \
-	--vecnormalize-path output/optimal/rl/.../final/vecnormalize.pkl \
+    --load-dir output/optimal/rl/.../final/ \
     --device cuda
 ```
 
@@ -274,18 +258,33 @@ python -m scripts.analyze_training_data \
 
 ### DP 基线复现 · `reproduce_dp`
 
-基于变间距动态规划（Variable-Spacing DP）计算最优速度曲线。外层二分搜索调整时间乘子，内层 DP 求解。
+基于动态规划（DP）+预计算状态转移图计算磁浮列车最优速度曲线。外层二分搜索调整时间乘子逼近目标运行时间，内层逆推 DP 求解最小能耗轨迹。
 
 #### 优化参数
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `--output-root` | `str` | `output/optimal/dp` | 输出根目录 |
-| `--schedule-time-s` | `float` | `440.0` | 规划运行时间 (s) |
+| `--schedule-time-s` | `float` | `430.0` | 规划运行时间 (s) |
 | `--delta-speed-mps` | `float` | `0.1` | 速度搜索步长 (m/s) |
 | `--max-outer-iterations` | `int` | `100` | 外层二分搜索最大迭代次数 |
 
-> 输出目录规则：`{output-root}/{time}_{speed}/`，如 `440.0s + 0.1 m/s` → `440p0_0p1/`。
+> 输出目录规则：`{output-root}/{time}_{speed}_{division}/`，例如 430.0 s + 0.1 m/s + 变间距 30 子阶段 → `430p0_0p1_var30/`。
+
+#### 阶段划分
+
+支持两种离散化方式，通过 `--stage-division` 切换：
+
+| 方式 | 说明 | 关联参数 |
+|------|------|----------|
+| `variable`（默认） | 基于安全临界点（IDP）划分大区间，每区间等分为 N 个子阶段 | `--sub-stage-count`（默认 `30`） |
+| `uniform` | 从起点到终点按固定距离等分 | `--uniform-step-size`（默认 `100.0` m） |
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--stage-division` | `str` | `variable` | `variable` / `uniform` |
+| `--sub-stage-count` | `int` | `30` | 变间距时每个临界区间的子阶段数 |
+| `--uniform-step-size` | `float` | `100.0` | 等间距时的阶段步长 (m) |
 
 #### 并行预计算
 
@@ -297,8 +296,39 @@ python -m scripts.analyze_training_data \
 | `--mp-start-method` | `str` | Windows 默认 `spawn` | `spawn` / `fork` / `forkserver` |
 | `--hide-precompute-progress` | `flag` | — | 关闭预计算进度条 |
 
+#### 磁盘缓存
+
+状态转移图预计算结果可持久化到磁盘，避免相同参数下重复计算。缓存默认开启，位于 `output/_dp_transition_graph_cache/`。
+
+**文件夹命名规则：** `{div_token}_{delta_token}_{hash12}`
+
+| 组成部分 | 说明 | 示例 |
+|----------|------|------|
+| `div_token` | 变间距 `var{子阶段数}`，等间距 `uni{步长}` | `var30`、`uni100p0` |
+| `delta_token` | 速度步长格式化值 | `0p1` |
+| `hash12` | 所有输入参数的 SHA256 前 12 位 | `a1b2c3d4e5f6` |
+
+> 完整示例：`var30_0p1_a1b2c3d4e5f6/`
+
+**缓存文件夹内容：**
+
+| 文件 | 用途 |
+|------|------|
+| `graph_data.pkl.gz` | gzip 压缩的完整状态转移图（stages、speed_states、transitions 等） |
+| `metadata.json` | 人类可读的缓存元数据与 SHA256 完整性校验签名 |
+
+**缓存键** 涵盖所有影响转移图计算的输入：离散化网格、车辆参数（mass、max_acc、max_dec 等）、ECC 能耗参数、防护曲线与限速、轨道坡度。任一输入变化会自动生成新的缓存文件夹。
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--skip-disk-cache` | `flag` | — | 跳过磁盘缓存，每次强制重新计算 |
+
+> 过期策略：手动删除对应的缓存文件夹即可，下次运行会自动重新计算并写入。
+
+#### 示例
+
 ```bash
-# 默认串行
+# 默认（变间距、串行预计算、启用磁盘缓存）
 python -m scripts.reproduce_dp
 
 # 并行预计算
@@ -309,10 +339,17 @@ python -m scripts.reproduce_dp \
     --precompute-mode parallel --precompute-workers 4 \
     --precompute-chunk-size 15 --mp-start-method spawn
 
-# 自定义优化参数
-python -m scripts.reproduce_dp \
-    --schedule-time-s 440.0 --delta-speed-mps 0.1 \
-    --max-outer-iterations 100
+# 等间距划分，步长 50 m
+python -m scripts.reproduce_dp --stage-division uniform --uniform-step-size 50.0
+
+# 变间距，增大子阶段密度
+python -m scripts.reproduce_dp --stage-division variable --sub-stage-count 50
+
+# 跳过磁盘缓存，强制重算
+python -m scripts.reproduce_dp --skip-disk-cache
+
+# 自定义时间 + 速度步长
+python -m scripts.reproduce_dp --schedule-time-s 500.0 --delta-speed-mps 0.05
 ```
 
 ---

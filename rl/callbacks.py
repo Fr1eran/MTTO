@@ -42,6 +42,20 @@ class TensorboardCallback(BaseCallback):
         self._pending_sample_records: int = 0
         self._pending_events: list[BufferedScalarEvent] = []
         self._episode_ids_by_env: list[int] = []
+        self._tb_writer: Any = None
+
+    def _init_callback(self) -> None:
+        self._tb_writer = self._resolve_tensorboard_writer()
+
+    def _resolve_tensorboard_writer(self):
+        output_formats = getattr(self.logger, "output_formats", None)
+        if not isinstance(output_formats, (list, tuple)):
+            return None
+        for fmt in output_formats:
+            writer = getattr(fmt, "writer", None)
+            if writer is not None and hasattr(writer, "add_scalar") and hasattr(writer, "flush"):
+                return writer
+        return None
 
     def _sync_episode_tracker(self, num_envs: int) -> None:
         if num_envs < 0:
@@ -83,6 +97,24 @@ class TensorboardCallback(BaseCallback):
 
         return payloads
 
+    def _extract_all_namespace_payloads(self) -> dict[str, list[dict[str, float]]]:
+        infos = self.locals.get("infos", [])
+        if not isinstance(infos, (list, tuple)):
+            return {}
+
+        self._sync_episode_tracker(len(infos))
+
+        buckets = {"rewards": [], "state": [], "constraint": [], "event": [], "basic": []}
+        for info in infos:
+            if not isinstance(info, dict):
+                continue
+            for ns in buckets:
+                payload = info.get(ns)
+                if isinstance(payload, dict):
+                    buckets[ns].append(payload)
+
+        return {ns: pl for ns, pl in buckets.items() if pl}
+
     def _enrich_state_payloads(
         self, payloads: list[dict[str, float]]
     ) -> list[dict[str, float]]:
@@ -99,8 +131,9 @@ class TensorboardCallback(BaseCallback):
 
         return enriched_payloads
 
-    def _collect_namespace_scalars(self, namespace: str) -> dict[str, float]:
-        payloads = self._get_namespace_payloads_from_locals(namespace)
+    def _collect_namespace_scalars(
+        self, namespace: str, payloads: list[dict[str, float]]
+    ) -> dict[str, float]:
         if not payloads:
             return {}
         if namespace == "state":
@@ -111,7 +144,7 @@ class TensorboardCallback(BaseCallback):
             for key, value in payload.items():
                 try:
                     scalar_value = float(value)
-                except TypeError, ValueError:
+                except (TypeError, ValueError):
                     continue
                 aggregated_values.setdefault(key, []).append(scalar_value)
 
@@ -124,9 +157,11 @@ class TensorboardCallback(BaseCallback):
         return namespace_scalars
 
     def _build_sample_event(self, step: int) -> BufferedScalarEvent | None:
+        all_payloads = self._extract_all_namespace_payloads()
+
         scalars: dict[str, float] = {}
-        for namespace in ("rewards", "state", "constraint", "event", "basic"):
-            namespace_scalars = self._collect_namespace_scalars(namespace)
+        for namespace, payloads in all_payloads.items():
+            namespace_scalars = self._collect_namespace_scalars(namespace, payloads)
             if namespace_scalars:
                 scalars.update(namespace_scalars)
 
@@ -135,30 +170,24 @@ class TensorboardCallback(BaseCallback):
 
         return BufferedScalarEvent(step=step, scalars=scalars)
 
+    def _record_all_namespaces_legacy(self) -> None:
+        all_payloads = self._extract_all_namespace_payloads()
+        for namespace, payloads in all_payloads.items():
+            namespace_scalars = self._collect_namespace_scalars(namespace, payloads)
+            for key, value in namespace_scalars.items():
+                self.logger.record(key, value)
+
     def _record_namespace_legacy(self, namespace: str) -> None:
-        namespace_scalars = self._collect_namespace_scalars(namespace)
+        payloads = self._get_namespace_payloads_from_locals(namespace)
+        namespace_scalars = self._collect_namespace_scalars(namespace, payloads)
         for key, value in namespace_scalars.items():
             self.logger.record(key, value)
-
-    def _get_tensorboard_writer(self):
-        output_formats = getattr(self.logger, "output_formats", None)
-        if not isinstance(output_formats, (list, tuple)):
-            return None
-
-        for output_format in output_formats:
-            writer = getattr(output_format, "writer", None)
-            if writer is None:
-                continue
-            if hasattr(writer, "add_scalar") and hasattr(writer, "flush"):
-                return writer
-
-        return None
 
     def _flush_pending_events(self) -> None:
         if not self._pending_events:
             return
 
-        writer = self._get_tensorboard_writer()
+        writer = self._tb_writer
         if writer is None:
             for event in self._pending_events:
                 for tag, value in event.scalars.items():
@@ -178,23 +207,32 @@ class TensorboardCallback(BaseCallback):
         self._pending_sample_records = 0
         self._last_dump_step = int(self.num_timesteps)
 
+    def _should_dump(self, current_step: int) -> bool:
+        if (
+            self.batch_dump_records is not None
+            and self._pending_sample_records >= self.batch_dump_records
+        ):
+            return True
+
+        if self.force_dump_interval_steps is not None:
+            if (current_step - self._last_dump_step) >= self.force_dump_interval_steps:
+                if self._tb_writer is None:
+                    return True
+                return bool(self._pending_events)
+
+        return False
+
     def _on_step(self) -> bool:
         current_step = int(self.num_timesteps)
-        tensorboard_writer = self._get_tensorboard_writer()
 
-        # 控制每次记录的最小步长间隔，避免高频写入造成 I/O 开销。
         should_sample = (
             current_step - self._last_sample_step
         ) >= self.min_tb_sample_interval_steps
 
         if should_sample:
             self._last_sample_step = current_step
-            if tensorboard_writer is None:
-                self._record_namespace_legacy(namespace="rewards")
-                self._record_namespace_legacy(namespace="state")
-                self._record_namespace_legacy(namespace="constraint")
-                self._record_namespace_legacy(namespace="event")
-                self._record_namespace_legacy(namespace="basic")
+            if self._tb_writer is None:
+                self._record_all_namespaces_legacy()
                 self._pending_sample_records += 1
             else:
                 sample_event = self._build_sample_event(step=current_step)
@@ -202,29 +240,8 @@ class TensorboardCallback(BaseCallback):
                     self._pending_events.append(sample_event)
                     self._pending_sample_records += 1
 
-        should_dump = False
-        if (
-            self.force_dump_interval_steps is not None
-            and (tensorboard_writer is not None and self._pending_events)
-            and (current_step - self._last_dump_step) >= self.force_dump_interval_steps
-        ):
-            should_dump = True
-
-        if (
-            self.force_dump_interval_steps is not None
-            and tensorboard_writer is None
-            and (current_step - self._last_dump_step) >= self.force_dump_interval_steps
-        ):
-            should_dump = True
-
-        if (
-            self.batch_dump_records is not None
-            and self._pending_sample_records >= self.batch_dump_records
-        ):
-            should_dump = True
-
-        if should_dump:
-            if tensorboard_writer is None:
+        if self._should_dump(current_step):
+            if self._tb_writer is None:
                 self.logger.dump(current_step)
                 self._last_dump_step = current_step
                 self._pending_sample_records = 0

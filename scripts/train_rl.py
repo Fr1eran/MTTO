@@ -70,7 +70,7 @@ def _build_env_initializer(
     return _init
 
 
-def build_arg_parser() -> argparse.ArgumentParser:
+def build_cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="使用可配置的日志记录和分析开关训练 MTTO PPO 策略",
     )
@@ -83,7 +83,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--schedule-time-s",
         type=float,
-        default=440.0,
+        default=430.0,
         help="规划运行时间(s)",
     )
     parser.add_argument(
@@ -464,7 +464,7 @@ def _resolve_output_dir(
 
 
 def main() -> None:
-    args = build_arg_parser().parse_args()
+    args = build_cli_parser().parse_args()
 
     schedule_time_s = args.schedule_time_s
     ds = args.max_step_distance

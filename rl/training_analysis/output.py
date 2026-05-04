@@ -15,12 +15,13 @@ def build_analysis_payload(
     run_directory: str,
     available_tags: list[str],
     regular_metrics: dict[str, Any],
-    reward_component_impact: dict[str, Any],
-    constraint_diagnostic: dict[str, Any],
-    evolution_metrics: dict[str, Any],
-    step_snapshots: list[dict[str, Any]],
-    episode_snapshots: list[dict[str, Any]],
-    config: dict[str, Any],
+    best_eval_metrics: dict[str, Any] | None = None,
+    reward_component_impact: dict[str, Any] | None = None,
+    constraint_diagnostic: dict[str, Any] | None = None,
+    evolution_metrics: dict[str, Any] | None = None,
+    step_snapshots: list[dict[str, Any]] | None = None,
+    episode_snapshots: list[dict[str, Any]] | None = None,
+    config: dict[str, Any] | None = None,
     data_quality: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
@@ -29,16 +30,17 @@ def build_analysis_payload(
             "run_name": run_name,
             "run_directory": run_directory,
             "available_tags": sorted(available_tags),
-            "config": config,
+            "config": config or {},
         },
         "regular_metrics": regular_metrics,
-        "reward_component_impact": reward_component_impact,
-        "constraint_diagnostic": constraint_diagnostic,
-        "evolution_metrics": evolution_metrics,
+        "best_eval_metrics": best_eval_metrics or {},
+        "reward_component_impact": reward_component_impact or {},
+        "constraint_diagnostic": constraint_diagnostic or {},
+        "evolution_metrics": evolution_metrics or {},
         "data_quality": data_quality or {},
         "snapshots": {
-            "by_step": step_snapshots,
-            "by_episode": episode_snapshots,
+            "by_step": step_snapshots or [],
+            "by_episode": episode_snapshots or [],
         },
     }
 
@@ -63,6 +65,7 @@ def _flatten_numeric_fields(
         return out
 
     if isinstance(value, list):
+        # 跳过嵌套列表/矩阵，CSV 无法扁平化表达
         return out
 
     if _is_scalar(value):
@@ -126,8 +129,11 @@ def _format_number(value: Any, default: str = "N/A") -> str:
     if value is None:
         return default
     try:
-        return f"{float(value):.6g}"
-    except TypeError, ValueError:
+        v = float(value)
+        if np.isnan(v) or np.isinf(v):
+            return default
+        return f"{v:.6g}"
+    except (TypeError, ValueError):
         return default
 
 
@@ -136,14 +142,14 @@ def _format_percent(value: Any, default: str = "N/A") -> str:
         return default
     try:
         return f"{float(value) * 100.0:.2f}%"
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return default
 
 
 def _ascii_bar(value: Any, width: int = 24) -> str:
     try:
         ratio = float(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         ratio = 0.0
     ratio = max(0.0, min(1.0, ratio))
     w = max(8, int(width))
@@ -253,6 +259,40 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
         f"near_miss={_format_percent(sbt.get('near_miss_ratio'))}"
     )
 
+    best_eval = payload.get("best_eval_metrics", {})
+    if isinstance(best_eval, dict) and best_eval.get("available", False):
+        best_success = best_eval.get("best_success", {})
+        best_reward = best_eval.get("best_total_reward", {})
+        lines.append(
+            "- best_eval: "
+            f"success_rate={_format_percent(best_success.get('final') if isinstance(best_success, dict) else None)}, "
+            f"best_reward={_format_number(best_reward.get('final') if isinstance(best_reward, dict) else None)}"
+        )
+
+    top3 = top_dominance[:3]
+    if top3:
+        lines.append(
+            "- top_dominance: "
+            + ", ".join(
+                f"{_short_component_name(tag)}={_format_percent(val)}"
+                for tag, val in top3
+            )
+        )
+
+    if strong_negative_pairs:
+        top_conflict = strong_negative_pairs[0]
+        lines.append(
+            "- top_objective_conflict: "
+            f"{top_conflict.get('left', '')} vs {top_conflict.get('right', '')}"
+            f" (pearson={_format_number(top_conflict.get('pearson'))})"
+        )
+
+    survival_slope = evolution.get("survival_distance_slope_per_stage")
+    if survival_slope is not None:
+        lines.append(
+            f"- survival_distance_slope_per_stage: {_format_number(survival_slope)}"
+        )
+
     lines.append("")
     lines.append("## Run Metadata")
     lines.append("")
@@ -287,6 +327,24 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
         f"approx_kl_p95={_format_number(update_safety.get('approx_kl_p95'))}, "
         f"approx_kl_exceed_ratio={_format_percent(update_safety.get('approx_kl_exceed_ratio'))}"
     )
+
+    best_eval = payload.get("best_eval_metrics", {})
+    if isinstance(best_eval, dict) and best_eval.get("available", False):
+        lines.append("")
+        lines.append("## Best Evaluation Performance")
+        lines.append("")
+        last_keys = [k for k in sorted(best_eval.keys()) if k.startswith("last_")]
+        best_keys = [k for k in sorted(best_eval.keys()) if k.startswith("best_")]
+        if best_keys:
+            lines.append("- final_best_values:")
+            for key in best_keys:
+                entry = best_eval.get(key, {}) if isinstance(best_eval.get(key), dict) else {}
+                lines.append(f"  - {key}: {_format_number(entry.get('final'))}")
+        if last_keys:
+            lines.append("- last_eval_values:")
+            for key in last_keys:
+                entry = best_eval.get(key, {}) if isinstance(best_eval.get(key), dict) else {}
+                lines.append(f"  - {key}: {_format_number(entry.get('final'))}")
 
     lines.append("")
     lines.append("## Reward Quality (Episode -> Stage)")

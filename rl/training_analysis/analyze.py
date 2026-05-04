@@ -1,8 +1,7 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
-
-import numpy as np
 
 from utils.data_loader import load_auxiliary_stopping_areas_ap_and_dp, load_stations
 
@@ -13,6 +12,10 @@ from .process import (
     exponential_moving_average,
     linear_slope,
 )
+
+import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_REWARD_COMPONENT_TAGS = [
@@ -192,9 +195,11 @@ def _compute_objective_correlation(
             corr = float(corr_matrix[i, j])
             row_data[col_tag] = corr
             if i < j and corr <= -0.4:
-                strong_negative_pairs.append(
-                    {"left": row_tag, "right": col_tag, "pearson": corr}
-                )
+                strong_negative_pairs.append({
+                    "left": row_tag,
+                    "right": col_tag,
+                    "pearson": corr,
+                })
         corr_map[row_tag] = row_data
 
     return {"matrix": corr_map, "strong_negative_pairs": strong_negative_pairs}
@@ -288,6 +293,47 @@ def compute_regular_training_metrics(
         }
 
     return regular
+
+
+BEST_EVAL_TAGS = [
+    "best_eval/last_success",
+    "best_eval/last_total_reward",
+    "best_eval/last_stop_error_m",
+    "best_eval/last_time_error_s",
+    "best_eval/last_total_energy_j",
+    "best_eval/best_success",
+    "best_eval/best_total_reward",
+    "best_eval/best_stop_error_m",
+    "best_eval/best_time_error_s",
+    "best_eval/best_total_energy_j",
+]
+
+
+def compute_best_eval_metrics(
+    series_map: dict[str, ScalarSeries],
+    eval_tags: list[str] | None = None,
+) -> dict[str, Any]:
+    tags = eval_tags or BEST_EVAL_TAGS
+    available = [tag for tag in tags if tag in series_map]
+
+    if not available:
+        return {"available": False}
+
+    metrics: dict[str, Any] = {"available": True}
+
+    for tag in available:
+        _, values = _series_values(series_map, tag)
+        if values.size == 0:
+            continue
+
+        short_name = tag.split("/", 1)[1] if "/" in tag else tag
+        metrics[short_name] = {
+            "final": float(values[-1]),
+            "max": float(np.max(values)),
+            "mean": float(np.mean(values)),
+        }
+
+    return metrics
 
 
 def _compute_reward_component_impact_step_based(
@@ -428,17 +474,15 @@ def compute_reward_component_impact(
             for tag in available
         }
 
-        stage_component_profile.append(
-            {
-                "window_index": window_index,
-                "episode_start": int(episode_start),
-                "episode_end": int(episode_end),
-                "episode_count": int(np.sum(member_mask)),
-                "mean_cumulative": mean_cumulative,
-                "std_cumulative": std_cumulative,
-                "mean_ratio": mean_ratio,
-            }
-        )
+        stage_component_profile.append({
+            "window_index": window_index,
+            "episode_start": int(episode_start),
+            "episode_end": int(episode_end),
+            "episode_count": int(np.sum(member_mask)),
+            "mean_cumulative": mean_cumulative,
+            "std_cumulative": std_cumulative,
+            "mean_ratio": mean_ratio,
+        })
 
     return {
         "available": True,
@@ -474,7 +518,8 @@ def _load_critical_points() -> dict[str, np.ndarray]:
             sps_zone_center_points = sps_zone_center_points[
                 (sps_zone_center_points < lower) | (sps_zone_center_points > upper)
             ]
-    except Exception:
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        logger.warning("Failed to load critical points for risk attribution: %s", exc)
         return {
             "sps_zone_center_points_m": sps_zone_center_points,
         }
@@ -512,21 +557,19 @@ def _build_critical_point_entries(
         violation_risk = _safe_ratio(float(violation_count), float(exposure_count))
         near_miss_risk = _safe_ratio(float(near_miss_count), float(exposure_count))
 
-        entries.append(
-            {
-                "type": point_type,
-                "point_m": float(point),
-                "radius_m": radius,
-                "exposure_count": exposure_count,
-                "near_miss_count": near_miss_count,
-                "failure_count": failure_count,
-                "violation_count": violation_count,
-                "near_miss_risk": near_miss_risk,
-                "violation_risk": violation_risk,
-                "failure_risk": failure_risk,
-                "risk": failure_risk,
-            }
-        )
+        entries.append({
+            "type": point_type,
+            "point_m": float(point),
+            "radius_m": radius,
+            "exposure_count": exposure_count,
+            "near_miss_count": near_miss_count,
+            "failure_count": failure_count,
+            "violation_count": violation_count,
+            "near_miss_risk": near_miss_risk,
+            "violation_risk": violation_risk,
+            "failure_risk": failure_risk,
+            "risk": failure_risk,
+        })
 
     entries.sort(
         key=lambda item: (
@@ -569,14 +612,12 @@ def _build_episode_boundary_profiles(
         )
         ratio = _safe_ratio(near_miss_distance, total_distance)
         episode_ratio_map[int(episode_id)] = ratio
-        episode_profile.append(
-            {
-                "episode_id": int(episode_id),
-                "total_distance_m": total_distance,
-                "near_miss_distance_m": near_miss_distance,
-                "near_miss_distance_ratio": ratio,
-            }
-        )
+        episode_profile.append({
+            "episode_id": int(episode_id),
+            "total_distance_m": total_distance,
+            "near_miss_distance_m": near_miss_distance,
+            "near_miss_distance_ratio": ratio,
+        })
 
     stage_profile: list[dict[str, Any]] = []
     for window_index, episode_start, episode_end, members in _build_episode_windows(
@@ -584,20 +625,18 @@ def _build_episode_boundary_profiles(
         episode_window_size,
     ):
         member_ratios = [episode_ratio_map[int(ep)] for ep in members]
-        stage_profile.append(
-            {
-                "window_index": window_index,
-                "episode_start": int(episode_start),
-                "episode_end": int(episode_end),
-                "episode_count": int(len(member_ratios)),
-                "mean_near_miss_distance_ratio": float(np.mean(member_ratios))
-                if member_ratios
-                else 0.0,
-                "max_near_miss_distance_ratio": float(np.max(member_ratios))
-                if member_ratios
-                else 0.0,
-            }
-        )
+        stage_profile.append({
+            "window_index": window_index,
+            "episode_start": int(episode_start),
+            "episode_end": int(episode_end),
+            "episode_count": int(len(member_ratios)),
+            "mean_near_miss_distance_ratio": float(np.mean(member_ratios))
+            if member_ratios
+            else 0.0,
+            "max_near_miss_distance_ratio": float(np.max(member_ratios))
+            if member_ratios
+            else 0.0,
+        })
 
     return episode_profile, stage_profile
 
@@ -710,13 +749,11 @@ def compute_constraint_diagnostic(
             violation_count = int(violation_hist[idx])
             near_miss_count = int(near_miss_hist[idx])
             if failure_count > 0:
-                hotspots.append(
-                    {
-                        "bin_start_m": float(edges[idx]),
-                        "bin_end_m": float(edges[idx + 1]),
-                        "count": failure_count,
-                    }
-                )
+                hotspots.append({
+                    "bin_start_m": float(edges[idx]),
+                    "bin_end_m": float(edges[idx + 1]),
+                    "count": failure_count,
+                })
 
             if exposure_count <= 0:
                 continue
@@ -724,19 +761,17 @@ def compute_constraint_diagnostic(
             failure_risk = _safe_ratio(float(failure_count), float(exposure_count))
             violation_risk = _safe_ratio(float(violation_count), float(exposure_count))
             near_miss_risk = _safe_ratio(float(near_miss_count), float(exposure_count))
-            risk_bins.append(
-                {
-                    "bin_start_m": float(edges[idx]),
-                    "bin_end_m": float(edges[idx + 1]),
-                    "exposure_count": int(exposure_count),
-                    "near_miss_count": near_miss_count,
-                    "failure_count": failure_count,
-                    "violation_count": violation_count,
-                    "near_miss_risk": near_miss_risk,
-                    "violation_risk": violation_risk,
-                    "failure_risk": failure_risk,
-                }
-            )
+            risk_bins.append({
+                "bin_start_m": float(edges[idx]),
+                "bin_end_m": float(edges[idx + 1]),
+                "exposure_count": int(exposure_count),
+                "near_miss_count": near_miss_count,
+                "failure_count": failure_count,
+                "violation_count": violation_count,
+                "near_miss_risk": near_miss_risk,
+                "violation_risk": violation_risk,
+                "failure_risk": failure_risk,
+            })
 
         risk_bins.sort(
             key=lambda item: (
@@ -956,17 +991,15 @@ def compute_evolution_metrics(
 
         terminal_state_counts[terminal_state] += 1
 
-        episode_records.append(
-            {
-                "episode_id": int(episode_id),
-                "step_start": int(ep_steps[0]),
-                "step_end": int(ep_steps[-1]) + 1,
-                "survival_distance_m": float(survival_distance),
-                "is_truncated": bool(is_truncated_episode),
-                "terminal_state": terminal_state,
-                "transition_matrix": transition_matrix,
-            }
-        )
+        episode_records.append({
+            "episode_id": int(episode_id),
+            "step_start": int(ep_steps[0]),
+            "step_end": int(ep_steps[-1]) + 1,
+            "survival_distance_m": float(survival_distance),
+            "is_truncated": bool(is_truncated_episode),
+            "terminal_state": terminal_state,
+            "transition_matrix": transition_matrix,
+        })
 
     if not episode_records:
         return {
@@ -1047,26 +1080,24 @@ def compute_evolution_metrics(
             for idx in range(3)
         }
 
-        stage_profiles.append(
-            {
-                "window_index": int(window_index),
-                "episode_start": int(episode_start),
-                "episode_end": int(episode_end),
-                "episode_count": int(np.sum(member_mask)),
-                "step_start": int(np.min(step_start_array[member_mask])),
-                "step_end": int(np.max(step_end_array[member_mask])),
-                "avg_survival_distance_m": avg_survival,
-                "survival_growth_rate_vs_prev": growth_vs_prev,
-                "truncated_episode_ratio": float(np.mean(stage_truncated)),
-                "terminal_state_ratio": terminal_state_ratio,
-                "transition_matrix": stage_matrix.astype(np.int64).tolist(),
-                "transition_probabilities": stage_probs.tolist(),
-                "normal_to_low_transition_rate": float(stage_probs[0, 1]),
-                "normal_to_high_transition_rate": float(stage_probs[0, 2]),
-                "low_to_high_transition_rate": float(stage_probs[1, 2]),
-                "high_to_low_transition_rate": float(stage_probs[2, 1]),
-            }
-        )
+        stage_profiles.append({
+            "window_index": int(window_index),
+            "episode_start": int(episode_start),
+            "episode_end": int(episode_end),
+            "episode_count": int(np.sum(member_mask)),
+            "step_start": int(np.min(step_start_array[member_mask])),
+            "step_end": int(np.max(step_end_array[member_mask])),
+            "avg_survival_distance_m": avg_survival,
+            "survival_growth_rate_vs_prev": growth_vs_prev,
+            "truncated_episode_ratio": float(np.mean(stage_truncated)),
+            "terminal_state_ratio": terminal_state_ratio,
+            "transition_matrix": stage_matrix.astype(np.int64).tolist(),
+            "transition_probabilities": stage_probs.tolist(),
+            "normal_to_low_transition_rate": float(stage_probs[0, 1]),
+            "normal_to_high_transition_rate": float(stage_probs[0, 2]),
+            "low_to_high_transition_rate": float(stage_probs[1, 2]),
+            "high_to_low_transition_rate": float(stage_probs[2, 1]),
+        })
 
         previous_avg_survival = avg_survival
 

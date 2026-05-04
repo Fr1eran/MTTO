@@ -1,7 +1,12 @@
+from __future__ import annotations
+
 import numpy as np
+from numpy.typing import NDArray
 
 
-def find_2curves_crosspoint(curve1, curve2):
+def find_2curves_crosspoint(
+    curve1: NDArray[np.float64], curve2: NDArray[np.float64]
+) -> tuple[float, float]:
     x1 = curve1[0, :]
     y1 = curve1[1, :]
     x2 = curve2[0, :]
@@ -20,12 +25,19 @@ def find_2curves_crosspoint(curve1, curve2):
     return (x_cross[0], y_cross[0])
 
 
-def cut_curve_by_crosspoint(s_list, v_list, x_cross):
+def cut_curve_by_crosspoint(
+    s_list: NDArray[np.float64], v_list: NDArray[np.float64], x_cross: float
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     idx = np.searchsorted(s_list, x_cross, side="left")
     return s_list[idx:], v_list[idx:]
 
 
-def cal_regions(above_curves_list, below_curves_list):
+def cal_regions(
+    above_curves_list: list[NDArray[np.float64]],
+    below_curves_list: list[NDArray[np.float64]],
+) -> tuple[
+    NDArray[np.float64], list[NDArray[np.float64]], list[NDArray[np.float64]]
+]:
     if len(above_curves_list) != len(below_curves_list):
         raise Exception("Two curve sets must have the same size")
     cross_points = np.empty((2, len(above_curves_list)))
@@ -47,7 +59,10 @@ def cal_regions(above_curves_list, below_curves_list):
     return cross_points, above_curves_part, below_curves_part
 
 
-def pad_2curve_lists(curves_list1, curves_list2):
+def pad_2curve_lists(
+    curves_list1: list[NDArray[np.float64]],
+    curves_list2: list[NDArray[np.float64]],
+) -> tuple[list[NDArray[np.float64]], list[NDArray[np.float64]]]:
     if len(curves_list1) != len(curves_list2):
         raise Exception("Two curve lists must have the same size")
     curves_list1_padded = []
@@ -63,7 +78,17 @@ def pad_2curve_lists(curves_list1, curves_list2):
     return curves_list1_padded, curves_list2_padded
 
 
-def pad_2curves(curve1_x, curve1_y, curve2_x, curve2_y):
+def pad_2curves(
+    curve1_x: NDArray[np.float64],
+    curve1_y: NDArray[np.float64],
+    curve2_x: NDArray[np.float64],
+    curve2_y: NDArray[np.float64],
+) -> tuple[
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+]:
     pad_width = len(curve1_x) - len(curve2_x)
     if pad_width > 0:
         curve2_y = np.pad(curve2_y, (0, pad_width), mode="edge")
@@ -78,7 +103,9 @@ def pad_2curves(curve1_x, curve1_y, curve2_x, curve2_y):
     return curve1_x, curve1_y, curve2_x, curve2_y
 
 
-def concatenate_curves_list(curves: list):
+def concatenate_curves_list(
+    curves: list[NDArray[np.float64]],
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     curves_x = [data[0, :] for data in curves]
     curves_y = [data[1, :] for data in curves]
 

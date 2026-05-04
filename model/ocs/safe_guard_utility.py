@@ -1,11 +1,13 @@
 import numpy as np
-from numpy.typing import NDArray
+from numpy.typing import NDArray, ArrayLike
 from matplotlib.axes import Axes
 from typing import Sequence, overload
 
 from utils.indexing_utils import get_interval_index
 from utils.curve_geometry import pad_2curve_lists, cal_regions
 from utils.curve_plot import concatenate_curves_with_NaN, draw_regions
+
+ScalarNumeric = float | np.floating
 
 
 class SafeGuardUtility:
@@ -316,7 +318,7 @@ class SafeGuardUtility:
         return self._idp_points_x
 
     def get_current_stopping_point(
-        self, current_pos: float, current_speed: float
+        self, current_pos: ScalarNumeric, current_speed: ScalarNumeric
     ) -> int:
         """
         根据当前状态获得列车的目标停车点编号
@@ -348,7 +350,7 @@ class SafeGuardUtility:
         return current_sp
 
     def get_min_and_max_speed(
-        self, current_pos: float, current_sp: int
+        self, current_pos: ScalarNumeric, current_sp: int
     ) -> tuple[float, float]:
         """
         获得当前位置在目标辅助停车区下的最小防护速度和最大防护速度
@@ -408,7 +410,7 @@ class SafeGuardUtility:
         return float(current_min_speed), float(current_max_speed)
 
     def get_latest_traction_and_braking_intervention_points(
-        self, current_speed: float | np.number, current_sp: int
+        self, current_speed: ScalarNumeric, current_sp: int
     ) -> tuple[float, float]:
         """
         根据速度反查最小位置和最大位置。
@@ -496,20 +498,16 @@ class SafeGuardUtility:
         return float(pos0 + (target_speed - speed0) * (pos1 - pos0) / (speed1 - speed0))
 
     @overload
-    def detect_danger(
-        self, pos: float | np.number, speed: float | np.number
-    ) -> np.bool_: ...
+    def detect_danger(self, pos: ScalarNumeric, speed: ScalarNumeric) -> bool: ...
 
     @overload
-    def detect_danger(
-        self, pos: NDArray[np.floating], speed: NDArray[np.floating]
-    ) -> NDArray[np.bool_]: ...
+    def detect_danger(self, pos: ArrayLike, speed: ArrayLike) -> NDArray[np.bool]: ...
 
     def detect_danger(
         self,
-        pos: float | np.number | NDArray[np.floating],
-        speed: float | np.number | NDArray[np.floating],
-    ) -> np.bool_ | NDArray[np.bool_]:
+        pos: ScalarNumeric | ArrayLike,
+        speed: ScalarNumeric | ArrayLike,
+    ) -> bool | NDArray[np.bool]:
         """
         检查速度是否超出限速或落入危险速度域
 
@@ -520,13 +518,16 @@ class SafeGuardUtility:
         Returns:
             当前磁浮列车状态是否危险
         """
+        pos = np.asarray(pos, dtype=np.float64)
+        speed = np.asarray(speed, dtype=np.float64)
         result1 = self._detect_speed_exceed(pos, speed)
         result2 = self._detect_dangerous_region_enter(pos, speed)
-        return result1 | result2  # type: ignore
+        result = result1 | result2
+        if result.ndim == 0:
+            return bool(result)
+        return result
 
-    def _detect_speed_exceed(
-        self, pos: float | np.number | NDArray, speed: float | np.number | NDArray
-    ) -> np.bool_ | NDArray[np.bool_]:
+    def _detect_speed_exceed(self, pos: NDArray, speed: NDArray):
         speed_limit = self.speed_limits[
             np.clip(
                 get_interval_index(pos, self.speed_limit_intervals),
@@ -536,9 +537,7 @@ class SafeGuardUtility:
         ]
         return speed >= speed_limit * self.gamma
 
-    def _detect_dangerous_region_enter(
-        self, pos: float | np.number | NDArray, speed: float | np.number | NDArray
-    ) -> bool | NDArray[np.bool_]:
+    def _detect_dangerous_region_enter(self, pos: NDArray, speed: NDArray):
         self._ensure_region_cache()
 
         result = np.zeros_like(pos, dtype=bool)

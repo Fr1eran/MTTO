@@ -7,6 +7,7 @@ import warnings
 
 from rl.callbacks import TensorboardCallback
 from rl.training_analysis.analyze import (
+    compute_best_eval_metrics,
     compute_constraint_diagnostic,
     compute_evolution_metrics,
     compute_regular_training_metrics,
@@ -18,7 +19,7 @@ from rl.training_analysis.output import build_analysis_payload, write_analysis_o
 from rl.training_analysis.process import build_episode_snapshots
 from scripts.analyze_training_data import build_arg_parser as build_analyze_arg_parser
 from scripts.train_rl import (
-    build_arg_parser as build_train_rl_arg_parser,
+    build_cli_parser as build_train_rl_arg_parser,
     resolve_log_interval,
     resolve_run_mode,
 )
@@ -92,6 +93,37 @@ def test_reward_component_impact_basic():
     correlation = impact["objective_correlation"]["matrix"]
     assert "rewards/safety" in correlation
     assert "rewards/energy" in correlation["rewards/safety"]
+
+
+def test_best_eval_metrics_basic():
+    series_map = {
+        "best_eval/best_total_reward": _make_series(
+            "best_eval/best_total_reward", [-10.0, -5.0, -3.0, -2.0]
+        ),
+        "best_eval/best_success": _make_series(
+            "best_eval/best_success", [0.0, 1.0, 1.0, 1.0]
+        ),
+        "best_eval/last_total_reward": _make_series(
+            "best_eval/last_total_reward", [-12.0, -8.0, -4.0, -3.0]
+        ),
+        "best_eval/last_success": _make_series(
+            "best_eval/last_success", [0.0, 0.0, 1.0, 1.0]
+        ),
+    }
+
+    metrics = compute_best_eval_metrics(series_map)
+
+    assert metrics["available"] is True
+    assert metrics["best_total_reward"]["final"] == -2.0
+    assert metrics["best_total_reward"]["max"] == -2.0
+    assert metrics["best_success"]["final"] == 1.0
+    assert metrics["last_total_reward"]["final"] == -3.0
+    assert metrics["last_success"]["final"] == 1.0
+
+
+def test_best_eval_metrics_empty():
+    metrics = compute_best_eval_metrics({})
+    assert metrics["available"] is False
 
 
 def test_constraint_diagnostic_basic():
@@ -350,7 +382,7 @@ def _make_callback_locals(
         "event": {"episode_truncated_count": truncated},
     }
     if position is not None:
-        diagnostics["runtime"] = {
+        diagnostics["basic"] = {
             "position": position,
             "operation_time": 12.0,
         }

@@ -1,10 +1,15 @@
+from __future__ import annotations
+
 import numpy as np
 from matplotlib.axes import Axes
+from numpy.typing import NDArray
 
 from utils.curve_geometry import concatenate_curves_list
 
 
-def concatenate_curves_with_NaN(curves_set: list):
+def concatenate_curves_with_NaN(
+    curves_set: list[NDArray[np.float64]],
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     curves_x = [data[0, :] for data in curves_set]
     curves_y = [data[1, :] for data in curves_set]
 
@@ -18,7 +23,14 @@ def concatenate_curves_with_NaN(curves_set: list):
     return curves_x_con_with_nan, curves_y_con_with_nan
 
 
-def draw_regions(ax: Axes, above_curves_list, below_curves_list, label, color, alpha):
+def draw_regions(
+    ax: Axes,
+    above_curves_list: list[NDArray[np.float64]],
+    below_curves_list: list[NDArray[np.float64]],
+    label: str,
+    color: str,
+    alpha: float,
+) -> None:
     above_curves_x_con, above_curves_y_con = concatenate_curves_list(above_curves_list)
     below_curves_x_con, below_curves_y_con = concatenate_curves_list(below_curves_list)
 
