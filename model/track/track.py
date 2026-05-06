@@ -7,16 +7,7 @@ import numpy as np
 from numpy.typing import ArrayLike, DTypeLike, NDArray
 
 from utils.indexing_utils import get_interval_index
-
-ScalarNumeric = float | np.floating
-
-
-def _restore_output_type(
-    values: NDArray[np.floating],
-) -> np.floating | NDArray[np.floating]:
-    if values.ndim == 0:
-        return values[()]
-    return values
+from utils.type_utils import ScalarNumeric, restore_output_type
 
 
 @dataclass
@@ -96,7 +87,7 @@ class TrackProfile:
                 get_interval_index(pos, self.slope_intervals), 0, len(self.slopes) - 1
             )
         ]
-        return _restore_output_type(slope.astype(dtype=dtype))
+        return restore_output_type(slope.astype(dtype=dtype))
 
     @overload
     def get_next_slope_and_distance(
@@ -154,11 +145,9 @@ class TrackProfile:
             - pos
         )
 
-        next_slope = next_slope.astype(dtype=dtype)
-        distance = distance.astype(dtype=dtype)
-        if pos.ndim == 0:
-            return next_slope[()], distance[()]
-        return next_slope, distance
+        return restore_output_type(next_slope.astype(dtype=dtype)), restore_output_type(
+            distance.astype(dtype=dtype)
+        )
 
     @overload
     def get_speed_limit(
@@ -197,7 +186,7 @@ class TrackProfile:
                 len(self.speed_limits) - 1,
             )
         ]
-        return _restore_output_type(speed_limit.astype(dtype=dtype))
+        return restore_output_type(speed_limit.astype(dtype=dtype))
 
     @overload
     def get_next_speed_limit_and_distance(
@@ -256,8 +245,6 @@ class TrackProfile:
             - pos
         )
 
-        next_speed_limit = next_speed_limit.astype(dtype=dtype)
-        distance = distance.astype(dtype=dtype)
-        if pos.ndim == 0:
-            return next_speed_limit[()], distance[()]
-        return next_speed_limit, distance
+        return restore_output_type(
+            next_speed_limit.astype(dtype=dtype)
+        ), restore_output_type(distance.astype(dtype=dtype))

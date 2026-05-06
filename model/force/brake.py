@@ -5,15 +5,7 @@ from typing import overload
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-ScalarNumeric = float | np.floating
-
-
-def _restore_output_type(
-    values: NDArray[np.float64],
-) -> np.floating | NDArray[np.float64]:
-    if values.ndim == 0:
-        return np.float64(values.item())
-    return values
+from utils.type_utils import ScalarNumeric, restore_output_type
 
 
 @overload
@@ -22,7 +14,7 @@ def sledge_frictional_brake_force(
     mass: ScalarNumeric,
     slope: ScalarNumeric,
     k: ScalarNumeric = 0.1,
-) -> np.floating: ...
+) -> np.float64: ...
 
 
 @overload
@@ -39,7 +31,7 @@ def sledge_frictional_brake_force(
     mass: ScalarNumeric,
     slope: ScalarNumeric | ArrayLike,
     k: ScalarNumeric = 0.1,
-) -> np.floating | NDArray[np.float64]:
+) -> np.float64 | NDArray[np.float64]:
     """
     计算滑橇摩擦制动力
 
@@ -65,7 +57,7 @@ def sledge_frictional_brake_force(
         speed_km <= MIN_V_KM, k * u * mass * 100 / np.sqrt(100**2 + slope**2) * 9.8, 0.0
     )
 
-    return _restore_output_type(sledge_frictional_resis_force)
+    return restore_output_type(sledge_frictional_resis_force)
 
 
 @overload
@@ -73,7 +65,7 @@ def vortex_brake_force(
     speed: ScalarNumeric,
     numoftrainsets: int,
     level: int,
-) -> np.floating: ...
+) -> np.float64: ...
 
 
 @overload
@@ -88,7 +80,7 @@ def vortex_brake_force(
     speed: ScalarNumeric | ArrayLike,
     numoftrainsets: int,
     level: int,
-) -> np.floating | NDArray[np.float64]:
+) -> np.float64 | NDArray[np.float64]:
     """
     计算磁浮列车的涡流制动阻力
 
@@ -119,14 +111,14 @@ def vortex_brake_force(
         0.0,
     )
 
-    return _restore_output_type(vortex_break_force)
+    return restore_output_type(vortex_break_force)
 
 
 @overload
 def wear_plate_frictional_brake_force(
     speed: ScalarNumeric,
     numoftrainsets: int,
-) -> np.floating: ...
+) -> np.float64: ...
 
 
 @overload
@@ -139,7 +131,7 @@ def wear_plate_frictional_brake_force(
 def wear_plate_frictional_brake_force(
     speed: ScalarNumeric | ArrayLike,
     numoftrainsets: int,
-) -> np.floating | NDArray[np.float64]:
+) -> np.float64 | NDArray[np.float64]:
     """
     计算磁浮列车的制动磨耗板的摩擦制动力
 
@@ -191,4 +183,4 @@ def wear_plate_frictional_brake_force(
     )
     wearplate_frictional_resis_force[mask] = tmp
 
-    return _restore_output_type(wearplate_frictional_resis_force)
+    return restore_output_type(wearplate_frictional_resis_force)

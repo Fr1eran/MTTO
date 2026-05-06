@@ -5,15 +5,7 @@ from typing import overload
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-ScalarNumeric = float | np.floating
-
-
-def _restore_output_type(
-    values: NDArray[np.float64],
-) -> np.floating | NDArray[np.float64]:
-    if values.ndim == 0:
-        return np.float64(values.item())
-    return values
+from utils.type_utils import ScalarNumeric, restore_output_type
 
 
 @overload
@@ -21,7 +13,7 @@ def added_resis_force(
     speed: ScalarNumeric,
     mass: ScalarNumeric,
     kind: int,
-) -> np.floating: ...
+) -> np.float64: ...
 
 
 @overload
@@ -36,7 +28,7 @@ def added_resis_force(
     speed: ScalarNumeric | ArrayLike,
     mass: ScalarNumeric,
     kind: int,
-) -> np.floating | NDArray[np.float64]:
+) -> np.float64 | NDArray[np.float64]:
     """
     计算轨道对列车的固定附加阻力
 
@@ -60,14 +52,14 @@ def added_resis_force(
         [lambda speed: 0.08 * mass, lambda speed: -0.2 * mass, lambda speed: 0],
     )
 
-    return _restore_output_type(added_resis_force)
+    return restore_output_type(added_resis_force)
 
 
 @overload
 def air_resis_force(
     speed: ScalarNumeric,
     numoftrainsets: int,
-) -> np.floating: ...
+) -> np.float64: ...
 
 
 @overload
@@ -80,7 +72,7 @@ def air_resis_force(
 def air_resis_force(
     speed: ScalarNumeric | ArrayLike,
     numoftrainsets: int,
-) -> np.floating | NDArray[np.float64]:
+) -> np.float64 | NDArray[np.float64]:
     """
     计算空气阻力
 
@@ -95,14 +87,14 @@ def air_resis_force(
 
     speed = np.asarray(speed, dtype=np.float64)
     air_resis_force = 2.8 * (0.53 * numoftrainsets / 2 + 0.3) * speed**2 / 1000.0
-    return _restore_output_type(air_resis_force)
+    return restore_output_type(air_resis_force)
 
 
 @overload
 def guideway_vortex_resis_force(
     speed: ScalarNumeric,
     numoftrainsets: int,
-) -> np.floating: ...
+) -> np.float64: ...
 
 
 @overload
@@ -115,7 +107,7 @@ def guideway_vortex_resis_force(
 def guideway_vortex_resis_force(
     speed: ScalarNumeric | ArrayLike,
     numoftrainsets: int,
-) -> np.floating | NDArray[np.float64]:
+) -> np.float64 | NDArray[np.float64]:
     """
     计算线路两侧导向轨的磁化阻力
 
@@ -135,14 +127,14 @@ def guideway_vortex_resis_force(
         0.1 * np.power(speed_km, 0.5) + 0.02 * np.power(speed_km, 0.7)
     )
 
-    return _restore_output_type(guideway_vortex_resis_force)
+    return restore_output_type(guideway_vortex_resis_force)
 
 
 @overload
 def linear_generator_resis_force(
     speed: ScalarNumeric,
     numoftrainsets: int,
-) -> np.floating: ...
+) -> np.float64: ...
 
 
 @overload
@@ -155,7 +147,7 @@ def linear_generator_resis_force(
 def linear_generator_resis_force(
     speed: ScalarNumeric | ArrayLike,
     numoftrainsets: int,
-) -> np.floating | NDArray[np.float64]:
+) -> np.float64 | NDArray[np.float64]:
     """
     计算磁浮列车的直线发电机产生的运行阻力
 
@@ -182,14 +174,14 @@ def linear_generator_resis_force(
             lambda speed: 146 * 3.6 * numoftrainsets / speed - 0.2,
         ],
     )
-    return _restore_output_type(lineargene_resis_force)
+    return restore_output_type(lineargene_resis_force)
 
 
 @overload
 def slope_resis_force(
     mass: ScalarNumeric,
     slope: ScalarNumeric,
-) -> np.floating: ...
+) -> np.float64: ...
 
 
 @overload
@@ -202,7 +194,7 @@ def slope_resis_force(
 def slope_resis_force(
     mass: ScalarNumeric,
     slope: ScalarNumeric | ArrayLike,
-) -> np.floating | NDArray[np.float64]:
+) -> np.float64 | NDArray[np.float64]:
     """
     计算斜坡阻力
 
@@ -215,4 +207,4 @@ def slope_resis_force(
 
     slope = np.asarray(slope, dtype=np.float64)
     slope_resis_force = 9.8 * mass * slope / 100
-    return _restore_output_type(slope_resis_force)
+    return restore_output_type(slope_resis_force)

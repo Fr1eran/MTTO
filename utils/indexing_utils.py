@@ -5,13 +5,7 @@ from typing import overload
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-ScalarNumeric = float | np.floating
-
-
-def _restore_output_type(values: NDArray[np.intp]) -> np.intp | NDArray[np.intp]:
-    if values.ndim == 0:
-        return values[()]
-    return values
+from utils.type_utils import ScalarNumeric, restore_output_type
 
 
 @overload
@@ -19,7 +13,9 @@ def get_interval_index(pos: ScalarNumeric, interval_points: NDArray) -> np.intp:
 
 
 @overload
-def get_interval_index(pos: ArrayLike, interval_points: NDArray) -> NDArray[np.intp]: ...
+def get_interval_index(
+    pos: ArrayLike, interval_points: NDArray
+) -> NDArray[np.intp]: ...
 
 
 def get_interval_index(
@@ -29,7 +25,7 @@ def get_interval_index(
     pos = np.asarray(pos, dtype=np.float64)
     interval_points = np.asarray(interval_points, dtype=np.float64)
     idx = np.searchsorted(interval_points, pos, side="right") - 1
-    return _restore_output_type(idx)
+    return restore_output_type(idx)
 
 
 def find_speed_rise_entry_and_fall(
