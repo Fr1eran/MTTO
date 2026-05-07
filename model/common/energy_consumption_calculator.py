@@ -98,7 +98,7 @@ class ECC:
             vehicle,
             acc_arr,
             speed_arr,
-            trackprofile.get_slope(pos_arr),
+            trackprofile.get_slope(pos_arr, dtype=np.float64),
         )
 
         mechanic_energy_consumption = cumulative_trapezoid(
@@ -240,7 +240,7 @@ class ECC:
                 )
                 t_nodes[i + 1] = t_nodes[i] + np.abs(delta_d[i]) / avg_speed
 
-            slope_nodes = trackprofile.get_slope(p_nodes)
+            slope_nodes = trackprofile.get_slope(p_nodes, dtype=np.float64)
 
             F_longitudinal = VehicleDynamic.calc_longitudinal_force(
                 vehicle=vehicle,

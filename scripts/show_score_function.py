@@ -56,7 +56,7 @@ def visualize_docking_score_function():
 
 
 def visualize_punctuality_score_function():
-    punctuality_score_func = SigmoidVariant(x1=22.0, x2=120.0, c=6.0)
+    punctuality_score_func = SigmoidVariant(x1=22.0, x2=80.0, c=8.0)
 
     x_values = np.linspace(0, 140.0, 1000)
 

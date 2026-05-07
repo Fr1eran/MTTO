@@ -1288,7 +1288,7 @@ class MTTOEnv(gym.Env):
         scale = 1.0 + 1.0 * np.exp(-0.001 * distance_to_target)
 
         # 最终势能为两侧惩罚之和
-        return scale * (phi_max + phi_min) * 5.0
+        return scale * (phi_max + phi_min) * 4.0
 
     def _potential_safety_position(
         self, pos: float, min_pos: float, max_pos: float, target_pos: float
@@ -1325,23 +1325,80 @@ class MTTOEnv(gym.Env):
         return val
 
     def _get_reward_punctuality_dense(self) -> float:
-        phi_curr = self._potential_punctuality(
+        # phi_curr = self._potential_punctuality_v1(
+        #     pos=self.current_pos,
+        #     operation_time=self.current_operation_time,
+        # )
+
+        # phi_prev = self._potential_punctuality_v1(
+        #     pos=self.last_state["pos"],
+        #     operation_time=self.last_state["operation_time"],
+        # )
+
+        # phi_curr = self._potential_punctuality_v2(
+        #     pos=self.current_pos,
+        #     operation_time=self.current_operation_time,
+        # )
+
+        # phi_prev = self._potential_punctuality_v2(
+        #     pos=self.last_state["pos"],
+        #     operation_time=self.last_state["operation_time"],
+        # )
+
+        phi_curr = self._potential_punctuality_v3(
             pos=self.current_pos,
             operation_time=self.current_operation_time,
         )
 
-        phi_prev = self._potential_punctuality(
+        phi_prev = self._potential_punctuality_v3(
             pos=self.last_state["pos"],
             operation_time=self.last_state["operation_time"],
         )
 
         return self.gamma * phi_curr - phi_prev
 
-    def _potential_punctuality(self, pos: float, operation_time: float):
-        # 以位置为基准估计沿最短运行参考曲线到终点的剩余时间，避免
-        # 当前速度同时影响本步耗时和未来最短剩余时间而产生奖励黑客。
+    def _potential_punctuality_v1(self, pos: float, operation_time: float):
         time_redundancy_norm = self._calc_time_redundancy_norm(pos, operation_time)
         return -4.0 * np.log1p(np.exp(-1.0 * time_redundancy_norm))
+
+    def _potential_punctuality_v2(self, pos: float, operation_time: float):
+        K_base = 0.5
+        K_safe = 0.1
+        K_late = 1.0
+
+        time_redundancy_norm = self._calc_time_redundancy_norm(pos, operation_time)
+
+        if time_redundancy_norm >= 0.0:
+            return K_base + K_safe * time_redundancy_norm
+        else:
+            return (
+                K_base
+                + K_safe * time_redundancy_norm
+                - K_late * time_redundancy_norm**2
+            )
+
+    def _potential_punctuality_v3(self, pos: float, operation_time: float):
+        K_base = 1.0
+        K_safe = 0.1
+        K_late = 1.0
+        alpha = 3.0
+
+        time_redundancy_norm = self._calc_time_redundancy_norm(pos, operation_time)
+
+        if time_redundancy_norm >= 0.0:
+            return K_base + K_safe * time_redundancy_norm
+        else:
+            return (
+                K_base
+                + K_safe * time_redundancy_norm
+                - K_late
+                / alpha
+                * (
+                    np.exp(-alpha * time_redundancy_norm)
+                    + alpha * time_redundancy_norm
+                    - 1
+                )
+            )
 
     def _get_reward_docking_dense(self):
 
@@ -1390,7 +1447,7 @@ class MTTOEnv(gym.Env):
         _docking = self._calc_docking_score()
         _punctuality = self._calc_punctuality_score()
         reward_docking = _docking * 10.0
-        reward_punctuality = _docking * _punctuality * 5.0
+        reward_punctuality = _docking * _punctuality * 8.0
 
         if self.enable_diagnostics and self._collect_step_diagnostics:
             self.rewards_info["docking"] = reward_docking

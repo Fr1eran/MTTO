@@ -143,7 +143,7 @@ def calc_potential_safety_speed_asymmetric_v2(
     return scale * (phi_max + phi_min) * 4.0
 
 
-def calc_potential_docking(
+def calc_potential_docking_v1(
     pos,
     speed,
     target_pos,
@@ -152,41 +152,93 @@ def calc_potential_docking(
     向量化停站势函数
     """
     # 基础参数
-    d_scale = 30000.0
+    d_scale = 3000.0
     speed_max = 500.0 / 3.6
 
-    sigma_x_hat = 0.1
+    sigma_x_hat = 0.05
     sigma_v_hat = 0.2
 
     # 正则化项
     dist_error = np.abs(target_pos - pos)
     x_hat = dist_error / d_scale
-    v_hat = speed / speed_max
+    v_hat = np.abs(speed / speed_max)
 
     # 增益参数
-    # K_L = 1.0
     K_G = 20.0
 
-    # 势能
-    # phi_linear = -K_L * np.sqrt(x_hat**2 + v_hat**2)
-    # phi_linear = -K_L * np.sqrt(x_hat**2)
+    phi_strong = K_G * np.exp(-x_hat / sigma_x_hat - v_hat / sigma_v_hat)
 
-    phi_strong = K_G * np.exp(
-        -np.abs(x_hat) / sigma_x_hat - np.abs(v_hat) / sigma_v_hat
-    )
-
-    # return phi_linear + phi_strong
     return phi_strong
 
 
-def calc_potential_punctuality(
+def calc_potential_docking_v2(
+    pos,
+    speed,
+    target_pos,
+):
+    """
+    向量化停站势函数
+    """
+    # 基础参数
+    d_scale = 3000.0
+    speed_max = 500.0 / 3.6
+
+    sigma_x_hat = 0.3
+    sigma_v_hat = 0.2
+
+    # 正则化项
+    dist_error = np.abs(target_pos - pos)
+    x_hat = dist_error / d_scale
+    v_hat = np.abs(speed / speed_max)
+
+    # 增益参数
+    K_G = 20.0
+
+    phi_strong = K_G * np.exp(-x_hat / sigma_x_hat) * np.exp(-v_hat / sigma_v_hat)
+
+    return phi_strong
+
+
+def calc_potential_punctuality_v1(
     redundant_operation_time,
     schedule_time: float,
 ):
-    # 计算时间冗余度
     time_redundancy_norm = redundant_operation_time / schedule_time
 
-    return -5.0 * np.log1p(np.exp(-3.0 * np.maximum(time_redundancy_norm, -0.2)))
+    return -4.0 * np.log1p(np.exp(-3.0 * time_redundancy_norm))
+
+
+def calc_potential_punctuality_v2(redundant_operation_time, schedule_time):
+    K_base = 0.5
+    K_safe = 0.1
+    K_late = 1.0
+
+    time_redundancy_norm = redundant_operation_time / schedule_time
+
+    return np.where(
+        time_redundancy_norm >= 0,
+        K_base + K_safe * time_redundancy_norm,
+        K_base + K_safe * time_redundancy_norm - K_late * time_redundancy_norm**2,
+    )
+
+
+def calc_potential_punctuality_v3(redundant_operation_time, schedule_time):
+    K_base = 1.0
+    K_safe = 0.1
+    K_late = 8.0
+    alpha = 2.0
+
+    time_redundancy_norm = redundant_operation_time / schedule_time
+
+    return np.where(
+        time_redundancy_norm >= 0,
+        K_base + K_safe * time_redundancy_norm,
+        K_base
+        + K_safe * time_redundancy_norm
+        - K_late
+        / alpha
+        * (np.exp(-alpha * time_redundancy_norm) + alpha * time_redundancy_norm - 1),
+    )
 
 
 def infer_position_from_speed(curve_pos, curve_speed, target_speed):
@@ -440,18 +492,25 @@ def plot_docking_potential_heatmap(view_mode="3d"):
         view_mode: "2d" 绘制热力图, "3d" 绘制三维曲面图。
     """
 
-    target_pos = 29270.046
+    target_pos = 10000.0
 
-    # K_L = 1.0
     K_G = 20.0
 
     # 扩大位置与速度展示范围
-    pos_array = np.linspace(target_pos - 10000.0, target_pos + 500.0, 1200)
-    speed_array_ms = np.linspace(0.0, 480.0 / 3.6, 1000)
+    pos_array = np.linspace(target_pos - 5000.0, target_pos + 5000.0, 1200)
+    speed_array_ms = np.linspace(-500.0 / 3.6, 500.0 / 3.6, 1000)
 
     POS, SPEED = np.meshgrid(pos_array, speed_array_ms)
 
-    POTENTIAL = calc_potential_docking(
+    # version 1
+    # POTENTIAL = calc_potential_docking_v1(
+    #     pos=POS,
+    #     speed=SPEED,
+    #     target_pos=target_pos,
+    # )
+
+    # version 2
+    POTENTIAL = calc_potential_docking_v2(
         pos=POS,
         speed=SPEED,
         target_pos=target_pos,
@@ -462,8 +521,19 @@ def plot_docking_potential_heatmap(view_mode="3d"):
     SPEED_KMH = SPEED * 3.6
     target_speed_ms = 0.0
     target_speed_kmh = target_speed_ms * 3.6
+
+    # version 1
+    # target_potential = float(
+    #     calc_potential_docking_v1(
+    #         pos=target_pos,
+    #         speed=target_speed_ms,
+    #         target_pos=target_pos,
+    #     )
+    # )
+
+    # version 2
     target_potential = float(
-        calc_potential_docking(
+        calc_potential_docking_v2(
             pos=target_pos,
             speed=target_speed_ms,
             target_pos=target_pos,
@@ -500,7 +570,7 @@ def plot_docking_potential_heatmap(view_mode="3d"):
         ax.set_xlim(pos_array[0], pos_array[-1])
         ax.set_ylim(speed_array_kmh[0], speed_array_kmh[-1])
         ax.set_xlabel("Position (m)")
-        ax.set_ylabel("Speed (km/h)")
+        ax.set_ylabel("Velocity (km/h)")
         ax.legend(loc="upper right", framealpha=0.9)
         ax.grid(True, alpha=0.3, linestyle=":")
 
@@ -542,7 +612,7 @@ def plot_docking_potential_heatmap(view_mode="3d"):
         ax.set_ylim(speed_array_kmh[0], speed_array_kmh[-1])
         ax.set_zlim(0, K_G * 1.02)
         ax.set_xlabel("Position (m)")
-        ax.set_ylabel("Speed (km/h)")
+        ax.set_ylabel("Velocity (km/h)")
         ax.set_zlabel(r"$\Phi_D$")
         ax.view_init(elev=28, azim=-130)
         ax.legend(loc="upper right")
@@ -568,12 +638,12 @@ def plot_docking_potential_slices():
     pos_array = target_pos + distance_error_array
     speed_array_ms = np.linspace(0.0, 120.0 / 3.6, 1200)
 
-    potential_vs_distance = calc_potential_docking(
+    potential_vs_distance = calc_potential_docking_v1(
         pos=pos_array,
         speed=0.0,
         target_pos=target_pos,
     )
-    potential_vs_speed = calc_potential_docking(
+    potential_vs_speed = calc_potential_docking_v1(
         pos=target_pos,
         speed=speed_array_ms,
         target_pos=target_pos,
@@ -607,9 +677,9 @@ def plot_docking_potential_slices():
 
 
 def plot_punctuality_potential_curve(
-    schedule_time: float = 440.0,
-    redundant_time_upper: float = 150.0,
-    redundant_time_lower: float = -200.0,
+    schedule_time: float = 430.0,
+    redundant_time_upper: float = 80.0,
+    redundant_time_lower: float = -100.0,
     num_points: int = 1200,
 ):
     """
@@ -629,9 +699,23 @@ def plot_punctuality_potential_curve(
         num_points,
         dtype=np.float64,
     )
-    potential_array = calc_potential_punctuality(
+
+    # version 1
+    # potential_array = calc_potential_punctuality_v1(
+    #     redundant_operation_time=redundant_operation_time_array,
+    #     schedule_time=schedule_time,
+    # )
+
+    # version 2
+    # potential_array = calc_potential_punctuality_v2(
+    #     redundant_operation_time=redundant_operation_time_array,
+    #     schedule_time=schedule_time,
+    # )
+
+    # version 3
+    potential_array = calc_potential_punctuality_v3(
         redundant_operation_time=redundant_operation_time_array,
-        schedule_time=float(schedule_time),
+        schedule_time=schedule_time,
     )
 
     fig, ax = plt.subplots(figsize=(12, 6))
@@ -664,13 +748,13 @@ if __name__ == "__main__":
         figure_dpi=150.0,
         savefig_dpi=300.0,
     )
-    plot_safety_potential_heatmap_speed()
+    # plot_safety_potential_heatmap_speed()
     # plot_safety_potential_heatmap_position()
     # plot_docking_potential_heatmap(view_mode="3d")
     # plot_docking_potential_heatmap(view_mode="2d")
     # plot_docking_potential_slices()
-    # plot_punctuality_potential_curve(
-    #     schedule_time=440.0,
-    #     redundant_time_upper=150.0,
-    #     redundant_time_lower=-200.0,
-    # )
+    plot_punctuality_potential_curve(
+        schedule_time=430.0,
+        redundant_time_upper=56.0,
+        redundant_time_lower=-120.0,
+    )
