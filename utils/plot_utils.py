@@ -32,6 +32,18 @@ SCI_ENGLISH_FONT_CANDIDATES: tuple[str, ...] = (
     "DejaVu Serif",
 )
 
+COMMERCIAL_FONT_FALLBACKS: dict[str, tuple[str, ...]] = {
+    "Calibri": ("Carlito", "Liberation Sans", "Nimbus Sans", "DejaVu Sans"),
+    "Arial": ("Liberation Sans", "Nimbus Sans", "DejaVu Sans"),
+    "Helvetica": ("Nimbus Sans", "Liberation Sans", "DejaVu Sans"),
+    "Times New Roman": (
+        "Liberation Serif",
+        "Nimbus Roman",
+        "TeX Gyre Termes",
+        "DejaVu Serif",
+    ),
+}
+
 # Backward-compatible alias: kept for callers importing this symbol directly.
 DEFAULT_FONT_CANDIDATES: tuple[str, ...] = CHINESE_FONT_CANDIDATES
 
@@ -47,21 +59,43 @@ def _pick_first_available_font(font_candidates: Sequence[str]) -> str | None:
 def _pick_selected_or_first_available_font(
     font_candidates: Sequence[str],
     preferred_font: str | None,
+    allow_fallback: bool = True,
 ) -> str | None:
-    """Pick user-selected font first, otherwise fallback to first available candidate."""
+    """Pick selected font first, then optional open-source fallbacks, then candidates."""
 
     if preferred_font is not None:
+        selected = _pick_first_available_font((preferred_font,))
+        if selected is not None:
+            return selected
+
+        fallback_candidates = (
+            COMMERCIAL_FONT_FALLBACKS.get(preferred_font, ()) if allow_fallback else ()
+        )
+        selected = _pick_first_available_font(fallback_candidates)
+        if selected is not None:
+            return selected
+
         if preferred_font not in font_candidates:
+            if fallback_candidates:
+                tried_fonts = (preferred_font,) + fallback_candidates
+                raise ValueError(
+                    f"preferred_font={preferred_font!r} 不在候选字体中: {tuple(font_candidates)!r}，"
+                    f"且已尝试替代字体仍不可用: {tried_fonts!r}"
+                )
             raise ValueError(
                 f"preferred_font={preferred_font!r} 不在候选字体中: {tuple(font_candidates)!r}"
             )
 
-        selected = _pick_first_available_font((preferred_font,))
-        if selected is None:
+        if fallback_candidates:
+            tried_fonts = (preferred_font,) + fallback_candidates
             raise ValueError(
-                f"preferred_font={preferred_font!r} 在当前系统不可用，请先安装该字体。"
+                f"preferred_font={preferred_font!r} 在当前系统不可用，"
+                f"且已尝试替代字体仍不可用: {tried_fonts!r}"
             )
-        return selected
+
+        raise ValueError(
+            f"preferred_font={preferred_font!r} 在当前系统不可用，请先安装该字体。"
+        )
 
     return _pick_first_available_font(font_candidates)
 
@@ -107,7 +141,7 @@ def set_global_plot_style(
 
     Args:
         font_preset: 预设候选字体集合。"sci" 为英文字体优先，"zh" 为中文字体优先。
-        preferred_font: 用户指定字体名。需位于候选字体中且在系统可用。
+        preferred_font: 用户指定字体名。若该字体不可用，会尝试开源兼容替代。
         font_candidates: 自定义候选字体。若传入则覆盖 font_preset 对应集合。
     """
 

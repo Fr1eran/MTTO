@@ -277,47 +277,61 @@ class MTTOEnv(gym.Env):
         self.is_final_approach = False
 
         # 定义智能体能够观测的状态信息
-        self.observation_space = gym.spaces.Dict({
-            "remaining_distance": gym.spaces.Box(
-                0.0,
-                1.0,
-                shape=(1,),
-                dtype=np.float32,
-            ),
-            "current_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
-            "current_acc": gym.spaces.Box(
-                -1.0,
-                1.0,
-                shape=(1,),
-                dtype=np.float32,
-            ),
-            "remaining_schedule_time": gym.spaces.Box(
-                -1.0,  # 最多超时10分钟
-                1.0,
-                shape=(1,),
-                dtype=np.float32,  # 允许超时或提前
-            ),
-            "time_redundancy": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
-            "current_slope": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
-            "current_max_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
-            "current_min_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
-            "next_slope": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
-            "next_max_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
-            "next_min_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
-            # "current_latest_traction_intervention_point": gym.spaces.Box(
-            #     0.0, 1.0, shape=(1,), dtype=np.float32
-            # ),
-            # "current_latest_braking_intervention_point": gym.spaces.Box(
-            #     0.0, 1.0, shape=(1,), dtype=np.float32
-            # ),
-            "is_final_approach": gym.spaces.Box(
-                -1.0, 1.0, shape=(1,), dtype=np.float32
-            ),
-            "rel_dist_to_target": gym.spaces.Box(
-                -1.0, 1.0, shape=(1,), dtype=np.float32
-            ),
-            "required_dec": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
-        })
+        self.observation_space = gym.spaces.Dict(
+            {
+                "remaining_distance": gym.spaces.Box(
+                    0.0,
+                    1.0,
+                    shape=(1,),
+                    dtype=np.float32,
+                ),
+                "current_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
+                "current_acc": gym.spaces.Box(
+                    -1.0,
+                    1.0,
+                    shape=(1,),
+                    dtype=np.float32,
+                ),
+                "remaining_schedule_time": gym.spaces.Box(
+                    -1.0,  # 最多超时10分钟
+                    1.0,
+                    shape=(1,),
+                    dtype=np.float32,  # 允许超时或提前
+                ),
+                "time_redundancy": gym.spaces.Box(
+                    -1.0, 1.0, shape=(1,), dtype=np.float32
+                ),
+                "current_slope": gym.spaces.Box(
+                    -1.0, 1.0, shape=(1,), dtype=np.float32
+                ),
+                "current_max_speed": gym.spaces.Box(
+                    0.0, 1.0, shape=(1,), dtype=np.float32
+                ),
+                "current_min_speed": gym.spaces.Box(
+                    0.0, 1.0, shape=(1,), dtype=np.float32
+                ),
+                "next_slope": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
+                "next_max_speed": gym.spaces.Box(
+                    0.0, 1.0, shape=(1,), dtype=np.float32
+                ),
+                "next_min_speed": gym.spaces.Box(
+                    0.0, 1.0, shape=(1,), dtype=np.float32
+                ),
+                # "current_latest_traction_intervention_point": gym.spaces.Box(
+                #     0.0, 1.0, shape=(1,), dtype=np.float32
+                # ),
+                # "current_latest_braking_intervention_point": gym.spaces.Box(
+                #     0.0, 1.0, shape=(1,), dtype=np.float32
+                # ),
+                "is_final_approach": gym.spaces.Box(
+                    -1.0, 1.0, shape=(1,), dtype=np.float32
+                ),
+                "rel_dist_to_target": gym.spaces.Box(
+                    -1.0, 1.0, shape=(1,), dtype=np.float32
+                ),
+                "required_dec": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
+            }
+        )
 
         # 定义智能体的动作空间, 归一化
         self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
@@ -1426,7 +1440,7 @@ class MTTOEnv(gym.Env):
         x_hat = dist_error_abs / self.target_attraction_domain_radius
         v_hat = speed / self.vehicle.max_speed
 
-        phi_strong = 20.0 * np.exp(-x_hat / 0.05 - v_hat / 0.2)
+        phi_strong = 20.0 * np.exp(-x_hat / 0.05 - v_hat / 0.1)
 
         return phi_strong
 
