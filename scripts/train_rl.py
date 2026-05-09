@@ -18,6 +18,7 @@ from utils.data_loader import (
     load_stations_goal_positions,
 )
 from stable_baselines3 import PPO
+from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.vec_env import (
     DummyVecEnv,
@@ -278,6 +279,9 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="在运行最佳评估回放时，使用确定性策略。",
     )
     parser.add_argument(
+        "--seed", type=int, default=None, help="Random seed for reproducibility."
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default="cpu",
@@ -465,6 +469,11 @@ def _resolve_output_dir(
 
 def main() -> None:
     args = build_cli_parser().parse_args()
+
+    if args.seed is not None:
+        set_random_seed(
+            seed=args.seed, using_cuda=True if args.device == "cuda" else False
+        )
 
     schedule_time_s = args.schedule_time_s
     ds = args.max_step_distance

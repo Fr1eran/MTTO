@@ -1,6 +1,5 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from typing import Any, cast
 
 from utils.data_loader import load_safeguard_curves
 from utils.plot_utils import set_global_plot_style
@@ -156,7 +155,7 @@ def calc_potential_docking_v1(
     speed_max = 500.0 / 3.6
 
     sigma_x_hat = 0.05
-    sigma_v_hat = 0.2
+    sigma_v_hat = 0.1
 
     # 正则化项
     dist_error = np.abs(target_pos - pos)
@@ -164,7 +163,7 @@ def calc_potential_docking_v1(
     v_hat = np.abs(speed / speed_max)
 
     # 增益参数
-    K_G = 20.0
+    K_G = 30.0
 
     phi_strong = K_G * np.exp(-x_hat / sigma_x_hat - v_hat / sigma_v_hat)
 
@@ -494,51 +493,31 @@ def plot_docking_potential_heatmap(view_mode="3d"):
 
     target_pos = 10000.0
 
-    K_G = 20.0
+    K_G = 30.0
 
     # 扩大位置与速度展示范围
-    pos_array = np.linspace(target_pos - 5000.0, target_pos + 5000.0, 1200)
-    speed_array_ms = np.linspace(-500.0 / 3.6, 500.0 / 3.6, 1000)
+    pos_array = np.linspace(target_pos - 1000.0, target_pos + 1000.0, 1200)
+    speed_array_ms = np.linspace(-200.0 / 3.6, 200.0 / 3.6, 1000)
 
     POS, SPEED = np.meshgrid(pos_array, speed_array_ms)
 
     # version 1
-    # POTENTIAL = calc_potential_docking_v1(
-    #     pos=POS,
-    #     speed=SPEED,
-    #     target_pos=target_pos,
-    # )
-
-    # version 2
-    POTENTIAL = calc_potential_docking_v2(
+    POTENTIAL = calc_potential_docking_v1(
         pos=POS,
         speed=SPEED,
         target_pos=target_pos,
     )
 
+    # version 2
+    # POTENTIAL = calc_potential_docking_v2(
+    #     pos=POS,
+    #     speed=SPEED,
+    #     target_pos=target_pos,
+    # )
+
     mode = str(view_mode).lower().strip()
     speed_array_kmh = speed_array_ms * 3.6
     SPEED_KMH = SPEED * 3.6
-    target_speed_ms = 0.0
-    target_speed_kmh = target_speed_ms * 3.6
-
-    # version 1
-    # target_potential = float(
-    #     calc_potential_docking_v1(
-    #         pos=target_pos,
-    #         speed=target_speed_ms,
-    #         target_pos=target_pos,
-    #     )
-    # )
-
-    # version 2
-    target_potential = float(
-        calc_potential_docking_v2(
-            pos=target_pos,
-            speed=target_speed_ms,
-            target_pos=target_pos,
-        )
-    )
 
     if mode == "2d":
         fig, ax = plt.subplots(figsize=(12, 6))
@@ -552,17 +531,6 @@ def plot_docking_potential_heatmap(view_mode="3d"):
             shading="auto",
             vmin=0.0,
             vmax=K_G,
-        )
-
-        ax.scatter(
-            target_pos,
-            target_speed_kmh,
-            color="black",
-            s=55,
-            marker="o",
-            edgecolor="white",
-            linewidth=0.8,
-            label="target point",
         )
 
         fig.colorbar(c, ax=ax)
@@ -583,7 +551,7 @@ def plot_docking_potential_heatmap(view_mode="3d"):
         ax = fig.add_subplot(111, projection="3d")
 
         cmap = plt.get_cmap("YlOrRd")
-        surface = ax.plot_surface(
+        ax.plot_surface(
             POS,
             SPEED_KMH,
             POTENTIAL,
@@ -594,28 +562,13 @@ def plot_docking_potential_heatmap(view_mode="3d"):
             vmax=K_G,
         )
 
-        ax_3d = cast(Any, ax)
-        ax_3d.scatter(
-            np.array([target_pos]),
-            np.array([target_speed_kmh]),
-            np.array([target_potential]),
-            color="black",
-            s=55,
-            marker="o",
-            depthshade=False,
-            label="Target Point",
-        )
-
-        fig.colorbar(surface, ax=ax, shrink=0.72, pad=0.08)
-
         ax.set_xlim(pos_array[0], pos_array[-1])
         ax.set_ylim(speed_array_kmh[0], speed_array_kmh[-1])
         ax.set_zlim(0, K_G * 1.02)
         ax.set_xlabel("Position (m)")
         ax.set_ylabel("Velocity (km/h)")
-        ax.set_zlabel(r"$\Phi_D$")
+        ax.set_zlabel("Parking Potential")
         ax.view_init(elev=28, azim=-130)
-        ax.legend(loc="upper right")
 
         plt.tight_layout()
         plt.show()
@@ -741,10 +694,10 @@ if __name__ == "__main__":
     set_global_plot_style(
         font_preset="sci",
         preferred_font="Calibri",
-        title_font_size=8.0,
-        axis_label_font_size=8.0,
-        tick_font_size=8.0,
-        legend_font_size=8.0,
+        title_font_size=12.0,
+        axis_label_font_size=12.0,
+        tick_font_size=12.0,
+        legend_font_size=12.0,
         figure_dpi=150.0,
         savefig_dpi=300.0,
     )
@@ -753,8 +706,8 @@ if __name__ == "__main__":
     # plot_docking_potential_heatmap(view_mode="3d")
     # plot_docking_potential_heatmap(view_mode="2d")
     # plot_docking_potential_slices()
-    plot_punctuality_potential_curve(
-        schedule_time=430.0,
-        redundant_time_upper=56.0,
-        redundant_time_lower=-120.0,
-    )
+    # plot_punctuality_potential_curve(
+    #     schedule_time=430.0,
+    #     redundant_time_upper=56.0,
+    #     redundant_time_lower=-120.0,
+    # )
