@@ -671,7 +671,7 @@ def plot_punctuality_potential_curve(
         schedule_time=schedule_time,
     )
 
-    fig, ax = plt.subplots(figsize=(12, 6))
+    fig, ax = plt.subplots(figsize=(8, 6))
 
     ax.plot(
         redundant_operation_time_array,
@@ -679,11 +679,12 @@ def plot_punctuality_potential_curve(
         color="tab:green",
         linewidth=2,
     )
-    ax.axvline(0.0, color="black", linestyle="--", linewidth=1.2)
+    ax.axvline(0.0, color="black", linestyle="--", linewidth=1.2, label=r"$\rho =0$")
 
     ax.set_xlim(redundant_time_upper, redundant_time_lower)
     ax.set_xlabel("Redunctant Operation Time (s)")
-    ax.set_ylabel(r"$\Phi_{T}$")
+    ax.set_ylabel("Punctuality Potential")
+    ax.legend(loc="upper right", framealpha=0.9)
     ax.grid(True, alpha=0.3, linestyle=":")
 
     plt.tight_layout()
@@ -706,8 +707,8 @@ if __name__ == "__main__":
     # plot_docking_potential_heatmap(view_mode="3d")
     # plot_docking_potential_heatmap(view_mode="2d")
     # plot_docking_potential_slices()
-    # plot_punctuality_potential_curve(
-    #     schedule_time=430.0,
-    #     redundant_time_upper=56.0,
-    #     redundant_time_lower=-120.0,
-    # )
+    plot_punctuality_potential_curve(
+        schedule_time=430.0,
+        redundant_time_upper=56.0,
+        redundant_time_lower=-120.0,
+    )

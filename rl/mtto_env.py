@@ -1282,7 +1282,7 @@ class MTTOEnv(gym.Env):
         scale = 1.0 + 1.0 * np.exp(-0.001 * distance_to_target)
 
         # 最终势能为两侧惩罚之和
-        return scale * (phi_max + phi_min) * 4.0
+        return scale * (phi_max + phi_min) * 2.0
 
     def _potential_safety_position(
         self, pos: float, min_pos: float, max_pos: float, target_pos: float
@@ -1397,23 +1397,29 @@ class MTTOEnv(gym.Env):
 
     def _get_reward_docking_dense(self):
 
-        phi_curr = self._potential_docking_v1(
-            pos=self.current_pos, speed=self.current_speed
-        )
+        if (
+            abs(self.train_service.target_position - self.current_pos)
+            < self.target_attraction_domain_radius * 2.0
+        ):
+            phi_curr = self._potential_docking_v1(
+                pos=self.current_pos, speed=self.current_speed
+            )
 
-        phi_prev = self._potential_docking_v1(
-            pos=self.last_state["pos"], speed=self.last_state["speed"]
-        )
+            phi_prev = self._potential_docking_v1(
+                pos=self.last_state["pos"], speed=self.last_state["speed"]
+            )
 
-        # phi_curr = self._potential_docking_v2(
-        #     pos=self.current_pos, speed=self.current_speed
-        # )
+            # phi_curr = self._potential_docking_v2(
+            #     pos=self.current_pos, speed=self.current_speed
+            # )
 
-        # phi_prev = self._potential_docking_v2(
-        #     pos=self.last_state["pos"], speed=self.last_state["speed"]
-        # )
+            # phi_prev = self._potential_docking_v2(
+            #     pos=self.last_state["pos"], speed=self.last_state["speed"]
+            # )
 
-        return self.gamma * phi_curr - phi_prev
+            return self.gamma * phi_curr - phi_prev
+        else:
+            return 0.0
 
     def _potential_docking_v1(self, pos: float, speed: float):
         dist_error_abs = abs(self.train_service.target_position - pos)

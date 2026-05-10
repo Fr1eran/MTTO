@@ -1,12 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from utils.score_function import SigmoidVariant
-
-# plt.rcParams.update({
-#     "text.usetex": True,
-#     "font.family": "serif",
-#     "font.serif": ["Computer Modern Roman"],
-# })
+from utils.plot_utils import set_global_plot_style
 
 
 def visualize_docking_score_function():
@@ -128,14 +123,14 @@ def visualize_combined_score_functions():
         c=8.0,
     )
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 10))
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 12))
 
     # ---- 上子图：停站分数 ----
     x_dock = np.linspace(0, 4.0, 1000)
     rewards_dock = docking_score_func(x_dock)
     gradients_dock = docking_score_func.gradient(x_dock)
 
-    ax1.plot(x_dock, rewards_dock, label=r"$f(x)$", color="blue", linewidth=2.5)
+    ax1.plot(x_dock, rewards_dock, label=r"$f(x)$", color="blue", linewidth=2)
     ax1.plot(
         x_dock,
         np.abs(gradients_dock) * 3,
@@ -159,14 +154,22 @@ def visualize_combined_score_functions():
     ax1.axhline(y=0, color="black", linewidth=1)
     ax1.grid(True, alpha=0.3)
     ax1.set_xlim(0, 4.0)
-    ax1.set_title("(a)", fontweight="bold", fontsize=14, loc="center", y=-0.18)
+    ax1.text(
+        0.5,
+        -0.20,
+        "(a)",
+        transform=ax1.transAxes,
+        ha="center",
+        va="top",
+        fontweight="normal",
+    )
 
     # ---- 下子图：准时分 ----
     x_punct = np.linspace(0, 140.0, 1000)
     rewards_punct = punctuality_score_func(x_punct)
     gradients_punct = punctuality_score_func.gradient(x_punct)
 
-    ax2.plot(x_punct, rewards_punct, label=r"$f(x)$", color="blue", linewidth=2.5)
+    ax2.plot(x_punct, rewards_punct, label=r"$f(x)$", color="blue", linewidth=2)
     ax2.plot(
         x_punct,
         np.abs(gradients_punct) * 3,
@@ -186,30 +189,43 @@ def visualize_combined_score_functions():
     )
     ax2.axhline(y=0, color="black", linewidth=1)
     ax2.grid(True, alpha=0.3)
-    ax2.set_ylim(-0.1, 1.2)
     ax2.set_xlim(0, 140.0)
-    ax2.set_title("(b)", fontweight="bold", fontsize=14, loc="center", y=-0.18)
+    ax2.text(
+        0.5,
+        -0.20,
+        "(b)",
+        transform=ax2.transAxes,
+        ha="center",
+        va="top",
+        fontweight="normal",
+    )
 
     # 共用图例，置于整张画布正上方
     handles, labels = ax1.get_legend_handles_labels()
-    left = fig.subplotpars.left
-    right = fig.subplotpars.right
     fig.legend(
         handles,
         labels,
-        loc="lower left",
-        bbox_to_anchor=(left, 0.945, right - left, 0.06),
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.995),
         bbox_transform=fig.transFigure,
         ncol=len(handles),
-        mode="expand",
         fontsize=12,
         frameon=True,
-        borderaxespad=0.0,
     )
 
-    plt.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.subplots_adjust(top=0.90, bottom=0.15, hspace=0.55)
     plt.show()
 
 
 if __name__ == "__main__":
+    set_global_plot_style(
+        font_preset="sci",
+        preferred_font="Calibri",
+        title_font_size=12.0,
+        axis_label_font_size=12.0,
+        tick_font_size=10.0,
+        legend_font_size=12.0,
+        figure_dpi=150.0,
+        savefig_dpi=300.0,
+    )
     visualize_combined_score_functions()
