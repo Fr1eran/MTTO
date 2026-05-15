@@ -1,16 +1,18 @@
-from typing import Any, TypedDict, cast
 import math
+from dataclasses import dataclass
+from typing import Any, TypedDict, cast
+
 import gymnasium as gym
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.animation import FuncAnimation
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from scipy.interpolate import PchipInterpolator
 
-from model.ocs import SafeGuardUtility, TrainService, SPS
-from model.vehicle import VehicleInfo
-from model.track import TrackInfo, TrackProfile
 from model.common import ECC, ORS
+from model.ocs import SPS, SafeGuardUtility, TrainService
+from model.track import TrackInfo, TrackProfile
+from model.vehicle import VehicleInfo
 from utils.indexing_utils import get_interval_index
 from utils.plot_utils import set_chinese_font
 from utils.score_function import SigmoidVariant
@@ -79,6 +81,17 @@ class TrainState(TypedDict, total=True):
     stopping_point_index: int
 
 
+@dataclass
+class RewardConfig:
+    """稠密奖励分量开关配置，用于消融实验。"""
+
+    enable_energy: bool = True
+    enable_comfort: bool = True
+    enable_potential_safety: bool = True
+    enable_potential_docking: bool = True
+    enable_potential_punctuality: bool = True
+
+
 class MTTOEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"]}
 
@@ -95,6 +108,7 @@ class MTTOEnv(gym.Env):
         enable_trajectory_tracking: bool = False,
         render_mode: str | None = None,
         use_animation: bool = False,
+        reward_config: RewardConfig | None = None,
     ):
         super().__init__()
 
@@ -113,6 +127,11 @@ class MTTOEnv(gym.Env):
 
         # 回报折扣因子
         self.gamma = gamma
+
+        # 奖励分量配置
+        self.reward_config = (
+            reward_config if reward_config is not None else RewardConfig()
+        )
 
         # 是否采集诊断信息
         self.enable_diagnostics = enable_diagnostics
@@ -137,17 +156,16 @@ class MTTOEnv(gym.Env):
         self._docking_score_func = SigmoidVariant(
             x1=self.train_service.max_stop_error,
             x2=self.train_service.max_stop_error * 10.0,
-            c=10.0,
+            c=5.0,
         )
 
         self._punctuality_score_func = SigmoidVariant(
             x1=self.train_service.schedule_time
-            * self.train_service.max_arr_time_error_ratio
-            / 100.0,
+            * self.train_service.max_arr_time_error_ratio,
             x2=self.train_service.schedule_time
             * self.train_service.max_arr_time_error_ratio
-            / 20.0,
-            c=8.0,
+            * 2,
+            c=6.0,
         )
 
         # 定义常量
@@ -275,7 +293,7 @@ class MTTOEnv(gym.Env):
         # (
         #     self.current_latest_traction_intervention_point,
         #     self.current_latest_braking_intervention_point,
-        # ) = self.safeguard_utility.get_latest_traction_and_braking_intervention_points(
+        # ) = self.safeguard_utility.get_latest_traction_and_braking_intervention_points(  # noqa: E501
         #     current_speed=self.current_speed, current_sp=self.current_sp
         # )
         self.is_final_approach = False
@@ -479,11 +497,11 @@ class MTTOEnv(gym.Env):
                 [self.next_min_speed / self.vehicle.max_speed], dtype=np.float32
             ),
             # "current_latest_traction_intervention_point": np.array(
-            #     [self.current_latest_traction_intervention_point / self.whole_distance],
+            #     [self.current_latest_traction_intervention_point / self.whole_distance],  # noqa: E501
             #     dtype=np.float32,
             # ),
             # "current_latest_braking_intervention_point": np.array(
-            #     [self.current_latest_braking_intervention_point / self.whole_distance],
+            #     [self.current_latest_braking_intervention_point / self.whole_distance],  # noqa: E501
             #     dtype=np.float32,
             # ),
             "is_final_approach": np.array(
@@ -649,7 +667,7 @@ class MTTOEnv(gym.Env):
         # (
         #     self.current_latest_traction_intervention_point,
         #     self.current_latest_braking_intervention_point,
-        # ) = self.safeguard_utility.get_latest_traction_and_braking_intervention_points(
+        # ) = self.safeguard_utility.get_latest_traction_and_braking_intervention_points(  # noqa: E501
         #     current_speed=self.current_speed, current_sp=self.current_sp
         # )
         self.is_final_approach = False
@@ -961,10 +979,14 @@ class MTTOEnv(gym.Env):
         reward_total = 0.0
 
         if not truncated:
+            # 基本生存奖励
+            small_bonus = 200.0 / self.max_episode_steps
             if terminated:
                 reward_total = self._get_reward_goal()
             else:
                 reward_total = self._get_reward_dense()
+
+            reward_total += small_bonus
         else:
             reward_total = -10.0
 
@@ -977,19 +999,37 @@ class MTTOEnv(gym.Env):
         self,
     ) -> float:
         # 安全奖励
-        reward_safety = self._get_reward_safety_dense()
+        reward_safety = (
+            self._get_reward_safety_dense()
+            if self.reward_config.enable_potential_safety
+            else 0.0
+        )
 
         # 能耗奖励
-        reward_energy = self._get_reward_energy_dense()
+        reward_energy = (
+            self._get_reward_energy_dense() if self.reward_config.enable_energy else 0.0
+        )
 
         # 舒适度奖励
-        reward_comfort = self._get_reward_comfort_dense()
+        reward_comfort = (
+            self._get_reward_comfort_dense()
+            if self.reward_config.enable_comfort
+            else 0.0
+        )
 
         # 运行时间奖励
-        reward_punctuality = self._get_reward_punctuality_dense()
+        reward_punctuality = (
+            self._get_reward_punctuality_dense()
+            if self.reward_config.enable_potential_punctuality
+            else 0.0
+        )
 
         # 停站奖励
-        reward_docking = self._get_reward_docking_dense()
+        reward_docking = (
+            self._get_reward_docking_dense()
+            if self.reward_config.enable_potential_docking
+            else 0.0
+        )
 
         if self.enable_diagnostics and self._collect_step_diagnostics:
             self.rewards_info["safety"] = reward_safety
@@ -1007,9 +1047,6 @@ class MTTOEnv(gym.Env):
         )
 
     def _get_reward_safety_dense(self) -> float:
-        # 基本生存奖励
-        small_bonus = 100.0 / self.max_episode_steps
-
         # 计算当前状态势能
 
         # phi_curr = self._potential_safety_speed(
@@ -1157,7 +1194,7 @@ class MTTOEnv(gym.Env):
             else self.train_service.target_position,
         )
 
-        return self.gamma * phi_curr - phi_prev + small_bonus
+        return self.gamma * phi_curr - phi_prev
 
     def _potential_safety_speed(
         self,
@@ -1228,16 +1265,6 @@ class MTTOEnv(gym.Env):
         # 2. 下限惩罚 (条件激活：仅当存在实质性的最小速度约束时才惩罚)
         phi_min = 0.0
         margin_min = speed - min_speed
-
-        # global_dist_to_end = abs(self.train_service.target_position - pos)
-        # fade_factor = 1.0
-        # if global_dist_to_end < self.target_attraction_domain_radius:
-        #     # 进入最后 3000m 吸引域后，将下限惩罚平滑衰减至 0，把控制权交给停站引力场
-        #     fade_factor = (
-        #         np.clip(
-        #             global_dist_to_end / self.target_attraction_domain_radius, 0.0, 1.0
-        #         )
-        #     ) ** 2
 
         # 当 min_speed 极小 (例如接近 0) 时，说明当前允许停车，直接关闭下限惩罚
         if min_speed > 0.0 and margin_min < lower_bound:
@@ -1315,7 +1342,7 @@ class MTTOEnv(gym.Env):
         delta_acc = abs(self.last_state["acc"] - self.current_acc)
         norm_jerk = delta_acc / (self.train_service.max_acc_change)
 
-        val = -10.0 / self.max_episode_steps * norm_jerk**2
+        val = -14.0 / self.max_episode_steps * norm_jerk**2
 
         return val
 
@@ -1374,9 +1401,9 @@ class MTTOEnv(gym.Env):
 
     def _potential_punctuality_v3(self, pos: float, operation_time: float):
         K_base = 1.0
-        K_safe = 0.1
-        K_late = 1.0
-        alpha = 3.0
+        K_safe = 1.0
+        K_late = 20.0
+        alpha = 2.0
 
         time_redundancy_norm = self._calc_time_redundancy_norm(pos, operation_time)
 
@@ -1427,7 +1454,7 @@ class MTTOEnv(gym.Env):
         x_hat = dist_error_abs / self.target_attraction_domain_radius
         v_hat = speed / self.vehicle.max_speed
 
-        phi_strong = 30.0 * np.exp(-x_hat / 0.05 - v_hat / 0.1)
+        phi_strong = 30.0 * np.exp(-x_hat / 0.1 - v_hat / 0.2)
 
         return phi_strong
 

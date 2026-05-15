@@ -6,16 +6,16 @@ from typing import overload
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
+from model.force.brake import (
+    sledge_frictional_brake_force,
+    vortex_brake_force,
+    wear_plate_frictional_brake_force,
+)
 from model.force.resis import (
     air_resis_force,
     guideway_vortex_resis_force,
     linear_generator_resis_force,
     slope_resis_force,
-)
-from model.force.brake import (
-    sledge_frictional_brake_force,
-    vortex_brake_force,
-    wear_plate_frictional_brake_force,
 )
 from utils.type_utils import ScalarNumeric, restore_output_type
 

@@ -1,7 +1,8 @@
-import numpy as np
 import matplotlib.pyplot as plt
-from utils.score_function import SigmoidVariant
+import numpy as np
+
 from utils.plot_utils import set_global_plot_style
+from utils.score_function import SigmoidVariant
 
 
 def visualize_docking_score_function():
@@ -114,13 +115,13 @@ def visualize_punctuality_score_function():
 
 def visualize_combined_score_functions():
     """在同一画幅中上下布局展示停站分数和准时分数的函数图像和导函数图像"""
-    docking_score_func = SigmoidVariant(x1=0.3, x2=3.0, c=10.0)
+    docking_score_func = SigmoidVariant(x1=0.3, x2=3.0, c=5.0)
     schedule_time = 430.0
     max_arr_time_ratio = 0.05
     punctuality_score_func = SigmoidVariant(
         x1=schedule_time * max_arr_time_ratio,
-        x2=schedule_time * max_arr_time_ratio * 5,
-        c=8.0,
+        x2=schedule_time * max_arr_time_ratio * 2,
+        c=6.0,
     )
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 12))
@@ -165,7 +166,7 @@ def visualize_combined_score_functions():
     )
 
     # ---- 下子图：准时分 ----
-    x_punct = np.linspace(0, 140.0, 1000)
+    x_punct = np.linspace(0, 100.0, 1000)
     rewards_punct = punctuality_score_func(x_punct)
     gradients_punct = punctuality_score_func.gradient(x_punct)
 

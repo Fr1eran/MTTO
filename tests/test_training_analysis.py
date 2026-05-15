@@ -6,6 +6,11 @@ from typing import Any, cast
 import warnings
 
 from rl.callbacks import TensorboardCallback
+from rl.experiment_utils import (
+    resolve_log_interval,
+    resolve_run_mode,
+    resolve_training_run_spec,
+)
 from rl.training_analysis.analyze import (
     compute_best_eval_metrics,
     compute_constraint_diagnostic,
@@ -18,11 +23,7 @@ from rl.training_analysis.pipeline import AnalysisConfig, run_training_analysis
 from rl.training_analysis.output import build_analysis_payload, write_analysis_outputs
 from rl.training_analysis.process import build_episode_snapshots
 from scripts.analyze_training_data import build_arg_parser as build_analyze_arg_parser
-from scripts.train_rl import (
-    build_cli_parser as build_train_rl_arg_parser,
-    resolve_log_interval,
-    resolve_run_mode,
-)
+from scripts.train_rl import build_cli_parser as build_train_rl_arg_parser
 
 
 def _make_series(tag: str, values: list[float], step_start: int = 0) -> ScalarSeries:
@@ -675,6 +676,14 @@ def test_analyze_cli_sampling_quality_args():
     assert args.sampling_quality_mode == "strict_fail"
 
 
+def test_analyze_cli_accepts_dry_run() -> None:
+    parser = build_analyze_arg_parser()
+    args = parser.parse_args(["--dry-run", "--log-root", "tb_logs"])
+
+    assert args.dry_run is True
+    assert args.log_root == "tb_logs"
+
+
 def test_resolve_log_interval_defaults_and_override():
     args = argparse.Namespace(log_interval=None)
     assert resolve_log_interval(args, "tune", True) == 1
@@ -755,6 +764,110 @@ def test_train_rl_cli_accepts_new_run_modes() -> None:
     for mode in ("tune", "reproduce", "monitor_best", "best_only"):
         args = parser.parse_args(["--run-mode", mode])
         assert args.run_mode == mode
+
+
+def test_train_rl_cli_accepts_reward_profile_and_experiment_tag() -> None:
+    parser = build_train_rl_arg_parser()
+    args = parser.parse_args([
+        "--reward-profile",
+        "basic_safety_docking",
+        "--experiment-tag",
+        "trial_a",
+    ])
+
+    assert args.reward_profile == "basic_safety_docking"
+    assert args.experiment_tag == "trial_a"
+
+
+def test_train_rl_cli_accepts_dry_run() -> None:
+    parser = build_train_rl_arg_parser()
+    args = parser.parse_args([
+        "--dry-run",
+        "--reward-profile",
+        "basic",
+    ])
+
+    assert args.dry_run is True
+    assert args.reward_profile == "basic"
+
+
+def test_train_rl_cli_rejects_removed_subproc_start_method_option() -> None:
+    parser = build_train_rl_arg_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--subproc-start-method", "spawn"])
+
+
+def test_resolve_training_run_spec_plans_paths_and_switches() -> None:
+    parser = build_train_rl_arg_parser()
+    args = parser.parse_args([
+        "--run-mode",
+        "monitor_best",
+        "--reward-profile",
+        "basic_safety",
+        "--experiment-tag",
+        "batch_a",
+        "--dry-run",
+    ])
+
+    spec = resolve_training_run_spec(args)
+
+    assert spec.run_mode == "monitor_best"
+    assert spec.enable_tb is True
+    assert spec.enable_callback is False
+    assert spec.enable_best_eval is True
+    assert spec.reward_profile.name == "basic_safety"
+    assert Path(spec.output_dir).name == "430p0_100p0__basic_safety__batch_a"
+    assert Path(spec.run_metadata_path).name == "run_metadata.json"
+    assert spec.run_metadata["reward_profile_name"] == "basic_safety"
+    assert spec.subproc_start_method is None
+    assert spec.run_metadata["subproc_start_method"] is None
+    assert spec.dry_run is True
+
+
+def test_resolve_training_run_spec_auto_selects_forkserver_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parser = build_train_rl_arg_parser()
+    args = parser.parse_args([
+        "--num-envs",
+        "2",
+        "--vec-env-type",
+        "subproc",
+        "--dry-run",
+    ])
+    monkeypatch.setattr(
+        "rl.experiment_utils.mp.get_all_start_methods",
+        lambda: ["spawn", "forkserver"],
+    )
+
+    spec = resolve_training_run_spec(args)
+
+    assert spec.use_subproc is True
+    assert spec.subproc_start_method == "forkserver"
+    assert spec.run_metadata["subproc_start_method"] == "forkserver"
+
+
+def test_resolve_training_run_spec_falls_back_to_spawn_when_needed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parser = build_train_rl_arg_parser()
+    args = parser.parse_args([
+        "--num-envs",
+        "2",
+        "--vec-env-type",
+        "subproc",
+        "--dry-run",
+    ])
+    monkeypatch.setattr(
+        "rl.experiment_utils.mp.get_all_start_methods",
+        lambda: ["spawn"],
+    )
+
+    spec = resolve_training_run_spec(args)
+
+    assert spec.use_subproc is True
+    assert spec.subproc_start_method == "spawn"
+    assert spec.run_metadata["subproc_start_method"] == "spawn"
 
 
 def test_train_rl_cli_rejects_removed_monitor_log_dir_option() -> None:

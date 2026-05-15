@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +26,7 @@ def build_analysis_payload(
 ) -> dict[str, Any]:
     return {
         "meta": {
-            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "generated_at_utc": datetime.now().isoformat(),
             "run_name": run_name,
             "run_directory": run_directory,
             "available_tags": sorted(available_tags),
@@ -133,7 +133,7 @@ def _format_number(value: Any, default: str = "N/A") -> str:
         if np.isnan(v) or np.isinf(v):
             return default
         return f"{v:.6g}"
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return default
 
 
@@ -142,14 +142,14 @@ def _format_percent(value: Any, default: str = "N/A") -> str:
         return default
     try:
         return f"{float(value) * 100.0:.2f}%"
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return default
 
 
 def _ascii_bar(value: Any, width: int = 24) -> str:
     try:
         ratio = float(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         ratio = 0.0
     ratio = max(0.0, min(1.0, ratio))
     w = max(8, int(width))
@@ -175,7 +175,7 @@ def _append_transition_matrix(
 
     lines.append("| from \\ to | " + " | ".join(labels) + " |")
     lines.append("| --- | " + " | ".join(["---"] * len(labels)) + " |")
-    for row_label, row in zip(labels, matrix):
+    for row_label, row in zip(labels, matrix, strict=False):
         if not isinstance(row, list):
             continue
         values = [str(int(v)) for v in row[: len(labels)]]
@@ -245,7 +245,13 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
     )
     lines.append(
         "- overall_normal_to_high_transition_rate: "
-        f"{_format_percent((evolution.get('overall_transition_probabilities') or [[0, 0, 0]])[0][2] if evolution.get('overall_transition_probabilities') else 0.0)}"
+        f"{
+            _format_percent(
+                (evolution.get('overall_transition_probabilities') or [[0, 0, 0]])[0][2]
+                if evolution.get('overall_transition_probabilities')
+                else 0.0
+            )
+        }"
     )
     sample_count = float(sbt.get("sample_count", 0.0)) if isinstance(sbt, dict) else 0.0
     failure_count = (
@@ -265,8 +271,18 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
         best_reward = best_eval.get("best_total_reward", {})
         lines.append(
             "- best_eval: "
-            f"success_rate={_format_percent(best_success.get('final') if isinstance(best_success, dict) else None)}, "
-            f"best_reward={_format_number(best_reward.get('final') if isinstance(best_reward, dict) else None)}"
+            f"success_rate={
+                _format_percent(
+                    best_success.get('final')
+                    if isinstance(best_success, dict)
+                    else None
+                )
+            }, "
+            f"best_reward={
+                _format_number(
+                    best_reward.get('final') if isinstance(best_reward, dict) else None
+                )
+            }"
         )
 
     top3 = top_dominance[:3]
@@ -309,18 +325,26 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
     lines.append(
         "- convergence: "
         f"final_ep_rew_mean={_format_number(convergence.get('final_ep_rew_mean'))}, "
-        f"rise_slope_per_step={_format_number(convergence.get('rise_slope_per_step'))}, "
+        f"rise_slope_per_step={
+            _format_number(convergence.get('rise_slope_per_step'))
+        }, "
         f"volatility_cv={_format_number(convergence.get('volatility_cv'))}"
     )
     lines.append(
         "- policy_vitality: "
-        f"entropy_trend_slope={_format_number(vitality.get('entropy_trend_slope_per_step'))}, "
+        f"entropy_trend_slope={
+            _format_number(vitality.get('entropy_trend_slope_per_step'))
+        }, "
         f"rigidity_risk_score={_format_number(vitality.get('rigidity_risk_score'))}"
     )
     lines.append(
         "- critic_foresight: "
-        f"explained_variance_mean={_format_number(critic.get('explained_variance_mean'))}, "
-        f"low_explained_variance_ratio={_format_percent(critic.get('low_explained_variance_ratio'))}"
+        f"explained_variance_mean={
+            _format_number(critic.get('explained_variance_mean'))
+        }, "
+        f"low_explained_variance_ratio={
+            _format_percent(critic.get('low_explained_variance_ratio'))
+        }"
     )
     lines.append(
         "- update_safety: "
@@ -338,12 +362,20 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
         if best_keys:
             lines.append("- final_best_values:")
             for key in best_keys:
-                entry = best_eval.get(key, {}) if isinstance(best_eval.get(key), dict) else {}
+                entry = (
+                    best_eval.get(key, {})
+                    if isinstance(best_eval.get(key), dict)
+                    else {}
+                )
                 lines.append(f"  - {key}: {_format_number(entry.get('final'))}")
         if last_keys:
             lines.append("- last_eval_values:")
             for key in last_keys:
-                entry = best_eval.get(key, {}) if isinstance(best_eval.get(key), dict) else {}
+                entry = (
+                    best_eval.get(key, {})
+                    if isinstance(best_eval.get(key), dict)
+                    else {}
+                )
                 lines.append(f"  - {key}: {_format_number(entry.get('final'))}")
 
     lines.append("")
@@ -353,7 +385,8 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
         lines.append("- dominance_by_component:")
         for tag, value in top_dominance:
             lines.append(
-                f"  - {_short_component_name(tag)}: {_ascii_bar(value, width=bar_width)}"
+                f"  - {_short_component_name(tag)}: \
+                {_ascii_bar(value, width=bar_width)}"
             )
     else:
         lines.append("- dominance_by_component: unavailable")
@@ -370,14 +403,12 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
         lines.append("- objective_conflicts: no strong negative pairs detected")
 
     if isinstance(stage_component_profile, list) and stage_component_profile:
-        component_keys = sorted(
-            {
-                key
-                for stage in stage_component_profile
-                if isinstance(stage, dict)
-                for key in (stage.get("mean_ratio", {}) or {}).keys()
-            }
-        )
+        component_keys = sorted({
+            key
+            for stage in stage_component_profile
+            if isinstance(stage, dict)
+            for key in (stage.get("mean_ratio", {}) or {}).keys()
+        })
         if component_keys:
             lines.append("")
             header = (
@@ -400,7 +431,8 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
                 lines.append(
                     "| "
                     f"{stage.get('window_index', 'N/A')} | "
-                    f"[{stage.get('episode_start', 'N/A')}, {stage.get('episode_end', 'N/A')}) | "
+                    f"[{stage.get('episode_start', 'N/A')}, \
+                    {stage.get('episode_end', 'N/A')}) | "
                     + " | ".join(ratio_cells)
                     + " |"
                 )
@@ -410,11 +442,17 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
     lines.append("")
     lines.append(
         "- boundary_adhesion_ratio_by_distance: "
-        f"{_ascii_bar(boundary_adhesion.get('near_miss_distance_ratio', 0.0), width=bar_width)}"
+        f"{
+            _ascii_bar(
+                boundary_adhesion.get('near_miss_distance_ratio', 0.0), width=bar_width
+            )
+        }"
     )
     lines.append(
         "- boundary_adhesion_distance: "
-        f"near_miss_distance_m={_format_number(boundary_adhesion.get('near_miss_distance_m'))}, "
+        f"near_miss_distance_m={
+            _format_number(boundary_adhesion.get('near_miss_distance_m'))
+        }, "
         f"total_distance_m={_format_number(boundary_adhesion.get('total_distance_m'))}"
     )
     lines.append(
@@ -423,8 +461,12 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
     )
     lines.append(
         "- safety_band_tolerance: "
-        f"avg_distance_to_vmax={_format_number(sbt.get('average_distance_to_vmax_mps'))}, "
-        f"avg_distance_to_vmin={_format_number(sbt.get('average_distance_to_vmin_mps'))}, "
+        f"avg_distance_to_vmax={
+            _format_number(sbt.get('average_distance_to_vmax_mps'))
+        }, "
+        f"avg_distance_to_vmin={
+            _format_number(sbt.get('average_distance_to_vmin_mps'))
+        }, "
         f"near_miss_ratio(sample)={_format_percent(sbt.get('near_miss_ratio'))}"
     )
 
@@ -434,7 +476,7 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
         lines.append("### Violation Spatial Distribution (Top Risk Bins)")
         lines.append("")
         lines.append(
-            "| bin_m | exposure | near_miss | violation | failure | near_miss_risk | violation_risk | failure_risk | chart |"
+            "| bin_m | exposure | near_miss | violation | failure | near_miss_risk | violation_risk | failure_risk | chart |"  # noqa: E501
         )
         lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
         for item in top_risk_bins[:10]:
@@ -442,7 +484,8 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
                 continue
             lines.append(
                 "| "
-                f"[{_format_number(item.get('bin_start_m'))}, {_format_number(item.get('bin_end_m'))}) | "
+                f"[{_format_number(item.get('bin_start_m'))}, \
+                {_format_number(item.get('bin_end_m'))}) | "
                 f"{item.get('exposure_count', 0)} | "
                 f"{item.get('near_miss_count', 0)} | "
                 f"{item.get('violation_count', 0)} | "
@@ -468,7 +511,7 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
         lines.append("### SPS Zone Center Neighborhood Risk Attribution")
         lines.append("")
         lines.append(
-            "| type | point_m | exposure | near_miss | violation | failure | near_miss_risk | violation_risk | failure_risk |"
+            "| type | point_m | exposure | near_miss | violation | failure | near_miss_risk | violation_risk | failure_risk |"  # noqa: E501
         )
         lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
         for item in sps_top_risky_points[:10]:
@@ -517,7 +560,7 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
         lines.append("### Stage Evolution")
         lines.append("")
         lines.append(
-            "| stage | episode_range | avg_survival_m | growth_vs_prev | normal->high | low->high | high->low |"
+            "| stage | episode_range | avg_survival_m | growth_vs_prev | normal->high | low->high | high->low |"  # noqa: E501
         )
         lines.append("| --- | --- | --- | --- | --- | --- | --- |")
         for stage in evolution_stage_profiles[:10]:
@@ -528,7 +571,8 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
             lines.append(
                 "| "
                 f"{stage.get('window_index', 'N/A')} | "
-                f"[{stage.get('episode_start', 'N/A')}, {stage.get('episode_end', 'N/A')}) | "
+                f"[{stage.get('episode_start', 'N/A')}, \
+                {stage.get('episode_end', 'N/A')}) | "
                 f"{_format_number(stage.get('avg_survival_distance_m'))} | "
                 f"{growth_text} | "
                 f"{_format_percent(stage.get('normal_to_high_transition_rate'))} | "
@@ -542,7 +586,9 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
     lines.append(f"- step_snapshots_count: {len(snapshots.get('by_step', []))}")
     lines.append(f"- episode_snapshots_count: {len(snapshots.get('by_episode', []))}")
     lines.append(
-        f"- export_csv: {bool(config.get('export_csv', False)) if isinstance(config, dict) else False}"
+        f"- export_csv: {
+            bool(config.get('export_csv', False)) if isinstance(config, dict) else False
+        }"
     )
 
     return "\n".join(lines) + "\n"

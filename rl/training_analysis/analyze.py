@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import numpy as np
+
 from utils.data_loader import load_auxiliary_stopping_areas_ap_and_dp, load_stations
 
 from .collect import ScalarSeries
@@ -12,8 +14,6 @@ from .process import (
     exponential_moving_average,
     linear_slope,
 )
-
-import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -505,7 +505,10 @@ def _load_critical_points() -> dict[str, np.ndarray]:
         aps, dps = load_auxiliary_stopping_areas_ap_and_dp()
         if len(aps) == len(dps) and len(aps) > 0:
             sps_zone_center_points = np.asarray(
-                [(float(ap) + float(dp)) / 2.0 for ap, dp in zip(aps, dps)],
+                [
+                    (float(ap) + float(dp)) / 2.0
+                    for ap, dp in zip(aps, dps, strict=False)
+                ],
                 dtype=np.float64,
             )
 
@@ -986,7 +989,7 @@ def compute_evolution_metrics(
 
         transition_matrix = np.zeros((3, 3), dtype=np.int64)
         if ep_states.size >= 2:
-            for left, right in zip(ep_states[:-1], ep_states[1:]):
+            for left, right in zip(ep_states[:-1], ep_states[1:], strict=False):
                 transition_matrix[int(left), int(right)] += 1
 
         terminal_state_counts[terminal_state] += 1
@@ -1010,7 +1013,9 @@ def compute_evolution_metrics(
 
     overall_transition = np.zeros((3, 3), dtype=np.int64)
     if violation_states.size >= 2:
-        for left, right in zip(violation_states[:-1], violation_states[1:]):
+        for left, right in zip(
+            violation_states[:-1], violation_states[1:], strict=False
+        ):
             overall_transition[int(left), int(right)] += 1
 
     episode_array = np.asarray(
@@ -1054,7 +1059,9 @@ def compute_evolution_metrics(
         if int(np.sum(stage_matrix)) == 0:
             stage_indices = np.where(np.isin(episode_ids, members))[0]
             if stage_indices.size >= 2:
-                for left_idx, right_idx in zip(stage_indices[:-1], stage_indices[1:]):
+                for left_idx, right_idx in zip(
+                    stage_indices[:-1], stage_indices[1:], strict=False
+                ):
                     if right_idx != left_idx + 1:
                         continue
                     left_state = int(violation_states[left_idx])

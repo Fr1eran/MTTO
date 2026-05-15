@@ -1,10 +1,10 @@
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 
+from model.common import ECC, ORS
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo, TrackProfile
 from model.vehicle import VehicleInfo
-from model.common import ORS, ECC
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_safeguard_curves,
@@ -217,9 +217,10 @@ def draw_curve(pos, speed) -> bool:
         # 更新标题
         ax.set_title(
             "极限操作模式下的最短运行时间曲线\n"
-            + f"起点: ({pos:.2f}m, {speed:.2f}m/s) 运行能耗: {total_energy:.2f} 运行时间: {total_operation_time:.2f}\n"
-            + r"$t_m={:.2f}$".format(t_min)
-            + r"$T_m={:.2f}$".format(T_min),
+            + f"起点: ({pos:.2f}m, {speed:.2f}m/s) "
+            + f"运行能耗: {total_energy:.2f} 运行时间: {total_operation_time:.2f}\n"
+            + rf"$t_m={t_min:.2f}$"
+            + rf"$T_m={T_min:.2f}$",
             fontsize=12,
         )
 
@@ -267,7 +268,7 @@ def on_key(event):
         try:
             # 输入位置
             pos_input = input(
-                f"请输入起点位置 (m) [范围: {longyang_start_position:.2f} - {putong_end_position:.2f}]: "
+                f"请输入起点位置 (m) [范围: {longyang_start_position:.2f} - {putong_end_position:.2f}]: "  # noqa: E501
             ).strip()
             if not pos_input:
                 print("[I] 取消操作")
@@ -276,7 +277,7 @@ def on_key(event):
             input_pos = float(pos_input)
             if input_pos < longyang_start_position or input_pos > putong_end_position:
                 print(
-                    f"[I] 错误：位置超出范围 ({longyang_start_position:.2f} - {putong_end_position:.2f})"
+                    f"[I] 错误：位置超出范围 ({longyang_start_position:.2f} - {putong_end_position:.2f})"  # noqa: E501
                 )
                 return
 

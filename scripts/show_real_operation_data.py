@@ -1,9 +1,9 @@
 import matplotlib.pyplot as plt
 import numpy as np
 
-from model.vehicle.vehicle import VehicleInfo
 from model.common.energy_consumption_calculator import ECC
 from model.track.track import TrackInfo, TrackProfile
+from model.vehicle.vehicle import VehicleInfo
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_excel,

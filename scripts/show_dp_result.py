@@ -5,10 +5,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from model.ocs import SafeGuardUtility
+from utils.data_loader import load_safeguard_curves, load_speed_limits
 from utils.io_utils import load_optimized_curve_and_metrics
 from utils.plot_utils import set_global_plot_style
-from utils.data_loader import load_speed_limits, load_safeguard_curves
-
 
 _DP_CURVE_FILENAME = "optimized_speed_curve.npz"
 _DP_METRICS_FILENAME = "optimized_speed_curve_metrics.json"

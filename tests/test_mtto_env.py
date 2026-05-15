@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from rl.mtto_env import MTTOEnv
+from rl.mtto_env import MTTOEnv, RewardConfig
 from model.vehicle import VehicleInfo
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
@@ -68,6 +68,7 @@ def mtto_env():
         train_service=train_service,
         gamma=0.995,
         max_step_distance=10.0,
+        reward_config=RewardConfig(),
     )
     return maglevttoenv
 

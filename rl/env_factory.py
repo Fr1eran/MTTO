@@ -1,9 +1,9 @@
+from gymnasium.wrappers import FlattenObservation
+
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
-from gymnasium.wrappers import FlattenObservation
-
-from rl.mtto_env import MTTOEnv
+from rl.mtto_env import MTTOEnv, RewardConfig
 
 
 def make_env(
@@ -17,6 +17,7 @@ def make_env(
     diagnostics_interval_steps: int = 1,
     enable_trajectory_tracking: bool = False,
     render_mode: str | None = None,
+    reward_config: RewardConfig | None = None,
 ):
     env = MTTOEnv(
         vehicle=vehicle,
@@ -29,6 +30,7 @@ def make_env(
         diagnostics_interval_steps=diagnostics_interval_steps,
         enable_trajectory_tracking=enable_trajectory_tracking,
         render_mode=render_mode,
+        reward_config=reward_config,
     )
     env = FlattenObservation(env)
     return env

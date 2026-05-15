@@ -1,39 +1,16 @@
 import argparse
-from pathlib import Path
 
 import matplotlib.pyplot as plt
-import numpy as np
 
-from model.ocs import SafeGuardUtility
-from utils.io_utils import load_optimized_curve_and_metrics
-from utils.plot_utils import set_global_plot_style
-from utils.data_loader import load_speed_limits, load_safeguard_curves
-
-_RL_CURVE_GLOB = "*trajectory.npz"
-_RL_METRICS_GLOB = "*_metrics.json"
-_RL_DEFAULT_SEARCH_DIR = "output/optimal/rl/best"
-
-
-def _build_safeguard_utility(factor: float = 0.95) -> SafeGuardUtility:
-    speed_limits, speed_limit_intervals = load_speed_limits(to_mps=True)
-    levi_curves_list, brake_curves_list, min_curves_list, max_curves_list = (
-        load_safeguard_curves(
-            "levi_curves_list",
-            "brake_curves_list",
-            "min_curves_list",
-            "max_curves_list",
-        )
-    )
-
-    return SafeGuardUtility(
-        speed_limits=speed_limits,
-        speed_limit_intervals=speed_limit_intervals,
-        levi_curves_list=levi_curves_list,
-        brake_curves_list=brake_curves_list,
-        min_curves_list=min_curves_list,
-        max_curves_list=max_curves_list,
-        factor=factor,
-    )
+from rl.experiment_utils import (
+    RL_DEFAULT_SEARCH_DIR as _RL_DEFAULT_SEARCH_DIR,
+    RL_TRAJECTORY_SOURCE_CHOICES as _RL_TRAJECTORY_SOURCE_CHOICES,
+    apply_rl_curve_plot_style,
+    get_rl_trajectory_status_text,
+    load_rl_curve_artifact,
+    render_rl_curve_on_axes,
+    resolve_rl_curve_artifact,
+)
 
 
 def _print_metrics(metrics: dict[str, object]) -> None:
@@ -43,6 +20,8 @@ def _print_metrics(metrics: dict[str, object]) -> None:
 
     print("Loaded metrics:")
     for key in [
+        "trajectory_source",
+        "reward_profile_name",
         "total_reward",
         "target_time_s",
         "total_time_s",
@@ -59,6 +38,8 @@ def _print_metrics(metrics: dict[str, object]) -> None:
         "comfort_rms",
         "episode_steps",
         "success",
+        "selection_bucket",
+        "best_update_reason",
         "num_timesteps",
         "eval_trigger_mode",
         "eval_trigger_interval",
@@ -68,82 +49,62 @@ def _print_metrics(metrics: dict[str, object]) -> None:
             print(f"  {key}: {metrics[key]}")
 
 
-def _as_float(value: object) -> float | None:
-    if isinstance(value, (int, float, np.integer, np.floating)):
-        return float(value)
-    return None
-
-
 def _build_cli_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Load and display saved RL best trajectory."
-    )
+    parser = argparse.ArgumentParser(description="加载并显示已保存的强化学习轨迹结果。")
     parser.add_argument(
         "--curve-dir",
         default=_RL_DEFAULT_SEARCH_DIR,
-        help=(
-            "Directory to recursively search for files matching "
-            f"'{_RL_CURVE_GLOB}' and '{_RL_METRICS_GLOB}'."
-        ),
+        help="用于搜索强化学习轨迹相关产物的路径",
+    )
+    parser.add_argument(
+        "--trajectory-source",
+        choices=_RL_TRAJECTORY_SOURCE_CHOICES,
+        default="best",
+        help="选择加载哪条保存的轨迹: 'best' 'best_steps' 'best_episodes' 'final'",
     )
     parser.add_argument(
         "--no-safeguard",
         action="store_true",
-        help="Do not draw safeguard background.",
+        help="不绘制安全防护曲线",
     )
     parser.add_argument(
         "--factor",
         type=float,
         default=0.99,
-        help="Safeguard factor used for rendering when safeguard is enabled.",
+        help="在启用安全防护时用于渲染的速度上限因数。",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="仅解析轨迹产物路径，不加载曲线数据或显示图窗。",
     )
 
     return parser
 
 
-def _find_latest_matching_file(*, search_dir: str, glob_pattern: str) -> Path:
-    search_root = Path(search_dir)
-    if not search_root.is_dir():
-        raise FileNotFoundError(f"Search directory does not exist: {search_dir}")
-
-    matches = sorted(
-        (path for path in search_root.rglob(glob_pattern) if path.is_file()),
-        key=lambda path: (path.stat().st_mtime, str(path)),
-        reverse=True,
+def plot_rl_curve(
+    *,
+    pos_arr,
+    speed_arr,
+    metrics: dict[str, object],
+    no_safeguard: bool,
+    factor: float,
+) -> None:
+    apply_rl_curve_plot_style()
+    fig, ax = plt.subplots(figsize=(12, 7))
+    render_rl_curve_on_axes(
+        ax=ax,
+        pos_arr=pos_arr,
+        speed_arr=speed_arr,
+        metrics=metrics,
+        no_safeguard=no_safeguard,
+        factor=factor,
     )
-    if not matches:
-        raise FileNotFoundError(
-            f"Could not find files matching '{glob_pattern}' under directory: {search_dir}"
-        )
+    ax.legend(loc="upper right")
 
-    if len(matches) > 1:
-        print(
-            f"Found {len(matches)} '{glob_pattern}' files under '{search_dir}', "
-            f"using latest: {matches[0]}"
-        )
-    return matches[0]
-
-
-def _resolve_curve_and_metrics_paths(*, curve_dir: str) -> tuple[str, str]:
-    curve_path = _find_latest_matching_file(
-        search_dir=curve_dir,
-        glob_pattern=_RL_CURVE_GLOB,
-    )
-
-    # 在 curve 文件所在目录查找匹配的 metrics 文件
-    curve_dir_path = curve_path.parent
-    metrics_matches = sorted(
-        (p for p in curve_dir_path.glob(_RL_METRICS_GLOB) if p.is_file()),
-        key=lambda p: (p.stat().st_mtime, str(p)),
-        reverse=True,
-    )
-    if not metrics_matches:
-        raise FileNotFoundError(
-            f"Could not find files matching '{_RL_METRICS_GLOB}' in directory: {curve_dir_path}"
-        )
-    metrics_path = metrics_matches[0]
-
-    return str(curve_path), str(metrics_path)
+    plt.tight_layout()
+    plt.show()
 
 
 def main() -> None:
@@ -151,116 +112,37 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        npz_path, metrics_path = _resolve_curve_and_metrics_paths(
-            curve_dir=args.curve_dir
+        artifact = resolve_rl_curve_artifact(
+            curve_dir=args.curve_dir,
+            trajectory_source=args.trajectory_source,
         )
     except FileNotFoundError as exc:
         parser.error(str(exc))
 
-    print(f"Using curve file: {npz_path}")
-    print(f"Using metrics file: {metrics_path}")
+    print(f"Using curve file: {artifact.npz_path}")
+    print(f"Using metrics file: {artifact.metrics_path}")
 
-    pos_arr, speed_arr, metrics = load_optimized_curve_and_metrics(
-        npz_path=npz_path,
-        metrics_path=metrics_path,
-        dtype=np.float32,
-        use_metrics_cache=True,
-    )
+    if args.dry_run:
+        print(
+            "Dry run completed: trajectory artifact resolved; \
+             skipped loading metrics and plotting."
+        )
+        return
+
+    pos_arr, speed_arr, metrics = load_rl_curve_artifact(artifact)
 
     _print_metrics(metrics)
+    status_text = get_rl_trajectory_status_text(metrics)
+    if status_text is not None:
+        print(status_text)
 
-    set_global_plot_style(
-        font_preset="sci",
-        preferred_font="Calibri",
-        title_font_size=8.0,
-        axis_label_font_size=8.0,
-        tick_font_size=8.0,
-        legend_font_size=8.0,
-        figure_dpi=150.0,
-        savefig_dpi=300.0,
+    plot_rl_curve(
+        pos_arr=pos_arr,
+        speed_arr=speed_arr,
+        metrics=metrics,
+        no_safeguard=args.no_safeguard,
+        factor=args.factor,
     )
-
-    fig, ax = plt.subplots(figsize=(12, 7))
-
-    if not args.no_safeguard:
-        safeguard = _build_safeguard_utility(factor=args.factor)
-        safeguard.render(ax=ax, layers=SafeGuardUtility.DANGER_VIEW_LAYERS)
-
-    ax.plot(
-        pos_arr,
-        speed_arr * 3.6,
-        color="blue",
-        alpha=0.85,
-        linewidth=1.5,
-        label="RL best optimized speed curve",
-    )
-
-    start_position = _as_float(metrics.get("start_position_m"))
-    target_position = _as_float(metrics.get("target_position_m"))
-    # final_position = _as_float(metrics.get("final_position_m"))
-    # final_speed_mps = _as_float(metrics.get("final_speed_mps"))
-
-    if start_position is not None:
-        ax.scatter(
-            start_position,
-            0.0,
-            marker="o",
-            color="green",
-            s=40,
-            alpha=0.85,
-            label="start",
-            zorder=5,
-            edgecolors="black",
-            linewidths=0.8,
-        )
-    if target_position is not None:
-        ax.scatter(
-            target_position,
-            0.0,
-            marker="o",
-            color="red",
-            s=40,
-            alpha=0.85,
-            label="end",
-            zorder=5,
-            edgecolors="black",
-            linewidths=0.8,
-        )
-    # if final_position is not None and final_speed_mps is not None:
-    #     should_draw_final_point = (
-    #         target_position is None
-    #         or abs(final_position - target_position) > 1e-6
-    #         or abs(final_speed_mps) > 1e-6
-    #     )
-    #     if should_draw_final_point:
-    #         ax.scatter(
-    #             final_position,
-    #             final_speed_mps * 3.6,
-    #             marker="X",
-    #             color="orange",
-    #             s=90,
-    #             alpha=0.9,
-    #             label="终止点",
-    #             zorder=6,
-    #             edgecolors="black",
-    #             linewidths=1.0,
-    #         )
-
-    success_value = metrics.get("success")
-    if isinstance(success_value, bool):
-        print(
-            "RL 最优轨迹（完成任务）" if success_value else "RL 最优轨迹（未完成任务）"
-        )
-
-    ax.set_xlabel("Position (m)")
-    ax.set_ylabel("Speed (km/h)")
-    ax.set_xlim((0.0, 30000.0))
-    ax.set_ylim((0.0, 500.0))
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc="upper right")
-
-    plt.tight_layout()
-    plt.show()
 
 
 if __name__ == "__main__":

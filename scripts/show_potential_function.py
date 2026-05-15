@@ -1,5 +1,5 @@
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 
 from utils.data_loader import load_safeguard_curves
 from utils.plot_utils import set_global_plot_style
@@ -154,8 +154,8 @@ def calc_potential_docking_v1(
     d_scale = 3000.0
     speed_max = 500.0 / 3.6
 
-    sigma_x_hat = 0.05
-    sigma_v_hat = 0.1
+    sigma_x_hat = 0.1
+    sigma_v_hat = 0.2
 
     # 正则化项
     dist_error = np.abs(target_pos - pos)
@@ -223,9 +223,9 @@ def calc_potential_punctuality_v2(redundant_operation_time, schedule_time):
 
 def calc_potential_punctuality_v3(redundant_operation_time, schedule_time):
     K_base = 1.0
-    K_safe = 0.1
-    K_late = 8.0
-    alpha = 2.0
+    K_safe = 1.0
+    K_late = 50.0
+    alpha = 5.0
 
     time_redundancy_norm = redundant_operation_time / schedule_time
 

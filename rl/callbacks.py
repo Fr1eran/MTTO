@@ -2,13 +2,21 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
 
 from rl.evaluation import (
     PolicyEvaluationResult,
+    describe_best_update_reason,
     evaluate_policy_once,
     save_policy_evaluation_curve,
 )
+
+
+def _safe_mean(values):
+    if not values:
+        return 0.0
+    return float(np.mean(values))
 
 
 @dataclass(frozen=True)
@@ -53,7 +61,11 @@ class TensorboardCallback(BaseCallback):
             return None
         for fmt in output_formats:
             writer = getattr(fmt, "writer", None)
-            if writer is not None and hasattr(writer, "add_scalar") and hasattr(writer, "flush"):
+            if (
+                writer is not None
+                and hasattr(writer, "add_scalar")
+                and hasattr(writer, "flush")
+            ):
                 return writer
         return None
 
@@ -104,7 +116,13 @@ class TensorboardCallback(BaseCallback):
 
         self._sync_episode_tracker(len(infos))
 
-        buckets = {"rewards": [], "state": [], "constraint": [], "event": [], "basic": []}
+        buckets = {
+            "rewards": [],
+            "state": [],
+            "constraint": [],
+            "event": [],
+            "basic": [],
+        }
         for info in infos:
             if not isinstance(info, dict):
                 continue
@@ -144,7 +162,7 @@ class TensorboardCallback(BaseCallback):
             for key, value in payload.items():
                 try:
                     scalar_value = float(value)
-                except (TypeError, ValueError):
+                except TypeError, ValueError:
                     continue
                 aggregated_values.setdefault(key, []).append(scalar_value)
 
@@ -272,6 +290,7 @@ class BestTrajectoryEvalCallback(BaseCallback):
         *,
         eval_env: Any,
         output_dir: str,
+        artifact_metadata: dict[str, Any] | None = None,
         eval_trigger_mode: str = "steps",
         eval_trigger_interval: int = 10_000,
         deterministic: bool = True,
@@ -285,11 +304,12 @@ class BestTrajectoryEvalCallback(BaseCallback):
 
         self.eval_env = eval_env
         self.output_dir = output_dir
+        self.artifact_metadata = dict(artifact_metadata or {})
         self.eval_trigger_mode = eval_trigger_mode
         self.trigger_interval = int(eval_trigger_interval)
         self.deterministic = deterministic
         self.best_result: PolicyEvaluationResult | None = None
-        self.best_trigger_value: int | None = None
+        self.best_trigger_interval: int | None = None
         self._episodes_seen = 0
         self._next_trigger_value = self.trigger_interval
 
@@ -310,16 +330,12 @@ class BestTrajectoryEvalCallback(BaseCallback):
         while self._next_trigger_value <= current_value:
             self._next_trigger_value += self.trigger_interval
 
-    def _is_new_best(self, result: PolicyEvaluationResult) -> bool:
-        if self.best_result is None:
-            return True
-        return result.comparison_key() > self.best_result.comparison_key()
-
     def _save_best_artifacts(
         self,
         result: PolicyEvaluationResult,
         *,
         eval_trigger_interval: int,
+        best_update_reason: str,
     ) -> None:
         model_path = os.path.join(self.output_dir, "best_model")
         vecnormalize_path = os.path.join(self.output_dir, "best_vecnormalize.pkl")
@@ -340,6 +356,9 @@ class BestTrajectoryEvalCallback(BaseCallback):
             eval_trigger_mode=self.eval_trigger_mode,
             eval_trigger_interval=eval_trigger_interval,
         )
+        extra_metrics.update(self.artifact_metadata)
+        extra_metrics["trajectory_source"] = "best"
+        extra_metrics["best_update_reason"] = best_update_reason
         save_policy_evaluation_curve(
             result,
             trajectory_path,
@@ -359,12 +378,17 @@ class BestTrajectoryEvalCallback(BaseCallback):
         self.logger.record("best_eval/last_time_error_s", result.time_error_s)
         self.logger.record("best_eval/last_total_energy_j", result.total_energy_j)
 
-        if not self._is_new_best(result):
+        best_update_reason = describe_best_update_reason(result, self.best_result)
+        if best_update_reason is None:
             return
 
-        self._save_best_artifacts(result, eval_trigger_interval=eval_trigger_interval)
+        self._save_best_artifacts(
+            result,
+            eval_trigger_interval=eval_trigger_interval,
+            best_update_reason=best_update_reason,
+        )
         self.best_result = result
-        self.best_trigger_value = eval_trigger_interval
+        self.best_trigger_interval = eval_trigger_interval
 
         self.logger.record("best_eval/best_success", float(result.success))
         self.logger.record("best_eval/best_total_reward", result.total_reward)
@@ -375,8 +399,10 @@ class BestTrajectoryEvalCallback(BaseCallback):
         if self.verbose > 0:
             print(
                 "New best trajectory saved: "
-                f"mode={self.eval_trigger_mode}, trigger_value={eval_trigger_interval}, "
-                f"success={result.success}, total_reward={result.total_reward:.6f}"
+                f"mode={self.eval_trigger_mode}, "
+                f"trigger_interval={eval_trigger_interval}, "
+                f"success={result.success}, "
+                f"total_reward={result.total_reward:.6f}"
             )
 
     def _on_step(self) -> bool:
@@ -397,3 +423,46 @@ class BestTrajectoryEvalCallback(BaseCallback):
         close_fn = getattr(self.eval_env, "close", None)
         if callable(close_fn):
             close_fn()
+
+
+class EpisodeMetricsCollector(BaseCallback):
+    def __init__(
+        self,
+        output_path: str,
+        collect_interval_steps: int = 1024,
+        verbose: int = 0,
+    ):
+        super().__init__(verbose)
+        self._output_path = output_path
+        self._collect_interval = max(1, int(collect_interval_steps))
+        self._last_collect_step: int = -self._collect_interval
+        self._steps: list[int] = []
+        self._rewards: list[float] = []
+        self._lengths: list[float] = []
+
+    def _on_step(self) -> bool:
+        current_step = int(self.num_timesteps)
+        if current_step - self._last_collect_step < self._collect_interval:
+            return True
+
+        buf = getattr(self.model, "ep_info_buffer", None)
+        if buf is None or len(buf) == 0 or len(buf[0]) == 0:
+            return True
+
+        reward_mean = _safe_mean([ep_info["r"] for ep_info in buf])
+        len_mean = _safe_mean([ep_info["l"] for ep_info in buf])
+
+        self._steps.append(current_step)
+        self._rewards.append(reward_mean)
+        self._lengths.append(len_mean)
+        self._last_collect_step = current_step
+        return True
+
+    def _on_training_end(self) -> None:
+        if self._steps:
+            np.savez(
+                self._output_path,
+                steps=np.asarray(self._steps, dtype=np.float64),
+                ep_mean_reward=np.asarray(self._rewards, dtype=np.float64),
+                ep_mean_len=np.asarray(self._lengths, dtype=np.float64),
+            )

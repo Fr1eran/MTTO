@@ -40,9 +40,22 @@ def resolve_run_directory(log_root: str | Path, run_name: str | None = None) -> 
         candidate = Path(run_name)
         if not candidate.is_absolute():
             candidate = root / candidate
-        if not candidate.exists() or not candidate.is_dir():
-            raise FileNotFoundError(f"Run directory not found: {candidate}")
-        return candidate
+        if candidate.exists() and candidate.is_dir():
+            return candidate
+
+        # SB3 会在 tb_log_name 后追加 _1、_2 等后缀
+        # 因此精确匹配失败时按前缀查找最新的匹配目录
+        run_dirs = list_run_directories(root)
+        run_name_lower = candidate.name.lower()
+        matching = [
+            d
+            for d in run_dirs
+            if d.name.lower() == run_name_lower
+            or d.name.lower().startswith(run_name_lower + "_")
+        ]
+        if matching:
+            return matching[-1]
+        raise FileNotFoundError(f"Run directory not found: {candidate}")
 
     run_dirs = list_run_directories(root)
     if not run_dirs:

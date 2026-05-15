@@ -1,8 +1,9 @@
 import json
 import os
+from collections.abc import Sequence
 from datetime import datetime
 from functools import lru_cache
-from typing import Any, Sequence
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -10,7 +11,7 @@ from numpy.typing import NDArray
 
 @lru_cache(maxsize=32)
 def _LoadJsonCached(path: str) -> dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -40,7 +41,7 @@ def load_optimized_curve_and_metrics(
         if use_metrics_cache:
             metrics = dict(_LoadJsonCached(metrics_path))
         else:
-            with open(metrics_path, "r", encoding="utf-8") as f:
+            with open(metrics_path, encoding="utf-8") as f:
                 metrics = json.load(f)
 
     return pos_arr, speed_arr, metrics

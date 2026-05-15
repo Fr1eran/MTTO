@@ -9,8 +9,16 @@ from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
 from rl.env_factory import make_env
-from rl.mtto_env import MTTOEnv
+from rl.mtto_env import MTTOEnv, RewardConfig
 from utils.io_utils import save_curve_and_metrics
+
+BEST_TRAJECTORY_SELECTION_RULE = "success_then_energy_else_reward"
+BEST_TRAJECTORY_SELECTION_RULE_DESCRIPTION = (
+    "Any successful evaluation outranks any non-successful evaluation. "
+    "Among successful evaluations, lower total_energy_j wins. "
+    "If no success is available, higher total_reward wins. "
+    "stop_error_m and abs(time_error_s) are deterministic tie-breakers."
+)
 
 
 @dataclass(frozen=True)
@@ -35,15 +43,6 @@ class PolicyEvaluationResult:
     episode_steps: int
     trajectory_pos_m: NDArray[np.float32]
     trajectory_speed_mps: NDArray[np.float32]
-
-    def comparison_key(self) -> tuple[int, float, float, float, float]:
-        return (
-            int(self.success),
-            float(self.total_reward),
-            -float(self.stop_error_m),
-            -abs(float(self.time_error_s)),
-            -float(self.total_energy_j),
-        )
 
     def to_metrics(
         self,
@@ -70,6 +69,7 @@ class PolicyEvaluationResult:
             "episode_steps": self.episode_steps,
             "success": self.success,
         }
+        metrics["selection_rule"] = BEST_TRAJECTORY_SELECTION_RULE
         if num_timesteps is not None:
             metrics["num_timesteps"] = int(num_timesteps)
         if eval_trigger_mode is not None:
@@ -91,6 +91,7 @@ def build_single_eval_env(
     enable_diagnostics: bool = False,
     enable_trajectory_tracking: bool = True,
     render_mode: str | None = None,
+    reward_config: RewardConfig | None = None,
 ) -> gym.Env[Any, Any]:
     return make_env(
         vehicle=vehicle,
@@ -102,6 +103,7 @@ def build_single_eval_env(
         enable_diagnostics=enable_diagnostics,
         enable_trajectory_tracking=enable_trajectory_tracking,
         render_mode=render_mode,
+        reward_config=reward_config,
     )
 
 
@@ -122,10 +124,10 @@ def is_success_within_train_service_limits(
     if schedule_time_s <= 0.0:
         return False
 
-    time_error_ratio_pct = abs(float(time_error_s)) / schedule_time_s * 100.0
+    time_error_ratio = abs(float(time_error_s)) / schedule_time_s
     return float(stop_error_m) <= float(
         train_service.max_stop_error
-    ) and time_error_ratio_pct <= float(train_service.max_arr_time_error_ratio)
+    ) and time_error_ratio <= float(train_service.max_arr_time_error_ratio)
 
 
 def evaluate_policy_once(
@@ -214,3 +216,26 @@ def save_policy_evaluation_curve(
         output_path=output_path,
         metrics=metrics,
     )
+
+
+def describe_best_update_reason(
+    candidate: PolicyEvaluationResult,
+    previous: PolicyEvaluationResult | None,
+) -> str | None:
+    if previous is None:
+        return "first_evaluation"
+
+    if not candidate.success and previous.success:
+        return None
+    elif candidate.success and not previous.success:
+        return "success_replaces_reward_fallback"
+    elif candidate.success and previous.success:
+        if float(candidate.total_energy_j) < float(previous.total_energy_j):
+            return "lower_energy_among_successes"
+        else:
+            return None
+    else:
+        if float(candidate.total_reward) > float(previous.total_reward):
+            return "higher_total_reward_without_success"
+        else:
+            return None

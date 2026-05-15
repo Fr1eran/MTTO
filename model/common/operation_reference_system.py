@@ -1,9 +1,11 @@
+from typing import NamedTuple, TypedDict
+
 import numpy as np
 from numpy.typing import NDArray
-from typing import NamedTuple, TypedDict
-from model.vehicle.vehicle import VehicleInfo
-from model.track.track import TrackInfo, TrackProfile
+
 from model.common.energy_consumption_calculator import ECC
+from model.track.track import TrackInfo, TrackProfile
+from model.vehicle.vehicle import VehicleInfo
 
 
 class GeneralOperation(NamedTuple):
@@ -62,8 +64,10 @@ class ORS:
             interval_points: 区间端点（升序）
         返回:
             区间索引(np.ndarray 或 int):
-              - 正向/forward: 若 pos 与某个端点相等，则视为属于将该端点作为左端点的区间（左端点包含）
-              - 反向/backward: 若 pos 与某个端点相等，则视为属于将该端点作为右端点的区间（右端点包含）
+              - 正向/forward:
+                若 pos 与某个端点相等，则视为属于将该端点作为左端点的区间（左端点包含）
+              - 反向/backward:
+                若 pos 与某个端点相等，则视为属于将该端点作为右端点的区间（右端点包含）
         """
 
         if ascend:  # 正向
@@ -85,8 +89,10 @@ class ORS:
         和所有限速下降后的出口点（位置与对应限速）列表。
 
         返回格式： (AscendBeginPoints, DescendEndPoints)
-          - AscendBeginPoints: list of ForwardBeginPoint, 应为在上升沿边界位置、左侧的区间限速、右侧区间编号
-          - DescendEndPoints: list of BackwardEndPoint, 应为在下降沿边界位置、右侧的区间限速、左侧区间编号
+          - AscendBeginPoints: list of ForwardBeginPoint
+            应为在上升沿边界位置、左侧的区间限速、右侧区间编号
+          - DescendEndPoints: list of BackwardEndPoint
+            应为在下降沿边界位置、右侧的区间限速、左侧区间编号
         """
 
         n = len(self.track.speed_limits)
@@ -388,16 +394,14 @@ class ORS:
                         begin_pos=ascend_begin_pos, begin_speed=ascend_begin_speed
                     )
 
-                    ascend_operations.append(
-                        {
-                            "ascend_begin_pos": ascend_begin_pos,
-                            "ascend_begin_speed": ascend_begin_speed,
-                            "ascend_operation_time": ascend_operation_time,
-                            "ascend_end_pos": ascend_end_pos,
-                            "ascend_end_interval": ascend_end_interval,
-                            "ascend_begin_interval": ascend_begin_interval,
-                        }
-                    )
+                    ascend_operations.append({
+                        "ascend_begin_pos": ascend_begin_pos,
+                        "ascend_begin_speed": ascend_begin_speed,
+                        "ascend_operation_time": ascend_operation_time,
+                        "ascend_end_pos": ascend_end_pos,
+                        "ascend_end_interval": ascend_end_interval,
+                        "ascend_begin_interval": ascend_begin_interval,
+                    })
                     prev_ascend_end_interval = ascend_end_interval
 
             prev_descend_begin_interval = brake_begin_interval
@@ -416,16 +420,14 @@ class ORS:
                         end_pos=descend_end_pos, end_speed=descend_end_speed
                     )
 
-                    descend_operations.append(
-                        {
-                            "descend_end_pos": descend_end_pos,
-                            "descend_end_speed": descend_end_speed,
-                            "descend_operation_time": descend_operation_time,
-                            "descend_begin_pos": descend_begin_pos,
-                            "descend_begin_interval": descend_begin_interval,
-                            "descend_end_interval": descend_end_interval,
-                        }
-                    )
+                    descend_operations.append({
+                        "descend_end_pos": descend_end_pos,
+                        "descend_end_speed": descend_end_speed,
+                        "descend_operation_time": descend_operation_time,
+                        "descend_begin_pos": descend_begin_pos,
+                        "descend_begin_interval": descend_begin_interval,
+                        "descend_end_interval": descend_end_interval,
+                    })
             # descend_operations不必反转
             # ToDO: 添加其他特殊情况下的子操作剔除
             # 计算操作模式

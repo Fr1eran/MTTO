@@ -1,8 +1,8 @@
-import matplotlib.pyplot as plt
-from matplotlib.font_manager import fontManager
 from collections.abc import Sequence
 from typing import Literal
 
+import matplotlib.pyplot as plt
+from matplotlib.font_manager import fontManager
 
 CHINESE_FONT_CANDIDATES: tuple[str, ...] = (
     "SimHei",
@@ -61,7 +61,7 @@ def _pick_selected_or_first_available_font(
     preferred_font: str | None,
     allow_fallback: bool = True,
 ) -> str | None:
-    """Pick selected font first, then optional open-source fallbacks, then candidates."""
+    """先选择指定字体，再依次选用可选的开源备用字体，最后才是备选字体。"""
 
     if preferred_font is not None:
         selected = _pick_first_available_font((preferred_font,))
@@ -79,11 +79,13 @@ def _pick_selected_or_first_available_font(
             if fallback_candidates:
                 tried_fonts = (preferred_font,) + fallback_candidates
                 raise ValueError(
-                    f"preferred_font={preferred_font!r} 不在候选字体中: {tuple(font_candidates)!r}，"
+                    f"preferred_font={preferred_font!r} "
+                    f"不在候选字体中: {tuple(font_candidates)!r}, "
                     f"且已尝试替代字体仍不可用: {tried_fonts!r}"
                 )
             raise ValueError(
-                f"preferred_font={preferred_font!r} 不在候选字体中: {tuple(font_candidates)!r}"
+                f"preferred_font={preferred_font!r} "
+                f"不在候选字体中: {tuple(font_candidates)!r}"
             )
 
         if fallback_candidates:

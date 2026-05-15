@@ -1,11 +1,12 @@
+from collections.abc import Callable
+
 import numpy as np
 from numpy.typing import NDArray
-from typing import Callable, Union
 
-from model.vehicle.vehicle import VehicleInfo, VehicleDynamic
 from model.track.track import TrackProfile
+from model.vehicle.vehicle import VehicleDynamic, VehicleInfo
 
-Numeric = Union[float | np.floating | NDArray[np.floating]]
+Numeric = float | np.floating | NDArray[np.floating]
 AccFunc = Callable[[Numeric, Numeric], Numeric]
 
 
@@ -379,7 +380,7 @@ class SafeGuardCurves:
             delay_time_until_DPS_done: 牵引切断命令发出到完成切断延时
 
         Returns:
-            ([np.ndarray[pos_array, speed_array], ...], [np.ndarray[pos_array, speed_array], ...])
+            levi_curves_list, min_curves_list
         """
         levi_curves_list_without_truncate = (
             self._calculate_curves_backward_without_truncate(
@@ -462,7 +463,7 @@ class SafeGuardCurves:
             delay_time_until_DPS_done: 牵引切断命令发出到完成切断延时
             delay_time_until_VB_begin: 牵引完成切断到涡流制动启动延时
         Returns:
-            ([np.ndarray[pos_array, speed_array], ...], [np.ndarray[pos_array, speed_array], ...])
+            brake_curves_list, max_curves_list
         """
         brake_curves_list_without_truncate = (
             self._calculate_curves_backward_without_truncate(

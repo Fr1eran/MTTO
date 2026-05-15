@@ -12,7 +12,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--log-root",
         type=str,
-        default="mtto_ppo_tensorboard_logs",
+        default="mtto_ppo_tb_logs",
         help="TensorBoard logs root directory.",
     )
     parser.add_argument(
@@ -116,7 +116,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         choices=["warn_only", "strict_fail"],
         default="warn_only",
-        help="Sampling quality gate mode: warn_only logs warning, strict_fail aborts analysis.",
+        help="Sampling quality gate mode: warn_only logs warning, \
+             strict_fail aborts analysis.",
     )
     parser.add_argument(
         "--export-csv",
@@ -129,6 +130,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Include raw step/episode snapshots in analysis payload.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="仅解析分析配置与输出位置，不执行日志分析。",
     )
     return parser
 
@@ -157,6 +164,17 @@ def main() -> None:
         include_snapshots=args.include_snapshots,
         output_root=args.output_root,
     )
+
+    if args.dry_run:
+        print("Training analysis dry run completed.")
+        print(f"log_root: {args.log_root}")
+        print(f"run_name: {args.run_name}")
+        print(f"output_root: {args.output_root}")
+        print(f"sampling_quality_mode: {args.sampling_quality_mode}")
+        print(f"export_csv: {args.export_csv}")
+        print(f"include_snapshots: {args.include_snapshots}")
+        print(f"config: {config}")
+        return
 
     result = run_training_analysis(
         log_root=args.log_root,

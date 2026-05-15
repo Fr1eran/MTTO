@@ -1,36 +1,38 @@
 import argparse
-from concurrent.futures import ProcessPoolExecutor, as_completed
 import gzip
 import hashlib
 import json
 import multiprocessing as mp
+import os
 import pickle
 import signal
-from datetime import datetime, timezone
+from collections.abc import Iterable, Sequence
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
-import numpy as np
-import os
-from typing import TypedDict, Sequence, Any, Iterable, Literal
-from numpy.typing import NDArray
+from typing import Any, Literal, TypedDict
+
 import matplotlib.pyplot as plt
+import numpy as np
+from numpy.typing import NDArray
 
 try:
     from tqdm import tqdm
 except ImportError:
     tqdm = None
 
-from model.ocs import SafeGuardUtility, TrainService
-from model.vehicle import VehicleInfo
-from model.track import TrackInfo, TrackProfile
 from model.common import ECC, ORS
-from utils.io_utils import save_curve_and_metrics
-from utils.plot_utils import set_global_plot_style
+from model.ocs import SafeGuardUtility, TrainService
+from model.track import TrackInfo, TrackProfile
+from model.vehicle import VehicleInfo
 from utils.data_loader import (
-    load_slopes,
     load_safeguard_curves,
+    load_slopes,
     load_speed_limits,
     load_stations,
 )
+from utils.io_utils import save_curve_and_metrics
+from utils.plot_utils import set_global_plot_style
 
 
 class OptimalSpeedProfile(TypedDict):
@@ -423,7 +425,9 @@ class VariableSpacingDPOptimizer:
             k_c=0.8,
         )
         self.ors = ORS(
-            vehicle=self.vehicle, track=self.track, factor=self.safeguard_utility.gamma
+            vehicle=self.vehicle,
+            track=self.track,
+            factor=self.safeguard_utility.gamma,
         )
         # 计算最短运行时间参考曲线
         self.ref_curve_pos, self.ref_curve_speed = (
@@ -521,10 +525,12 @@ class VariableSpacingDPOptimizer:
 
                     # 基于加减速度物理边界的下一阶段速度索引剪枝
                     v2_min = max(
-                        speed_k**2 + 2.0 * self.vehicle.max_dec * abs_delta_pos, 0.0
+                        speed_k**2 + 2.0 * self.vehicle.max_dec * abs_delta_pos,
+                        0.0,
                     )
                     v2_max = max(
-                        speed_k**2 + 2.0 * self.vehicle.max_acc * abs_delta_pos, 0.0
+                        speed_k**2 + 2.0 * self.vehicle.max_acc * abs_delta_pos,
+                        0.0,
                     )
                     v_next_min = np.sqrt(v2_min)
                     v_next_max = np.sqrt(v2_max)
@@ -743,9 +749,7 @@ class VariableSpacingDPOptimizer:
 
         # 1) 尝试从磁盘加载
         if not self.skip_disk_cache:
-            cached = self._load_transition_graph_from_disk(
-                delta_speed, content_hash
-            )
+            cached = self._load_transition_graph_from_disk(delta_speed, content_hash)
             if cached is not None:
                 self._graph_cache = cached
                 self._graph_cache_signature = cache_signature
@@ -845,7 +849,15 @@ class VariableSpacingDPOptimizer:
 
         # ECC 参数（影响能耗）
         ecc = self.ecc
-        for val in (ecc.R_m, ecc.L_d, ecc.R_k, ecc.L_k, ecc.Tau, ecc.Psi_fd, ecc.k_c):
+        for val in (
+            ecc.R_m,
+            ecc.L_d,
+            ecc.R_k,
+            ecc.L_k,
+            ecc.Tau,
+            ecc.Psi_fd,
+            ecc.k_c,
+        ):
             hasher.update(str(val).encode())
 
         # SafeGuard 防护曲线与限速（影响危险域检测）
@@ -868,9 +880,7 @@ class VariableSpacingDPOptimizer:
 
         return hasher.hexdigest()
 
-    def _make_cache_folder_name(
-        self, delta_speed: float, content_hash: str
-    ) -> str:
+    def _make_cache_folder_name(self, delta_speed: float, content_hash: str) -> str:
         """生成可读的缓存文件夹名，包含关键参数与前缀哈希。"""
         delta_token = _format_float_token(delta_speed)
         hash_prefix = content_hash[:12]
@@ -880,9 +890,7 @@ class VariableSpacingDPOptimizer:
             div_token = f"var{self.sub_stage_count}"
         return f"{div_token}_{delta_token}_{hash_prefix}"
 
-    def _get_disk_cache_dir(
-        self, delta_speed: float, content_hash: str
-    ) -> Path:
+    def _get_disk_cache_dir(self, delta_speed: float, content_hash: str) -> Path:
         return Path(self._CACHE_BASE_DIR) / self._make_cache_folder_name(
             delta_speed, content_hash
         )
@@ -932,7 +940,7 @@ class VariableSpacingDPOptimizer:
             "num_stages": int(len(graph_cache["stages"])),
             "num_speed_states": int(len(graph_cache["speed_states"])),
             "total_valid_edges": int(graph_cache["total_valid_edges"]),
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now().isoformat(),
         }
         try:
             meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False))
@@ -988,7 +996,11 @@ class VariableSpacingDPOptimizer:
         return graph_cache
 
     def _calculate_transition(
-        self, pos_k: float, speed_k: float, displacement: float, speed_k_1: float
+        self,
+        pos_k: float,
+        speed_k: float,
+        displacement: float,
+        speed_k_1: float,
     ) -> tuple[bool, float, float]:
         return _calculate_transition_with_context(
             pos_k=pos_k,
@@ -1170,7 +1182,9 @@ class VariableSpacingDPOptimizer:
         target_time = self.train_service.schedule_time
         time_tolerance_ratio = self.train_service.max_arr_time_error_ratio
         print(
-            f"开始双层寻优: 目标时间为{target_time:.2f}s, 时间误差容忍率为 {time_tolerance_ratio}%, 速度步长为 {delta_speed:.2f}m/s"
+            f"开始双层寻优: 目标时间为{target_time:.2f}s, \
+            时间误差容忍率为 {time_tolerance_ratio * 100}%, \
+            速度步长为 {delta_speed:.2f}m/s"
         )
 
         lambda_time = 1e5
@@ -1180,12 +1194,15 @@ class VariableSpacingDPOptimizer:
 
         for iteration in range(max_iters):
             print(
-                f"第{iteration + 1}次迭代: 测试 lambda = {lambda_time:.2f} ...", end=""
+                f"第{iteration + 1}次迭代: 测试 lambda = {lambda_time:.2f} ...",
+                end="",
             )
 
             # 调用内层DP
             result = self._solve_dp_inner(
-                lambda_time=lambda_time, max_speed=max_speed, delta_speed=delta_speed
+                lambda_time=lambda_time,
+                max_speed=max_speed,
+                delta_speed=delta_speed,
             )
 
             if result is None:
@@ -1199,7 +1216,7 @@ class VariableSpacingDPOptimizer:
             best_result = result
 
             # 判断时间误差率是否满足约束
-            time_error_ratio = abs(total_time - target_time) / target_time * 100.0
+            time_error_ratio = abs(total_time - target_time) / target_time
             if time_error_ratio <= time_tolerance_ratio:
                 print(
                     f"成功收敛! 运行时间误差率为{time_error_ratio:.4f}%, 满足精度要求"
@@ -1427,7 +1444,7 @@ def _run_optimization(*, cli_args: argparse.Namespace, output_dir: str) -> int:
         target_position=putong_target,
         schedule_time=cli_args.schedule_time_s,
         max_acc_change=0.75,
-        max_arr_time_error_ratio=5.0,
+        max_arr_time_error_ratio=0.05,
         max_stop_error=0.3,
     )
 

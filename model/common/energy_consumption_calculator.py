@@ -2,10 +2,11 @@ from collections.abc import Callable
 from typing import cast
 
 import numpy as np
-from scipy.integrate import cumulative_trapezoid, trapezoid
 from numpy.typing import NDArray
-from model.vehicle.vehicle import VehicleInfo, VehicleDynamic
+from scipy.integrate import cumulative_trapezoid, trapezoid
+
 from model.track.track import TrackProfile
+from model.vehicle.vehicle import VehicleDynamic, VehicleInfo
 
 AccProfile = Callable[[NDArray[np.floating]], NDArray[np.floating]]
 
@@ -30,8 +31,10 @@ class ECC:
 
     参考文献：
     [1] 赖晴鹰. 中速磁浮运控电一体化运行策略优化[D]. 北京交通大学, 2022.
-    [2] Q. Lai, J. Liu, A. Haghani, L. Meng, and Y. Wang, “Optimal Energy Speed Profile of Medium-Speed Maglev
-    Trains Integrating the Power Supply System and Train Control System,” Transportation Research Record,
+    [2] Q. Lai, J. Liu, A. Haghani, L. Meng, and Y. Wang,
+    “Optimal Energy Speed Profile of Medium-Speed Maglev
+    Trains Integrating the Power Supply System and Train Control System,”
+    Transportation Research Record,
     vol. 2674, no. Compendex, pp. 729-738, 2020, doi: 10.1177/0361198120938052.
     [3] 柴晓凤．中速磁浮节能运行图优化方法研究[D]. 北京交通大学, 2020.
 
@@ -177,13 +180,11 @@ class ECC:
             try:
                 acc_eval = np.asarray(acc_func(d_nodes), dtype=np.float64)
             except Exception as exc:
-                raise TypeError(
-                    "acc callback must accept numpy array input (vectorized callback required)"
-                ) from exc
+                raise TypeError("acc callback must accept numpy array input") from exc
 
             if acc_eval.ndim != d_nodes.ndim or acc_eval.shape != d_nodes.shape:
                 raise ValueError(
-                    "acc callback must return array with same ndim and shape as input distance samples"
+                    "acc callback must return array with same ndim and shape as input"
                 )
 
             return np.asarray(acc_eval, dtype=np.float64)

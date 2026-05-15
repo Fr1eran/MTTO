@@ -5,7 +5,6 @@ from typing import overload
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-
 ScalarNumeric = float | np.floating
 
 

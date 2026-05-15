@@ -1,154 +1,123 @@
-import os
 import argparse
+import os
 from datetime import datetime
 
 import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize, VecVideoRecorder
 
-from model.ocs import SafeGuardUtility, TrainService
-from model.track import TrackInfo
-from model.vehicle import VehicleInfo
 from rl.env_factory import make_env
-from rl.evaluation import is_success_within_train_service_limits
-from utils.data_loader import (
-    load_auxiliary_stopping_areas_ap_and_dp,
-    load_safeguard_curves,
-    load_slopes,
-    load_speed_limits,
-    load_stations_goal_positions,
+from rl.evaluation import PolicyEvaluationResult, is_success_within_train_service_limits
+from rl.experiment_utils import (
+    DEFAULT_MAX_STEP_DISTANCE,
+    DEFAULT_REWARD_DISCOUNT,
+    DEFAULT_REWARD_PROFILE_NAME,
+    DEFAULT_SCHEDULE_TIME_S,
+    RL_FINAL_MODEL_FILENAME,
+    RL_FINAL_VECNORMALIZE_FILENAME,
+    build_run_metadata,
+    build_scenario,
+    load_run_metadata,
+    resolve_reward_profile,
+    reward_profile_names,
 )
 from utils.io_utils import save_curve_and_metrics
-
-_RL_FINAL_MODEL_FILENAME = "final_model.zip"
-_RL_FINAL_VECNORMALIZE_FILENAME = "final_vecnormalize.pkl"
-
-
-def build_scenario() -> tuple[VehicleInfo, TrackInfo, SafeGuardUtility, TrainService]:
-    slopes, slope_intervals = load_slopes()
-    speed_limits, speed_limit_intervals = load_speed_limits(
-        to_mps=True, dtype=np.float64
-    )
-    accessible_points, dangerous_points = load_auxiliary_stopping_areas_ap_and_dp()
-    longyang_start_position, putong_end_position = load_stations_goal_positions()
-    levi_curves_list, brake_curves_list, min_curves_list, max_curves_list = (
-        load_safeguard_curves(
-            "levi_curves_list",
-            "brake_curves_list",
-            "min_curves_list",
-            "max_curves_list",
-        )
-    )
-
-    safeguard_utility = SafeGuardUtility(
-        speed_limits=speed_limits,
-        speed_limit_intervals=speed_limit_intervals,
-        levi_curves_list=levi_curves_list,
-        brake_curves_list=brake_curves_list,
-        min_curves_list=min_curves_list,
-        max_curves_list=max_curves_list,
-        factor=0.95,
-    )
-
-    track = TrackInfo(
-        slopes=slopes,
-        slope_intervals=slope_intervals,
-        speed_limits=speed_limits,
-        speed_limit_intervals=speed_limit_intervals,
-        ASA_aps=accessible_points,
-        ASA_dps=dangerous_points,
-    )
-
-    vehicle = VehicleInfo(mass=317.5, numoftrainsets=5, length=128.5)
-
-    train_service = TrainService(
-        start_position=longyang_start_position,
-        start_speed=0.0,
-        target_position=putong_end_position,
-        schedule_time=430.0,
-        max_acc_change=0.75,
-        max_arr_time_error_ratio=5.0,
-        max_stop_error=0.3,
-    )
-
-    return vehicle, track, safeguard_utility, train_service
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Evaluate trained MTTO PPO policy.",
+        description="评估 MTTO PPO 策略",
     )
     parser.add_argument(
         "--load-dir",
         type=str,
         default="output/optimal/rl/final/",
-        help="Search Path of PPO model zip file and vecnormalize pkl file.",
+        help="PPO 模型文件和 vecnormalize 文件的搜索路径",
     )
     parser.add_argument(
         "--reward-discount",
         type=float,
-        default=0.99,
-        help="Discount factor used to reconstruct evaluation environment.",
+        default=None,
+        help="评估环境的折扣因子",
+    )
+    parser.add_argument(
+        "--schedule-time-s",
+        type=float,
+        default=None,
+        help="规划运行时间；未指定时优先从训练元数据读取。",
     )
     parser.add_argument(
         "--step-distance",
         type=float,
-        default=100.0,
-        help="Environment max_step_distance for evaluation.",
+        default=None,
+        help="评估环境的最大仿真位移步长",
+    )
+    parser.add_argument(
+        "--reward-profile",
+        type=str,
+        choices=tuple(reward_profile_names()),
+        default=None,
+        help="奖励配置预设；未指定时优先从训练元数据读取。",
     )
     parser.add_argument(
         "--device",
         type=str,
         default="cpu",
-        help="Inference device for loading PPO model.",
+        help="部署 PPO 模型的硬件设备",
     )
     parser.add_argument(
         "--deterministic",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Use deterministic policy during evaluation.",
+        help="评估时使用确定性策略",
     )
     parser.add_argument(
         "--record-video",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Enable video recording for evaluation rollout.",
+        help="记录评估过程视频",
     )
     parser.add_argument(
         "--save-trajectory",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Save trajectory NPZ and metrics JSON files.",
+        help="保存轨迹数据",
     )
     parser.add_argument(
         "--video-folder",
         type=str,
         default="mtto_eval_video",
-        help="Output directory for evaluation videos.",
+        help="评估视频保存路径",
     )
     parser.add_argument(
         "--output-dir",
         type=str,
         default=None,
-        help="Output directory for saved trajectory files.",
+        help="轨迹文件保存路径",
     )
     parser.add_argument(
         "--video-length",
         type=int,
         default=10000,
-        help="Maximum recorded video length in steps.",
+        help="视频的最大状态转移步数",
     )
     parser.add_argument(
         "--video-trigger-step",
         type=int,
         default=0,
-        help="Record video when step equals this value.",
+        help="当状态转移至该步时，开始保存视频",
     )
     parser.add_argument(
         "--enable-env-diagnostics",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Enable diagnostics collection in evaluation environment.",
+        help="评估时收集诊断信息",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="仅解析评估配置、路径与训练元数据，不加载模型或运行 rollout。",
     )
     return parser
 
@@ -156,12 +125,52 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_arg_parser().parse_args()
 
-    reward_discount = args.reward_discount
-    ds = args.step_distance
     load_dir = args.load_dir
+    run_metadata = load_run_metadata(load_dir)
 
-    model_zip_path = os.path.join(load_dir, f"{_RL_FINAL_MODEL_FILENAME}")
-    vecnormalize_pkl_path = os.path.join(load_dir, f"{_RL_FINAL_VECNORMALIZE_FILENAME}")
+    schedule_time_s = float(
+        args.schedule_time_s
+        if args.schedule_time_s is not None
+        else run_metadata.get("schedule_time_s", DEFAULT_SCHEDULE_TIME_S)
+    )
+    reward_discount = float(
+        args.reward_discount
+        if args.reward_discount is not None
+        else run_metadata.get("reward_discount", DEFAULT_REWARD_DISCOUNT)
+    )
+    ds = float(
+        args.step_distance
+        if args.step_distance is not None
+        else run_metadata.get("max_step_distance", DEFAULT_MAX_STEP_DISTANCE)
+    )
+    reward_profile = resolve_reward_profile(
+        args.reward_profile
+        or str(run_metadata.get("reward_profile_name", DEFAULT_REWARD_PROFILE_NAME))
+    )
+    reward_config = reward_profile.to_reward_config()
+    output_dir = args.output_dir if args.output_dir is not None else load_dir
+
+    model_zip_path = os.path.join(load_dir, RL_FINAL_MODEL_FILENAME)
+    vecnormalize_pkl_path = os.path.join(load_dir, RL_FINAL_VECNORMALIZE_FILENAME)
+    if args.dry_run:
+        print("========== Evaluation Dry Run ==========")
+        print(f"  load_dir:            {load_dir}")
+        print(f"  output_dir:          {output_dir}")
+        print(f"  reward_profile:      {reward_profile.name}")
+        print(f"  reward_config:       {reward_config}")
+        print(f"  schedule_time_s:     {schedule_time_s:.2f}")
+        print(f"  step_distance:       {ds:.2f}")
+        print(f"  reward_discount:     {reward_discount:.4f}")
+        print(f"  deterministic:       {args.deterministic}")
+        print(f"  record_video:        {args.record_video}")
+        print(f"  save_trajectory:     {args.save_trajectory}")
+        print(f"  model_zip_path:      {model_zip_path}")
+        print(f"  model_exists:        {os.path.exists(model_zip_path)}")
+        print(f"  vecnormalize_path:   {vecnormalize_pkl_path}")
+        print(f"  vecnormalize_exists: {os.path.exists(vecnormalize_pkl_path)}")
+        print("========================================")
+        return
+
     if not os.path.exists(model_zip_path):
         raise FileNotFoundError(f"Model file not found: {model_zip_path}")
     if not os.path.exists(vecnormalize_pkl_path):
@@ -169,7 +178,9 @@ def main() -> None:
             f"VecNormalize stats file not found: {vecnormalize_pkl_path}"
         )
 
-    vehicle, track, safeguard_utility, train_service = build_scenario()
+    vehicle, track, safeguard_utility, train_service = build_scenario(
+        schedule_time_s=schedule_time_s
+    )
 
     venv_eval = DummyVecEnv([
         lambda: make_env(
@@ -182,6 +193,7 @@ def main() -> None:
             enable_diagnostics=args.enable_env_diagnostics,
             enable_trajectory_tracking=args.record_video,
             render_mode="rgb_array" if args.record_video else None,
+            reward_config=reward_config,
         )
     ])
 
@@ -254,27 +266,48 @@ def main() -> None:
 
     saved_npz_path = ""
     saved_json_path = ""
-    output_dir = args.output_dir if args.output_dir is not None else load_dir
     if args.save_trajectory:
         npz_path = os.path.join(output_dir, "final_trajectory.npz")
-        trajectory_metrics = {
-            "total_reward": total_reward,
-            "target_time_s": target_time_s,
-            "total_time_s": total_time_s,
-            "time_error_s": time_error_s,
-            "start_position_m": start_position_m,
-            "target_position_m": target_position_m,
-            "final_position_m": final_position_m,
-            "stop_error_m": stop_error_m,
-            "total_energy_kj": total_energy_kj,
-            "total_energy_j": total_energy_j,
-            "final_speed_mps": final_speed_mps,
-            "comfort_tav": comfort_tav,
-            "comfort_er_pct": comfort_er_pct,
-            "comfort_rms": comfort_rms,
-            "episode_steps": episode_steps,
-            "success": success,
-        }
+        trajectory_metadata = build_run_metadata(
+            reward_profile=reward_profile,
+            schedule_time_s=schedule_time_s,
+            max_step_distance=ds,
+            reward_discount=reward_discount,
+            run_mode=str(run_metadata.get("run_mode")),
+            experiment_tag=str(run_metadata.get("experiment_tag")),
+            tensorboard_log_dir=str(run_metadata.get("tensorboard_log_dir")),
+            tb_log_name=str(run_metadata.get("tb_log_name")),
+            output_dir=str(run_metadata.get("output_dir")),
+            final_output_dir=str(run_metadata.get("final_output_dir")),
+            best_eval_output_dir=str(run_metadata.get("best_eval_output_dir")),
+        )
+        trajectory_metadata["trajectory_source"] = "final"
+        trajectory_metadata["evaluation_load_dir"] = load_dir
+        trajectory_metadata["deterministic"] = bool(args.deterministic)
+        evaluation_result = PolicyEvaluationResult(
+            success=success,
+            total_reward=float(total_reward),
+            total_time_s=total_time_s,
+            target_time_s=target_time_s,
+            total_energy_j=total_energy_j,
+            total_energy_kj=total_energy_kj,
+            start_position_m=start_position_m,
+            target_position_m=target_position_m,
+            final_position_m=final_position_m,
+            final_speed_mps=final_speed_mps,
+            stop_error_m=stop_error_m,
+            time_error_s=time_error_s,
+            comfort_tav=comfort_tav,
+            comfort_er_pct=comfort_er_pct,
+            comfort_rms=comfort_rms,
+            terminated=bool(success),
+            truncated=not bool(success),
+            episode_steps=episode_steps,
+            trajectory_pos_m=np.asarray(trajectory_position_seq, dtype=np.float32),
+            trajectory_speed_mps=np.asarray(trajectory_speed_seq, dtype=np.float32),
+        )
+        trajectory_metrics = evaluation_result.to_metrics()
+        trajectory_metrics.update(trajectory_metadata)
         saved_npz_path, saved_json_path = save_curve_and_metrics(
             pos_arr=trajectory_position_seq,
             speed_arr=trajectory_speed_seq,
@@ -287,6 +320,7 @@ def main() -> None:
     print("========== Evaluation Results ==========")
     print(f"  total_reward:       {total_reward:.6f}")
     print(f"  success:            {success}")
+    print(f"  reward_profile:     {reward_profile.name}")
     print(f"  target_time_s:      {target_time_s:.2f}")
     print(f"  total_time_s:       {total_time_s:.2f}")
     print(f"  time_error_s:       {time_error_s:.2f}")

@@ -46,9 +46,7 @@ class AnalysisConfig:
 
     def __post_init__(self):
         if not 0 < self.ema_alpha <= 1.0:
-            raise ValueError(
-                f"ema_alpha must be in (0, 1], got {self.ema_alpha}"
-            )
+            raise ValueError(f"ema_alpha must be in (0, 1], got {self.ema_alpha}")
         if self.episode_window_size < 1:
             raise ValueError(
                 f"episode_window_size must be >= 1, got {self.episode_window_size}"
@@ -229,7 +227,7 @@ def run_training_analysis(
         )
         if sampling_quality["mode"] == "strict_fail":
             raise ValueError(quality_message)
-        warnings.warn(quality_message)
+        warnings.warn(quality_message, stacklevel=2)
 
     regular_metrics = compute_regular_training_metrics(
         series_map,

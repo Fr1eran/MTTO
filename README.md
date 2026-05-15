@@ -10,11 +10,13 @@
 - [快速开始](#快速开始)
 - [脚本详解](#脚本详解)
   - [RL 训练 · `train_rl`](#rl-训练--train_rl)
+    - [RL 消融训练 · `train_reward_ablation`](#rl-消融训练--train_reward_ablation)
   - [RL 评估 · `evaluate_rl`](#rl-评估--evaluate_rl)
   - [训练日志分析 · `analyze_training_data`](#训练日志分析--analyze_training_data)
   - [DP 基线复现 · `reproduce_dp`](#dp-基线复现--reproduce_dp)
   - [DP 结果可视化 · `show_dp_result`](#dp-结果可视化--show_dp_result)
   - [RL 结果可视化 · `show_rl_result`](#rl-结果可视化--show_rl_result)
+    - [RL 消融结果可视化 · `show_reward_ablation`](#rl-消融结果可视化--show_reward_ablation)
   - [防护曲线 · `show_safeguard_curves`](#防护曲线--show_safeguard_curves)
   - [计算并保存防护曲线 · `calc_and_save_safeguard_curves`](#计算并保存防护曲线--calc_and_save_safeguard_curves)
   - [最短运行时间曲线 · `calc_min_operation_time_curve`](#最短运行时间曲线--calc_min_operation_time_curve)
@@ -39,6 +41,7 @@ MTTO/
 │   ├── callbacks.py        #   训练回调（TensorBoard 日志 & 最优轨迹评估）
 │   ├── env_factory.py      #   环境工厂
 │   ├── evaluation.py       #   评估辅助
+│   ├── experiment_utils.py #   reward profile、运行元数据、输出命名
 │   ├── mtto_env.py         #   Gym 环境
 │   └── training_analysis/  #   训练日志分析流水线
 ├── scripts/                # 可执行入口
@@ -57,17 +60,21 @@ MTTO/
 | 用途 | 命令 |
 |------|------|
 | RL 训练 | `python -m scripts.train_rl` |
+| RL 消融训练 | `python -m scripts.train_reward_ablation` |
 | RL 评估 | `python -m scripts.evaluate_rl` |
 | 训练日志分析 | `python -m scripts.analyze_training_data` |
 | DP 基线复现 | `python -m scripts.reproduce_dp` |
 | DP 结果可视化 | `python -m scripts.show_dp_result` |
 | RL 结果可视化 | `python -m scripts.show_rl_result` |
+| RL 消融结果可视化 | `python -m scripts.show_reward_ablation` |
 | 防护曲线可视化 | `python -m scripts.show_safeguard_curves` |
 | 计算并保存防护曲线 | `python -m scripts.calc_and_save_safeguard_curves` |
 | 最短运行时间曲线 | `python -m scripts.calc_min_operation_time_curve` |
 | 实际运营数据展示 | `python -m scripts.show_real_operation_data` |
 | 奖励函数可视化 | `python -m scripts.show_reward_function` |
 | 势函数可视化 | `python -m scripts.show_potential_function` |
+
+RL 工作流脚本 `train_rl`、`train_reward_ablation`、`evaluate_rl`、`analyze_training_data`、`show_rl_result`、`show_reward_ablation` 统一支持 `--dry-run`，用于预览有效配置、路径解析结果、运行矩阵或展示计划，而不执行训练/评估/分析/绘图。
 
 ---
 
@@ -91,10 +98,19 @@ MTTO/
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `--num-envs` | `int` | `1` | 并行采样环境数量 |
-| `--vec-env-type` | `str` | `subproc` | 向量化后端：`dummy` / `subproc`（仅 `num-envs>1` 时 `subproc` 生效） |
-| `--subproc-start-method` | `str` | `spawn` | 多进程启动方式：`spawn` / `forkserver` |
+| `--vec-env-type` | `str` | `subproc` | 向量化后端：`dummy` / `subproc`（仅 `num-envs>1` 时 `subproc` 生效 |
 | `--max-step-distance` | `float` | `100.0` | 相邻状态转移间的最大移动距离 (m) |
-| `--schedule-time-s` | `float` | `440.0` | 规划运行时间 (s) |
+| `--schedule-time-s` | `float` | `430.0` | 规划运行时间 (s) |
+
+
+#### 奖励配置与实验标识
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--reward-profile` | `str` | `full_shaping` | 奖励预设：`basic`、`basic_safety`、`basic_safety_docking`、`basic_safety_docking_punctuality`、`full_shaping` |
+| `--experiment-tag` | `str` | `None` | 附加实验标签，用于隔离输出目录与 TensorBoard 运行名 |
+
+`basic` 固定包含 `energy + comfort`；其余预设仅沿 `safety / docking / punctuality` 三个 shaping 维度逐级打开。
 
 #### PPO 超参数
 
@@ -111,7 +127,7 @@ MTTO/
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `--tensorboard-log-dir` | `str` | `mtto_ppo_tensorboard_logs` | TensorBoard 日志根目录 |
-| `--tb-log-name` | `str` | `trainning_log` | TensorBoard 日志子目录名 |
+| `--tb-log-name` | `str` | 自动生成 | TensorBoard 运行名称；未指定时会拼接 run-mode、reward-profile、时间参数和 experiment-tag |
 | `--log-interval` | `int` | `1`（tune）/ `5`（reproduce）/ `1`（monitor_best）/ `10`（best_only） | PPO 日志打印间隔 |
 | `--tb-sample-interval-steps` | `int` | `1` | 回调最小采样步长 |
 | `--env-diagnostics-interval-steps` | `int` | 同 `--tb-sample-interval-steps` | 环境诊断快照记录间隔 |
@@ -124,6 +140,9 @@ MTTO/
 | `--enable-monitor` | `bool` | 取决于 run-mode | 启用 VecMonitor 包装器 |
 | `--enable-env-diagnostics` | `bool` | 取决于 run-mode | 启用环境诊断信息采集 |
 | `--enable-auto-analysis` | `bool` | 取决于 run-mode | 启用训练后自动分析 |
+| `--dry-run` | `bool` | `False` | 仅解析有效训练配置、输出路径和运行元数据预览，不创建环境或启动训练 |
+
+每次训练会在实验输出根目录写入 `run_metadata.json`，记录 reward profile、run-mode、TensorBoard 运行名、schedule_time_s、max_step_distance 等信息，供评估与轨迹展示脚本复用。
 
 #### Best-Eval（训练期最优轨迹评估）
 
@@ -134,8 +153,19 @@ MTTO/
 | `--best-eval-trigger-interval` | `int` | `100000` | 评估触发间隔 |
 | `--best-eval-deterministic` | `bool` | `True` | 是否使用确定性策略推理 |
 
-评估规则：优先判断是否成功到达 → 比较总 reward → 停车误差 → 时刻误差 → 能耗。
-每次刷新最优时，在 `output/optimal/rl/best_{trigger_mode}/` 下保存模型、轨迹和指标。
+成功判定使用 `TrainService.max_stop_error` 与 `TrainService.max_arr_time_error_ratio`：
+- `stop_error_m <= max_stop_error`
+- `abs(time_error_s) / schedule_time <= max_arr_time_error_ratio`
+
+Best-eval 排序规则：
+- 一旦出现成功轨迹，所有成功轨迹都优先于所有未成功轨迹
+- 在成功轨迹之间，优先比较总能耗，越小越优
+- 如果当前还没有成功轨迹，才回退到按总 reward 比较
+- 停站误差与绝对时间误差仅作为稳定 tie-break
+
+每次刷新最优时，在实验目录下的 `best_{trigger_mode}/` 中保存模型、VecNormalize、`best_trajectory.npz` 与 `best_trajectory_metrics.json`。
+
+如果后续要执行 PBRS 消融实验，建议统一使用 `monitor_best` 模式，以保留 rollout 基础监控和训练期最优轨迹评估，同时避免高频诊断采样带来的额外开销。
 
 #### 训练后自动分析
 
@@ -161,6 +191,12 @@ python -m scripts.train_rl --run-mode reproduce
 # 关闭高频回调，保留基础监控 + best-eval
 python -m scripts.train_rl --run-mode monitor_best
 
+# 使用 basic+safety+docking 预设，并附加实验标签
+python -m scripts.train_rl --run-mode monitor_best --reward-profile basic_safety_docking --experiment-tag exp_a
+
+# 仅预览 monitor_best 训练配置与输出路径
+python -m scripts.train_rl --run-mode monitor_best --reward-profile basic_safety --dry-run
+
 # 低开销训练，仅保留 best-eval
 python -m scripts.train_rl --run-mode best_only
 
@@ -176,15 +212,75 @@ python -m scripts.train_rl --output-root output/optimal/rl/safety_speed/ --sched
 
 ---
 
+### RL 消融训练 · `train_reward_ablation`
+
+按四种 PBRS 奖励方案批量串行训练 PPO，并强制运行在 `monitor_best` 语义下。该脚本不是 `train_rl` 的全量参数代理，而是一个精简入口：只暴露 `monitor_best` 仍然有意义的训练参数；`--run-mode`、`--reward-profile`、`--output-root`、`--tb-log-name`、所有 `--enable-*` 开关、高频 callback flush 参数和自动分析参数都被隐藏并由脚本内部固定。
+
+默认 reward case 顺序如下：
+- `basic`
+- `basic_safety`
+- `basic_safety_docking`
+- `basic_safety_docking_punctuality`
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--ablation-output-root` | `str` | `output/optimal/rl/ablation` | 消融批次输出根目录 |
+| `--ablation-tag` | `str` | `None` | 批次标签；若存在重复训练，会自动附加 repeat 标识 |
+| `--reward-profiles` | `list[str]` | 上述四种默认 case | 指定 reward case 子集或重排顺序 |
+| `--repeats` | `int` | `1` | 每种情形的重复训练次数 |
+| `--seed-list` | `list[int]` | `None` | 显式指定每次重复的 seed；指定后优先于 `--repeats` / `--base-seed` |
+| `--base-seed` | `int` | `None` | 当 `repeats > 1` 时按 `base-seed + repeat_index` 推导各轮 seed |
+| `--schedule-time-s` | `float` | `430.0` | 规划运行时间 |
+| `--max-step-distance` | `float` | `100.0` | 相邻状态转移最大移动距离 |
+| `--reward-discount` | `float` | `0.99` | 回报折扣因子 |
+| `--num-envs` | `int` | `1` | 训练环境数量 |
+| `--vec-env-type` | `str` | `subproc` | 向量化环境后端（启动方式自动选择） |
+| `--rollout-steps-per-update` | `int` | `2048` | PPO rollout 步数 |
+| `--n-steps-per-env` | `int` | 自动推导 | 每个环境的步数 |
+| `--total-timesteps` | `int` | `200000` | 总训练步数 |
+| `--tensorboard-log-dir` | `str` | `mtto_ppo_tb_logs` | TensorBoard 日志根目录 |
+| `--log-interval` | `int` | 沿用 `monitor_best` 默认 | PPO 日志打印间隔 |
+| `--best-eval-trigger-mode` | `str` | `steps` | 训练期 best-eval 触发模式 |
+| `--best-eval-trigger-interval` | `int` | `100000` | 训练期 best-eval 触发间隔 |
+| `--best-eval-deterministic` | `bool` | `True` | best-eval 是否使用确定性策略 |
+| `--device` | `str` | `cpu` | 运行设备 |
+| `--dry-run` | `bool` | `False` | 仅展开 reward case × repeat × seed 的运行矩阵，不启动训练 |
+
+消融脚本沿用相同策略：当启用 `subproc` 且并行环境数大于 1 时，自动优先 `forkserver`，否则使用 `spawn`。
+
+批次执行过程中会在 `--ablation-output-root` 下维护 `ablation_manifest.json`，记录每个 case / repeat 的输出路径、TensorBoard 运行名、run metadata 路径和执行状态，供后续 `show_reward_ablation` 直接消费。
+
+```bash
+# 默认四种 case，各跑一次
+python -m scripts.train_reward_ablation --base-seed 42
+
+# 两次重复训练，按同一基准 seed 派生 42 / 43
+python -m scripts.train_reward_ablation \
+    --ablation-output-root output/optimal/rl/ablation_exp_1 \
+    --ablation-tag exp_1 \
+    --repeats 2 \
+    --base-seed 42
+
+# 只跑两个 case，并预览运行矩阵
+python -m scripts.train_reward_ablation \
+    --reward-profiles basic basic_safety_docking \
+    --seed-list 7 8 \
+    --dry-run
+```
+
+---
+
 ### RL 评估 · `evaluate_rl`
 
-加载训练好的 PPO 模型，在单环境中执行评估 rollout，可选录制视频。
+加载训练好的 PPO 模型，在单环境中执行评估 rollout，可选录制视频。若 `--load-dir` 所在实验目录存在 `run_metadata.json`，评估会优先复用其中的 `schedule_time_s`、`reward_discount`、`max_step_distance` 与 `reward_profile`；只有在显式传参时才覆盖这些值。
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `--load-dir` | `str` | `output/optimal/rl/final/` | 模型与 VecNormalize 文件所在目录 |
-| `--reward-discount` | `float` | `0.99` | 折扣因子（重建环境用） |
-| `--step-distance` | `float` | `100.0` | 环境最大步距 (m) |
+| `--reward-discount` | `float` | 从 `run_metadata.json` 读取，否则 `0.99` | 折扣因子（重建环境用） |
+| `--schedule-time-s` | `float` | 从 `run_metadata.json` 读取，否则 `430.0` | 规划运行时间 |
+| `--step-distance` | `float` | 从 `run_metadata.json` 读取，否则 `100.0` | 环境最大步距 (m) |
+| `--reward-profile` | `str` | 从 `run_metadata.json` 读取，否则 `full_shaping` | 评估所使用的奖励预设 |
 | `--device` | `str` | `cpu` | 推理设备 |
 | `--deterministic` | `bool` | `True` | 是否使用确定性策略 |
 | `--record-video` | `bool` | `False` | 是否录制评估视频 |
@@ -194,6 +290,9 @@ python -m scripts.train_rl --output-root output/optimal/rl/safety_speed/ --sched
 | `--video-length` | `int` | `10000` | 最大录制步数 |
 | `--video-trigger-step` | `int` | `0` | 视频录制触发步数 |
 | `--enable-env-diagnostics` | `bool` | `False` | 启用环境诊断信息采集 |
+| `--dry-run` | `bool` | `False` | 仅解析有效评估配置、训练元数据回填结果与输入输出路径，不加载模型或运行 rollout |
+
+评估成功后可保存 `final_trajectory.npz` 与 `final_trajectory_metrics.json`。最终轨迹指标会显式写入 `trajectory_source=final`，并与训练期的最优轨迹共用同一套 selection metadata 结构。
 
 ```bash
 # 默认评估
@@ -206,6 +305,15 @@ python -m scripts.evaluate_rl --record-video
 python -m scripts.evaluate_rl \
     --load-dir output/optimal/rl/.../final/ \
     --device cuda
+
+# 覆盖训练元数据中的 reward profile 与时间参数
+python -m scripts.evaluate_rl \
+    --load-dir output/optimal/rl/.../final/ \
+    --reward-profile basic_safety_docking \
+    --schedule-time-s 430.0
+
+# 仅预览有效评估配置
+python -m scripts.evaluate_rl --load-dir output/optimal/rl/.../final/ --dry-run
 ```
 
 ---
@@ -236,6 +344,7 @@ python -m scripts.evaluate_rl \
 | `--sampling-quality-mode` | `str` | `warn_only` | `warn_only` / `strict_fail` |
 | `--export-csv` | `bool` | `False` | 导出 CSV 产物 |
 | `--include-snapshots` | `bool` | `False` | 包含原始 step/episode 快照 |
+| `--dry-run` | `bool` | `False` | 仅解析日志分析配置与输出路径，不执行分析 |
 
 ```bash
 # 默认分析（轻量输出）
@@ -252,6 +361,9 @@ python -m scripts.analyze_training_data \
 # 严格采样质量闸门
 python -m scripts.analyze_training_data \
     --sampling-quality-mode strict_fail
+
+# 仅预览分析配置
+python -m scripts.analyze_training_data --run-name trainning_log_1 --dry-run
 ```
 
 ---
@@ -374,18 +486,73 @@ python -m scripts.show_dp_result --no-safeguard
 
 ### RL 结果可视化 · `show_rl_result`
 
-加载已保存的 RL 最优轨迹及指标，叠加防护曲线背景渲染。
+加载已保存的 RL 单条轨迹及指标，叠加防护曲线背景渲染。该入口统一支持：
+- 训练期间按步数评估得到的 `best_steps`
+- 训练期间按回合评估得到的 `best_episodes`
+- 训练结束后单独评估得到的 `final`
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `--curve-dir` | `str` | `output/optimal/rl/best` | 递归搜索曲线文件的目录 |
+| `--curve-dir` | `str` | `output/optimal/rl` | RL 输出根目录或任一实验子目录 |
+| `--trajectory-source` | `str` | `best` | 轨迹来源：`best` / `best_steps` / `best_episodes` / `final` |
 | `--no-safeguard` | `flag` | — | 不绘制防护曲线背景 |
 | `--factor` | `float` | `0.99` | 防护曲线渲染因子 |
+| `--dry-run` | `bool` | `False` | 仅解析将加载的轨迹产物与 metrics 路径，不读取数据或显示图窗 |
 
 ```bash
 python -m scripts.show_rl_result
-python -m scripts.show_rl_result --curve-dir output/optimal/rl/best_steps
+python -m scripts.show_rl_result --curve-dir output/optimal/rl --trajectory-source best_steps
+python -m scripts.show_rl_result --curve-dir output/optimal/rl --trajectory-source best_episodes
+python -m scripts.show_rl_result --curve-dir output/optimal/rl --trajectory-source final
+python -m scripts.show_rl_result --curve-dir output/optimal/rl --trajectory-source final --dry-run
 python -m scripts.show_rl_result --no-safeguard
+```
+
+---
+
+### RL 消融结果可视化 · `show_reward_ablation`
+
+读取 `train_reward_ablation` 生成的 `ablation_manifest.json`，并完成两类展示：
+- 平均回合奖励与平均回合长度曲线
+- 最终或“最优”轨迹
+
+曲线数据直接来自每个 run 的 `final/episode_metrics.npz`，即训练期间由 `EpisodeMetricsCollector` 收集的 `steps`、`ep_mean_reward`、`ep_mean_len`。轨迹展示默认按 reward profile 分子图绘制，且每个子图标题不承载详细指标，而是在左上角使用 SCI 风格的 panel label，例如 `(a)`、`(b)`、`(c)`、`(d)`。与轨迹有关的详细指标会统一输出到终端摘要，包括 panel label 与 reward profile 的映射、选中的 repeat/seed、success、total_reward、total_energy_j、time_error_s、stop_error_m 以及 artifact 路径。
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--ablation-root` | `str` | `output/optimal/rl/ablation` | 消融批次输出根目录，必须包含 `ablation_manifest.json` |
+| `--trajectory-source` | `str` | `best` | 轨迹来源：`best` / `best_steps` / `best_episodes` / `final` |
+| `--curve-layout` | `str` | `overlay` | 曲线布局：`overlay` / `separate` |
+| `--trajectory-layout` | `str` | `separate` | 轨迹布局：首版固定按 reward profile 分子图展示 |
+| `--reward-profiles` | `list[str]` | `None` | 仅展示指定 reward profile 子集 |
+| `--no-safeguard` | `flag` | — | 轨迹图不绘制 safeguard 背景 |
+| `--factor` | `float` | `0.99` | safeguard 背景渲染因子 |
+| `--dry-run` | `bool` | `False` | 仅解析 manifest、episode_metrics 路径、候选轨迹与代表 repeat 选择结果，不加载数组或弹图窗 |
+
+代表轨迹的 repeat 选择规则复用训练期“最优轨迹”的既有语义：
+- 成功轨迹优先于未成功轨迹
+- 成功轨迹之间按总能耗更低优先
+- 若都未成功，则按总 reward 更高优先
+
+```bash
+# 默认展示：曲线叠加 + best 轨迹分子图
+python -m scripts.show_reward_ablation --ablation-root output/optimal/rl/ablation
+
+# 展示最终轨迹
+python -m scripts.show_reward_ablation \
+    --ablation-root output/optimal/rl/ablation \
+    --trajectory-source final
+
+# 只展示两个 reward profile，并把曲线切为 separate 布局
+python -m scripts.show_reward_ablation \
+    --ablation-root output/optimal/rl/ablation \
+    --reward-profiles basic basic_safety \
+    --curve-layout separate
+
+# 仅预览将加载的曲线文件与代表轨迹，不弹图窗
+python -m scripts.show_reward_ablation \
+    --ablation-root output/optimal/rl/ablation \
+    --dry-run
 ```
 
 ---

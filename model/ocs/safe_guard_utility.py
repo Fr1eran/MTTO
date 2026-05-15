@@ -1,11 +1,13 @@
-import numpy as np
-from numpy.typing import NDArray, ArrayLike
-from matplotlib.axes import Axes
-from typing import Sequence, overload
+from collections.abc import Sequence
+from typing import overload
 
-from utils.indexing_utils import get_interval_index
-from utils.curve_geometry import pad_2curve_lists, cal_regions
+import numpy as np
+from matplotlib.axes import Axes
+from numpy.typing import ArrayLike, NDArray
+
+from utils.curve_geometry import cal_regions, pad_2curve_lists
 from utils.curve_plot import concatenate_curves_with_NaN, draw_regions
+from utils.indexing_utils import get_interval_index
 
 ScalarNumeric = float | np.floating
 
@@ -23,20 +25,21 @@ class SafeGuardUtility:
         factor : 限速因子
 
     Methods:
-        get_latest_traction_and_braking_intervention_points() : 根据速度反查最小位置和最大位置
+        get_latest_traction_and_braking_intervention_points()
+        : 根据速度反查最小位置和最大位置
         detect_danger() : 检查速度是否超出限速或落入危险速度域
         render() : 按图层选择性绘制原有和新增防护曲线/危险点
     """
 
-    # 默认危险域视图：使用交叉点后的局部 min/max 曲线与危险区域。
+    # 默认危险域视图: 使用交叉点后的局部 min/max 曲线与危险区域。
     DANGER_VIEW_LAYERS: tuple[str, ...] = (
         "speed_limit",
         "danger_region",
         "min_curve_part",
         "max_curve_part",
-        "idp_points",
+        # "idp_points",
     )
-    # 默认全量曲线视图：展示完整 levi/brake/min/max 曲线。
+    # 默认全量曲线视图: 展示完整 levi/brake/min/max 曲线。
     FULL_CURVE_VIEW_LAYERS: tuple[str, ...] = (
         "speed_limit",
         "levi_curve_full",
@@ -44,7 +47,7 @@ class SafeGuardUtility:
         "min_curve_full",
         "max_curve_full",
     )
-    # 固定绘制顺序：避免图层遮挡关系因调用顺序变化而不稳定。
+    # 固定绘制顺序: 避免图层遮挡关系因调用顺序变化而不稳定。
     _LAYER_RENDER_ORDER: tuple[str, ...] = (
         "speed_limit",
         "danger_region",
@@ -68,7 +71,7 @@ class SafeGuardUtility:
         "min_curve_full",
         "max_curve_full",
     })
-    # 同名曲线“局部段”和“全量曲线”互斥，避免语义冲突与重复绘制。
+    # 同名曲线“局部段”和“全量曲线”互斥, 避免语义冲突与重复绘制。
     _MUTUALLY_EXCLUSIVE_LAYER_PAIRS: tuple[tuple[str, str], ...] = (
         ("min_curve_part", "min_curve_full"),
         ("max_curve_part", "max_curve_full"),
@@ -115,7 +118,7 @@ class SafeGuardUtility:
 
         self.gamma = factor
 
-        # render/detect 所需的区域缓存，首次使用时按需计算
+        # render/detect 所需的区域缓存, 首次使用时按需计算
         self._region_cache_ready = False
         self._idp_points_x = np.asarray([], dtype=np.float64)
         self._idp_points_y = np.asarray([], dtype=np.float64)
@@ -133,7 +136,7 @@ class SafeGuardUtility:
         self._max_curves_parts_speed_con = np.asarray([], dtype=np.float64)
         self._num_regions = 0
 
-        # 完整曲线渲染缓存，首次渲染完整曲线时按需计算
+        # 完整曲线渲染缓存, 首次渲染完整曲线时按需计算
         self._full_curve_cache_ready = False
         self._levi_curves_pos_con = np.asarray([], dtype=np.float64)
         self._levi_curves_speed_con = np.asarray([], dtype=np.float64)
@@ -146,7 +149,7 @@ class SafeGuardUtility:
 
     @staticmethod
     def _sanitize_curve(curve: NDArray[np.floating]) -> NDArray[np.float64]:
-        """标准化防护曲线，并将速度数组投影为单调不增。"""
+        """标准化防护曲线, 并将速度数组投影为单调不增。"""
 
         curve_arr = np.asarray(curve, dtype=np.float64)
         if curve_arr.ndim != 2 or curve_arr.shape[0] != 2:
@@ -193,10 +196,10 @@ class SafeGuardUtility:
     def _normalize_render_layers(self, layers: Sequence[str] | None) -> tuple[str, ...]:
         """规范化图层参数并执行合法性校验。
 
-        规则：
-            1. layers 为 None 时，使用默认危险域视图。
+        规则:
+            1. layers 为 None 时, 使用默认危险域视图。
             2. 拒绝未知图层名。
-            3. 拒绝互斥图层组合（min/max 的 part 与 full 不可并存）。
+            3. 拒绝互斥图层组合(min/max 的 part 与 full 不可并存)。
         """
         if layers is None:
             return self.DANGER_VIEW_LAYERS
@@ -211,7 +214,8 @@ class SafeGuardUtility:
         if unknown_layers:
             raise ValueError(
                 "Unknown render layers: "
-                f"{unknown_layers}. Supported layers: {sorted(self._VALID_RENDER_LAYERS)}"
+                f"{unknown_layers}. Supported layers: \
+                  {sorted(self._VALID_RENDER_LAYERS)}"
             )
 
         for layer_a, layer_b in self._MUTUALLY_EXCLUSIVE_LAYER_PAIRS:
@@ -223,7 +227,7 @@ class SafeGuardUtility:
         return normalized_layers
 
     def _ensure_region_cache(self) -> None:
-        """按需构建危险域相关缓存（render/detect 共用）。"""
+        """按需构建危险域相关缓存(render/detect 共用)。"""
         if self._region_cache_ready:
             return
 
@@ -365,7 +369,7 @@ class SafeGuardUtility:
 
         # 根据当前状态计算最小防护速度
         if current_sp == -1:
-            # 还在加速区，尚未步进到第一个辅助停车区
+            # 还在加速区, 尚未步进到第一个辅助停车区
             current_min_speed = 0.0
         else:
             # 已开始停车点步进
@@ -579,15 +583,15 @@ class SafeGuardUtility:
             layers: 需要绘制的图层序列。
                 - None 时使用 `DANGER_VIEW_LAYERS`。
                 - 允许混合选择危险域图层和完整曲线图层。
-                - 互斥约束：`min_curve_part` 与 `min_curve_full` 不能同时出现；
+                - 互斥约束: `min_curve_part` 与 `min_curve_full` 不能同时出现;
                   `max_curve_part` 与 `max_curve_full` 不能同时出现。
-            speed_unit: 速度显示单位，仅支持 "m/s" 与 "km/h"。
+            speed_unit: 速度显示单位, 仅支持 "m/s" 与 "km/h"。
         """
         selected_layers = self._normalize_render_layers(layers)
         if not selected_layers:
             return
 
-        # 仅在需要时触发对应预处理缓存，避免不必要的计算开销。
+        # 仅在需要时触发对应预处理缓存, 避免不必要的计算开销。
         if any(layer in self._REGION_RENDER_LAYERS for layer in selected_layers):
             self._ensure_region_cache()
         if any(layer in self._FULL_CURVE_RENDER_LAYERS for layer in selected_layers):
@@ -627,7 +631,7 @@ class SafeGuardUtility:
                     speed_scale=speed_scale,
                     label="minimum speed curve",
                     color="blue",
-                    linewidth=1.5,
+                    linewidth=1.2,
                 )
             elif layer == "max_curve_part":
                 self._plot_curve(
@@ -637,7 +641,7 @@ class SafeGuardUtility:
                     speed_scale=speed_scale,
                     label="maximum speed curve",
                     color="red",
-                    linewidth=1.5,
+                    linewidth=1.2,
                 )
             elif layer == "levi_curve_full":
                 self._plot_curve(
@@ -648,7 +652,7 @@ class SafeGuardUtility:
                     label="levitation safety curve",
                     color="blue",
                     linestyle="dashed",
-                    linewidth=1.5,
+                    linewidth=1.2,
                 )
             elif layer == "brake_curve_full":
                 self._plot_curve(
@@ -659,7 +663,7 @@ class SafeGuardUtility:
                     label="braking safety curve",
                     color="red",
                     linestyle="dashed",
-                    linewidth=1.5,
+                    linewidth=1.2,
                 )
             elif layer == "min_curve_full":
                 self._plot_curve(
@@ -667,9 +671,9 @@ class SafeGuardUtility:
                     pos=self._min_curves_pos_con,
                     speed=self._min_curves_speed_con,
                     speed_scale=speed_scale,
-                    label="minimum speed curve (full)",
+                    label="minimum speed curve",
                     color="blue",
-                    linewidth=1.5,
+                    linewidth=1.2,
                 )
             elif layer == "max_curve_full":
                 self._plot_curve(
@@ -677,9 +681,9 @@ class SafeGuardUtility:
                     pos=self._max_curves_pos_con,
                     speed=self._max_curves_speed_con,
                     speed_scale=speed_scale,
-                    label="maximum speed curve (full)",
+                    label="maximum speed curve",
                     color="red",
-                    linewidth=1.5,
+                    linewidth=1.2,
                 )
             elif layer == "idp_points":
                 ax.scatter(
