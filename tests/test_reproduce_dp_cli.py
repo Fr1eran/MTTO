@@ -4,14 +4,14 @@ import pytest
 
 from scripts.reproduce_dp import (
     _build_cli_parser,
-    _format_float_token,
     _resolve_output_dir,
     _validate_cli_args,
     main,
 )
-
+from utils.io_utils import format_float_token
 
 # ---- CLI defaults ----
+
 
 def test_reproduce_dp_cli_defaults() -> None:
     parser = _build_cli_parser()
@@ -30,15 +30,22 @@ def test_reproduce_dp_cli_defaults() -> None:
 
 # ---- CLI explicit args ----
 
+
 def test_reproduce_dp_cli_accepts_explicit_args() -> None:
     parser = _build_cli_parser()
     args = parser.parse_args([
-        "--output-root", "output/custom",
-        "--schedule-time-s", "500.5",
-        "--delta-speed-mps", "0.05",
-        "--max-outer-iterations", "50",
-        "--precompute-mode", "parallel",
-        "--precompute-workers", "4",
+        "--output-root",
+        "output/custom",
+        "--schedule-time-s",
+        "500.5",
+        "--delta-speed-mps",
+        "0.05",
+        "--max-outer-iterations",
+        "50",
+        "--precompute-mode",
+        "parallel",
+        "--precompute-workers",
+        "4",
     ])
 
     assert args.output_root == "output/custom"
@@ -52,9 +59,12 @@ def test_reproduce_dp_cli_accepts_explicit_args() -> None:
 def test_reproduce_dp_cli_stage_division_uniform() -> None:
     parser = _build_cli_parser()
     args = parser.parse_args([
-        "--stage-division", "uniform",
-        "--uniform-step-size", "25.0",
-        "--sub-stage-count", "50",
+        "--stage-division",
+        "uniform",
+        "--uniform-step-size",
+        "25.0",
+        "--sub-stage-count",
+        "50",
         "--skip-disk-cache",
     ])
 
@@ -67,8 +77,10 @@ def test_reproduce_dp_cli_stage_division_uniform() -> None:
 def test_reproduce_dp_cli_stage_division_variable() -> None:
     parser = _build_cli_parser()
     args = parser.parse_args([
-        "--stage-division", "variable",
-        "--sub-stage-count", "20",
+        "--stage-division",
+        "variable",
+        "--sub-stage-count",
+        "20",
     ])
 
     assert args.stage_division == "variable"
@@ -78,6 +90,7 @@ def test_reproduce_dp_cli_stage_division_variable() -> None:
 
 
 # ---- _format_float_token ----
+
 
 @pytest.mark.parametrize(
     "value,expected",
@@ -89,10 +102,11 @@ def test_reproduce_dp_cli_stage_division_variable() -> None:
     ],
 )
 def test_format_float_token(value: float, expected: str) -> None:
-    assert _format_float_token(value) == expected
+    assert format_float_token(value) == expected
 
 
 # ---- _resolve_output_dir ----
+
 
 def test_resolve_output_dir_variable() -> None:
     path = _resolve_output_dir(
@@ -141,9 +155,11 @@ def test_resolve_output_dir_different_divisions_produce_distinct_paths() -> None
 
 # ---- _validate_cli_args ----
 
+
 class TestValidateCliArgs:
     def test_accepts_valid_args(self) -> None:
         import argparse
+
         ns = argparse.Namespace(
             output_root="out",
             schedule_time_s=440.0,
@@ -172,6 +188,7 @@ class TestValidateCliArgs:
     )
     def test_rejects_invalid_value(self, field: str, value: object) -> None:
         import argparse
+
         ns = argparse.Namespace(
             output_root="out",
             schedule_time_s=440.0,
@@ -186,6 +203,7 @@ class TestValidateCliArgs:
 
 
 # ---- main() rejects invalid args ----
+
 
 @pytest.mark.parametrize(
     "argv",

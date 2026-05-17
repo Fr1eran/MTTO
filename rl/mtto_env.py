@@ -980,7 +980,7 @@ class MTTOEnv(gym.Env):
 
         if not truncated:
             # 基本生存奖励
-            small_bonus = 200.0 / self.max_episode_steps
+            small_bonus = 100.0 / self.max_episode_steps
             if terminated:
                 reward_total = self._get_reward_goal()
             else:
@@ -1309,7 +1309,7 @@ class MTTOEnv(gym.Env):
         scale = 1.0 + 1.0 * np.exp(-0.001 * distance_to_target)
 
         # 最终势能为两侧惩罚之和
-        return scale * (phi_max + phi_min) * 2.0
+        return scale * (phi_max + phi_min) * 3.0
 
     def _potential_safety_position(
         self, pos: float, min_pos: float, max_pos: float, target_pos: float
@@ -1342,7 +1342,7 @@ class MTTOEnv(gym.Env):
         delta_acc = abs(self.last_state["acc"] - self.current_acc)
         norm_jerk = delta_acc / (self.train_service.max_acc_change)
 
-        val = -14.0 / self.max_episode_steps * norm_jerk**2
+        val = -15.0 / self.max_episode_steps * norm_jerk**2
 
         return val
 
@@ -1402,8 +1402,8 @@ class MTTOEnv(gym.Env):
     def _potential_punctuality_v3(self, pos: float, operation_time: float):
         K_base = 1.0
         K_safe = 1.0
-        K_late = 20.0
-        alpha = 2.0
+        K_late = 5.0
+        alpha = 3.0
 
         time_redundancy_norm = self._calc_time_redundancy_norm(pos, operation_time)
 
@@ -1454,9 +1454,10 @@ class MTTOEnv(gym.Env):
         x_hat = dist_error_abs / self.target_attraction_domain_radius
         v_hat = speed / self.vehicle.max_speed
 
-        phi_strong = 30.0 * np.exp(-x_hat / 0.1 - v_hat / 0.2)
+        phi_weak = 2.0 * np.exp(-x_hat - v_hat)
+        phi_strong = 30.0 * np.exp(-x_hat / 0.05 - v_hat / 0.1)
 
-        return phi_strong
+        return phi_weak + phi_strong
 
     def _potential_docking_v2(self, pos: float, speed: float):
         dist_error_abs = abs(self.train_service.target_position - pos)
@@ -1475,7 +1476,7 @@ class MTTOEnv(gym.Env):
         _docking = self._calc_docking_score()
         _punctuality = self._calc_punctuality_score()
         reward_docking = _docking * 20.0
-        reward_punctuality = _docking * _punctuality * 10.0
+        reward_punctuality = _docking * _punctuality * 30.0
 
         if self.enable_diagnostics and self._collect_step_diagnostics:
             self.rewards_info["docking"] = reward_docking

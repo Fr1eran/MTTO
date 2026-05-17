@@ -24,9 +24,9 @@ def _write_episode_metrics(
     output_path = final_output_dir / EPISODE_METRICS_FILENAME
     np.savez(
         output_path,
-        steps=np.asarray(steps, dtype=np.float64),
-        ep_mean_reward=np.asarray(rewards, dtype=np.float64),
-        ep_mean_len=np.asarray(lengths, dtype=np.float64),
+        index=np.asarray(steps, dtype=np.float64),
+        ep_reward=np.asarray(rewards, dtype=np.float64),
+        ep_len=np.asarray(lengths, dtype=np.float64),
     )
     return output_path
 
@@ -69,6 +69,19 @@ def _build_manifest(tmp_path: Path) -> tuple[dict[str, object], Path]:
         steps=[0, 100, 200],
         rewards=[3.0, 4.0, 5.0],
         lengths=[8.0, 7.0, 6.0],
+    )
+
+    _write_run_metadata(
+        run_basic_r1 / "final",
+        {"rollout_record_trigger_mode": "steps"},
+    )
+    _write_run_metadata(
+        run_basic_r2 / "final",
+        {"rollout_record_trigger_mode": "steps"},
+    )
+    _write_run_metadata(
+        run_safety_r1 / "final",
+        {"rollout_record_trigger_mode": "steps"},
     )
 
     _write_trajectory_artifact(
@@ -199,6 +212,84 @@ def test_select_representative_trajectory_candidates_uses_existing_comparison_ke
     assert selected[0].repeat_index == 1
     assert selected[0].seed == 11
     assert selected[0].metrics["total_energy_j"] == 4_000.0
+
+
+def _write_run_metadata(
+    output_dir: Path,
+    metadata: dict[str, object],
+) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    metadata_path = output_dir / "run_metadata.json"
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    return metadata_path
+
+
+def test_build_curve_aggregates_episode_mode(tmp_path: Path) -> None:
+    ablation_root = tmp_path / "ablation_ep"
+    run_r1 = ablation_root / "430p0_100p0__basic__r01"
+    run_r2 = ablation_root / "430p0_100p0__basic__r02"
+
+    _write_episode_metrics(
+        run_r1 / "final",
+        steps=[0, 1, 2],
+        rewards=[1.0, 3.0, 5.0],
+        lengths=[10.0, 9.0, 8.0],
+    )
+    _write_episode_metrics(
+        run_r2 / "final",
+        steps=[0, 1, 2, 3],
+        rewards=[2.0, 4.0, 6.0, 8.0],
+        lengths=[12.0, 10.0, 8.0, 6.0],
+    )
+    _write_run_metadata(
+        run_r1 / "final",
+        {"rollout_record_trigger_mode": "episodes"},
+    )
+    _write_run_metadata(
+        run_r2 / "final",
+        {"rollout_record_trigger_mode": "episodes"},
+    )
+
+    manifest = {
+        "ablation_output_root": str(ablation_root),
+        "reward_profiles": ["basic"],
+        "runs": [
+            {
+                "reward_profile_name": "basic",
+                "repeat_index": 0,
+                "seed": 10,
+                "output_dir": str(run_r1),
+                "final_output_dir": str(run_r1 / "final"),
+                "status": "completed",
+            },
+            {
+                "reward_profile_name": "basic",
+                "repeat_index": 1,
+                "seed": 11,
+                "output_dir": str(run_r2),
+                "final_output_dir": str(run_r2 / "final"),
+                "status": "completed",
+            },
+        ],
+    }
+    manifest_path = ablation_root / "ablation_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    aggregates, warnings = build_curve_aggregates(manifest)
+
+    assert warnings == []
+    assert len(aggregates) == 1
+    aggregate = aggregates[0]
+    assert aggregate.record_mode == "episodes"
+    assert aggregate.valid_repeat_count == 2
+    np.testing.assert_allclose(aggregate.reference_steps, [0.0, 1.0, 2.0, 3.0])
+    np.testing.assert_allclose(
+        aggregate.mean_reward, [1.5, 3.5, 5.5, 8.0]
+    )
+    np.testing.assert_allclose(
+        aggregate.mean_length, [11.0, 9.5, 8.0, 6.0]
+    )
 
 
 def test_panel_label_for_index_uses_sci_style() -> None:

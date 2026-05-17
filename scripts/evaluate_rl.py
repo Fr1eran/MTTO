@@ -16,12 +16,12 @@ from rl.experiment_utils import (
     RL_FINAL_MODEL_FILENAME,
     RL_FINAL_VECNORMALIZE_FILENAME,
     build_run_metadata,
-    build_scenario,
     load_run_metadata,
     resolve_reward_profile,
     reward_profile_names,
 )
 from utils.io_utils import save_curve_and_metrics
+from utils.scenario import build_scenario
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

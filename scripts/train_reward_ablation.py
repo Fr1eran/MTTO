@@ -60,6 +60,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--rollout-record-trigger-mode",
+        type=str,
+        choices=["steps", "episodes"],
+        default="episodes",
+        help=(
+            "EpisodeMetricsCollector 记录触发模式。"
+            "steps=按训练步数采样滑动窗口均值；"
+            "episodes=每个回合终止时记录该回合的原始 reward 与长度。"
+        ),
+    )
+    parser.add_argument(
         "--repeats",
         type=int,
         default=1,
@@ -249,6 +260,7 @@ def _apply_ablation_overrides(
         "best_eval_trigger_mode",
         "best_eval_trigger_interval",
         "best_eval_deterministic",
+        "rollout_record_trigger_mode",
         "device",
     ):
         setattr(train_args, field_name, getattr(args, field_name))

@@ -33,15 +33,10 @@ from rl.env_factory import make_env
 from rl.evaluation import build_single_eval_env
 from rl.mtto_env import RewardConfig
 from rl.training_analysis import AnalysisConfig, run_training_analysis
-from utils.data_loader import (
-    load_auxiliary_stopping_areas_ap_and_dp,
-    load_safeguard_curves,
-    load_slopes,
-    load_speed_limits,
-    load_stations_goal_positions,
-)
-from utils.io_utils import load_optimized_curve_and_metrics
+from utils.io_utils import format_float_token, load_optimized_curve_and_metrics
 from utils.plot_utils import set_global_plot_style
+from utils.scenario import build_safeguard_utility, build_scenario
+from utils.trajectory import OptimizedCurveArtifact
 
 __all__ = [
     # 常量
@@ -57,14 +52,10 @@ __all__ = [
     # dataclass
     "RewardProfile",
     "TrainingRunSpec",
-    "ResolvedRLCurveArtifact",
     # reward profile
     "reward_profile_names",
     "resolve_reward_profile",
     "build_reward_config",
-    # 场景
-    "build_scenario",
-    "build_rl_safeguard_utility",
     # 路径 & 元数据
     "resolve_output_dir",
     "resolve_tb_log_name",
@@ -110,7 +101,6 @@ RL_TRAJECTORY_SOURCE_CHOICES: tuple[str, ...] = (
 _RL_BEST_TRAJECTORY_FILENAME = "best_trajectory.npz"
 _RL_FINAL_TRAJECTORY_FILENAME = "final_trajectory.npz"
 _RL_TRAJECTORY_METRICS_SUFFIX = "_metrics.json"
-
 # =============================================================================
 # 训练超参数常量
 # =============================================================================
@@ -205,19 +195,11 @@ class TrainingRunSpec:
     best_eval_trigger_mode: str
     best_eval_trigger_interval: int
     best_eval_deterministic: bool
+    rollout_record_trigger_mode: str
     total_timesteps: int
     device: str
     seed: int | None
     dry_run: bool
-
-
-@dataclass(frozen=True)
-class ResolvedRLCurveArtifact:
-    """RL 轨迹产物的文件定位信息。"""
-
-    npz_path: str
-    metrics_path: str
-    trajectory_source: str
 
 
 # =============================================================================
@@ -335,18 +317,6 @@ def build_reward_config(profile_name: str | None = None) -> RewardConfig:
 # =============================================================================
 
 
-def _format_float_token(value: float, *, decimals: int = 10) -> str:
-    if not np.isfinite(value):
-        raise ValueError("value must be finite")
-
-    token = f"{round(float(value), decimals):.{decimals}f}".rstrip("0").rstrip(".")
-    if token in {"", "-0", "0"}:
-        token = "0"
-    if "." not in token:
-        token = f"{token}.0"
-    return token.replace("-", "neg").replace(".", "p")
-
-
 def _sanitize_identifier_token(value: str) -> str:
     normalized = re.sub(r"[^0-9a-zA-Z]+", "_", str(value).strip().lower())
     normalized = normalized.strip("_")
@@ -363,8 +333,8 @@ def _build_experiment_token(
     experiment_tag: str | None = None,
     include_default_profile: bool = False,
 ) -> str:
-    schedule_token = _format_float_token(schedule_time_s)
-    max_step_token = _format_float_token(max_step_distance)
+    schedule_token = format_float_token(schedule_time_s)
+    max_step_token = format_float_token(max_step_distance)
     profile = resolve_reward_profile(reward_profile_name)
 
     tokens = [f"{schedule_token}_{max_step_token}"]
@@ -456,11 +426,24 @@ def build_run_metadata(
     reward_discount: float,
     run_mode: str | None = None,
     experiment_tag: str | None = None,
-    tensorboard_log_dir: str | None = None,
-    tb_log_name: str | None = None,
+    total_timesteps: int | None = None,
+    enable_tb: bool | None = None,
+    enable_callback: bool | None = None,
+    enable_monitor: bool | None = None,
+    enable_env_diagnostics: bool | None = None,
+    enable_auto_analysis: bool | None = None,
+    enable_best_eval: bool | None = None,
+    num_envs: int | None = None,
+    vec_env_type: str | None = None,
+    subproc_start_method: str | None = None,
+    n_steps_per_env: int | None = None,
+    rollout_steps_per_update: int | None = None,
+    rollout_record_trigger_mode: str | None = None,
     output_dir: str | None = None,
     final_output_dir: str | None = None,
     best_eval_output_dir: str | None = None,
+    tensorboard_log_dir: str | None = None,
+    tb_log_name: str | None = None,
 ) -> dict[str, Any]:
     """构建单次训练运行的元数据字典，用于持久化记录实验参数。
 
@@ -471,43 +454,87 @@ def build_run_metadata(
         reward_discount: 奖励折扣因子 γ。
         run_mode: 运行模式。
         experiment_tag: 实验标签。
-        tensorboard_log_dir: TensorBoard 日志目录。
-        tb_log_name: TensorBoard 日志名称。
+        total_timesteps: PPO 总训练步数。
+        enable_tb: 是否启用 TensorBoard。
+        enable_callback: 是否启用 TensorBoard 回调。
+        enable_monitor: 是否启用 VecMonitor。
+        enable_env_diagnostics: 是否启用环境诊断信息。
+        enable_auto_analysis: 是否启用训练后自动分析。
+        enable_best_eval: 是否启用最优轨迹评估。
+        num_envs: 训练环境数量。
+        vec_env_type: 向量化环境后端类型。
+        subproc_start_method: SubprocVecEnv 启动方法。
+        n_steps_per_env: 每个环境的 rollout 步数。
+        rollout_steps_per_update: 单次 PPO 更新的总 rollout 步数。
+        rollout_record_trigger_mode: EpisodeMetricsCollector 记录触发模式。
         output_dir: 输出目录。
         final_output_dir: 最终产出目录。
         best_eval_output_dir: 最优轨迹评估产出目录。
+        tensorboard_log_dir: TensorBoard 日志目录。
+        tb_log_name: TensorBoard 日志名称。
 
     Returns:
         包含实验完整元数据的字典。
     """
     metadata = reward_profile.to_metadata()
+
     metadata.update({
         "schedule_time_s": float(schedule_time_s),
         "max_step_distance": float(max_step_distance),
         "reward_discount": float(reward_discount),
-        "experiment_token": _build_experiment_token(
-            schedule_time_s=schedule_time_s,
-            max_step_distance=max_step_distance,
-            reward_profile_name=reward_profile.name,
-            experiment_tag=experiment_tag,
-            include_default_profile=True,
-        ),
     })
 
-    if run_mode is not None:
-        metadata["run_mode"] = str(run_mode)
+    metadata["experiment_token"] = _build_experiment_token(
+        schedule_time_s=schedule_time_s,
+        max_step_distance=max_step_distance,
+        reward_profile_name=reward_profile.name,
+        experiment_tag=experiment_tag,
+        include_default_profile=True,
+    )
     if experiment_tag is not None:
         metadata["experiment_tag"] = str(experiment_tag)
-    if tensorboard_log_dir is not None:
-        metadata["tensorboard_log_dir"] = str(tensorboard_log_dir)
-    if tb_log_name is not None:
-        metadata["tb_log_name"] = str(tb_log_name)
+    if run_mode is not None:
+        metadata["run_mode"] = str(run_mode)
+    if total_timesteps is not None:
+        metadata["total_timesteps"] = int(total_timesteps)
+
+    if enable_tb is not None:
+        metadata["enable_tb"] = bool(enable_tb)
+    if enable_callback is not None:
+        metadata["enable_callback"] = bool(enable_callback)
+    if enable_monitor is not None:
+        metadata["enable_monitor"] = bool(enable_monitor)
+    if enable_env_diagnostics is not None:
+        metadata["enable_env_diagnostics"] = bool(enable_env_diagnostics)
+    if enable_auto_analysis is not None:
+        metadata["enable_auto_analysis"] = bool(enable_auto_analysis)
+    if enable_best_eval is not None:
+        metadata["enable_best_eval"] = bool(enable_best_eval)
+
+    if num_envs is not None:
+        metadata["num_envs"] = int(num_envs)
+    if vec_env_type is not None:
+        metadata["vec_env_type"] = str(vec_env_type)
+    if subproc_start_method is not None:
+        metadata["subproc_start_method"] = str(subproc_start_method)
+    if n_steps_per_env is not None:
+        metadata["n_steps_per_env"] = int(n_steps_per_env)
+    if rollout_steps_per_update is not None:
+        metadata["rollout_steps_per_update"] = int(rollout_steps_per_update)
+
+    if rollout_record_trigger_mode is not None:
+        metadata["rollout_record_trigger_mode"] = str(rollout_record_trigger_mode)
+
     if output_dir is not None:
         metadata["output_dir"] = str(output_dir)
     if final_output_dir is not None:
         metadata["final_output_dir"] = str(final_output_dir)
     if best_eval_output_dir is not None:
         metadata["best_eval_output_dir"] = str(best_eval_output_dir)
+    if tensorboard_log_dir is not None:
+        metadata["tensorboard_log_dir"] = str(tensorboard_log_dir)
+    if tb_log_name is not None:
+        metadata["tb_log_name"] = str(tb_log_name)
 
     return metadata
 
@@ -558,98 +585,6 @@ def load_run_metadata(search_dir: str | os.PathLike[str]) -> dict[str, Any]:
 
 
 # =============================================================================
-# 场景构建
-# =============================================================================
-
-
-def build_scenario(
-    *, schedule_time_s: float
-) -> tuple[VehicleInfo, TrackInfo, SafeGuardUtility, TrainService]:
-    """根据规划运行时间构建磁浮列车运行优化场景的四元组。
-
-    Args:
-        schedule_time_s: 规划运行时间 (s)。
-
-    Returns:
-        (VehicleInfo, TrackInfo, SafeGuardUtility, TrainService) 四元组。
-    """
-    slopes, slope_intervals = load_slopes()
-    speed_limits, speed_limit_intervals = load_speed_limits(
-        to_mps=True, dtype=np.float64
-    )
-    accessible_points, dangerous_points = load_auxiliary_stopping_areas_ap_and_dp()
-    longyang_start_position, putong_end_position = load_stations_goal_positions()
-    levi_curves_list, brake_curves_list, min_curves_list, max_curves_list = (
-        load_safeguard_curves(
-            "levi_curves_list",
-            "brake_curves_list",
-            "min_curves_list",
-            "max_curves_list",
-        )
-    )
-
-    safeguard_utility = SafeGuardUtility(
-        speed_limits=speed_limits,
-        speed_limit_intervals=speed_limit_intervals,
-        levi_curves_list=levi_curves_list,
-        brake_curves_list=brake_curves_list,
-        min_curves_list=min_curves_list,
-        max_curves_list=max_curves_list,
-        factor=0.95,
-    )
-    track = TrackInfo(
-        slopes=slopes,
-        slope_intervals=slope_intervals,
-        speed_limits=speed_limits,
-        speed_limit_intervals=speed_limit_intervals,
-        ASA_aps=accessible_points,
-        ASA_dps=dangerous_points,
-    )
-    vehicle = VehicleInfo(mass=317.5, numoftrainsets=5, length=128.5)
-    train_service = TrainService(
-        start_position=longyang_start_position,
-        start_speed=0.0,
-        target_position=putong_end_position,
-        schedule_time=schedule_time_s,
-        max_acc_change=0.75,
-        max_arr_time_error_ratio=0.05,
-        max_stop_error=0.3,
-    )
-
-    return vehicle, track, safeguard_utility, train_service
-
-
-def build_rl_safeguard_utility(factor: float = 0.95) -> SafeGuardUtility:
-    """构建用于 RL 轨迹可视化时渲染安全防护边界的 SafeGuardUtility 实例。
-
-    Args:
-        factor: 安全系数，默认 0.95。
-
-    Returns:
-        SafeGuardUtility 实例。
-    """
-    speed_limits, speed_limit_intervals = load_speed_limits(to_mps=True)
-    levi_curves_list, brake_curves_list, min_curves_list, max_curves_list = (
-        load_safeguard_curves(
-            "levi_curves_list",
-            "brake_curves_list",
-            "min_curves_list",
-            "max_curves_list",
-        )
-    )
-
-    return SafeGuardUtility(
-        speed_limits=speed_limits,
-        speed_limit_intervals=speed_limit_intervals,
-        levi_curves_list=levi_curves_list,
-        brake_curves_list=brake_curves_list,
-        min_curves_list=min_curves_list,
-        max_curves_list=max_curves_list,
-        factor=factor,
-    )
-
-
-# =============================================================================
 # 训练配置解析
 # =============================================================================
 
@@ -694,6 +629,7 @@ def build_default_training_args() -> argparse.Namespace:
         best_eval_trigger_mode="steps",
         best_eval_trigger_interval=100_000,
         best_eval_deterministic=True,
+        rollout_record_trigger_mode="steps",
         seed=None,
         device="cpu",
         dry_run=False,
@@ -919,26 +855,25 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
         reward_discount=reward_discount,
         run_mode=run_mode,
         experiment_tag=args.experiment_tag,
-        tensorboard_log_dir=args.tensorboard_log_dir if enable_tb else None,
-        tb_log_name=effective_tb_log_name if enable_tb else None,
+        total_timesteps=int(args.total_timesteps),
+        enable_tb=bool(enable_tb),
+        enable_callback=bool(enable_callback),
+        enable_monitor=bool(enable_monitor),
+        enable_env_diagnostics=bool(enable_env_diagnostics),
+        enable_auto_analysis=bool(enable_auto_analysis),
+        enable_best_eval=bool(enable_best_eval),
+        num_envs=int(num_envs),
+        vec_env_type=resolved_vec_env_type,
+        subproc_start_method=subproc_start_method,
+        n_steps_per_env=int(n_steps_per_env),
+        rollout_steps_per_update=int(rollout_steps_per_update),
+        rollout_record_trigger_mode=args.rollout_record_trigger_mode,
         output_dir=output_dir,
         final_output_dir=final_output_dir,
         best_eval_output_dir=best_eval_output_dir if enable_best_eval else None,
+        tensorboard_log_dir=args.tensorboard_log_dir if enable_tb else None,
+        tb_log_name=effective_tb_log_name if enable_tb else None,
     )
-    run_metadata.update({
-        "enable_tb": bool(enable_tb),
-        "enable_callback": bool(enable_callback),
-        "enable_monitor": bool(enable_monitor),
-        "enable_env_diagnostics": bool(enable_env_diagnostics),
-        "enable_auto_analysis": bool(enable_auto_analysis),
-        "enable_best_eval": bool(enable_best_eval),
-        "num_envs": int(num_envs),
-        "vec_env_type": resolved_vec_env_type,
-        "subproc_start_method": subproc_start_method,
-        "n_steps_per_env": int(n_steps_per_env),
-        "rollout_steps_per_update": int(rollout_steps_per_update),
-        "total_timesteps": int(args.total_timesteps),
-    })
 
     return TrainingRunSpec(
         schedule_time_s=schedule_time_s,
@@ -977,6 +912,7 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
         best_eval_trigger_mode=args.best_eval_trigger_mode,
         best_eval_trigger_interval=max(1, int(args.best_eval_trigger_interval)),
         best_eval_deterministic=bool(args.best_eval_deterministic),
+        rollout_record_trigger_mode=args.rollout_record_trigger_mode,
         total_timesteps=int(args.total_timesteps),
         device=args.device,
         seed=args.seed,
@@ -1122,6 +1058,7 @@ def train_single_experiment(
                 resolved_spec.final_output_dir, "episode_metrics.npz"
             ),
             collect_interval_steps=max(1, resolved_spec.n_steps_per_env),
+            record_trigger_mode=resolved_spec.rollout_record_trigger_mode,
         )
     )
     if resolved_spec.enable_callback:
@@ -1287,7 +1224,7 @@ def resolve_rl_curve_artifact(
     *,
     curve_dir: str,
     trajectory_source: str = "best",
-) -> ResolvedRLCurveArtifact:
+) -> OptimizedCurveArtifact:
     """在训练输出目录中定位最优或最终轨迹产物。
 
     Args:
@@ -1295,7 +1232,7 @@ def resolve_rl_curve_artifact(
         trajectory_source: 轨迹来源标识 (best/best_steps/best_episodes/final)。
 
     Returns:
-        _ResolvedRLCurveArtifact 实例。
+        OptimizedCurveArtifact 实例。
 
     Raises:
         ValueError: 未知的 trajectory_source。
@@ -1325,15 +1262,14 @@ def resolve_rl_curve_artifact(
     )
     metrics_path = _resolve_rl_metrics_path(curve_path)
 
-    return ResolvedRLCurveArtifact(
+    return OptimizedCurveArtifact(
         npz_path=str(curve_path),
         metrics_path=str(metrics_path),
-        trajectory_source=trajectory_source,
     )
 
 
 def load_rl_curve_artifact(
-    artifact: ResolvedRLCurveArtifact,
+    artifact: OptimizedCurveArtifact,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
     """加载轨迹产物中的位置数组、速度数组和指标字典。
 
@@ -1349,12 +1285,11 @@ def load_rl_curve_artifact(
         dtype=np.float32,
         use_metrics_cache=True,
     )
-    if "trajectory_source" not in metrics:
-        metrics["trajectory_source"] = artifact.trajectory_source
+
     return pos_arr, speed_arr, metrics
 
 
-def load_rl_curve_metrics(artifact: ResolvedRLCurveArtifact) -> dict[str, object]:
+def load_rl_curve_metrics(artifact: OptimizedCurveArtifact) -> dict[str, object]:
     """仅加载轨迹产物的指标字典（不加载位置/速度数组）。
 
     Args:
@@ -1371,8 +1306,7 @@ def load_rl_curve_metrics(artifact: ResolvedRLCurveArtifact) -> dict[str, object
         raise FileNotFoundError(f"Metrics file does not exist: {artifact.metrics_path}")
     with metrics_path.open("r", encoding="utf-8") as file_obj:
         metrics = json.load(file_obj)
-    if "trajectory_source" not in metrics:
-        metrics["trajectory_source"] = artifact.trajectory_source
+
     return metrics
 
 
@@ -1600,7 +1534,7 @@ def render_rl_curve_on_axes(
     """
     if not no_safeguard:
         resolved_safeguard = (
-            safeguard if safeguard is not None else build_rl_safeguard_utility(factor)
+            safeguard if safeguard is not None else build_safeguard_utility(factor)
         )
         resolved_safeguard.render(ax=ax, layers=SafeGuardUtility.DANGER_VIEW_LAYERS)
 

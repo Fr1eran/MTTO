@@ -430,17 +430,30 @@ class EpisodeMetricsCollector(BaseCallback):
         self,
         output_path: str,
         collect_interval_steps: int = 1024,
+        record_trigger_mode: str = "steps",
         verbose: int = 0,
     ):
         super().__init__(verbose)
+        if record_trigger_mode not in ("steps", "episodes"):
+            raise ValueError(
+                f"record_trigger_mode must be 'steps' or 'episodes', "
+                f"got '{record_trigger_mode}'"
+            )
         self._output_path = output_path
+        self._record_trigger_mode = record_trigger_mode
         self._collect_interval = max(1, int(collect_interval_steps))
         self._last_collect_step: int = -self._collect_interval
         self._steps: list[int] = []
         self._rewards: list[float] = []
         self._lengths: list[float] = []
+        self._episode_indices: list[int] = []
 
     def _on_step(self) -> bool:
+        if self._record_trigger_mode == "episodes":
+            return self._on_step_episodes_mode()
+        return self._on_step_steps_mode()
+
+    def _on_step_steps_mode(self) -> bool:
         current_step = int(self.num_timesteps)
         if current_step - self._last_collect_step < self._collect_interval:
             return True
@@ -458,11 +471,56 @@ class EpisodeMetricsCollector(BaseCallback):
         self._last_collect_step = current_step
         return True
 
+    def _on_step_episodes_mode(self) -> bool:
+        dones_raw = self.locals.get("dones")
+        if dones_raw is None:
+            return True
+
+        try:
+            dones = list(dones_raw)
+        except TypeError:
+            return True
+
+        infos = self.locals.get("infos", [])
+        if not isinstance(infos, (list, tuple)):
+            return True
+
+        for env_idx, done in enumerate(dones):
+            if not bool(done):
+                continue
+            if env_idx >= len(infos):
+                continue
+            info = infos[env_idx]
+            if not isinstance(info, dict):
+                continue
+            episode_info = info.get("episode")
+            if not isinstance(episode_info, dict):
+                continue
+            r_val = episode_info.get("r")
+            l_val = episode_info.get("l")
+            if r_val is None or l_val is None:
+                continue
+
+            self._episode_indices.append(len(self._episode_indices))
+            self._rewards.append(float(r_val))
+            self._lengths.append(float(l_val))
+
+        return True
+
     def _on_training_end(self) -> None:
-        if self._steps:
-            np.savez(
-                self._output_path,
-                steps=np.asarray(self._steps, dtype=np.float64),
-                ep_mean_reward=np.asarray(self._rewards, dtype=np.float64),
-                ep_mean_len=np.asarray(self._lengths, dtype=np.float64),
-            )
+        if self._record_trigger_mode == "episodes":
+            if self._episode_indices:
+                np.savez(
+                    self._output_path,
+                    index=np.asarray(self._episode_indices, dtype=np.float64),
+                    ep_reward=np.asarray(self._rewards, dtype=np.float64),
+                    ep_len=np.asarray(self._lengths, dtype=np.float64),
+                )
+        else:
+            if self._steps:
+                np.savez(
+                    self._output_path,
+                    index=np.asarray(self._steps, dtype=np.float64),
+                    ep_reward=np.asarray(self._rewards, dtype=np.float64),
+                    ep_len=np.asarray(self._lengths, dtype=np.float64),
+                )

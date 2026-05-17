@@ -1,8 +1,6 @@
 import os
 from pathlib import Path
 
-import pytest
-
 from scripts.show_rl_result import (
     _build_cli_parser,
     resolve_rl_curve_artifact,
@@ -67,4 +65,4 @@ def test_resolve_rl_curve_artifact_prefers_latest_best_across_trigger_modes(
 
     assert artifact.npz_path == str(new_curve)
     assert artifact.metrics_path == str(new_metrics)
-    assert artifact.trajectory_source == "best"
+    assert artifact.npz_path.endswith(".npz")

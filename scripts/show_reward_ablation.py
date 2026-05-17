@@ -14,16 +14,17 @@ from rl.experiment_utils import (
     RL_TRAJECTORY_SOURCE_CHOICES,
     add_panel_label,
     apply_rl_curve_plot_style,
-    build_rl_safeguard_utility,
     build_rl_trajectory_comparison_key,
     format_rl_trajectory_terminal_summary,
     load_rl_curve_artifact,
     load_rl_curve_metrics,
+    load_run_metadata,
     render_rl_curve_on_axes,
     resolve_reward_profile,
     resolve_rl_curve_artifact,
     reward_profile_names,
 )
+from utils.scenario import build_safeguard_utility
 
 ABLATION_MANIFEST_FILENAME = "ablation_manifest.json"
 EPISODE_METRICS_FILENAME = "episode_metrics.npz"
@@ -45,14 +46,16 @@ class CurveRunArtifact:
     repeat_index: int
     seed: int | None
     episode_metrics_path: str
-    steps: np.ndarray
-    ep_mean_reward: np.ndarray
-    ep_mean_len: np.ndarray
+    record_mode: str
+    index: np.ndarray
+    ep_reward: np.ndarray
+    ep_len: np.ndarray
 
 
 @dataclass(frozen=True)
 class CurveAggregateResult:
     reward_profile_name: str
+    record_mode: str
     reference_steps: np.ndarray
     mean_reward: np.ndarray
     std_reward: np.ndarray
@@ -193,25 +196,31 @@ def _iter_completed_profile_runs(
 
 def _load_episode_metrics_npz(
     episode_metrics_path: Path,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    with np.load(episode_metrics_path) as data:
-        required_keys = ("steps", "ep_mean_reward", "ep_mean_len")
-        missing_keys = [key for key in required_keys if key not in data]
-        if missing_keys:
-            raise KeyError(
-                f"Missing keys {missing_keys} in episode metrics file: {episode_metrics_path}"  # noqa: E501
-            )
-        steps = np.asarray(data["steps"], dtype=np.float64)
-        ep_mean_reward = np.asarray(data["ep_mean_reward"], dtype=np.float64)
-        ep_mean_len = np.asarray(data["ep_mean_len"], dtype=np.float64)
+    record_mode: str | None = None,
+) -> dict[str, Any]:
+    if record_mode is None:
+        raise ValueError(
+            "Cannot determine record_mode: "
+            f"run_metadata.json missing or lacks rollout_record_trigger_mode for {episode_metrics_path}"  # noqa: E501
+        )
 
-    if steps.size == 0 or ep_mean_reward.size == 0 or ep_mean_len.size == 0:
+    with np.load(episode_metrics_path) as data:
+        index = np.asarray(data["index"], dtype=np.float64)
+        ep_reward = np.asarray(data["ep_reward"], dtype=np.float64)
+        ep_len = np.asarray(data["ep_len"], dtype=np.float64)
+
+    if index.size == 0 or ep_reward.size == 0 or ep_len.size == 0:
         raise ValueError(f"Empty episode metrics arrays in: {episode_metrics_path}")
-    if not (steps.size == ep_mean_reward.size == ep_mean_len.size):
+    if not (index.size == ep_reward.size == ep_len.size):
         raise ValueError(
             f"Mismatched episode metrics array lengths in: {episode_metrics_path}"
         )
-    return steps, ep_mean_reward, ep_mean_len
+    return {
+        "record_mode": record_mode,
+        "index": index,
+        "ep_reward": ep_reward,
+        "ep_len": ep_len,
+    }
 
 
 def build_curve_aggregates(
@@ -229,6 +238,7 @@ def build_curve_aggregates(
         warnings.extend(profile_warnings)
 
         curve_runs: list[CurveRunArtifact] = []
+        profile_record_mode: str | None = None
         for run_entry in profile_runs:
             final_output_dir = run_entry.get("final_output_dir")
             if not isinstance(final_output_dir, str) or not final_output_dir:
@@ -248,13 +258,39 @@ def build_curve_aggregates(
                 )
                 continue
 
+            run_metadata = load_run_metadata(final_output_dir)
+            run_record_mode = run_metadata.get("rollout_record_trigger_mode")
+            if isinstance(run_record_mode, str) and run_record_mode in (
+                "steps",
+                "episodes",
+            ):
+                record_mode = run_record_mode
+            else:
+                record_mode = None
+
             try:
-                steps, ep_mean_reward, ep_mean_len = _load_episode_metrics_npz(
-                    episode_metrics_path
+                loaded = _load_episode_metrics_npz(
+                    episode_metrics_path, record_mode=record_mode
                 )
-            except (KeyError, ValueError) as exc:
+            except KeyError as exc:
                 warnings.append(str(exc))
                 continue
+
+            record_mode = str(loaded["record_mode"])
+            if profile_record_mode is None:
+                profile_record_mode = record_mode
+            elif profile_record_mode != record_mode:
+                warnings.append(
+                    f"Skipped curve run for profile={reward_profile_name}, "
+                    f"repeat={run_entry.get('repeat_index')} "
+                    f"because record_mode mismatch: expected={profile_record_mode}, "
+                    f"got={record_mode}"
+                )
+                continue
+
+            index_arr: np.ndarray = loaded["index"]  # type: ignore[assignment]
+            ep_reward_arr: np.ndarray = loaded["ep_reward"]  # type: ignore[assignment]
+            ep_len_arr: np.ndarray = loaded["ep_len"]  # type: ignore[assignment]
 
             curve_runs.append(
                 CurveRunArtifact(
@@ -266,9 +302,10 @@ def build_curve_aggregates(
                         else None
                     ),
                     episode_metrics_path=str(episode_metrics_path),
-                    steps=steps,
-                    ep_mean_reward=ep_mean_reward,
-                    ep_mean_len=ep_mean_len,
+                    record_mode=record_mode,
+                    index=index_arr,
+                    ep_reward=ep_reward_arr,
+                    ep_len=ep_len_arr,
                 )
             )
 
@@ -278,34 +315,40 @@ def build_curve_aggregates(
             )
             continue
 
-        reference_steps = np.unique(
-            np.concatenate([curve_run.steps for curve_run in curve_runs])
-        )
+        resolved_record_mode = profile_record_mode or "steps"
+
+        if resolved_record_mode == "episodes":
+            max_len = max(int(len(cr.index)) for cr in curve_runs)
+            reference_x = np.arange(max_len, dtype=np.float64)
+        else:
+            reference_x = np.unique(np.concatenate([cr.index for cr in curve_runs]))
+
         aligned_rewards = np.vstack([
             np.interp(
-                reference_steps,
-                curve_run.steps,
-                curve_run.ep_mean_reward,
+                reference_x,
+                cr.index,
+                cr.ep_reward,
                 left=np.nan,
                 right=np.nan,
             )
-            for curve_run in curve_runs
+            for cr in curve_runs
         ])
         aligned_lengths = np.vstack([
             np.interp(
-                reference_steps,
-                curve_run.steps,
-                curve_run.ep_mean_len,
+                reference_x,
+                cr.index,
+                cr.ep_len,
                 left=np.nan,
                 right=np.nan,
             )
-            for curve_run in curve_runs
+            for cr in curve_runs
         ])
 
         aggregates.append(
             CurveAggregateResult(
                 reward_profile_name=reward_profile_name,
-                reference_steps=reference_steps,
+                record_mode=resolved_record_mode,
+                reference_steps=reference_x,
                 mean_reward=np.nanmean(aligned_rewards, axis=0),
                 std_reward=np.nanstd(aligned_rewards, axis=0),
                 mean_length=np.nanmean(aligned_lengths, axis=0),
@@ -440,7 +483,10 @@ def _plot_curve_aggregates(
                 color=color,
                 alpha=0.18,
             )
-            ax_reward.set_xlabel("Training steps")
+            x_label = (
+                "Episode" if aggregate.record_mode == "episodes" else "Training steps"
+            )
+            ax_reward.set_xlabel(x_label)
             ax_reward.set_ylabel("Mean episode reward")
             ax_reward.grid(True, alpha=0.3)
 
@@ -454,7 +500,7 @@ def _plot_curve_aggregates(
                 color=color,
                 alpha=0.18,
             )
-            ax_length.set_xlabel("Training steps")
+            ax_length.set_xlabel(x_label)
             ax_length.set_ylabel("Mean episode length")
             ax_length.grid(True, alpha=0.3)
 
@@ -475,11 +521,12 @@ def _plot_curve_aggregates(
     for aggregate in aggregates:
         color = _resolve_profile_color(aggregate.reward_profile_name)
         profile_label = resolve_reward_profile(aggregate.reward_profile_name).label
+        x_label = "Episode" if aggregate.record_mode == "episodes" else "Training steps"
         ax_reward.plot(
             aggregate.reference_steps,
             aggregate.mean_reward,
             color=color,
-            label=profile_label,
+            label=f"{profile_label} ({aggregate.record_mode})",
         )
         ax_reward.fill_between(
             aggregate.reference_steps,
@@ -492,7 +539,7 @@ def _plot_curve_aggregates(
             aggregate.reference_steps,
             aggregate.mean_length,
             color=color,
-            label=profile_label,
+            label=f"{profile_label} ({aggregate.record_mode})",
         )
         ax_length.fill_between(
             aggregate.reference_steps,
@@ -502,10 +549,10 @@ def _plot_curve_aggregates(
             alpha=0.18,
         )
 
-    ax_reward.set_xlabel("Training steps")
+    ax_reward.set_xlabel(x_label)
     ax_reward.set_ylabel("Mean episode reward")
     ax_reward.grid(True, alpha=0.3)
-    ax_length.set_xlabel("Training steps")
+    ax_length.set_xlabel(x_label)
     ax_length.set_ylabel("Mean episode length")
     ax_length.grid(True, alpha=0.3)
     fig.legend(
@@ -539,7 +586,7 @@ def _plot_selected_trajectories(
         squeeze=False,
     )
     flat_axes = list(axes.flatten())
-    safeguard = None if no_safeguard else build_rl_safeguard_utility(factor)
+    safeguard = None if no_safeguard else build_safeguard_utility(factor)
 
     for index, candidate in enumerate(selected_candidates):
         ax = flat_axes[index]

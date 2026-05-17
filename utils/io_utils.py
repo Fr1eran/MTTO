@@ -9,6 +9,29 @@ import numpy as np
 from numpy.typing import NDArray
 
 
+def format_float_token(value: float, *, decimals: int = 10) -> str:
+    """将浮点数格式化为路径安全的 token 字符串。
+
+    小数点替换为 'p'，负号替换为 'neg'，末尾零删除。
+    例如: 430.0 → '430p0', 0.1 → '0p1', -1.5 → 'neg1p5'。
+
+    Args:
+        value: 有限浮点数。
+        decimals: 四舍五入后保留的小数位数，默认 10。
+
+    Raises:
+        ValueError: value 不是有限数时抛出。
+    """
+    if not np.isfinite(value):
+        raise ValueError("value must be finite")
+    token = f"{round(float(value), decimals):.{decimals}f}".rstrip("0").rstrip(".")
+    if token in {"", "-0", "0"}:
+        token = "0"
+    if "." not in token:
+        token = f"{token}.0"
+    return token.replace("-", "neg").replace(".", "p")
+
+
 @lru_cache(maxsize=32)
 def _LoadJsonCached(path: str) -> dict[str, Any]:
     with open(path, encoding="utf-8") as f:
