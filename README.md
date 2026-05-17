@@ -16,7 +16,8 @@
   - [DP 基线复现 · `reproduce_dp`](#dp-基线复现--reproduce_dp)
   - [DP 结果可视化 · `show_dp_result`](#dp-结果可视化--show_dp_result)
   - [RL 结果可视化 · `show_rl_result`](#rl-结果可视化--show_rl_result)
-    - [RL 消融结果可视化 · `show_reward_ablation`](#rl-消融结果可视化--show_reward_ablation)
+  - [DP 与 RL 对比可视化 · `compare_rl_dp`](#dp-与-rl-对比可视化--compare_rl_dp)
+  - [RL 消融结果可视化 · `show_reward_ablation`](#rl-消融结果可视化--show_reward_ablation)
   - [防护曲线 · `show_safeguard_curves`](#防护曲线--show_safeguard_curves)
   - [计算并保存防护曲线 · `calc_and_save_safeguard_curves`](#计算并保存防护曲线--calc_and_save_safeguard_curves)
   - [最短运行时间曲线 · `calc_min_operation_time_curve`](#最短运行时间曲线--calc_min_operation_time_curve)
@@ -66,6 +67,7 @@ MTTO/
 | DP 基线复现 | `python -m scripts.reproduce_dp` |
 | DP 结果可视化 | `python -m scripts.show_dp_result` |
 | RL 结果可视化 | `python -m scripts.show_rl_result` |
+| DP 与 RL 对比可视化 | `python -m scripts.compare_rl_dp` |
 | RL 消融结果可视化 | `python -m scripts.show_reward_ablation` |
 | 防护曲线可视化 | `python -m scripts.show_safeguard_curves` |
 | 计算并保存防护曲线 | `python -m scripts.calc_and_save_safeguard_curves` |
@@ -506,6 +508,43 @@ python -m scripts.show_rl_result --curve-dir output/optimal/rl --trajectory-sour
 python -m scripts.show_rl_result --curve-dir output/optimal/rl --trajectory-source final
 python -m scripts.show_rl_result --curve-dir output/optimal/rl --trajectory-source final --dry-run
 python -m scripts.show_rl_result --no-safeguard
+```
+
+---
+
+### DP 与 RL 对比可视化 · `compare_rl_dp`
+
+在同一窗口内对比展示 DP 与 RL 所选最优轨迹，包含三联图：
+- 速度-位置最优轨迹叠加
+- 加速度随位置变化曲线
+- 累计总能耗（牵引+悬浮）随位置变化曲线
+
+该脚本默认行为：
+- DP 轨迹从 `output/optimal/dp` 递归搜索最新 `optimized_speed_curve.npz`
+- RL 轨迹从 `output/optimal/rl` 递归搜索，默认 `trajectory_source=best`
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--dp-curve-dir` | `str` | `output/optimal/dp` | DP 输出根目录，递归搜索最新曲线产物 |
+| `--rl-curve-dir` | `str` | `output/optimal/rl` | RL 输出根目录，递归搜索匹配轨迹产物 |
+| `--trajectory-source` | `str` | `best` | RL 轨迹来源：`best` / `best_steps` / `best_episodes` / `final` |
+| `--no-safeguard` | `flag` | — | 速度图不渲染 safeguard 背景 |
+| `--factor` | `float` | `0.99` | safeguard 背景渲染因子 |
+
+```bash
+# 默认：自动选择最新 DP 与 RL(best) 轨迹并显示三联图
+python -m scripts.compare_rl_dp
+
+# 指定 RL 轨迹来源为最终评估轨迹
+python -m scripts.compare_rl_dp --trajectory-source final
+
+# 指定 DP/RL 搜索目录
+python -m scripts.compare_rl_dp \
+    --dp-curve-dir output/optimal/dp \
+    --rl-curve-dir output/optimal/rl
+
+# 关闭 safeguard 背景并调整渲染因子
+python -m scripts.compare_rl_dp --no-safeguard --factor 0.97
 ```
 
 ---

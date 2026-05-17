@@ -271,14 +271,23 @@ def test_trajectory_tracking_can_be_enabled_without_rendering(mtto_env: MTTOEnv)
     mtto_env.enable_trajectory_tracking = True
     try:
         mtto_env.reset()
-        action = mtto_env.action_space.sample()
+        assert mtto_env.trajectory_pos is not None
+        assert mtto_env.trajectory_speed_mps is not None
+        assert len(mtto_env.trajectory_pos) == 1
+        assert len(mtto_env.trajectory_speed_mps) == 1
+
+        action = np.asarray([1.0], dtype=np.float32)
         mtto_env.step(action)
 
         assert mtto_env.render_mode is None
         assert mtto_env.trajectory_pos is not None
         assert mtto_env.trajectory_speed_mps is not None
-        assert len(mtto_env.trajectory_pos) >= 1
-        assert len(mtto_env.trajectory_speed_mps) >= 1
+        assert len(mtto_env.trajectory_pos) == 2
+        assert len(mtto_env.trajectory_speed_mps) == 2
+        assert mtto_env.trajectory_pos[-1] == pytest.approx(float(mtto_env.current_pos))
+        assert mtto_env.trajectory_speed_mps[-1] == pytest.approx(
+            abs(float(mtto_env.current_speed))
+        )
     finally:
         mtto_env.enable_trajectory_tracking = False
         mtto_env.reset()

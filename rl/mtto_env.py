@@ -817,11 +817,8 @@ class MTTOEnv(gym.Env):
         if self.enable_trajectory_tracking:
             # 记录轨迹数据
             self._record_trajectory(
-                pos=self.last_state["pos"],
-                speed=self.last_state["speed"],
-                acc=self.current_acc,
-                displacement=distance,
-                operation_time=operation_time,
+                pos=self.current_pos,
+                speed=self.current_speed,
             )
 
         # 获取可观测状态和信息
@@ -1531,39 +1528,15 @@ class MTTOEnv(gym.Env):
         self,
         pos: float,
         speed: float,
-        acc: float = 0.0,
-        displacement: float = 0.0,
-        operation_time: float = 0.0,
     ):
-        """记录完整的匀变速运动轨迹"""
+        """记录离散轨迹点。"""
         if not self.enable_trajectory_tracking:
             return
 
         assert self.trajectory_pos is not None
         assert self.trajectory_speed_mps is not None
-
-        # 如果是初始状态或者没有运动，只记录当前点
-        if abs(operation_time) < 1e-6 or abs(displacement) < 1e-6:
-            self.trajectory_pos.append(pos)
-            self.trajectory_speed_mps.append(abs(speed))
-            return
-
-        # 生成中间轨迹点数量（基于运动时间动态调整）
-        # 确保轨迹足够平滑，同时避免过多的点
-        num_points = max(5, min(100, int(operation_time * 4)))  # 5-100个点之间
-
-        # 生成时间序列
-        time_steps = np.linspace(0, operation_time, num_points)
-
-        # 向量化计算所有时间点的位置和速度（匀变速运动公式）
-        # 位置：s = s0 + v0*t + 0.5*a*t^2
-        pos_array = pos + speed * time_steps + 0.5 * acc * time_steps**2
-        # 速度：v = v0 + a*t
-        vel_array = speed + acc * time_steps
-
-        # 批量添加到历史记录中
-        self.trajectory_pos.extend(pos_array.tolist())
-        self.trajectory_speed_mps.extend(np.abs(vel_array).tolist())
+        self.trajectory_pos.append(float(pos))
+        self.trajectory_speed_mps.append(float(speed))
 
     def _reset_trajectory(self):
         """重置轨迹历史数据并记录初始状态"""
