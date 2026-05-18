@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from utils.trajectory import smooth_trajectory
+from utils.trajectory import recover_time_axis_from_trajectory, smooth_trajectory
 
 
 def test_smooth_trajectory_returns_expected_length_and_endpoints() -> None:
@@ -84,3 +84,51 @@ def test_smooth_trajectory_validates_options() -> None:
 
     with pytest.raises(ValueError, match="Unknown method"):
         smooth_trajectory(pos, speed, method="pchip")
+
+
+def test_recover_time_axis_from_trajectory_matches_uniform_motion() -> None:
+    pos = np.asarray([0.0, 1.0, 3.0], dtype=np.float64)
+    speed = np.asarray([1.0, 1.0, 1.0], dtype=np.float64)
+
+    time_arr = recover_time_axis_from_trajectory(pos, speed)
+
+    np.testing.assert_allclose(time_arr, np.asarray([0.0, 1.0, 3.0]))
+
+
+def test_recover_time_axis_from_trajectory_handles_repeated_position() -> None:
+    pos = np.asarray([0.0, 0.0, 5.0], dtype=np.float64)
+    speed = np.asarray([0.0, 0.0, 2.0], dtype=np.float64)
+
+    time_arr = recover_time_axis_from_trajectory(pos, speed)
+
+    assert time_arr[0] == pytest.approx(0.0)
+    assert time_arr[1] == pytest.approx(0.0)
+    assert time_arr[2] > time_arr[1]
+
+
+@pytest.mark.parametrize(
+    "pos,speed,error_msg",
+    [
+        (np.asarray([[0.0, 1.0]]), np.asarray([0.0, 1.0]), "1-D"),
+        (np.asarray([0.0, 1.0]), np.asarray([[0.0, 1.0]]), "1-D"),
+        (np.asarray([0.0, 1.0]), np.asarray([0.0]), "equal length"),
+    ],
+)
+def test_recover_time_axis_from_trajectory_validates_shapes(
+    pos: np.ndarray,
+    speed: np.ndarray,
+    error_msg: str,
+) -> None:
+    with pytest.raises(ValueError, match=error_msg):
+        recover_time_axis_from_trajectory(pos, speed)
+
+
+def test_recover_time_axis_from_trajectory_validates_tolerances() -> None:
+    pos = np.asarray([0.0, 1.0], dtype=np.float64)
+    speed = np.asarray([0.0, 1.0], dtype=np.float64)
+
+    with pytest.raises(ValueError, match=">= 0"):
+        recover_time_axis_from_trajectory(pos, speed, position_tolerance=-1.0)
+
+    with pytest.raises(ValueError, match=">= 0"):
+        recover_time_axis_from_trajectory(pos, speed, speed_tolerance=-1.0)

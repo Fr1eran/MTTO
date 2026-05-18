@@ -17,6 +17,7 @@
   - [DP 结果可视化 · `show_dp_result`](#dp-结果可视化--show_dp_result)
   - [RL 结果可视化 · `show_rl_result`](#rl-结果可视化--show_rl_result)
   - [DP 与 RL 对比可视化 · `compare_rl_dp`](#dp-与-rl-对比可视化--compare_rl_dp)
+    - [SPS 合规分析 · `analyze_sps_compliance`](#sps-合规分析--analyze_sps_compliance)
   - [RL 消融结果可视化 · `show_reward_ablation`](#rl-消融结果可视化--show_reward_ablation)
   - [防护曲线 · `show_safeguard_curves`](#防护曲线--show_safeguard_curves)
   - [计算并保存防护曲线 · `calc_and_save_safeguard_curves`](#计算并保存防护曲线--calc_and_save_safeguard_curves)
@@ -68,6 +69,7 @@ MTTO/
 | DP 结果可视化 | `python -m scripts.show_dp_result` |
 | RL 结果可视化 | `python -m scripts.show_rl_result` |
 | DP 与 RL 对比可视化 | `python -m scripts.compare_rl_dp` |
+| SPS 合规分析 | `python -m scripts.analyze_sps_compliance` |
 | RL 消融结果可视化 | `python -m scripts.show_reward_ablation` |
 | 防护曲线可视化 | `python -m scripts.show_safeguard_curves` |
 | 计算并保存防护曲线 | `python -m scripts.calc_and_save_safeguard_curves` |
@@ -545,6 +547,56 @@ python -m scripts.compare_rl_dp \
 
 # 关闭 safeguard 背景并调整渲染因子
 python -m scripts.compare_rl_dp --no-safeguard --factor 0.97
+```
+
+---
+
+### SPS 合规分析 · `analyze_sps_compliance`
+
+离线回放 DP 与 RL 轨迹在停车点步进机制（SPS）下的合规性，核心判据固定为：
+- 是否触发过步进请求（`triggered`）
+- 是否存在“因未满足 `T_s` 时延约束导致的 min/max 防护边界违规”（`delay_related_boundary_violation`）
+
+默认输出模式为 `text+plot`（文本摘要 + 主图）。主图仅在速度-位置平面展示，并标注：
+- `REQUEST_START` 位置
+- `STEP_COMPLETE` 位置
+
+当事件点密集时，可切换为仅保留 marker（不显示文本注释）。
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--dp-curve-dir` | `str` | `output/optimal/dp` | DP 输出根目录，递归搜索最新曲线产物 |
+| `--rl-curve-dir` | `str` | `output/optimal/rl` | RL 输出根目录，递归搜索匹配轨迹产物 |
+| `--trajectory-source` | `str` | `best` | RL 轨迹来源：`best` / `best_steps` / `best_episodes` / `final` |
+| `--schedule-time-s` | `float` | `None` | 可选覆盖场景构建使用的计划运行时间 |
+| `--step-delay-s` | `float` | `2.0` | SPS 回放中的步进平均时延 `T_s` |
+| `--boundary-eps` | `float` | `1e-6` | 边界违规判定数值容差 |
+| `--output-mode` | `str` | `text+plot` | 输出模式：`text` / `plot` / `json` / `text+plot` |
+| `--json-output-path` | `str` | `None` | 启用 json 输出时，可选写入路径 |
+| `--event-annotation` | `str` | `auto` | 标注模式：`auto` / `text` / `marker-only` |
+| `--max-text-annotations` | `int` | `12` | `auto` 模式下文本标注上限 |
+| `--no-safeguard` | `flag` | — | 主图不绘制 safeguard 背景 |
+| `--factor` | `float` | `0.99` | safeguard 渲染与回放边界使用的因子 |
+
+```bash
+# 默认：文本摘要 + 主图（含事件 marker）
+python -m scripts.analyze_sps_compliance
+
+# 仅输出文本
+python -m scripts.analyze_sps_compliance --output-mode text
+
+# 输出 JSON 并写入文件
+python -m scripts.analyze_sps_compliance \
+    --output-mode json \
+    --json-output-path output/optimal/sps_compliance_report.json
+
+# 主图启用 marker-only（不显示文本注释）
+python -m scripts.analyze_sps_compliance --event-annotation marker-only
+
+# 指定 RL 轨迹来源与 SPS 时延参数
+python -m scripts.analyze_sps_compliance \
+    --trajectory-source final \
+    --step-delay-s 2.0
 ```
 
 ---

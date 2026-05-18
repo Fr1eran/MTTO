@@ -12,6 +12,7 @@ from model.vehicle import VehicleInfo
 __all__ = [
     "OptimizedCurveArtifact",
     "smooth_trajectory",
+    "recover_time_axis_from_trajectory",
     "compute_segment_accelerations",
     "compute_comfort_metrics_from_trajectory",
     "compute_cumulative_energy_from_trajectory",
@@ -140,6 +141,73 @@ def smooth_trajectory(
     smooth_speed[-1] = float(speed[-1])
 
     return smooth_pos, smooth_speed
+
+
+def recover_time_axis_from_trajectory(
+    pos_arr: Sequence[float] | np.ndarray,
+    speed_arr: Sequence[float] | np.ndarray,
+    *,
+    position_tolerance: float = 1e-9,
+    speed_tolerance: float = 1e-9,
+) -> np.ndarray:
+    """按匀变速近似从离散位置/速度序列恢复累计时间轴。
+
+    该函数主要用于离线回放分析。返回长度与输入位置序列一致，
+    并满足 time_arr[0] = 0。
+
+    Args:
+        pos_arr: 位置序列 (m)，一维。
+        speed_arr: 速度序列 (m/s)，一维，与 pos_arr 等长。
+        position_tolerance: 判定零位移阈值 (m)，必须 >= 0。
+        speed_tolerance: 判定零速度/零加速度阈值，必须 >= 0。
+
+    Returns:
+        累计时间数组 (s)，长度与 pos_arr 相同。
+    """
+    pos = np.asarray(pos_arr, dtype=np.float64)
+    speed = np.asarray(speed_arr, dtype=np.float64)
+
+    if pos.ndim != 1 or speed.ndim != 1:
+        raise ValueError("pos_arr and speed_arr must be 1-D arrays")
+    if pos.size != speed.size:
+        raise ValueError("pos_arr and speed_arr must have equal length")
+    if position_tolerance < 0.0:
+        raise ValueError("position_tolerance must be >= 0")
+    if speed_tolerance < 0.0:
+        raise ValueError("speed_tolerance must be >= 0")
+
+    time_arr = np.zeros(pos.size, dtype=np.float64)
+    if pos.size < 2:
+        return time_arr
+
+    for idx in range(1, pos.size):
+        ds = float(pos[idx] - pos[idx - 1])
+        v0 = float(speed[idx - 1])
+        v1 = float(speed[idx])
+
+        if abs(ds) <= position_tolerance:
+            dt = 0.0
+        else:
+            avg_speed = 0.5 * (v0 + v1)
+            if abs(avg_speed) > speed_tolerance:
+                dt = abs(ds / avg_speed)
+            else:
+                delta_v_sq = v1**2 - v0**2
+                if abs(delta_v_sq) <= speed_tolerance:
+                    dt = 0.0
+                else:
+                    acc = delta_v_sq / (2.0 * ds)
+                    if abs(acc) <= speed_tolerance:
+                        dt = 0.0
+                    else:
+                        dt = abs((v1 - v0) / acc)
+
+        if not np.isfinite(dt) or dt < 0.0:
+            dt = 0.0
+
+        time_arr[idx] = time_arr[idx - 1] + dt
+
+    return time_arr
 
 
 def compute_segment_accelerations(
