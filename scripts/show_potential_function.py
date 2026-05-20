@@ -1,11 +1,16 @@
+import argparse
+from collections.abc import Callable, Sequence
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.figure import Figure
 
 from utils.data_loader import load_safeguard_curves
 from utils.plot_utils import set_global_plot_style
 
 
-def calc_potential_safety_speed(pos, speed, min_speed, max_speed, target_pos):
+def _potential_safety_speed(pos, speed, min_speed, max_speed, target_pos):
     """
     向量化安全势能函数
 
@@ -29,7 +34,7 @@ def calc_potential_safety_speed(pos, speed, min_speed, max_speed, target_pos):
     return scale * phi_base
 
 
-def calc_potential_safety_position(pos, min_pos, max_pos, target_pos):
+def _potential_safety_position(pos, min_pos, max_pos, target_pos):
     distance_to_target = np.abs(target_pos - pos)
     center_pos = (max_pos + min_pos) / 2.0
     safe_margin = (max_pos - min_pos) / 2.0
@@ -46,7 +51,7 @@ def calc_potential_safety_position(pos, min_pos, max_pos, target_pos):
     return scale * phi_base
 
 
-def calc_potential_safety_speed_adaptive(pos, speed, min_speed, max_speed, target_pos):
+def _potential_safety_speed_adaptive(pos, speed, min_speed, max_speed, target_pos):
     distance_to_target = np.abs(target_pos - pos)
     scale = 1.0 + 1.0 * np.exp(-0.001 * distance_to_target)
 
@@ -69,7 +74,7 @@ def calc_potential_safety_speed_adaptive(pos, speed, min_speed, max_speed, targe
     return scale * phi_base
 
 
-def calc_potential_safety_speed_asymmetric_v1(
+def _potential_safety_speed_asymmetric_v1(
     pos,
     speed,
     min_speed,
@@ -107,7 +112,7 @@ def calc_potential_safety_speed_asymmetric_v1(
     return scale * (phi_max + phi_min)
 
 
-def calc_potential_safety_speed_asymmetric_v2(
+def _potential_safety_speed_asymmetric_v2(
     pos,
     speed,
     min_speed,
@@ -142,7 +147,7 @@ def calc_potential_safety_speed_asymmetric_v2(
     return scale * (phi_max + phi_min) * 4.0
 
 
-def calc_potential_docking_v1(
+def _potential_docking_v1(
     pos,
     speed,
     target_pos,
@@ -175,7 +180,7 @@ def calc_potential_docking_v1(
     return phi_weak + phi_strong
 
 
-def calc_potential_docking_v2(
+def _potential_docking_v2(
     pos,
     speed,
     target_pos,
@@ -203,7 +208,7 @@ def calc_potential_docking_v2(
     return phi_strong
 
 
-def calc_potential_punctuality_v1(
+def _potential_punctuality_v1(
     redundant_operation_time,
     schedule_time: float,
 ):
@@ -212,7 +217,7 @@ def calc_potential_punctuality_v1(
     return -4.0 * np.log1p(np.exp(-3.0 * time_redundancy_norm))
 
 
-def calc_potential_punctuality_v2(redundant_operation_time, schedule_time):
+def _potential_punctuality_v2(redundant_operation_time, schedule_time):
     K_base = 0.5
     K_safe = 0.1
     K_late = 1.0
@@ -226,7 +231,7 @@ def calc_potential_punctuality_v2(redundant_operation_time, schedule_time):
     )
 
 
-def calc_potential_punctuality_v3(redundant_operation_time, schedule_time):
+def _potential_punctuality_v3(redundant_operation_time, schedule_time):
     K_base = 1.0
     K_safe = 1.0
     K_late = 50.0
@@ -274,7 +279,31 @@ def interp_with_constant_fill(x, y, query, left_value, right_value):
     )
 
 
-def plot_safety_potential_heatmap_speed():
+def _apply_minimal_axis_style(ax) -> None:
+    ax.grid(False)
+    ax.set_axis_on()
+
+
+def _apply_transparent_background(fig: Figure) -> None:
+    """让图窗与所有坐标轴背景透明，便于嵌入论文架构图。"""
+    fig.patch.set_facecolor("none")
+    fig.patch.set_alpha(0.0)
+
+    for ax in fig.axes:
+        ax.set_facecolor("none")
+        if ax.patch is not None:
+            ax.patch.set_alpha(0.0)
+
+        # 3D 坐标轴 pane 默认非透明，需单独处理。
+        for axis_name in ("xaxis", "yaxis", "zaxis"):
+            axis_obj = getattr(ax, axis_name, None)
+            pane = getattr(axis_obj, "pane", None)
+            if pane is not None:
+                pane.set_facecolor((1.0, 1.0, 1.0, 0.0))
+                pane.set_edgecolor((1.0, 1.0, 1.0, 0.0))
+
+
+def plot_safety_potential_heatmap_speed(*, minimal: bool = False) -> Figure:
     min_curves_list, max_curves_list = load_safeguard_curves(
         "min_curves_list", "max_curves_list"
     )
@@ -342,7 +371,7 @@ def plot_safety_potential_heatmap_speed():
     # )
 
     # 非对称解耦势能场 v2
-    POTENTIAL = calc_potential_safety_speed_asymmetric_v2(
+    POTENTIAL = _potential_safety_speed_asymmetric_v2(
         POS, SPEED, SPEED_MIN, SPEED_MAX, target_pos
     )
 
@@ -359,43 +388,59 @@ def plot_safety_potential_heatmap_speed():
         SPEED * 3.6,
         POTENTIAL_MASKED,
         cmap=cmap,
-        shading="auto",
         vmin=-4.0,
         vmax=0.0,
     )
 
-    ax.plot(
-        pos_array,
-        speed_max_1d_masked * 3.6,
-        color="red",
-        linewidth=1,
-        label=r"upper speed curve",
-    )
-    ax.plot(
-        pos_array,
-        speed_min_1d_masked * 3.6,
-        color="blue",
-        linewidth=1,
-        label=r"lower speed curve",
-    )
-
-    # 添加色标
-    fig.colorbar(c, ax=ax, extend="min")
-
-    # 图表格式化
     ax.set_xlim(pos_left_bound + 5000, pos_right_bound + 1000)
     ax.set_ylim(lower_speed * 3.6, upper_speed * 3.6 * 0.75)
-    ax.set_xlabel("Position (m)")
-    ax.set_ylabel("Speed (km/h)")
-    ax.tick_params(axis="both", which="major")
-    ax.legend(loc="lower left", framealpha=0.9)
-    ax.grid(True, alpha=0.3, linestyle=":")
 
+    if minimal:
+        ax.plot(
+            pos_array,
+            speed_max_1d_masked * 3.6,
+            color="red",
+            linewidth=1,
+        )
+        ax.plot(
+            pos_array,
+            speed_min_1d_masked * 3.6,
+            color="blue",
+            linewidth=1,
+        )
+        _apply_minimal_axis_style(ax)
+    else:
+        ax.plot(
+            pos_array,
+            speed_max_1d_masked * 3.6,
+            color="red",
+            linewidth=1,
+            label=r"upper speed curve",
+        )
+        ax.plot(
+            pos_array,
+            speed_min_1d_masked * 3.6,
+            color="blue",
+            linewidth=1,
+            label=r"lower speed curve",
+        )
+
+        # 添加色标
+        fig.colorbar(c, ax=ax, extend="min")
+
+        # 图表格式化
+        ax.set_xlabel("Position (m)")
+        ax.set_ylabel("Speed (km/h)")
+        ax.tick_params(axis="both", which="major")
+        ax.legend(loc="lower left", framealpha=0.9)
+        ax.grid(True, alpha=0.3, linestyle=":")
+
+    _apply_transparent_background(fig)
     plt.tight_layout()
-    plt.show()
+    return fig
 
 
-def plot_safety_potential_heatmap_position():
+def plot_safety_potential_heatmap_position(*, minimal: bool = False) -> Figure:
     min_curves_list, max_curves_list = load_safeguard_curves(
         "min_curves_list", "max_curves_list"
     )
@@ -434,7 +479,7 @@ def plot_safety_potential_heatmap_position():
     POS_LOWER = np.tile(pos_lower_1d[:, None], (1, pos_array.size))
     POS_UPPER = np.tile(pos_upper_1d[:, None], (1, pos_array.size))
 
-    POTENTIAL = calc_potential_safety_position(POS, POS_LOWER, POS_UPPER, target_pos)
+    POTENTIAL = _potential_safety_position(POS, POS_LOWER, POS_UPPER, target_pos)
     in_pos_band = (POS >= POS_LOWER) & (POS <= POS_UPPER)
     POTENTIAL_MASKED = np.where(in_pos_band, POTENTIAL, np.nan)
 
@@ -452,43 +497,64 @@ def plot_safety_potential_heatmap_position():
         vmax=0.0,
     )
 
-    ax.plot(
-        pos_from_max_curve,
-        speed_array_ms * 3.6,
-        color="red",
-        linewidth=1,
-        label="upper speed curve",
-    )
-    ax.plot(
-        pos_from_min_curve,
-        speed_array_ms * 3.6,
-        color="blue",
-        linewidth=1,
-        label="lower speed curve",
-    )
-    ax.plot(
-        safe_center_pos_array,
-        speed_array_ms * 3.6,
-        color="black",
-        linestyle="--",
-        linewidth=1.5,
-        label="safe center",
-    )
-
-    fig.colorbar(c, ax=ax, extend="min")
-
     ax.set_xlim(pos_left_bound - 1000, pos_right_bound + 1000)
     ax.set_ylim(lower_speed * 3.6, upper_speed * 3.6)
-    ax.set_xlabel("Position (m)")
-    ax.set_ylabel("Speed (km/h)")
-    ax.legend(loc="lower left", framealpha=0.9)
-    ax.grid(True, alpha=0.3, linestyle=":")
 
+    if minimal:
+        ax.plot(
+            pos_from_max_curve,
+            speed_array_ms * 3.6,
+            color="red",
+            linewidth=1,
+        )
+        ax.plot(
+            pos_from_min_curve,
+            speed_array_ms * 3.6,
+            color="blue",
+            linewidth=1,
+        )
+        _apply_minimal_axis_style(ax)
+    else:
+        ax.plot(
+            pos_from_max_curve,
+            speed_array_ms * 3.6,
+            color="red",
+            linewidth=1,
+            label="upper speed curve",
+        )
+        ax.plot(
+            pos_from_min_curve,
+            speed_array_ms * 3.6,
+            color="blue",
+            linewidth=1,
+            label="lower speed curve",
+        )
+        ax.plot(
+            safe_center_pos_array,
+            speed_array_ms * 3.6,
+            color="black",
+            linestyle="--",
+            linewidth=1.5,
+            label="safe center",
+        )
+
+        fig.colorbar(c, ax=ax, extend="min")
+
+        ax.set_xlabel("Position (m)")
+        ax.set_ylabel("Speed (km/h)")
+        ax.legend(loc="lower left", framealpha=0.9)
+        ax.grid(True, alpha=0.3, linestyle=":")
+
+    _apply_transparent_background(fig)
     plt.tight_layout()
-    plt.show()
+    return fig
 
 
-def plot_docking_potential_heatmap(view_mode="3d"):
+def plot_docking_potential_heatmap(
+    view_mode: str = "3d",
+    *,
+    minimal: bool = False,
+) -> Figure:
     """
     按停站势函数公式绘制势场图。
 
@@ -507,7 +573,7 @@ def plot_docking_potential_heatmap(view_mode="3d"):
     POS, SPEED = np.meshgrid(pos_array, speed_array_ms)
 
     # version 1
-    POTENTIAL = calc_potential_docking_v1(
+    POTENTIAL = _potential_docking_v1(
         pos=POS,
         speed=SPEED,
         target_pos=target_pos,
@@ -538,18 +604,21 @@ def plot_docking_potential_heatmap(view_mode="3d"):
             vmax=K_G,
         )
 
-        fig.colorbar(c, ax=ax)
-
         ax.set_xlim(pos_array[0], pos_array[-1])
         ax.set_ylim(speed_array_kmh[0], speed_array_kmh[-1])
-        ax.set_xlabel("Position (m)")
-        ax.set_ylabel("Velocity (km/h)")
-        ax.legend(loc="upper right", framealpha=0.9)
-        ax.grid(True, alpha=0.3, linestyle=":")
 
+        if minimal:
+            _apply_minimal_axis_style(ax)
+        else:
+            fig.colorbar(c, ax=ax)
+            ax.set_xlabel("Position (m)")
+            ax.set_ylabel("Velocity (km/h)")
+            ax.legend(loc="upper right", framealpha=0.9)
+            ax.grid(True, alpha=0.3, linestyle=":")
+
+        _apply_transparent_background(fig)
         plt.tight_layout()
-        plt.show()
-        return
+        return fig
 
     if mode == "3d":
         fig = plt.figure(figsize=(12, 6))
@@ -570,19 +639,23 @@ def plot_docking_potential_heatmap(view_mode="3d"):
         ax.set_xlim(pos_array[0], pos_array[-1])
         ax.set_ylim(speed_array_kmh[0], speed_array_kmh[-1])
         ax.set_zlim(0, K_G * 1.02)
-        ax.set_xlabel("Position (m)")
-        ax.set_ylabel("Velocity (km/h)")
-        ax.set_zlabel("Parking Potential")
         ax.view_init(elev=28, azim=-130)
 
+        if minimal:
+            _apply_minimal_axis_style(ax)
+        else:
+            ax.set_xlabel("Position (m)")
+            ax.set_ylabel("Velocity (km/h)")
+            ax.set_zlabel("Parking Potential")
+
+        _apply_transparent_background(fig)
         plt.tight_layout()
-        plt.show()
-        return
+        return fig
 
     raise ValueError("view_mode 仅支持 '2d' 或 '3d'")
 
 
-def plot_docking_potential_slices():
+def plot_docking_potential_slices(*, minimal: bool = False) -> Figure:
     """
     绘制停站势函数在距离维与速度维上的一维切片，便于调参。
     """
@@ -596,12 +669,12 @@ def plot_docking_potential_slices():
     pos_array = target_pos + distance_error_array
     speed_array_ms = np.linspace(0.0, 120.0 / 3.6, 1200)
 
-    potential_vs_distance = calc_potential_docking_v1(
+    potential_vs_distance = _potential_docking_v1(
         pos=pos_array,
         speed=0.0,
         target_pos=target_pos,
     )
-    potential_vs_speed = calc_potential_docking_v1(
+    potential_vs_speed = _potential_docking_v1(
         pos=target_pos,
         speed=speed_array_ms,
         target_pos=target_pos,
@@ -610,28 +683,35 @@ def plot_docking_potential_slices():
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
 
     axes[0].plot(distance_error_array, potential_vs_distance, color="tab:orange")
-    axes[0].axvline(0.0, color="black", linestyle="--", linewidth=1.2)
-    axes[0].axvline(scale_pos, color="gray", linestyle=":", linewidth=1.2)
-    axes[0].axvline(-scale_pos, color="gray", linestyle=":", linewidth=1.2)
-    axes[0].set_xlabel("docking error (m)")
-    axes[0].set_ylabel(r"$\Phi_D$")
-    axes[0].set_title("v = 0")
-    axes[0].grid(True, alpha=0.3, linestyle=":")
 
     axes[1].plot(speed_array_ms * 3.6, potential_vs_speed, color="tab:red")
-    axes[1].axvline(0.0, color="black", linestyle="--", linewidth=1.2)
-    axes[1].axvline(scale_speed * 3.6, color="gray", linestyle=":", linewidth=1.2)
-    axes[1].set_xlabel("speed (km/h)")
-    axes[1].set_ylabel(r"$\Phi_D$")
-    axes[1].set_title("d = 0")
-    axes[1].grid(True, alpha=0.3, linestyle=":")
 
-    fig.suptitle(
-        r"$\Phi_D$ slice",
-        fontsize=13,
-    )
+    if minimal:
+        _apply_minimal_axis_style(axes[0])
+        _apply_minimal_axis_style(axes[1])
+    else:
+        axes[0].axvline(0.0, color="black", linestyle="--", linewidth=1.2)
+        axes[0].axvline(scale_pos, color="gray", linestyle=":", linewidth=1.2)
+        axes[0].axvline(-scale_pos, color="gray", linestyle=":", linewidth=1.2)
+        axes[0].set_xlabel("docking error (m)")
+        axes[0].set_ylabel(r"$\Phi_D$")
+        axes[0].set_title("v = 0")
+        axes[0].grid(True, alpha=0.3, linestyle=":")
+
+        axes[1].axvline(0.0, color="black", linestyle="--", linewidth=1.2)
+        axes[1].axvline(scale_speed * 3.6, color="gray", linestyle=":", linewidth=1.2)
+        axes[1].set_xlabel("speed (km/h)")
+        axes[1].set_ylabel(r"$\Phi_D$")
+        axes[1].set_title("d = 0")
+        axes[1].grid(True, alpha=0.3, linestyle=":")
+
+        fig.suptitle(
+            r"$\Phi_D$ slice",
+            fontsize=13,
+        )
+    _apply_transparent_background(fig)
     plt.tight_layout()
-    plt.show()
+    return fig
 
 
 def plot_punctuality_potential_curve(
@@ -639,7 +719,9 @@ def plot_punctuality_potential_curve(
     redundant_time_upper: float = 80.0,
     redundant_time_lower: float = -100.0,
     num_points: int = 1200,
-):
+    *,
+    minimal: bool = False,
+) -> Figure:
     """
     绘制准点势函数关于冗余运行时间的一维曲线。
 
@@ -671,7 +753,7 @@ def plot_punctuality_potential_curve(
     # )
 
     # version 3
-    potential_array = calc_potential_punctuality_v3(
+    potential_array = _potential_punctuality_v3(
         redundant_operation_time=redundant_operation_time_array,
         schedule_time=schedule_time,
     )
@@ -684,19 +766,86 @@ def plot_punctuality_potential_curve(
         color="tab:green",
         linewidth=2,
     )
-    ax.axvline(0.0, color="black", linestyle="--", linewidth=1.2, label=r"$\rho =0$")
 
     ax.set_xlim(redundant_time_upper, redundant_time_lower)
-    ax.set_xlabel("Redunctant Operation Time (s)")
-    ax.set_ylabel("Punctuality Potential")
-    ax.legend(loc="upper right", framealpha=0.9)
-    ax.grid(True, alpha=0.3, linestyle=":")
 
+    if minimal:
+        _apply_minimal_axis_style(ax)
+    else:
+        ax.axvline(
+            0.0, color="black", linestyle="--", linewidth=1.2, label=r"$\rho =0$"
+        )
+        ax.set_xlabel("Redunctant Operation Time (s)")
+        ax.set_ylabel("Punctuality Potential")
+        ax.legend(loc="upper right", framealpha=0.9)
+        ax.grid(True, alpha=0.3, linestyle=":")
+
+    _apply_transparent_background(fig)
     plt.tight_layout()
-    plt.show()
+    return fig
 
 
-if __name__ == "__main__":
+PLOT_TYPE_CHOICES: tuple[str, ...] = (
+    "safety-speed",
+    "safety-position",
+    "docking-heatmap",
+    "docking-slices",
+    "punctuality-curve",
+)
+
+
+def _build_cli_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="展示并可选保存势函数图。")
+    parser.add_argument(
+        "--plot-type",
+        choices=PLOT_TYPE_CHOICES,
+        default="docking-heatmap",
+        help="选择展示哪种势函数图。",
+    )
+    parser.add_argument(
+        "--save",
+        action="store_true",
+        help="启用图像保存。启用后必须传 --output-file。",
+    )
+    parser.add_argument(
+        "--output-file",
+        type=str,
+        default=None,
+        help="输出图像路径（如 output/potential.png）。",
+    )
+    parser.add_argument(
+        "--minimal",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="极简图形模式：仅保留核心数据图元，移除文字与辅助标注。",
+    )
+    return parser
+
+
+def _validate_cli_args(cli_args: argparse.Namespace) -> None:
+    if cli_args.output_file is not None and not cli_args.output_file.strip():
+        raise ValueError("--output-file must not be empty")
+    if cli_args.save and cli_args.output_file is None:
+        raise ValueError("--output-file is required when --save is set")
+
+
+def _resolve_plotter(plot_type: str, *, minimal: bool) -> Callable[[], Figure]:
+    plotters: dict[str, Callable[[], Figure]] = {
+        "safety-speed": lambda: plot_safety_potential_heatmap_speed(minimal=minimal),
+        "safety-position": lambda: plot_safety_potential_heatmap_position(
+            minimal=minimal
+        ),
+        "docking-heatmap": lambda: plot_docking_potential_heatmap(
+            view_mode="3d",
+            minimal=minimal,
+        ),
+        "docking-slices": lambda: plot_docking_potential_slices(minimal=minimal),
+        "punctuality-curve": lambda: plot_punctuality_potential_curve(minimal=minimal),
+    }
+    return plotters[plot_type]
+
+
+def _apply_plot_style() -> None:
     set_global_plot_style(
         font_preset="sci",
         preferred_font="Calibri",
@@ -704,16 +853,39 @@ if __name__ == "__main__":
         axis_label_font_size=12.0,
         tick_font_size=12.0,
         legend_font_size=12.0,
-        figure_dpi=150.0,
+        figure_dpi=100.0,
         savefig_dpi=300.0,
     )
-    # plot_safety_potential_heatmap_speed()
-    # plot_safety_potential_heatmap_position()
-    plot_docking_potential_heatmap(view_mode="3d")
-    # plot_docking_potential_heatmap(view_mode="2d")
-    # plot_docking_potential_slices()
-    # plot_punctuality_potential_curve(
-    #     schedule_time=430.0,
-    #     redundant_time_upper=56.0,
-    #     redundant_time_lower=-120.0,
-    # )
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = _build_cli_parser()
+    cli_args = parser.parse_args(argv)
+
+    try:
+        _validate_cli_args(cli_args)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    _apply_plot_style()
+    figure = _resolve_plotter(cli_args.plot_type, minimal=cli_args.minimal)()
+
+    if cli_args.save:
+        output_path = Path(cli_args.output_file)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(
+            output_path,
+            transparent=True,
+            facecolor="none",
+            edgecolor="none",
+            bbox_inches="tight",
+            pad_inches=0.02,
+        )
+        print(f"图像已保存: {output_path}")
+
+    plt.show()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

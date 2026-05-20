@@ -977,7 +977,7 @@ class MTTOEnv(gym.Env):
 
         if not truncated:
             # 基本生存奖励
-            small_bonus = 100.0 / self.max_episode_steps
+            small_bonus = 150.0 / self.max_episode_steps
             if terminated:
                 reward_total = self._get_reward_goal()
             else:
@@ -1399,7 +1399,7 @@ class MTTOEnv(gym.Env):
     def _potential_punctuality_v3(self, pos: float, operation_time: float):
         K_base = 1.0
         K_safe = 1.0
-        K_late = 5.0
+        K_late = 8.0
         alpha = 3.0
 
         time_redundancy_norm = self._calc_time_redundancy_norm(pos, operation_time)
