@@ -80,7 +80,7 @@ DEFAULT_SNAPSHOT_TAGS = [
     "rewards/energy",
     "rewards/comfort",
     "rewards/punctuality",
-    "rewards/docking",
+    "rewards/stopping",
     "state/episode_id",
     "state/pos_m",
     "constraint/margin_to_vmax_mps",
@@ -304,3 +304,4 @@ def run_training_analysis(
     payload["output_paths"] = output_paths
 
     return payload
+

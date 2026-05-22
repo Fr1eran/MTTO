@@ -1,20 +1,115 @@
 from collections.abc import Callable
 
 import numpy as np
+from numba import njit
 from numpy.typing import NDArray
 
-from model.track.track import TrackProfile
-from model.vehicle.vehicle import VehicleDynamic, VehicleInfo
+from model.track import TrackInfo, get_slope, get_speed_limit
+from model.vehicle import (
+    VehicleInfo,
+    calc_brake_deceleration,
+    calc_brake_deceleration_scalar_numba,
+    calc_levi_deceleration,
+    calc_levi_deceleration_scalar_numba,
+)
 
 Numeric = float | np.floating | NDArray[np.floating]
 AccFunc = Callable[[Numeric, Numeric], Numeric]
+
+
+@njit(cache=True)
+def _build_curve_backward_with_truncate_numba(
+    begin: float,
+    ds: float,
+    slopes: NDArray[np.float64],
+    speed_limits: NDArray[np.float64],
+    mass: float,
+    numoftrainsets: float,
+    dec_mode: int,
+):
+    speed = 0.0
+    pos = begin
+    max_steps = int(pos // ds)
+    speed_arr = np.empty(max_steps + 1, dtype=np.float64)
+    speed_arr[0] = 0.0
+    idx = 0
+
+    for j in range(max_steps):
+        if dec_mode == 0:
+            dec = calc_levi_deceleration_scalar_numba(
+                speed, slopes[j], mass, numoftrainsets
+            )
+        else:
+            dec = calc_brake_deceleration_scalar_numba(
+                speed, slopes[j], mass, numoftrainsets, 0
+            )
+        next_speed_squared = speed**2 + 2.0 * dec * ds
+        if next_speed_squared < 0.0:
+            break
+        next_speed = np.sqrt(next_speed_squared)
+        if next_speed >= speed_limits[j]:
+            break
+        pos = pos - ds
+        speed = next_speed
+        idx += 1
+        speed_arr[idx] = next_speed
+
+    out_len = idx
+    out_pos = np.empty(out_len, dtype=np.float64)
+    out_speed = np.empty(out_len, dtype=np.float64)
+    for k in range(out_len):
+        out_pos[k] = begin - ds * (out_len - 1 - k)
+        out_speed[k] = speed_arr[out_len - 1 - k]
+    return out_pos, out_speed
+
+
+@njit(cache=True)
+def _build_curve_backward_without_truncate_numba(
+    begin: float,
+    ds: float,
+    slopes: NDArray[np.float64],
+    mass: float,
+    numoftrainsets: float,
+    dec_mode: int,
+):
+    n = int(np.ceil(begin / ds))
+    if n <= 0:
+        return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
+
+    pos_desc = np.empty(n, dtype=np.float64)
+    speed_desc = np.zeros(n, dtype=np.float64)
+    for i in range(n):
+        pos_desc[i] = begin - ds * i
+
+    speed = 0.0
+    for j in range(1, n):
+        if dec_mode == 0:
+            dec = calc_levi_deceleration_scalar_numba(
+                speed, slopes[j - 1], mass, numoftrainsets
+            )
+        else:
+            dec = calc_brake_deceleration_scalar_numba(
+                speed, slopes[j - 1], mass, numoftrainsets, 0
+            )
+        next_speed_squared = speed**2 + 2.0 * dec * ds
+        if next_speed_squared < 0.0:
+            next_speed_squared = 0.0
+        speed = np.sqrt(next_speed_squared)
+        speed_desc[j] = speed
+
+    out_pos = np.empty(n, dtype=np.float64)
+    out_speed = np.empty(n, dtype=np.float64)
+    for k in range(n):
+        out_pos[k] = pos_desc[n - 1 - k]
+        out_speed[k] = speed_desc[n - 1 - k]
+    return out_pos, out_speed
 
 
 class SafeGuardCurves:
     """
     上海磁浮示范线线路安全防护计算类
     Attributes:
-        trackprofile: 轨道纵断面特性计算类
+        track: 轨道数据类
 
     Methods:
         GetsDesPoints(apoffsets, dpoffsets): 获取辅助停车区目标点位置
@@ -22,11 +117,17 @@ class SafeGuardCurves:
         CalBrakeCurves(dpoffsets, vehicle, ds): 计算安全制动曲线
     """
 
-    def __init__(self, trackprofile: TrackProfile):
-        self.trackprofile = trackprofile
+    def __init__(self, track: TrackInfo):
+        self.track = track
 
     def _calculate_curves_backward_with_truncate(
-        self, begins: NDArray[np.floating], ds: float, dec_func: AccFunc
+        self,
+        begins: NDArray[np.floating],
+        ds: float,
+        dec_func: AccFunc,
+        *,
+        dec_mode: int | None = None,
+        vehicle: VehicleInfo | None = None,
     ) -> list[NDArray[np.float64]]:
         """
         通用防护曲线计算方法
@@ -37,15 +138,59 @@ class SafeGuardCurves:
         Returns:
             [np.ndarray[pos_array, speed_array], ...]
         """
+        if dec_mode is not None and vehicle is not None:
+            mass = float(vehicle.mass)
+            numoftrainsets = float(vehicle.numoftrainsets)
+            curve_list = []
+            for i in range(len(begins)):
+                begin = float(begins[i])
+                pos_desc = np.arange(begin, 0.0, -ds)
+                slopes = np.asarray(
+                    get_slope(
+                        pos_desc,
+                        self.track.slopes,
+                        self.track.slope_intervals,
+                    ),
+                    dtype=np.float64,
+                )
+                speed_limits = np.asarray(
+                    get_speed_limit(
+                        pos_desc,
+                        self.track.speed_limits,
+                        self.track.speed_limit_intervals,
+                    ),
+                    dtype=np.float64,
+                )
+                pos_arr, speed_arr = _build_curve_backward_with_truncate_numba(
+                    begin=begin,
+                    ds=ds,
+                    slopes=slopes,
+                    speed_limits=speed_limits,
+                    mass=mass,
+                    numoftrainsets=numoftrainsets,
+                    dec_mode=dec_mode,
+                )
+                curve_list.append(
+                    np.stack([pos_arr, speed_arr], axis=0, dtype=np.float64)
+                )
+            return curve_list
+
         curve_list = []
         for i in range(len(begins)):
             speed = 0.0  # 初速度
             pos = begins[i]  # 初位置
             max_steps = int(pos // ds)
             speed_arr = np.empty(max_steps + 1)
-            slopes = self.trackprofile.get_slope(pos=np.arange(pos, 0.0, -ds))
-            speed_limits = self.trackprofile.get_speed_limit(
-                pos=np.arange(pos, 0.0, -ds)
+            pos_desc = np.arange(pos, 0.0, -ds)
+            slopes = get_slope(
+                pos_desc,
+                self.track.slopes,
+                self.track.slope_intervals,
+            )
+            speed_limits = get_speed_limit(
+                pos_desc,
+                self.track.speed_limits,
+                self.track.speed_limit_intervals,
             )
             idx = 0
             speed_arr[0] = 0.0
@@ -68,7 +213,13 @@ class SafeGuardCurves:
         return curve_list
 
     def _calculate_curves_backward_without_truncate(
-        self, begins: NDArray[np.floating], ds: float, dec_func: AccFunc
+        self,
+        begins: NDArray[np.floating],
+        ds: float,
+        dec_func: AccFunc,
+        *,
+        dec_mode: int | None = None,
+        vehicle: VehicleInfo | None = None,
     ) -> list[NDArray[np.float64]]:
         """
         通用防护曲线计算方法
@@ -79,12 +230,44 @@ class SafeGuardCurves:
         Returns:
             [np.ndarray[pos_array, speed_array], ...]
         """
+        if dec_mode is not None and vehicle is not None:
+            mass = float(vehicle.mass)
+            numoftrainsets = float(vehicle.numoftrainsets)
+            curve_list = []
+            for i in range(len(begins)):
+                begin = float(begins[i])
+                pos_desc = np.arange(begin, 0.0, -ds)
+                slopes = np.asarray(
+                    get_slope(
+                        pos_desc,
+                        self.track.slopes,
+                        self.track.slope_intervals,
+                    ),
+                    dtype=np.float64,
+                )
+                pos_arr, speed_arr = _build_curve_backward_without_truncate_numba(
+                    begin=begin,
+                    ds=ds,
+                    slopes=slopes,
+                    mass=mass,
+                    numoftrainsets=numoftrainsets,
+                    dec_mode=dec_mode,
+                )
+                curve_list.append(
+                    np.stack([pos_arr, speed_arr], axis=0, dtype=np.float64)
+                )
+            return curve_list
+
         curve_list = []
         for i in range(len(begins)):
             speed = 0.0  # 初速度
             pos_arr = np.arange(begins[i], 0.0, -ds)
             speed_arr = np.zeros_like(pos_arr)
-            slopes = self.trackprofile.get_slope(pos=pos_arr)
+            slopes = get_slope(
+                pos_arr,
+                self.track.slopes,
+                self.track.slope_intervals,
+            )
             for j in range(1, speed_arr.shape[0]):
                 dec = dec_func(speed, slopes[j - 1])
                 next_speed_squared = speed**2 + 2 * dec * ds
@@ -135,8 +318,11 @@ class SafeGuardCurves:
         """
 
         # 获取曲线上各点对应的限速
-        speed_limits = self.trackprofile.get_speed_limit(
-            pos=curve_pos_arr, dtype=np.float64
+        speed_limits = get_speed_limit(
+            curve_pos_arr,
+            self.track.speed_limits,
+            self.track.speed_limit_intervals,
+            dtype=np.float64,
         )
 
         # 找到最后一个超出限速的点
@@ -266,10 +452,15 @@ class SafeGuardCurves:
             brake_speed_arr = brake_curves_list[i][1, :]
             brake_pos_arr = brake_curves_list[i][0, :]
             max_acc = vehicle.max_acc
-            levi_dec_arr = VehicleDynamic.calc_levi_deceleration(
-                vehicle=vehicle,
+            levi_dec_arr = calc_levi_deceleration(
+                mass=vehicle.mass,
+                numoftrainsets=vehicle.numoftrainsets,
                 speed=brake_speed_arr,
-                slope=self.trackprofile.get_slope(pos=brake_pos_arr),
+                slope=get_slope(
+                    brake_pos_arr,
+                    self.track.slopes,
+                    self.track.slope_intervals,
+                ),
             )
             # 计算最大速度曲线
             max_speed_arr = (
@@ -315,11 +506,14 @@ class SafeGuardCurves:
                     + max_speed_arr_truncated[-1] ** 2
                     / (
                         2
-                        * VehicleDynamic.calc_brake_deceleration(
-                            vehicle=vehicle,
+                        * calc_brake_deceleration(
+                            mass=vehicle.mass,
+                            numoftrainsets=vehicle.numoftrainsets,
                             speed=max_speed_arr_truncated[-1],
-                            slope=self.trackprofile.get_slope(
-                                pos=max_pos_arr_truncated[-1]
+                            slope=get_slope(
+                                max_pos_arr_truncated[-1],
+                                self.track.slopes,
+                                self.track.slope_intervals,
                             ),
                             level=0,
                         )
@@ -352,9 +546,14 @@ class SafeGuardCurves:
         return self._calculate_curves_backward_with_truncate(
             apoffsets,
             ds,
-            lambda speed, slope: VehicleDynamic.calc_levi_deceleration(
-                vehicle=vehicle, speed=speed, slope=slope
+            lambda speed, slope: calc_levi_deceleration(
+                mass=vehicle.mass,
+                numoftrainsets=vehicle.numoftrainsets,
+                speed=speed,
+                slope=slope,
             ),
+            dec_mode=0,
+            vehicle=vehicle,
         )
 
     def calc_levi_and_min_curves(
@@ -386,9 +585,14 @@ class SafeGuardCurves:
             self._calculate_curves_backward_without_truncate(
                 apoffsets,
                 ds,
-                lambda speed, slope: VehicleDynamic.calc_levi_deceleration(
-                    vehicle=vehicle, speed=speed, slope=slope
+                lambda speed, slope: calc_levi_deceleration(
+                    mass=vehicle.mass,
+                    numoftrainsets=vehicle.numoftrainsets,
+                    speed=speed,
+                    slope=slope,
                 ),
+                dec_mode=0,
+                vehicle=vehicle,
             )
         )
         min_curves_list = self.calc_min_curves(
@@ -436,9 +640,15 @@ class SafeGuardCurves:
         return self._calculate_curves_backward_with_truncate(
             dpoffsets,
             ds,
-            lambda speed, slope: VehicleDynamic.calc_brake_deceleration(
-                vehicle=vehicle, speed=speed, slope=slope, level=0
+            lambda speed, slope: calc_brake_deceleration(
+                mass=vehicle.mass,
+                numoftrainsets=vehicle.numoftrainsets,
+                speed=speed,
+                slope=slope,
+                level=0,
             ),
+            dec_mode=1,
+            vehicle=vehicle,
         )
 
     def calc_brake_and_max_curves(
@@ -469,9 +679,15 @@ class SafeGuardCurves:
             self._calculate_curves_backward_without_truncate(
                 dpoffsets,
                 ds,
-                lambda speed, slope: VehicleDynamic.calc_brake_deceleration(
-                    vehicle=vehicle, speed=speed, slope=slope, level=0
+                lambda speed, slope: calc_brake_deceleration(
+                    mass=vehicle.mass,
+                    numoftrainsets=vehicle.numoftrainsets,
+                    speed=speed,
+                    slope=slope,
+                    level=0,
                 ),
+                dec_mode=1,
+                vehicle=vehicle,
             )
         )
         max_curves_list = self.calc_max_curves(

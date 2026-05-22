@@ -4,8 +4,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from model.common.energy_consumption_calculator import ECC
-from model.track.track import TrackInfo, TrackProfile
-from model.vehicle.vehicle import VehicleInfo
+from model.track import TrackInfo
+from model.vehicle import VehicleInfo
 
 
 class GeneralOperation(NamedTuple):
@@ -51,7 +51,6 @@ class ORS:
     ) -> None:
         self.vehicle = vehicle
         self.track = track
-        self.trackprofile = TrackProfile(track=track)
         self.gamma: float = factor
 
     def _get_speed_limits_interval_index(
@@ -721,7 +720,7 @@ class ORS:
                     direction=1,
                     operation_time=actual_time,
                     vehicle=self.vehicle,
-                    trackprofile=self.trackprofile,
+                    track=self.track,
                 )
 
                 ref_mec += PEC
@@ -738,7 +737,7 @@ class ORS:
                     direction=1,
                     operation_time=operation_time,
                     vehicle=self.vehicle,
-                    trackprofile=self.trackprofile,
+                    track=self.track,
                 )
 
                 ref_mec += PEC

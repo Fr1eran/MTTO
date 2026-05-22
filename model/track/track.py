@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import overload
 
 import numpy as np
+from numba import njit
 from numpy.typing import ArrayLike, DTypeLike, NDArray
 
 from utils.indexing_utils import get_interval_index
@@ -28,223 +29,277 @@ class TrackInfo:
         )
 
 
-class TrackProfile:
+# 标量化 numba 版本
+
+
+@njit(cache=True)
+def get_slope_scalar_numba(
+    pos: float,
+    slopes: NDArray[np.float64],
+    slope_intervals: NDArray[np.float64],
+) -> float:
+    left = 0
+    right = slope_intervals.size
+    while left < right:
+        mid = (left + right) // 2
+        if pos < slope_intervals[mid]:
+            right = mid
+        else:
+            left = mid + 1
+
+    idx = left - 1
+    if idx < 0:
+        idx = 0
+    elif idx >= slopes.size:
+        idx = slopes.size - 1
+    return slopes[idx]
+
+
+@njit(cache=True)
+def get_slope_array_numba(
+    pos_arr: NDArray[np.float64],
+    slopes: NDArray[np.float64],
+    slope_intervals: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    out = np.empty(pos_arr.size, dtype=np.float64)
+    for i in range(pos_arr.size):
+        out[i] = get_slope_scalar_numba(pos_arr[i], slopes, slope_intervals)
+    return out
+
+
+@njit(cache=True)
+def get_speed_limit_scalar_numba(
+    pos: float,
+    speed_limits: NDArray[np.float64],
+    speed_limit_intervals: NDArray[np.float64],
+) -> float:
+    left = 0
+    right = speed_limit_intervals.size
+    while left < right:
+        mid = (left + right) // 2
+        if pos < speed_limit_intervals[mid]:
+            right = mid
+        else:
+            left = mid + 1
+
+    idx = left - 1
+    if idx < 0:
+        idx = 0
+    elif idx >= speed_limits.size:
+        idx = speed_limits.size - 1
+    return speed_limits[idx]
+
+
+@njit(cache=True)
+def get_speed_limit_array_numba(
+    pos_arr: NDArray[np.float64],
+    speed_limits: NDArray[np.float64],
+    speed_limit_intervals: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    out = np.empty(pos_arr.size, dtype=np.float64)
+    for i in range(pos_arr.size):
+        out[i] = get_speed_limit_scalar_numba(
+            pos_arr[i], speed_limits, speed_limit_intervals
+        )
+    return out
+
+
+# 向量化 numpy 版本
+
+
+@overload
+def get_slope(
+    pos: ScalarNumeric,
+    slopes: ArrayLike,
+    slope_intervals: ArrayLike,
+    *,
+    dtype: DTypeLike = np.float32,
+) -> np.floating: ...
+
+
+@overload
+def get_slope(
+    pos: ArrayLike,
+    slopes: ArrayLike,
+    slope_intervals: ArrayLike,
+    *,
+    dtype: DTypeLike = np.float32,
+) -> NDArray[np.floating]: ...
+
+
+def get_slope(
+    pos: ScalarNumeric | ArrayLike,
+    slopes: ArrayLike,
+    slope_intervals: ArrayLike,
+    *,
+    dtype: DTypeLike = np.float32,
+) -> np.floating | NDArray[np.floating]:
     """
-    上海磁浮示范线轨道纵断面特性类
-    Methods:
-        GetSlope: 获取当前位置的分段常值坡度
-        GetNextSlopeAndDistance: 获取下个坡度变化区间的坡度和与当前位置的距离
-        GetSpeedlimit: 获取当前位置的限速
-        GetNextSpeedlimitAndDistance: 获取下个限速变化区间的限速和与当前位置的距离
+    根据当前位置计算相应的分段常值坡度。
     """
+    pos_arr = np.asarray(pos, dtype=np.float64)
+    slopes_arr = np.asarray(slopes, dtype=np.float64)
+    intervals_arr = np.asarray(slope_intervals, dtype=np.float64)
+    slope = slopes_arr[
+        np.clip(get_interval_index(pos_arr, intervals_arr), 0, len(slopes_arr) - 1)
+    ]
+    return restore_output_type(slope.astype(dtype=dtype))
 
-    def __init__(
-        self,
-        track: TrackInfo,
-        *,
-        dtype: DTypeLike = np.float64,
-    ):
-        self.slopes = np.asarray(track.slopes, dtype=dtype)
-        self.slope_intervals = np.asarray(track.slope_intervals, dtype=dtype)
-        self.speed_limits = np.asarray(track.speed_limits, dtype=dtype)
-        self.speed_limit_intervals = np.asarray(
-            track.speed_limit_intervals, dtype=dtype
-        )
 
-    @overload
-    def get_slope(
-        self,
-        pos: ScalarNumeric,
-        *,
-        dtype: DTypeLike = np.float32,
-    ) -> np.floating: ...
+@overload
+def get_next_slope_and_distance(
+    pos: ScalarNumeric,
+    direction: int,
+    slopes: ArrayLike,
+    slope_intervals: ArrayLike,
+    *,
+    dtype: DTypeLike = np.float32,
+) -> tuple[np.floating, np.floating]: ...
 
-    @overload
-    def get_slope(
-        self,
-        pos: ArrayLike,
-        *,
-        dtype: DTypeLike = np.float32,
-    ) -> NDArray[np.floating]: ...
 
-    def get_slope(
-        self,
-        pos: ScalarNumeric | ArrayLike,
-        *,
-        dtype: DTypeLike = np.float32,
-    ) -> np.floating | NDArray[np.floating]:
-        """
-        根据当前位置计算相应的分段常值坡度。
+@overload
+def get_next_slope_and_distance(
+    pos: ArrayLike,
+    direction: int,
+    slopes: ArrayLike,
+    slope_intervals: ArrayLike,
+    *,
+    dtype: DTypeLike = np.float32,
+) -> tuple[NDArray[np.floating], NDArray[np.floating]]: ...
 
-        Args:
-            pos: 当前位置
-        Returns:
-            当前位置对应的坡度（百分位）
-        """
-        pos = np.asarray(pos, dtype=dtype)
-        slope = self.slopes[
+
+def get_next_slope_and_distance(
+    pos: ScalarNumeric | ArrayLike,
+    direction: int,
+    slopes: ArrayLike,
+    slope_intervals: ArrayLike,
+    *,
+    dtype: DTypeLike = np.float32,
+) -> (
+    tuple[np.floating, np.floating] | tuple[NDArray[np.floating], NDArray[np.floating]]
+):
+    """
+    根据当前位置和运动方向返回下个坡度区间坡度和当前位置与下一坡度区间的距离。
+    """
+    pos_arr = np.asarray(pos, dtype=np.float64)
+    slopes_arr = np.asarray(slopes, dtype=np.float64)
+    intervals_arr = np.asarray(slope_intervals, dtype=np.float64)
+    current_interval_index = get_interval_index(pos_arr, intervals_arr)
+    next_interval_index = np.clip(
+        current_interval_index + direction, 0, len(slopes_arr) - 1
+    )
+
+    next_slope = slopes_arr[next_interval_index]
+    distance = (
+        intervals_arr[
             np.clip(
-                get_interval_index(pos, self.slope_intervals), 0, len(self.slopes) - 1
-            )
-        ]
-        return restore_output_type(slope.astype(dtype=dtype))
-
-    @overload
-    def get_next_slope_and_distance(
-        self,
-        pos: ScalarNumeric,
-        direction: int,
-        *,
-        dtype: DTypeLike = np.float32,
-    ) -> tuple[np.floating, np.floating]: ...
-
-    @overload
-    def get_next_slope_and_distance(
-        self,
-        pos: ArrayLike,
-        direction: int,
-        *,
-        dtype: DTypeLike = np.float32,
-    ) -> tuple[NDArray[np.floating], NDArray[np.floating]]: ...
-
-    def get_next_slope_and_distance(
-        self,
-        pos: ScalarNumeric | ArrayLike,
-        direction: int,
-        *,
-        dtype: DTypeLike = np.float32,
-    ) -> (
-        tuple[np.floating, np.floating]
-        | tuple[NDArray[np.floating], NDArray[np.floating]]
-    ):
-        """
-        根据当前位置和运动方向返回当前坡度和下一区间坡度的变化量和当前位置与下一坡度区间的距离
-
-        Args:
-            pos: 当前位置
-            direction: 运动方向
-
-        Returns:
-            下个坡度区间的坡度(百分位)，当前位置与下一坡度区间的距离(m)
-        """
-        pos = np.asarray(pos, dtype=dtype)
-        current_interval_index = get_interval_index(pos, self.slope_intervals)
-        next_interval_index = np.clip(
-            current_interval_index + direction, 0, len(self.slopes) - 1
-        )
-
-        next_slope = self.slopes[next_interval_index]
-        distance = (
-            self.slope_intervals[
-                np.clip(
-                    current_interval_index + (direction + 1) // 2,
-                    0,
-                    len(self.slope_intervals) - 1,
-                )
-            ]
-            - pos
-        )
-
-        return restore_output_type(next_slope.astype(dtype=dtype)), restore_output_type(
-            distance.astype(dtype=dtype)
-        )
-
-    @overload
-    def get_speed_limit(
-        self,
-        pos: ScalarNumeric,
-        *,
-        dtype: DTypeLike = np.float32,
-    ) -> np.floating: ...
-
-    @overload
-    def get_speed_limit(
-        self,
-        pos: ArrayLike,
-        *,
-        dtype: DTypeLike = np.float32,
-    ) -> NDArray[np.floating]: ...
-
-    def get_speed_limit(
-        self,
-        pos: ScalarNumeric | ArrayLike,
-        *,
-        dtype: DTypeLike = np.float32,
-    ) -> np.floating | NDArray[np.floating]:
-        """
-        根据当前位置返回对应的限速值。
-        Args:
-            pos: 当前位置
-        Returns:
-            当前位置对应的限速值(m/s)
-        """
-        pos = np.asarray(pos, dtype=dtype)
-        speed_limit = self.speed_limits[
-            np.clip(
-                get_interval_index(pos, self.speed_limit_intervals),
+                current_interval_index + (direction + 1) // 2,
                 0,
-                len(self.speed_limits) - 1,
+                len(intervals_arr) - 1,
             )
         ]
-        return restore_output_type(speed_limit.astype(dtype=dtype))
+        - pos_arr
+    )
 
-    @overload
-    def get_next_speed_limit_and_distance(
-        self,
-        pos: ScalarNumeric,
-        direction: int,
-        *,
-        dtype: DTypeLike = np.float32,
-    ) -> tuple[np.floating, np.floating]: ...
+    return restore_output_type(next_slope.astype(dtype=dtype)), restore_output_type(
+        distance.astype(dtype=dtype)
+    )
 
-    @overload
-    def get_next_speed_limit_and_distance(
-        self,
-        pos: ArrayLike,
-        direction: int,
-        *,
-        dtype: DTypeLike = np.float32,
-    ) -> tuple[NDArray[np.floating], NDArray[np.floating]]: ...
 
-    def get_next_speed_limit_and_distance(
-        self,
-        pos: ScalarNumeric | ArrayLike,
-        direction: int,
-        *,
-        dtype: DTypeLike = np.float32,
-    ) -> (
-        tuple[np.floating, np.floating]
-        | tuple[NDArray[np.floating], NDArray[np.floating]]
-    ):
-        """
-        根据当前位置和运动方向返回对应的限速值变化量和当前位置与下一限速区间的距离
+@overload
+def get_speed_limit(
+    pos: ScalarNumeric,
+    speed_limits: ArrayLike,
+    speed_limit_intervals: ArrayLike,
+    *,
+    dtype: DTypeLike = np.float32,
+) -> np.floating: ...
 
-        Args:
-            pos: 当前位置
-            direction: 运动方向
 
-        Returns:
-            下个限速区间的限速值(m/s)，当前位置与下一限速区间的距离(m)
-        """
-        pos = np.asarray(pos, dtype=dtype)
-        current_interval_index = get_interval_index(pos, self.speed_limit_intervals)
-        next_interval_index = np.clip(
-            current_interval_index + direction, 0, len(self.speed_limits) - 1
-        )
+@overload
+def get_speed_limit(
+    pos: ArrayLike,
+    speed_limits: ArrayLike,
+    speed_limit_intervals: ArrayLike,
+    *,
+    dtype: DTypeLike = np.float32,
+) -> NDArray[np.floating]: ...
 
-        next_speed_limit = self.speed_limits[next_interval_index]
 
-        distance = (
-            self.speed_limit_intervals[
-                np.clip(
-                    current_interval_index + (direction + 1) // 2,
-                    0,
-                    len(self.speed_limit_intervals) - 1,
-                )
-            ]
-            - pos
-        )
+def get_speed_limit(
+    pos: ScalarNumeric | ArrayLike,
+    speed_limits: ArrayLike,
+    speed_limit_intervals: ArrayLike,
+    *,
+    dtype: DTypeLike = np.float32,
+) -> np.floating | NDArray[np.floating]:
+    """
+    根据当前位置返回对应的限速值。
+    """
+    pos_arr = np.asarray(pos, dtype=np.float64)
+    limits_arr = np.asarray(speed_limits, dtype=np.float64)
+    intervals_arr = np.asarray(speed_limit_intervals, dtype=np.float64)
+    speed_limit = limits_arr[
+        np.clip(get_interval_index(pos_arr, intervals_arr), 0, len(limits_arr) - 1)
+    ]
+    return restore_output_type(speed_limit.astype(dtype=dtype))
 
-        return restore_output_type(
-            next_speed_limit.astype(dtype=dtype)
-        ), restore_output_type(distance.astype(dtype=dtype))
+
+@overload
+def get_next_speed_limit_and_distance(
+    pos: ScalarNumeric,
+    direction: int,
+    speed_limits: ArrayLike,
+    speed_limit_intervals: ArrayLike,
+    *,
+    dtype: DTypeLike = np.float32,
+) -> tuple[np.floating, np.floating]: ...
+
+
+@overload
+def get_next_speed_limit_and_distance(
+    pos: ArrayLike,
+    direction: int,
+    speed_limits: ArrayLike,
+    speed_limit_intervals: ArrayLike,
+    *,
+    dtype: DTypeLike = np.float32,
+) -> tuple[NDArray[np.floating], NDArray[np.floating]]: ...
+
+
+def get_next_speed_limit_and_distance(
+    pos: ScalarNumeric | ArrayLike,
+    direction: int,
+    speed_limits: ArrayLike,
+    speed_limit_intervals: ArrayLike,
+    *,
+    dtype: DTypeLike = np.float32,
+) -> (
+    tuple[np.floating, np.floating] | tuple[NDArray[np.floating], NDArray[np.floating]]
+):
+    """
+    根据当前位置和运动方向返回下个限速区间限速和当前位置与下一限速区间的距离。
+    """
+    pos_arr = np.asarray(pos, dtype=np.float64)
+    limits_arr = np.asarray(speed_limits, dtype=np.float64)
+    intervals_arr = np.asarray(speed_limit_intervals, dtype=np.float64)
+    current_interval_index = get_interval_index(pos_arr, intervals_arr)
+    next_interval_index = np.clip(
+        current_interval_index + direction, 0, len(limits_arr) - 1
+    )
+
+    next_speed_limit = limits_arr[next_interval_index]
+    distance = (
+        intervals_arr[
+            np.clip(
+                current_interval_index + (direction + 1) // 2,
+                0,
+                len(intervals_arr) - 1,
+            )
+        ]
+        - pos_arr
+    )
+
+    return restore_output_type(
+        next_speed_limit.astype(dtype=dtype)
+    ), restore_output_type(distance.astype(dtype=dtype))

@@ -23,7 +23,7 @@ DEFAULT_REWARD_COMPONENT_TAGS = [
     "rewards/energy",
     "rewards/comfort",
     "rewards/punctuality",
-    "rewards/docking",
+    "rewards/stopping",
 ]
 
 VIOLATION_STATE_LABELS = ["normal", "low_violation", "high_violation"]
@@ -1143,3 +1143,4 @@ def compute_evolution_metrics(
         "overall_terminal_state_ratio": overall_terminal_state_ratio,
         "stage_profiles": stage_profiles,
     }
+

@@ -1,14 +1,130 @@
-from collections.abc import Callable
-from typing import cast
-
 import numpy as np
+from numba import njit
 from numpy.typing import NDArray
-from scipy.integrate import cumulative_trapezoid, trapezoid
+from scipy.integrate import cumulative_trapezoid
 
-from model.track.track import TrackProfile
-from model.vehicle.vehicle import VehicleDynamic, VehicleInfo
+from model.track import TrackInfo, get_slope, get_slope_scalar_numba
+from model.vehicle import (
+    VehicleInfo,
+    calc_longitudinal_force,
+    calc_longitudinal_force_scalar_numba,
+)
 
-AccProfile = Callable[[NDArray[np.floating]], NDArray[np.floating]]
+
+@njit(cache=True)
+def _calc_energy_constant_acc_numba(
+    begin_pos: float,
+    begin_speed: float,
+    acc: float,
+    distance: float,
+    direction: int,
+    operation_time_value: float,
+    mass: float,
+    numoftrainsets: float,
+    slopes: NDArray[np.float64],
+    slope_intervals: NDArray[np.float64],
+    r_m: float,
+    l_d: float,
+    r_k: float,
+    l_k: float,
+    k_c: float,
+    h: float,
+    phi_1: float,
+    phi_2: float,
+) -> tuple[float, float]:
+    mechanic_energy_consumption = 0.0
+    motor_energy_consumption = 0.0
+    abs_distance = np.abs(distance)
+
+    if abs_distance < 1e-6:
+        slope = get_slope_scalar_numba(begin_pos, slopes, slope_intervals)
+        f_longitudinal = calc_longitudinal_force_scalar_numba(
+            begin_speed, slope, acc, mass, numoftrainsets
+        )
+        mechanic_energy_consumption = np.abs(f_longitudinal * distance)
+    else:
+        n_samples = int(abs_distance / 1.0)
+        if n_samples < 10:
+            n_samples = 10
+
+        delta_d = distance / n_samples
+        abs_delta_d = np.abs(delta_d)
+        motor_r_coeff = (
+            2.0 / (3.0 * h**2) * (r_m + k_c**2 * r_k + (1.0 - k_c) ** 2 * r_k)
+        )
+        motor_l_coeff = (
+            2.0 / (3.0 * h**2) * (l_d + k_c**2 * l_k + (1.0 - k_c) ** 2 * l_k)
+        )
+
+        speed = begin_speed
+        time_current = 0.0
+        slope = get_slope_scalar_numba(begin_pos, slopes, slope_intervals)
+        f_current = calc_longitudinal_force_scalar_numba(
+            speed, slope, acc, mass, numoftrainsets
+        )
+        abs_f_current = np.abs(f_current)
+        motor_r_current = f_current**2 * motor_r_coeff
+        motor_l_current = abs_f_current * motor_l_coeff
+
+        for i in range(n_samples):
+            next_speed_squared = speed**2 + 2.0 * acc * delta_d
+            if next_speed_squared < 0.0:
+                next_speed_squared = 0.0
+            speed_next = np.sqrt(next_speed_squared)
+
+            avg_speed = (speed + speed_next) / 2.0
+            if avg_speed < 1e-6:
+                avg_speed = 1e-6
+            time_next = time_current + abs_delta_d / avg_speed
+
+            d_next = delta_d * (i + 1)
+            pos_next = begin_pos + d_next * direction
+            slope_next = get_slope_scalar_numba(pos_next, slopes, slope_intervals)
+            f_next = calc_longitudinal_force_scalar_numba(
+                speed_next, slope_next, acc, mass, numoftrainsets
+            )
+            abs_f_next = np.abs(f_next)
+            motor_r_next = f_next**2 * motor_r_coeff
+            motor_l_next = abs_f_next * motor_l_coeff
+
+            mechanic_energy_consumption += (
+                0.5 * (abs_f_current + abs_f_next) * abs_delta_d
+            )
+            motor_energy_consumption += (
+                0.5 * (motor_r_current + motor_r_next) * (time_next - time_current)
+            )
+            motor_energy_consumption += (
+                0.5 * (motor_l_current + motor_l_next) * (abs_f_next - abs_f_current)
+            )
+
+            speed = speed_next
+            time_current = time_next
+            f_current = f_next
+            abs_f_current = abs_f_next
+            motor_r_current = motor_r_next
+            motor_l_current = motor_l_next
+
+    if np.isnan(operation_time_value):
+        if np.abs(acc) < 1e-9:
+            speed_denom = begin_speed
+            if speed_denom < 1e-6:
+                speed_denom = 1e-6
+            time = distance / speed_denom
+        else:
+            next_speed_squared = begin_speed**2 + 2.0 * acc * distance
+            if next_speed_squared < 0.0:
+                next_speed_squared = 0.0
+            next_speed = np.sqrt(next_speed_squared)
+            time = (next_speed - begin_speed) / acc
+    else:
+        time = operation_time_value
+
+    propulsion_energy_consumption = (
+        mechanic_energy_consumption + motor_energy_consumption
+    )
+    leviation_energy_consumption = phi_1 * distance + phi_2 * mass * time
+
+    return propulsion_energy_consumption, leviation_energy_consumption
 
 
 class ECC:
@@ -62,26 +178,26 @@ class ECC:
         Psi_fd: float,
         k_c: float,
     ) -> None:
-        self.R_m = R_m
-        self.L_d = L_d
-        self.R_k = R_k
-        self.L_k = L_k
-        self.Tau = Tau
-        self.Psi_fd = Psi_fd
-        self.k_c = k_c
-        self.h = np.pi * Psi_fd / Tau
-        self.Phi_1 = 0.1049
-        self.Phi_2 = 1.006
+        self.R_m: float = R_m
+        self.L_d: float = L_d
+        self.R_k: float = R_k
+        self.L_k: float = L_k
+        self.Tau: float = Tau
+        self.Psi_fd: float = Psi_fd
+        self.k_c: float = k_c
+        self.h: float = np.pi * Psi_fd / Tau
+        self.Phi_1: float = 0.1049
+        self.Phi_2: float = 1.006
 
     def calc_energy_cumulative(
         self,
-        pos_arr: NDArray[np.floating],
-        speed_arr: NDArray[np.floating],
-        acc_arr: NDArray[np.floating],
+        pos_arr: NDArray[np.float64],
+        speed_arr: NDArray[np.float64],
+        acc_arr: NDArray[np.float64],
         vehicle: VehicleInfo,
-        trackprofile: TrackProfile,
-        travel_time_arr: NDArray[np.floating],
-    ) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
+        track: TrackInfo,
+        travel_time_arr: NDArray[np.float64],
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         """
         计算列车运行一段距离消耗的总能量(kJ),
         包括牵引系统能耗(kJ)和悬浮系统能耗(kJ)
@@ -90,18 +206,24 @@ class ECC:
             pos: 位置(单位: m)
             speed: 速度大小(单位: m/s)
             vehicle: 车辆类
-            trackprofile: 线路特性对象
+            track: 线路数据对象
             travel_time: 总共旅行时间
 
         Returns:
             tuple(propulsion_energy_consumption, leviation_energy_consumption)
         """
 
-        F_longitudinal = VehicleDynamic.calc_longitudinal_force(
-            vehicle,
-            acc_arr,
-            speed_arr,
-            trackprofile.get_slope(pos_arr, dtype=np.float64),
+        F_longitudinal = calc_longitudinal_force(
+            mass=vehicle.mass,
+            numoftrainsets=vehicle.numoftrainsets,
+            acc=acc_arr,
+            speed=speed_arr,
+            slope=get_slope(
+                pos_arr,
+                track.slopes,
+                track.slope_intervals,
+                dtype=np.float64,
+            ),
         )
 
         mechanic_energy_consumption = cumulative_trapezoid(
@@ -141,12 +263,12 @@ class ECC:
         self,
         begin_pos: float,
         begin_speed: float,
-        acc: float | AccProfile,
+        acc: float,
         distance: float,
         direction: int,
         operation_time: float | None,
         vehicle: VehicleInfo,
-        trackprofile: TrackProfile,
+        track: TrackInfo,
     ) -> tuple[float, float]:
         """
         计算列车从起始位置和速度连续位移一段距离消耗的能量(kJ),
@@ -155,140 +277,39 @@ class ECC:
         Args:
             begin_pos: 起始位置(m)
             begin_speed: 起始速度(m/s)
-            acc: 加速度常数，或以位移距离为输入返回加速度的回调函数
-                回调必须支持数组输入（向量化），并返回与输入同维度同形状的数组
+            acc: 加速度常数
             distance: 运动距离(m)
             operation_time: 运行时间(s)
             vehicle: 车辆实例
-            trackprofile: 轨道特性实例
+            track: 轨道数据实例
 
         Returns:
             propulsion_energy_consumption: 牵引能耗(kJ)
             leviation_energy_consumption: 悬浮能耗(kJ)
         """
 
-        acc_is_callable = callable(acc)
-        if acc_is_callable:
-            acc_func = cast(AccProfile, acc)
-            acc_value = None
-        else:
-            acc_func = None
-            acc_value = float(acc)
-
-        def _eval_acc_nodes(d_nodes: NDArray[np.floating]) -> NDArray[np.float64]:
-            assert acc_func is not None
-            try:
-                acc_eval = np.asarray(acc_func(d_nodes), dtype=np.float64)
-            except Exception as exc:
-                raise TypeError("acc callback must accept numpy array input") from exc
-
-            if acc_eval.ndim != d_nodes.ndim or acc_eval.shape != d_nodes.shape:
-                raise ValueError(
-                    "acc callback must return array with same ndim and shape as input"
-                )
-
-            return np.asarray(acc_eval, dtype=np.float64)
-
-        auto_operation_time: float | None = None
-
-        # 计算机械能耗
-        if np.abs(distance) < 1e-6:
-            # 位移极小，使用起始点的力近似
-            if acc_func is not None:
-                acc_for_force = float(
-                    _eval_acc_nodes(np.asarray([0.0], dtype=np.float64))[0]
-                )
-            else:
-                acc_for_force = acc_value
-            assert acc_for_force is not None
-            F_longitudinal = VehicleDynamic.calc_longitudinal_force(
-                vehicle=vehicle,
-                acc=acc_for_force,
-                speed=begin_speed,
-                slope=trackprofile.get_slope(pos=begin_pos),
+        operation_time_value = np.nan if operation_time is None else operation_time
+        propulsion_energy_consumption, leviation_energy_consumption = (
+            _calc_energy_constant_acc_numba(
+                begin_pos=begin_pos,
+                begin_speed=begin_speed,
+                acc=acc,
+                distance=distance,
+                direction=direction,
+                operation_time_value=operation_time_value,
+                mass=vehicle.mass,
+                numoftrainsets=vehicle.numoftrainsets,
+                slopes=track.slopes,
+                slope_intervals=track.slope_intervals,
+                r_m=self.R_m,
+                l_d=self.L_d,
+                r_k=self.R_k,
+                l_k=self.L_k,
+                k_c=self.k_c,
+                h=self.h,
+                phi_1=self.Phi_1,
+                phi_2=self.Phi_2,
             )
-            mechanic_energy_consumption = np.abs(F_longitudinal * distance)
-            motor_energy_consumption = 0.0
-            auto_operation_time = 0.0
-        else:
-            # 离散采样进行数值积分
-            n_samples = max(10, int(np.abs(distance) / 1.0))
-            d_nodes = np.linspace(0.0, distance, n_samples + 1)
-            delta_d = np.diff(d_nodes)
-            p_nodes = begin_pos + d_nodes * direction
-
-            if acc_func is not None:
-                acc_nodes = _eval_acc_nodes(d_nodes)
-            else:
-                assert acc_value is not None
-                acc_nodes = np.full_like(d_nodes, acc_value, dtype=np.float64)
-
-            speed_nodes = np.empty_like(d_nodes)
-            speed_nodes[0] = begin_speed
-            for i in range(n_samples):
-                speed_nodes[i + 1] = np.sqrt(
-                    np.maximum(
-                        speed_nodes[i] ** 2 + 2.0 * acc_nodes[i] * delta_d[i],
-                        0.0,
-                    )
-                )
-
-            t_nodes = np.zeros_like(d_nodes)
-            for i in range(n_samples):
-                # 用平均速度求平均时间的数值稳定性更强
-                avg_speed = np.maximum(
-                    (speed_nodes[i] + speed_nodes[i + 1]) / 2.0, 1e-6
-                )
-                t_nodes[i + 1] = t_nodes[i] + np.abs(delta_d[i]) / avg_speed
-
-            slope_nodes = trackprofile.get_slope(p_nodes, dtype=np.float64)
-
-            F_longitudinal = VehicleDynamic.calc_longitudinal_force(
-                vehicle=vehicle,
-                acc=acc_nodes,
-                speed=speed_nodes,
-                slope=slope_nodes,
-            )
-            # |F| 对距离积分，使用绝对距离增量确保能耗非负
-            mechanic_energy_consumption = np.sum(
-                0.5
-                * (np.abs(F_longitudinal[:-1]) + np.abs(F_longitudinal[1:]))
-                * np.abs(delta_d)
-            )
-            motor_energy_consumption = trapezoid(
-                y=(2 * F_longitudinal**2 / (3 * self.h**2))
-                * (self.R_m + self.k_c**2 * self.R_k + (1 - self.k_c) ** 2 * self.R_k),
-                x=t_nodes,
-            ) + trapezoid(
-                y=(np.abs(F_longitudinal) * 2 / (3 * self.h**2))
-                * (self.L_d + self.k_c**2 * self.L_k + (1 - self.k_c) ** 2 * self.L_k),
-                x=np.abs(F_longitudinal),
-            )
-            auto_operation_time = float(t_nodes[-1])
-
-        # 计算悬浮能耗
-        if operation_time is None:
-            if acc_func is not None:
-                assert auto_operation_time is not None
-                time = auto_operation_time
-            else:
-                assert acc_value is not None
-                # 保持恒加速度输入的原有时间计算逻辑
-                if np.abs(acc_value) < 1e-9:
-                    time = distance / np.maximum(begin_speed, 1e-6)
-                else:
-                    next_speed_squared = begin_speed**2 + 2 * acc_value * distance
-                    next_speed = np.sqrt(np.maximum(next_speed_squared, 0))
-                    time = (next_speed - begin_speed) / acc_value
-        else:
-            time = operation_time
-
-        propulsion_energy_consumption = (
-            mechanic_energy_consumption + motor_energy_consumption
         )
 
-        leviation_energy_consumption = (
-            self.Phi_1 * distance + self.Phi_2 * vehicle.mass * time
-        )
-
-        return float(propulsion_energy_consumption), float(leviation_energy_consumption)
+        return propulsion_energy_consumption, leviation_energy_consumption

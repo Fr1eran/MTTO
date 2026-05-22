@@ -1,6 +1,15 @@
 import numpy as np
 import pytest
-from model.track.track import TrackInfo, TrackProfile
+from model.track import (
+    TrackInfo,
+    get_next_slope_and_distance,
+    get_slope,
+    get_slope_array_numba,
+    get_slope_scalar_numba,
+    get_speed_limit,
+    get_speed_limit_array_numba,
+    get_speed_limit_scalar_numba,
+)
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_slopes,
@@ -9,7 +18,7 @@ from utils.data_loader import (
 
 
 @pytest.fixture(scope="module")
-def track_profile():
+def track():
     # 坡度，百分位
     slopes, slope_intervals = load_slopes()
 
@@ -26,10 +35,10 @@ def track_profile():
         ASA_aps=aps,
         ASA_dps=dps,
     )
-    return TrackProfile(track=track)
+    return track
 
 
-def test_get_slope(track_profile: TrackProfile):
+def test_get_slope(track: TrackInfo):
     pos = np.array(
         [
             2600.0,
@@ -78,10 +87,15 @@ def test_get_slope(track_profile: TrackProfile):
         ],
         dtype=np.float32,
     )
-    result1 = track_profile.get_slope(pos=pos, dtype=np.float32)
-    result2 = track_profile.get_slope(pos=pos)
-    result3 = track_profile.get_slope(pos=2885.1417)
-    result4 = track_profile.get_slope(pos=2883.4972)
+    result1 = get_slope(
+        pos,
+        track.slopes,
+        track.slope_intervals,
+        dtype=np.float32,
+    )
+    result2 = get_slope(pos, track.slopes, track.slope_intervals)
+    result3 = get_slope(2885.1417, track.slopes, track.slope_intervals)
+    result4 = get_slope(2883.4972, track.slopes, track.slope_intervals)
     np.testing.assert_allclose(result1, expected_result)
     np.testing.assert_allclose(result2, expected_result)
     assert isinstance(result3, np.floating)
@@ -90,7 +104,35 @@ def test_get_slope(track_profile: TrackProfile):
     np.testing.assert_allclose(result4, -0.0154)
 
 
-def test_get_speed_limit(track_profile: TrackProfile):
+def test_get_slope_scalar_and_array_numba_kernels(track: TrackInfo):
+    pos = np.array(
+        [
+            0.0,
+            2600.0,
+            2883.4972,
+            2884.0,
+            2885.1417,
+            15000.0,
+            21100.0,
+            29000.0,
+        ],
+        dtype=np.float64,
+    )
+    expected = get_slope(pos, track.slopes, track.slope_intervals, dtype=np.float64)
+    result = get_slope_array_numba(pos, track.slopes, track.slope_intervals)
+    scalar_result = np.float64(
+        get_slope_scalar_numba(2885.1417, track.slopes, track.slope_intervals)
+    )
+
+    np.testing.assert_allclose(result, expected)
+    assert isinstance(scalar_result, np.floating)
+    np.testing.assert_allclose(
+        scalar_result,
+        get_slope(2885.1417, track.slopes, track.slope_intervals, dtype=np.float64),
+    )
+
+
+def test_get_speed_limit(track: TrackInfo):
     pos = np.array(
         [
             200.0,
@@ -142,14 +184,60 @@ def test_get_speed_limit(track_profile: TrackProfile):
         )
         / 3.6
     )
-    result1 = track_profile.get_speed_limit(pos=pos, dtype=np.float32)
-    result2 = track_profile.get_speed_limit(pos=240.0)
+    result1 = get_speed_limit(
+        pos,
+        track.speed_limits,
+        track.speed_limit_intervals,
+        dtype=np.float32,
+    )
+    result2 = get_speed_limit(
+        240.0,
+        track.speed_limits,
+        track.speed_limit_intervals,
+    )
     np.testing.assert_allclose(result1, expected_result)
     assert isinstance(result2, np.floating)
     np.testing.assert_allclose(result2, 100.0 / 3.6)
 
 
-def test_get_next_slope_and_distance(track_profile: TrackProfile):
+def test_get_speed_limit_numba_kernels(track: TrackInfo):
+    pos = np.array(
+        [
+            200.0,
+            400.0,
+            800.0,
+            1500.0,
+            21500.0,
+            28500.0,
+            29880.0,
+        ],
+        dtype=np.float64,
+    )
+    expected = get_speed_limit(
+        pos,
+        track.speed_limits,
+        track.speed_limit_intervals,
+        dtype=np.float64,
+    )
+    result = get_speed_limit_array_numba(
+        pos,
+        track.speed_limits,
+        track.speed_limit_intervals,
+    )
+    scalar_result = np.float64(
+        get_speed_limit_scalar_numba(
+            240.0,
+            track.speed_limits,
+            track.speed_limit_intervals,
+        )
+    )
+
+    np.testing.assert_allclose(result, expected)
+    assert isinstance(scalar_result, np.floating)
+    np.testing.assert_allclose(scalar_result, 100.0 / 3.6)
+
+
+def test_get_next_slope_and_distance(track: TrackInfo):
     pos = np.array(
         [
             2600.0,
@@ -190,11 +278,19 @@ def test_get_next_slope_and_distance(track_profile: TrackProfile):
         ],
         dtype=np.float32,
     )
-    dslope_ahead, distance_ahead = track_profile.get_next_slope_and_distance(
-        pos=pos, direction=1, dtype=np.float32
+    dslope_ahead, distance_ahead = get_next_slope_and_distance(
+        pos,
+        1,
+        track.slopes,
+        track.slope_intervals,
+        dtype=np.float32,
     )
-    dslope_rear, distance_rear = track_profile.get_next_slope_and_distance(
-        pos=pos, direction=-1, dtype=np.float32
+    dslope_rear, distance_rear = get_next_slope_and_distance(
+        pos,
+        -1,
+        track.slopes,
+        track.slope_intervals,
+        dtype=np.float32,
     )
     # 32位浮点数精度较低
     print(distance_rear)

@@ -13,7 +13,6 @@ from dp.experiment_utils import (
     resolve_dp_curve_artifact,
 )
 from model.common import ECC
-from model.track import TrackProfile
 from rl.experiment_utils import (
     DEFAULT_SCHEDULE_TIME_S,
     RL_DEFAULT_SEARCH_DIR,
@@ -230,7 +229,6 @@ def main() -> None:
     print(f"Energy context schedule_time_s: {schedule_time_s:.3f}")
 
     vehicle, track, _, _ = build_scenario(schedule_time_s=schedule_time_s)
-    trackprofile = TrackProfile(track=track)
     ecc = _build_ecc()
 
     dp_acc_arr = compute_segment_accelerations(dp_pos_arr, dp_speed_arr)
@@ -242,14 +240,14 @@ def main() -> None:
         pos_arr=dp_pos_arr,
         speed_arr=dp_speed_arr,
         vehicle=vehicle,
-        trackprofile=trackprofile,
+        track=track,
         ecc=ecc,
     )
     rl_cum_energy_arr = compute_cumulative_energy_from_trajectory(
         pos_arr=rl_pos_arr,
         speed_arr=rl_speed_arr,
         vehicle=vehicle,
-        trackprofile=trackprofile,
+        track=track,
         ecc=ecc,
     )
 

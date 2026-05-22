@@ -11,7 +11,7 @@ from scipy.interpolate import PchipInterpolator
 
 from model.common import ECC, ORS
 from model.ocs import SPS, SafeGuardUtility, TrainService
-from model.track import TrackInfo, TrackProfile
+from model.track import TrackInfo, get_slope_scalar_numba, get_speed_limit_scalar_numba
 from model.vehicle import VehicleInfo
 from utils.indexing_utils import get_interval_index
 from utils.plot_utils import set_chinese_font
@@ -20,7 +20,7 @@ from utils.score_function import SigmoidVariant
 
 class RewardInfoForTB(TypedDict, total=False):
     safety: float
-    docking: float
+    stopping: float
     punctuality: float
     energy: float
     comfort: float
@@ -74,9 +74,10 @@ class TrainState(TypedDict, total=True):
     acc: float
     min_speed: float
     max_speed: float
-    latest_traction_intervention_point: float
-    latest_braking_intervention_point: float
+    # latest_traction_intervention_point: float
+    # latest_braking_intervention_point: float
     operation_time: float
+    time_redundancy: float
     energy_consumption: float
     stopping_point_index: int
 
@@ -88,7 +89,7 @@ class RewardConfig:
     enable_energy: bool = True
     enable_comfort: bool = True
     enable_potential_safety: bool = True
-    enable_potential_docking: bool = True
+    enable_potential_stopping: bool = True
     enable_potential_punctuality: bool = True
 
 
@@ -117,7 +118,6 @@ class MTTOEnv(gym.Env):
 
         # 磁浮列车运行优化的线路实例
         self.track = track
-        self.trackprofile = TrackProfile(track=self.track)
 
         # 磁浮列车安全防护实例
         self.safeguard_utility = safeguard_utility
@@ -153,7 +153,7 @@ class MTTOEnv(gym.Env):
             + 1
         )
 
-        self._docking_score_func = SigmoidVariant(
+        self._stopping_score_func = SigmoidVariant(
             x1=self.train_service.max_stop_error,
             x2=self.train_service.max_stop_error * 10.0,
             c=5.0,
@@ -261,9 +261,14 @@ class MTTOEnv(gym.Env):
         self.current_speed: float = self.train_service.start_speed
         self.current_acc: float = 0.0
         self.current_operation_time: float = 0.0
+        self.current_time_redundancy: float = self._calc_time_redundancy()
         self.current_energy_consumption: float = 0.0
         # self.mass = self.vehicle.mass
-        self.current_slope = self.trackprofile.get_slope(pos=self.current_pos)
+        self.current_slope = get_slope_scalar_numba(
+            self.current_pos,
+            self.track.slopes,
+            self.track.slope_intervals,
+        )
         self.current_sp: int = -1  # 初始时在加速区，尚未步进至第一个辅助停车区
         self.current_min_speed, self.current_max_speed = (
             self.safeguard_utility.get_min_and_max_speed(
@@ -275,8 +280,10 @@ class MTTOEnv(gym.Env):
             self._get_upper_speed(self.current_pos),
             self.current_max_speed,
         )
-        self.next_slope = self.trackprofile.get_slope(
-            pos=self.current_pos + self.max_step_distance * self.direction
+        self.next_slope = get_slope_scalar_numba(
+            self.current_pos + self.max_step_distance * self.direction,
+            self.track.slopes,
+            self.track.slope_intervals,
         )
         self.next_min_speed, self.next_max_speed = (
             self.safeguard_utility.get_min_and_max_speed(
@@ -314,7 +321,7 @@ class MTTOEnv(gym.Env):
                 dtype=np.float32,
             ),
             "remaining_schedule_time": gym.spaces.Box(
-                -1.0,  # 最多超时10分钟
+                -1.0,
                 1.0,
                 shape=(1,),
                 dtype=np.float32,  # 允许超时或提前
@@ -423,7 +430,11 @@ class MTTOEnv(gym.Env):
 
     def _set_speed_limit_diagnostic(self):
         self.current_speed_limit_mps = float(
-            self.trackprofile.get_speed_limit(pos=self.current_pos)
+            get_speed_limit_scalar_numba(
+                self.current_pos,
+                self.track.speed_limits,
+                self.track.speed_limit_intervals,
+            )
         )
         self.current_speed_limit_segment = self._get_speed_limit_segment(
             self.current_pos
@@ -471,11 +482,7 @@ class MTTOEnv(gym.Env):
                 dtype=np.float32,
             ),
             "time_redundancy": np.array(
-                [
-                    self._calc_time_redundancy_norm(
-                        self.current_pos, self.current_operation_time
-                    )
-                ],
+                [self.current_time_redundancy],
                 dtype=np.float32,
             ),
             "current_slope": np.array(
@@ -633,9 +640,14 @@ class MTTOEnv(gym.Env):
         self.current_speed = self.train_service.start_speed
         self.current_acc = 0.0
         self.current_operation_time = 0.0
+        self.current_time_redundancy = self._calc_time_redundancy()
         self.current_energy_consumption = 0.0
         # self.mass = self.vehicle.mass
-        self.current_slope = self.trackprofile.get_slope(pos=self.current_pos)
+        self.current_slope = get_slope_scalar_numba(
+            self.current_pos,
+            self.track.slopes,
+            self.track.slope_intervals,
+        )
 
         # 重置停车点步进
         self.current_sp = -1
@@ -650,8 +662,10 @@ class MTTOEnv(gym.Env):
             self._get_upper_speed(self.current_pos),
             self.current_max_speed,
         )
-        self.next_slope = self.trackprofile.get_slope(
-            pos=self.current_pos + self.max_step_distance
+        self.next_slope = get_slope_scalar_numba(
+            self.current_pos + self.max_step_distance,
+            self.track.slopes,
+            self.track.slope_intervals,
         )
         (
             self.next_min_speed,
@@ -735,7 +749,7 @@ class MTTOEnv(gym.Env):
             direction=self.direction,
             operation_time=operation_time,
             vehicle=self.vehicle,
-            trackprofile=self.trackprofile,
+            track=self.track,
         )
         energy_consumption = current_mec + current_lec
 
@@ -743,9 +757,14 @@ class MTTOEnv(gym.Env):
         self.current_pos += distance * self.direction
         self.current_speed = next_speed
         self.current_operation_time += operation_time
+        self.current_time_redundancy = self._calc_time_redundancy()
         self.current_energy_consumption += energy_consumption
         # self.mass = self.vehicle.mass
-        self.current_slope = self.trackprofile.get_slope(pos=self.current_pos)
+        self.current_slope = get_slope_scalar_numba(
+            self.current_pos,
+            self.track.slopes,
+            self.track.slope_intervals,
+        )
         self.current_sp = self.sps.step_to_next_stopping_point(
             current_pos=self.current_pos,
             current_speed=self.current_speed,
@@ -762,8 +781,10 @@ class MTTOEnv(gym.Env):
             self._get_upper_speed(self.current_pos),
             self.current_max_speed,
         )
-        self.next_slope = self.trackprofile.get_slope(
-            pos=self.current_pos + self.max_step_distance * self.direction
+        self.next_slope = get_slope_scalar_numba(
+            self.current_pos + self.max_step_distance * self.direction,
+            self.track.slopes,
+            self.track.slope_intervals,
         )
         self.next_min_speed, self.next_max_speed = (
             self.safeguard_utility.get_min_and_max_speed(
@@ -792,7 +813,11 @@ class MTTOEnv(gym.Env):
         )
 
         self.current_speed_limit_mps = float(
-            self.trackprofile.get_speed_limit(pos=self.current_pos)
+            get_speed_limit_scalar_numba(
+                self.current_pos,
+                self.track.speed_limits,
+                self.track.speed_limit_intervals,
+            )
         )
         self.current_speed_limit_segment = self._get_speed_limit_segment(
             self.current_pos
@@ -949,20 +974,21 @@ class MTTOEnv(gym.Env):
             )
         )
 
-    def _calc_redundant_operation_time(
-        self, pos: float | np.floating, operation_time: float
-    ) -> float:
-        min_remaining = self._get_reference_remaining_operation_time(pos)
-        actual_remaining = self.train_service.schedule_time - operation_time
+    def _calc_redundant_operation_time(self) -> float:
+        # min_remaining = self._get_reference_remaining_operation_time(self.current_pos)
+        min_remaining = self.ors.calc_min_operation_time(
+            begin_pos=self.current_pos,
+            begin_speed=self.current_speed,
+            end_pos=self.train_service.target_position,
+            end_speed=0.0,
+        )
+        actual_remaining = (
+            self.train_service.schedule_time - self.current_operation_time
+        )
         return actual_remaining - min_remaining
 
-    def _calc_time_redundancy_norm(
-        self, pos: float | np.floating, operation_time: float
-    ) -> float:
-        return (
-            self._calc_redundant_operation_time(pos, operation_time)
-            / self.train_service.schedule_time
-        )
+    def _calc_time_redundancy(self) -> float:
+        return self._calc_redundant_operation_time() / self.train_service.schedule_time
 
     def _get_upper_speed(self, pos: float | np.floating):
         return max(0.0, self.upper_speed_profile_interp_func(pos))
@@ -973,8 +999,6 @@ class MTTOEnv(gym.Env):
         terminated: bool,
         truncated: bool,
     ) -> float:
-        reward_total = 0.0
-
         if not truncated:
             # 基本生存奖励
             small_bonus = 150.0 / self.max_episode_steps
@@ -1022,9 +1046,9 @@ class MTTOEnv(gym.Env):
         )
 
         # 停站奖励
-        reward_docking = (
-            self._get_reward_docking_dense()
-            if self.reward_config.enable_potential_docking
+        reward_stopping = (
+            self._get_reward_stopping_dense()
+            if self.reward_config.enable_potential_stopping
             else 0.0
         )
 
@@ -1033,14 +1057,14 @@ class MTTOEnv(gym.Env):
             self.rewards_info["energy"] = reward_energy
             self.rewards_info["comfort"] = reward_comfort
             self.rewards_info["punctuality"] = reward_punctuality
-            self.rewards_info["docking"] = reward_docking
+            self.rewards_info["stopping"] = reward_stopping
 
         return (
             reward_safety
             + reward_energy
             + reward_comfort
             + reward_punctuality
-            + reward_docking
+            + reward_stopping
         )
 
     def _get_reward_safety_dense(self) -> float:
@@ -1345,118 +1369,93 @@ class MTTOEnv(gym.Env):
 
     def _get_reward_punctuality_dense(self) -> float:
         # phi_curr = self._potential_punctuality_v1(
-        #     pos=self.current_pos,
-        #     operation_time=self.current_operation_time,
+        #     time_redundancy=self.current_time_redundancy
         # )
 
         # phi_prev = self._potential_punctuality_v1(
-        #     pos=self.last_state["pos"],
-        #     operation_time=self.last_state["operation_time"],
+        #     time_redundancy=self.last_state["time_redundancy"]
         # )
 
         # phi_curr = self._potential_punctuality_v2(
-        #     pos=self.current_pos,
-        #     operation_time=self.current_operation_time,
+        #     time_redundancy=self.current_time_redundancy
         # )
 
         # phi_prev = self._potential_punctuality_v2(
-        #     pos=self.last_state["pos"],
-        #     operation_time=self.last_state["operation_time"],
+        #     time_redundancy=self.last_state["time_redundancy"]
         # )
 
         phi_curr = self._potential_punctuality_v3(
-            pos=self.current_pos,
-            operation_time=self.current_operation_time,
+            time_redundancy=self.current_time_redundancy
         )
 
         phi_prev = self._potential_punctuality_v3(
-            pos=self.last_state["pos"],
-            operation_time=self.last_state["operation_time"],
+            time_redundancy=self.last_state["time_redundancy"]
         )
 
         return self.gamma * phi_curr - phi_prev
 
-    def _potential_punctuality_v1(self, pos: float, operation_time: float):
-        time_redundancy_norm = self._calc_time_redundancy_norm(pos, operation_time)
-        return -4.0 * np.log1p(np.exp(-1.0 * time_redundancy_norm))
+    def _potential_punctuality_v1(self, time_redundancy: float):
+        return -4.0 * np.log1p(np.exp(-1.0 * time_redundancy))
 
-    def _potential_punctuality_v2(self, pos: float, operation_time: float):
+    def _potential_punctuality_v2(self, time_redundancy: float):
         K_base = 0.5
         K_safe = 0.1
         K_late = 1.0
 
-        time_redundancy_norm = self._calc_time_redundancy_norm(pos, operation_time)
-
-        if time_redundancy_norm >= 0.0:
-            return K_base + K_safe * time_redundancy_norm
+        if time_redundancy >= 0.0:
+            return K_base + K_safe * time_redundancy
         else:
-            return (
-                K_base
-                + K_safe * time_redundancy_norm
-                - K_late * time_redundancy_norm**2
-            )
+            return K_base + K_safe * time_redundancy - K_late * time_redundancy**2
 
-    def _potential_punctuality_v3(self, pos: float, operation_time: float):
+    def _potential_punctuality_v3(self, time_redundancy: float):
         K_base = 1.0
         K_safe = 1.0
-        K_late = 8.0
-        alpha = 3.0
+        K_late = 10.0
+        alpha = 5.0
 
-        time_redundancy_norm = self._calc_time_redundancy_norm(pos, operation_time)
-
-        if time_redundancy_norm >= 0.0:
-            return K_base + K_safe * time_redundancy_norm
+        if time_redundancy >= 0.0:
+            return K_base + K_safe * time_redundancy
         else:
             return (
                 K_base
-                + K_safe * time_redundancy_norm
+                + K_safe * time_redundancy
                 - K_late
                 / alpha
-                * (
-                    np.exp(-alpha * time_redundancy_norm)
-                    + alpha * time_redundancy_norm
-                    - 1
-                )
+                * (np.exp(-alpha * time_redundancy) + alpha * time_redundancy - 1)
             )
 
-    def _get_reward_docking_dense(self):
+    def _get_reward_stopping_dense(self):
 
-        if (
-            abs(self.train_service.target_position - self.current_pos)
-            < self.target_attraction_domain_radius * 2.0
-        ):
-            phi_curr = self._potential_docking_v1(
-                pos=self.current_pos, speed=self.current_speed
-            )
+        phi_curr = self._potential_stopping_v1(
+            pos=self.current_pos, speed=self.current_speed
+        )
 
-            phi_prev = self._potential_docking_v1(
-                pos=self.last_state["pos"], speed=self.last_state["speed"]
-            )
+        phi_prev = self._potential_stopping_v1(
+            pos=self.last_state["pos"], speed=self.last_state["speed"]
+        )
 
-            # phi_curr = self._potential_docking_v2(
-            #     pos=self.current_pos, speed=self.current_speed
-            # )
+        # phi_curr = self._potential_stopping_v2(
+        #     pos=self.current_pos, speed=self.current_speed
+        # )
 
-            # phi_prev = self._potential_docking_v2(
-            #     pos=self.last_state["pos"], speed=self.last_state["speed"]
-            # )
+        # phi_prev = self._potential_stopping_v2(
+        #     pos=self.last_state["pos"], speed=self.last_state["speed"]
+        # )
 
-            return self.gamma * phi_curr - phi_prev
-        else:
-            return 0.0
+        return self.gamma * phi_curr - phi_prev
 
-    def _potential_docking_v1(self, pos: float, speed: float):
+    def _potential_stopping_v1(self, pos: float, speed: float):
         dist_error_abs = abs(self.train_service.target_position - pos)
 
         x_hat = dist_error_abs / self.target_attraction_domain_radius
         v_hat = speed / self.vehicle.max_speed
 
         phi_weak = 2.0 * np.exp(-x_hat - v_hat)
-        phi_strong = 30.0 * np.exp(-x_hat / 0.05 - v_hat / 0.1)
+        phi_strong = 30.0 * np.exp(-x_hat / 0.01 - v_hat / 0.1)
 
         return phi_weak + phi_strong
 
-    def _potential_docking_v2(self, pos: float, speed: float):
+    def _potential_stopping_v2(self, pos: float, speed: float):
         dist_error_abs = abs(self.train_service.target_position - pos)
 
         x_hat = dist_error_abs / self.target_attraction_domain_radius
@@ -1470,20 +1469,20 @@ class MTTOEnv(gym.Env):
     def _get_reward_goal(
         self,
     ) -> float:
-        _docking = self._calc_docking_score()
+        _stopping = self._calc_stopping_score()
         _punctuality = self._calc_punctuality_score()
-        reward_docking = _docking * 20.0
-        reward_punctuality = _docking * _punctuality * 30.0
+        reward_stopping = _stopping * 20.0
+        reward_punctuality = _stopping * _punctuality * 30.0
 
         if self.enable_diagnostics and self._collect_step_diagnostics:
-            self.rewards_info["docking"] = reward_docking
+            self.rewards_info["stopping"] = reward_stopping
             self.rewards_info["punctuality"] = reward_punctuality
 
-        return reward_docking + reward_punctuality
+        return reward_stopping + reward_punctuality
 
-    def _calc_docking_score(self) -> float:
-        docking_pos_error = abs(self.train_service.target_position - self.current_pos)
-        return self._docking_score_func(docking_pos_error)
+    def _calc_stopping_score(self) -> float:
+        stopping_pos_error = abs(self.train_service.target_position - self.current_pos)
+        return self._stopping_score_func(stopping_pos_error)
 
     def _calc_punctuality_score(self) -> float:
         ontime_error = abs(
@@ -1507,6 +1506,7 @@ class MTTOEnv(gym.Env):
         #     self.current_latest_braking_intervention_point
         # )
         self.last_state["operation_time"] = self.current_operation_time
+        self.last_state["time_redundancy"] = self.current_time_redundancy
         self.last_state["energy_consumption"] = self.current_energy_consumption
         self.last_state["stopping_point_index"] = self.current_sp
 
@@ -1517,9 +1517,10 @@ class MTTOEnv(gym.Env):
             "acc": 0.0,
             "min_speed": 0.0,
             "max_speed": 0.0,
-            "latest_traction_intervention_point": 0.0,
-            "latest_braking_intervention_point": 0.0,
+            # "latest_traction_intervention_point": 0.0,
+            # "latest_braking_intervention_point": 0.0,
             "operation_time": 0.0,
+            "time_redundancy": 0.0,
             "energy_consumption": 0.0,
             "stopping_point_index": -1,
         }

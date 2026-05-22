@@ -2,8 +2,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from model.common.energy_consumption_calculator import ECC
-from model.track.track import TrackInfo, TrackProfile
-from model.vehicle.vehicle import VehicleInfo
+from model.track import TrackInfo
+from model.vehicle import VehicleInfo
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_excel,
@@ -53,8 +53,6 @@ track = TrackInfo(
     accessible_points,
     dangerous_points,
 )
-trackprofile = TrackProfile(track=track)
-
 vehicle = VehicleInfo(mass=317.5, numoftrainsets=5, length=128.5)
 
 tec = ECC(
@@ -67,7 +65,7 @@ propulsion_energy_consumption, leviation_energy_consumption = (
         speed_arr=v_km.to_numpy(dtype=np.float64) / 3.6,
         acc_arr=accelerate.to_numpy(dtype=np.float64),
         vehicle=vehicle,
-        trackprofile=trackprofile,
+        track=track,
         travel_time_arr=travel_time.to_numpy(dtype=np.float64),
     )
 )

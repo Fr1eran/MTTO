@@ -128,7 +128,7 @@ def test_cal_energy_consumption(mtto_env: MTTOEnv):
         direction=mtto_env.direction,
         operation_time=0.0,
         vehicle=mtto_env.vehicle,
-        trackprofile=mtto_env.trackprofile,
+        track=mtto_env.track,
     )
     energy_consumption1 = mec1 + lec1
 
@@ -140,7 +140,7 @@ def test_cal_energy_consumption(mtto_env: MTTOEnv):
         direction=mtto_env.direction,
         operation_time=14.142,
         vehicle=mtto_env.vehicle,
-        trackprofile=mtto_env.trackprofile,
+        track=mtto_env.track,
     )
     energy_consumption2 = mec2 + lec2
 
@@ -244,7 +244,7 @@ def test_step_with_diagnostics_puts_namespaces_at_info_top_level(
     runtime = info[runtime_namespace]
     assert isinstance(runtime, dict)
     assert "position" in runtime
-    assert "docking_position" not in runtime
+    assert "stopping_position" not in runtime
 
     expected_runtime_keys = {
         "energy_consumption",

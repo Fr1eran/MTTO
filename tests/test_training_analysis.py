@@ -82,7 +82,7 @@ def test_reward_component_impact_basic():
             "rewards/punctuality",
             [0.4, 0.5, 0.45, 0.55],
         ),
-        "rewards/docking": _make_series("rewards/docking", [0.2, 0.3, 0.2, 0.35]),
+        "rewards/stopping": _make_series("rewards/stopping", [0.2, 0.3, 0.2, 0.35]),
     }
 
     impact = compute_reward_component_impact(series_map)
@@ -770,12 +770,12 @@ def test_train_rl_cli_accepts_reward_profile_and_experiment_tag() -> None:
     parser = build_train_rl_arg_parser()
     args = parser.parse_args([
         "--reward-profile",
-        "basic_safety_docking",
+        "basic_safety_stopping",
         "--experiment-tag",
         "trial_a",
     ])
 
-    assert args.reward_profile == "basic_safety_docking"
+    assert args.reward_profile == "basic_safety_stopping"
     assert args.experiment_tag == "trial_a"
 
 
@@ -946,3 +946,4 @@ def test_write_outputs_includes_extended_risk_columns(tmp_path):
     assert "near_miss_risk" in report_text
     assert "violation_risk" in report_text
     assert "failure_risk" in report_text
+

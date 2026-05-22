@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from model.ocs import SafeGuardCurves
 from model.vehicle import VehicleInfo
-from model.track import TrackInfo, TrackProfile
+from model.track import TrackInfo
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_slopes,
@@ -28,8 +28,7 @@ def safeguard_curves_and_vehicle():
         ASA_aps=accessible_points,
         ASA_dps=dangerous_points,
     )
-    trackprofile = TrackProfile(track=track)
-    cal_SGC = SafeGuardCurves(trackprofile=trackprofile)
+    cal_SGC = SafeGuardCurves(track=track)
     vehicle = VehicleInfo(mass=317.5, numoftrainsets=5, length=128.5)
     return cal_SGC, vehicle
 

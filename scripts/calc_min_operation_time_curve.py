@@ -3,7 +3,7 @@ import numpy as np
 
 from model.common import ECC, ORS
 from model.ocs import SafeGuardUtility, TrainService
-from model.track import TrackInfo, TrackProfile
+from model.track import TrackInfo
 from model.vehicle import VehicleInfo
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
@@ -47,7 +47,6 @@ track = TrackInfo(
     accessible_points,
     dangerous_points,
 )
-track_profile = TrackProfile(track=track)
 vehicle = VehicleInfo(
     mass=317.5,
     numoftrainsets=5,

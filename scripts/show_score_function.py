@@ -5,13 +5,13 @@ from utils.plot_utils import set_global_plot_style
 from utils.score_function import SigmoidVariant
 
 
-def visualize_docking_score_function():
-    docking_score_func = SigmoidVariant(x1=0.3, x2=3.0, c=10.0)
+def visualize_stopping_score_function():
+    stopping_score_func = SigmoidVariant(x1=0.3, x2=3.0, c=10.0)
 
     x_values = np.linspace(0, 4.0, 1000)
 
-    rewards = docking_score_func(x_values)
-    gradients = docking_score_func.gradient(x_values)
+    rewards = stopping_score_func(x_values)
+    gradients = stopping_score_func.gradient(x_values)
 
     plt.figure(figsize=(10, 6))
 
@@ -29,16 +29,16 @@ def visualize_docking_score_function():
 
     # 标记关键点和参考线
     plt.axvline(
-        x=docking_score_func.x1,
+        x=stopping_score_func.x1,
         color="green",
         linestyle=":",
-        label=f"$x_1 = {docking_score_func.x1}$",
+        label=f"$x_1 = {stopping_score_func.x1}$",
     )
     plt.axvline(
-        x=docking_score_func.x2,
+        x=stopping_score_func.x2,
         color="purple",
         linestyle=":",
-        label=f"$x_2 = {docking_score_func.x2}$",
+        label=f"$x_2 = {stopping_score_func.x2}$",
     )
     plt.axhline(y=0, color="black", linewidth=1)
 
@@ -115,7 +115,7 @@ def visualize_punctuality_score_function():
 
 def visualize_combined_score_functions():
     """在同一画幅中上下布局展示停站分数和准时分数的函数图像和导函数图像"""
-    docking_score_func = SigmoidVariant(x1=0.3, x2=3.0, c=5.0)
+    stopping_score_func = SigmoidVariant(x1=0.3, x2=3.0, c=5.0)
     schedule_time = 430.0
     max_arr_time_ratio = 0.05
     punctuality_score_func = SigmoidVariant(
@@ -127,27 +127,27 @@ def visualize_combined_score_functions():
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 12))
 
     # ---- 上子图：停站分数 ----
-    x_dock = np.linspace(0, 4.0, 1000)
-    rewards_dock = docking_score_func(x_dock)
-    gradients_dock = docking_score_func.gradient(x_dock)
+    x_stop = np.linspace(0, 4.0, 1000)
+    rewards_stop = stopping_score_func(x_stop)
+    gradients_stop = stopping_score_func.gradient(x_stop)
 
-    ax1.plot(x_dock, rewards_dock, label=r"$f(x)$", color="blue", linewidth=2)
+    ax1.plot(x_stop, rewards_stop, label=r"$f(x)$", color="blue", linewidth=2)
     ax1.plot(
-        x_dock,
-        np.abs(gradients_dock) * 3,
+        x_stop,
+        np.abs(gradients_stop) * 3,
         label=r"$f'(x)$",
         color="red",
         linestyle="--",
         linewidth=2,
     )
     ax1.axvline(
-        x=docking_score_func.x1,
+        x=stopping_score_func.x1,
         color="green",
         linestyle=":",
         label=r"$x_1$",
     )
     ax1.axvline(
-        x=docking_score_func.x2,
+        x=stopping_score_func.x2,
         color="purple",
         linestyle=":",
         label=r"$x_2$",
@@ -230,3 +230,4 @@ if __name__ == "__main__":
         savefig_dpi=300.0,
     )
     visualize_combined_score_functions()
+

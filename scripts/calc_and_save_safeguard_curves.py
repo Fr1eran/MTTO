@@ -4,7 +4,7 @@ import pickle
 import numpy as np
 
 from model.ocs import SafeGuardCurves
-from model.track import TrackInfo, TrackProfile
+from model.track import TrackInfo
 from model.vehicle import VehicleInfo
 from utils.data_loader import (
     load_acceleration_zones,
@@ -51,8 +51,7 @@ track = TrackInfo(
     accessible_points,
     dangerous_points,
 )
-trackprofile = TrackProfile(track=track)
-cal_SGC = SafeGuardCurves(trackprofile=trackprofile)
+cal_SGC = SafeGuardCurves(track=track)
 vehicle = VehicleInfo(mass=317.5, numoftrainsets=5, length=128.5)
 
 # 终点站同样需要计算防护曲线

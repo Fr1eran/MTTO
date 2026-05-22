@@ -23,7 +23,7 @@ except ImportError:
 
 from model.common import ECC, ORS
 from model.ocs import SafeGuardUtility, TrainService
-from model.track import TrackInfo, TrackProfile
+from model.track import TrackInfo
 from model.vehicle import VehicleInfo
 from utils.io_utils import format_float_token
 
@@ -67,7 +67,7 @@ def _calculate_transition_with_context(
     vehicle: VehicleInfo,
     safeguard_utility: SafeGuardUtility,
     ecc: ECC,
-    trackprofile: TrackProfile,
+    track: TrackInfo,
 ) -> tuple[bool, float, float]:
     if np.isclose(displacement, 0.0):
         return False, np.inf, np.inf
@@ -107,7 +107,7 @@ def _calculate_transition_with_context(
         direction=1 if displacement > 0 else -1,
         operation_time=time,
         vehicle=vehicle,
-        trackprofile=trackprofile,
+        track=track,
     )
 
     return True, propulsion_energy + leviation_energy, time
@@ -123,7 +123,7 @@ def _compute_transition_batch(
     vehicle: VehicleInfo,
     safeguard_utility: SafeGuardUtility,
     ecc: ECC,
-    trackprofile: TrackProfile,
+    track: TrackInfo,
 ) -> TransitionBatchResult:
     batch_rows: SparseTransitionRows = []
     total_valid_edges = 0
@@ -170,7 +170,7 @@ def _compute_transition_batch(
                     vehicle=vehicle,
                     safeguard_utility=safeguard_utility,
                     ecc=ecc,
-                    trackprofile=trackprofile,
+                    track=track,
                 )
                 if not is_valid:
                     continue
@@ -223,7 +223,7 @@ def _compute_transition_batch_worker(k_start: int, k_end: int) -> TransitionBatc
         vehicle=_DP_PARALLEL_CONTEXT["vehicle"],
         safeguard_utility=_DP_PARALLEL_CONTEXT["safeguard_utility"],
         ecc=_DP_PARALLEL_CONTEXT["ecc"],
-        trackprofile=_DP_PARALLEL_CONTEXT["trackprofile"],
+        track=_DP_PARALLEL_CONTEXT["track"],
     )
 
 
@@ -330,7 +330,6 @@ class VariableSpacingDPOptimizer:
 
         self.vehicle = vehicle
         self.track = track
-        self.trackprofile = TrackProfile(track=self.track)
         self.safeguard_utility = safeguard_utility
         self.train_service = train_service
         self.show_precompute_progress = show_precompute_progress
@@ -487,7 +486,7 @@ class VariableSpacingDPOptimizer:
                                 vehicle=self.vehicle,
                                 safeguard_utility=self.safeguard_utility,
                                 ecc=self.ecc,
-                                trackprofile=self.trackprofile,
+                                track=self.track,
                             )
                         )
                         if not is_valid:
@@ -566,7 +565,7 @@ class VariableSpacingDPOptimizer:
             "vehicle": self.vehicle,
             "safeguard_utility": self.safeguard_utility,
             "ecc": self.ecc,
-            "trackprofile": self.trackprofile,
+            "track": self.track,
         }
 
         progress_bar = None
@@ -809,8 +808,8 @@ class VariableSpacingDPOptimizer:
                 hasher.update(curve.tobytes())
 
         # 线路坡度（影响能耗）
-        hasher.update(self.trackprofile.slopes.tobytes())
-        hasher.update(self.trackprofile.slope_intervals.tobytes())
+        hasher.update(self.track.slopes.tobytes())
+        hasher.update(self.track.slope_intervals.tobytes())
 
         return hasher.hexdigest()
 

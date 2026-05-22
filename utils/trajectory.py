@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from model.common import ECC
-from model.track import TrackProfile
+from model.track import TrackInfo
 from model.vehicle import VehicleInfo
 
 __all__ = [
@@ -301,7 +301,7 @@ def compute_cumulative_energy_from_trajectory(
     speed_arr: Sequence[float] | np.ndarray,
     *,
     vehicle: VehicleInfo,
-    trackprofile: TrackProfile,
+    track: TrackInfo,
     ecc: ECC,
 ) -> np.ndarray:
     """从位置/速度序列逐段重计算累积牵引能耗曲线。
@@ -313,7 +313,7 @@ def compute_cumulative_energy_from_trajectory(
         pos_arr: 位置序列 (m)，一维，长度 N。
         speed_arr: 速度序列 (m/s)，一维，与 pos_arr 等长。
         vehicle: 车辆参数实例。
-        trackprofile: 轨道坡度/曲率查询接口。
+        track: 轨道数据对象。
         ecc: 牵引能耗计算器实例。
 
     Returns:
@@ -357,7 +357,7 @@ def compute_cumulative_energy_from_trajectory(
                 direction=1 if displacement > 0 else -1,
                 operation_time=t,
                 vehicle=vehicle,
-                trackprofile=trackprofile,
+                track=track,
             )
             cum_energy[i + 1] = cum_energy[i] + (prop_e + levi_e) / 1000.0
         except Exception:

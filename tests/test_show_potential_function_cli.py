@@ -66,7 +66,7 @@ def test_show_potential_function_cli_defaults() -> None:
     parser = show_potential_function._build_cli_parser()
     args = parser.parse_args([])
 
-    assert args.plot_type == "docking-heatmap"
+    assert args.plot_type == "stopping-heatmap"
     assert args.save is False
     assert args.output_file is None
     assert args.minimal is False
@@ -139,7 +139,7 @@ def test_main_saves_figure_and_creates_parent_dir(
     exit_code = show_potential_function.main(
         [
             "--plot-type",
-            "docking-slices",
+            "stopping-slices",
             "--save",
             "--output-file",
             str(output_file),
@@ -177,8 +177,8 @@ def test_main_does_not_save_when_save_flag_is_disabled(
     assert figure.saved_paths == []
 
 
-def test_plot_docking_potential_slices_minimal_keeps_axis_and_hides_annotations() -> None:
-    fig = show_potential_function.plot_docking_potential_slices(minimal=True)
+def test_plot_stopping_potential_slices_minimal_keeps_axis_and_hides_annotations() -> None:
+    fig = show_potential_function.plot_stopping_potential_slices(minimal=True)
     ax_left, ax_right = fig.axes
 
     assert fig._suptitle is None
@@ -189,8 +189,8 @@ def test_plot_docking_potential_slices_minimal_keeps_axis_and_hides_annotations(
     show_potential_function.plt.close(fig)
 
 
-def test_plot_docking_potential_slices_default_keeps_annotations() -> None:
-    fig = show_potential_function.plot_docking_potential_slices(minimal=False)
+def test_plot_stopping_potential_slices_default_keeps_annotations() -> None:
+    fig = show_potential_function.plot_stopping_potential_slices(minimal=False)
     ax_left, ax_right = fig.axes
 
     assert fig._suptitle is not None
@@ -251,16 +251,16 @@ def test_plot_safety_position_minimal_keeps_upper_and_lower_bounds(
     show_potential_function.plt.close(fig)
 
 
-def test_plot_docking_heatmap_2d_minimal_skips_colorbar(
+def test_plot_stopping_heatmap_2d_minimal_skips_colorbar(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_compact_linspace(monkeypatch)
 
-    fig_minimal = show_potential_function.plot_docking_potential_heatmap(
+    fig_minimal = show_potential_function.plot_stopping_potential_heatmap(
         view_mode="2d",
         minimal=True,
     )
-    fig_default = show_potential_function.plot_docking_potential_heatmap(
+    fig_default = show_potential_function.plot_stopping_potential_heatmap(
         view_mode="2d",
         minimal=False,
     )
@@ -291,3 +291,4 @@ def test_apply_transparent_background_sets_figure_and_axes_transparent() -> None
     assert fig.patch.get_alpha() == 0.0
     assert ax.patch.get_alpha() == 0.0
     show_potential_function.plt.close(fig)
+

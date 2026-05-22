@@ -102,7 +102,7 @@ def test_resolve_ablation_run_matrix_allows_subset_profiles() -> None:
     args = parser.parse_args([
         "--reward-profiles",
         "basic_safety",
-        "basic_safety_docking",
+        "basic_safety_stopping",
         "--base-seed",
         "5",
     ])
@@ -111,5 +111,6 @@ def test_resolve_ablation_run_matrix_allows_subset_profiles() -> None:
 
     assert [entry.reward_profile_name for entry in run_entries] == [
         "basic_safety",
-        "basic_safety_docking",
+        "basic_safety_stopping",
     ]
+

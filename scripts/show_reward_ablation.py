@@ -34,8 +34,8 @@ DEFAULT_ABLATION_ROOT = "output/optimal/rl/ablation"
 PROFILE_COLORS: dict[str, str] = {
     "basic": "#1f77b4",
     "basic_safety": "#2ca02c",
-    "basic_safety_docking": "#ff7f0e",
-    "basic_safety_docking_punctuality": "#d62728",
+    "basic_safety_stopping": "#ff7f0e",
+    "basic_safety_stopping_punctuality": "#d62728",
     "full_shaping": "#9467bd",
 }
 
@@ -712,3 +712,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

@@ -8,7 +8,7 @@ def EnergyRewardFunction(delta_acc):
     return -0.04 * (1 - np.exp(-3.0 * norm_jerk))
 
 
-def DockingRewardFunction(delta_pos):
+def StoppingRewardFunction(delta_pos):
     # return 2 * np.exp(-2.310490602 * delta_pos) - 1
     # return 4 * np.exp(-0.958940241 * delta_pos) - 3
     return 6 * np.exp(-0.607738523 * delta_pos) - 5
@@ -26,7 +26,7 @@ def PunctualityRewardFunction(delta_time):
 # plt.show()
 
 # delta_pos = np.linspace(0, 10, 200)
-# reward = DockingRewardFunction(delta_pos=delta_pos)
+# reward = StoppingRewardFunction(delta_pos=delta_pos)
 # plt.plot(delta_pos, reward)
 # plt.show()
 
@@ -34,3 +34,4 @@ delta_time = np.linspace(0, 200, 1000)
 reward = PunctualityRewardFunction(delta_time=delta_time)
 plt.plot(delta_time, reward)
 plt.show()
+

@@ -123,15 +123,15 @@ class RewardProfile:
     label: str
     description: str
     enable_potential_safety: bool = False
-    enable_potential_docking: bool = False
+    enable_potential_stopping: bool = False
     enable_potential_punctuality: bool = False
 
     def enabled_shaping_components(self) -> tuple[str, ...]:
         components: list[str] = []
         if self.enable_potential_safety:
             components.append("safety")
-        if self.enable_potential_docking:
-            components.append("docking")
+        if self.enable_potential_stopping:
+            components.append("stopping")
         if self.enable_potential_punctuality:
             components.append("punctuality")
         return tuple(components)
@@ -142,7 +142,7 @@ class RewardProfile:
             enable_energy=True,
             enable_comfort=True,
             enable_potential_punctuality=self.enable_potential_punctuality,
-            enable_potential_docking=self.enable_potential_docking,
+            enable_potential_stopping=self.enable_potential_stopping,
         )
 
     def to_metadata(self) -> dict[str, Any]:
@@ -214,10 +214,10 @@ def _reward_config_to_dict(reward_config: RewardConfig) -> dict[str, bool]:
 REWARD_PROFILES: dict[str, RewardProfile] = {
     "full_shaping": RewardProfile(
         name="full_shaping",
-        label="basic+safety+docking+punctuality",
+        label="basic+safety+stopping+punctuality",
         description="Base reward keeps energy and comfort, plus all shaping terms.",
         enable_potential_safety=True,
-        enable_potential_docking=True,
+        enable_potential_stopping=True,
         enable_potential_punctuality=True,
     ),
     "basic": RewardProfile(
@@ -231,19 +231,19 @@ REWARD_PROFILES: dict[str, RewardProfile] = {
         description="Base reward plus safety shaping.",
         enable_potential_safety=True,
     ),
-    "basic_safety_docking": RewardProfile(
-        name="basic_safety_docking",
-        label="basic+safety+docking",
-        description="Base reward plus safety and docking shaping.",
+    "basic_safety_stopping": RewardProfile(
+        name="basic_safety_stopping",
+        label="basic+safety+stopping",
+        description="Base reward plus safety and stopping shaping.",
         enable_potential_safety=True,
-        enable_potential_docking=True,
+        enable_potential_stopping=True,
     ),
-    "basic_safety_docking_punctuality": RewardProfile(
-        name="basic_safety_docking_punctuality",
-        label="basic+safety+docking+punctuality",
-        description="Base reward plus safety, docking, and punctuality shaping.",
+    "basic_safety_stopping_punctuality": RewardProfile(
+        name="basic_safety_stopping_punctuality",
+        label="basic+safety+stopping+punctuality",
+        description="Base reward plus safety, stopping, and punctuality shaping.",
         enable_potential_safety=True,
-        enable_potential_docking=True,
+        enable_potential_stopping=True,
         enable_potential_punctuality=True,
     ),
 }
@@ -256,10 +256,10 @@ REWARD_PROFILE_ALIASES: dict[str, str] = {
     "basic": "basic",
     "basic+safety": "basic_safety",
     "basic_safety": "basic_safety",
-    "basic+safety+docking": "basic_safety_docking",
-    "basic_safety_docking": "basic_safety_docking",
-    "basic+safety+docking+punctuality": "basic_safety_docking_punctuality",
-    "basic_safety_docking_punctuality": "basic_safety_docking_punctuality",
+    "basic_safety_stopping": "basic_safety_stopping",
+    "basic+safety+stopping": "basic_safety_stopping",
+    "basic_safety_stopping_punctuality": "basic_safety_stopping_punctuality",
+    "basic+safety+stopping+punctuality": "basic_safety_stopping_punctuality",
 }
 
 
@@ -1582,3 +1582,4 @@ def render_rl_curve_on_axes(
     ax.set_xlim((0.0, 30000.0))
     ax.set_ylim((0.0, 500.0))
     ax.grid(True, alpha=0.3)
+

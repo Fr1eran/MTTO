@@ -22,8 +22,8 @@ def test_reward_profile_names_include_ablation_profiles() -> None:
         "full_shaping",
         "basic",
         "basic_safety",
-        "basic_safety_docking",
-        "basic_safety_docking_punctuality",
+        "basic_safety_stopping",
+        "basic_safety_stopping_punctuality",
     )
 
 
@@ -31,8 +31,8 @@ def test_basic_reward_profiles_keep_energy_and_comfort_enabled() -> None:
     expected_flags = {
         "basic": (False, False, False),
         "basic_safety": (True, False, False),
-        "basic_safety_docking": (True, True, False),
-        "basic_safety_docking_punctuality": (True, True, True),
+        "basic_safety_stopping": (True, True, False),
+        "basic_safety_stopping_punctuality": (True, True, True),
         DEFAULT_REWARD_PROFILE_NAME: (True, True, True),
     }
 
@@ -42,7 +42,7 @@ def test_basic_reward_profiles_keep_energy_and_comfort_enabled() -> None:
         assert reward_config.enable_comfort is True
         assert (
             reward_config.enable_potential_safety,
-            reward_config.enable_potential_docking,
+            reward_config.enable_potential_stopping,
             reward_config.enable_potential_punctuality,
         ) == expected
 
@@ -129,3 +129,4 @@ def test_add_panel_label_places_text_on_axes() -> None:
     assert text.get_va() == "top"
 
     plt.close(fig)
+

@@ -1,20 +1,20 @@
 import numpy as np
 import pytest
+from scipy.integrate import trapezoid
 
 from model.common import ECC
-from model.track import TrackInfo, TrackProfile
-from model.vehicle import VehicleInfo
+from model.track import TrackInfo, get_slope
+from model.vehicle import VehicleInfo, calc_longitudinal_force
 
 
 @pytest.fixture(scope="module")
 def energy_consumption_calculator_case():
     track = TrackInfo(
-        slopes=np.asarray([0.0], dtype=np.float64),
-        slope_intervals=np.asarray([0.0, 20000.0], dtype=np.float64),
+        slopes=np.asarray([0.0, 0.8, -0.4], dtype=np.float64),
+        slope_intervals=np.asarray([0.0, 500.0, 1000.0, 20000.0], dtype=np.float64),
         speed_limits=np.asarray([120.0 / 3.6], dtype=np.float64),
         speed_limit_intervals=np.asarray([0.0, 20000.0], dtype=np.float64),
     )
-    track_profile = TrackProfile(track)
     vehicle = VehicleInfo(mass=317.5, numoftrainsets=5, length=128.5)
     ecc = ECC(
         R_m=0.2796,
@@ -25,183 +25,160 @@ def energy_consumption_calculator_case():
         Psi_fd=3.9629,
         k_c=0.8,
     )
-    return ecc, vehicle, track_profile
+    return ecc, vehicle, track
 
 
-def test_calc_energy_constant_function_equivalent_to_scalar(
-    energy_consumption_calculator_case,
-):
-    ecc, vehicle, track_profile = energy_consumption_calculator_case
-    begin_pos = 100.0
-    begin_speed = 10.0
-    distance = 200.0
-    scalar_acc = 0.35
+def _calc_energy_constant_acc_reference(
+    ecc: ECC,
+    vehicle: VehicleInfo,
+    track: TrackInfo,
+    *,
+    begin_pos: float,
+    begin_speed: float,
+    acc: float,
+    distance: float,
+    direction: int,
+    operation_time: float | None,
+) -> tuple[float, float]:
+    if np.abs(distance) < 1e-6:
+        f_longitudinal = calc_longitudinal_force(
+            mass=vehicle.mass,
+            numoftrainsets=vehicle.numoftrainsets,
+            acc=acc,
+            speed=begin_speed,
+            slope=get_slope(
+                begin_pos,
+                track.slopes,
+                track.slope_intervals,
+                dtype=np.float64,
+            ),
+        )
+        mechanic_energy_consumption = np.abs(f_longitudinal * distance)
+        motor_energy_consumption = 0.0
+    else:
+        n_samples = max(10, int(np.abs(distance) / 1.0))
+        d_nodes = np.linspace(0.0, distance, n_samples + 1)
+        delta_d = np.diff(d_nodes)
+        p_nodes = begin_pos + d_nodes * direction
+        acc_nodes = np.full_like(d_nodes, acc, dtype=np.float64)
 
-    def const_acc_profile(s):
-        s_arr = np.asarray(s, dtype=np.float64)
-        return np.full_like(s_arr, scalar_acc, dtype=np.float64)
+        speed_nodes = np.empty_like(d_nodes)
+        speed_nodes[0] = begin_speed
+        for i in range(n_samples):
+            next_speed_squared = speed_nodes[i] ** 2 + 2.0 * acc_nodes[i] * delta_d[i]
+            speed_nodes[i + 1] = np.sqrt(np.maximum(next_speed_squared, 0.0))
 
-    scalar_pec, scalar_lec = ecc.calc_energy(
-        begin_pos=begin_pos,
-        begin_speed=begin_speed,
-        acc=scalar_acc,
-        distance=distance,
-        direction=1,
-        operation_time=None,
-        vehicle=vehicle,
-        trackprofile=track_profile,
-    )
-    func_pec, func_lec = ecc.calc_energy(
-        begin_pos=begin_pos,
-        begin_speed=begin_speed,
-        acc=const_acc_profile,
-        distance=distance,
-        direction=1,
-        operation_time=None,
-        vehicle=vehicle,
-        trackprofile=track_profile,
-    )
+        t_nodes = np.zeros_like(d_nodes)
+        for i in range(n_samples):
+            avg_speed = np.maximum(
+                (speed_nodes[i] + speed_nodes[i + 1]) / 2.0, 1e-6
+            )
+            t_nodes[i + 1] = t_nodes[i] + np.abs(delta_d[i]) / avg_speed
 
-    assert np.isfinite(func_pec)
-    assert np.isfinite(func_lec)
-    assert abs(func_pec - scalar_pec) / max(abs(scalar_pec), 1.0) < 2e-2
-    assert abs(func_lec - scalar_lec) / max(abs(scalar_lec), 1.0) < 2e-2
-
-
-def test_calc_energy_accepts_distance_dependent_acc(energy_consumption_calculator_case):
-    ecc, vehicle, track_profile = energy_consumption_calculator_case
-
-    def acc_profile(s):
-        s_arr = np.asarray(s, dtype=np.float64)
-        return 0.2 + 0.001 * s_arr
-
-    pec, lec = ecc.calc_energy(
-        begin_pos=1000.0,
-        begin_speed=8.0,
-        acc=acc_profile,
-        distance=150.0,
-        direction=1,
-        operation_time=None,
-        vehicle=vehicle,
-        trackprofile=track_profile,
-    )
-
-    assert np.isfinite(pec)
-    assert np.isfinite(lec)
-    assert pec > 0.0
-    assert lec > 0.0
-
-
-def test_calc_energy_callable_respects_operation_time_override(
-    energy_consumption_calculator_case,
-):
-    ecc, vehicle, track_profile = energy_consumption_calculator_case
-    distance = 100.0
-    forced_time = 12.34
-
-    def acc_profile(s):
-        s_arr = np.asarray(s, dtype=np.float64)
-        return 0.25 + 0.0002 * s_arr
-
-    _, lec = ecc.calc_energy(
-        begin_pos=500.0,
-        begin_speed=12.0,
-        acc=acc_profile,
-        distance=distance,
-        direction=1,
-        operation_time=forced_time,
-        vehicle=vehicle,
-        trackprofile=track_profile,
-    )
-
-    expected_lec = ecc.Phi_1 * distance + ecc.Phi_2 * vehicle.mass * forced_time
-    assert lec == pytest.approx(expected_lec, rel=1e-8, abs=1e-8)
-
-
-def test_calc_energy_accepts_array_only_callback(energy_consumption_calculator_case):
-    ecc, vehicle, track_profile = energy_consumption_calculator_case
-
-    def acc_profile_array_only(s):
-        assert isinstance(s, np.ndarray)
-        return 0.15 + 0.0005 * s
-
-    pec, lec = ecc.calc_energy(
-        begin_pos=200.0,
-        begin_speed=7.5,
-        acc=acc_profile_array_only,
-        distance=80.0,
-        direction=1,
-        operation_time=None,
-        vehicle=vehicle,
-        trackprofile=track_profile,
-    )
-
-    assert np.isfinite(pec)
-    assert np.isfinite(lec)
-
-
-def test_calc_energy_array_only_callback_with_tiny_distance(
-    energy_consumption_calculator_case,
-):
-    ecc, vehicle, track_profile = energy_consumption_calculator_case
-
-    def acc_profile_array_only(s):
-        assert isinstance(s, np.ndarray)
-        return np.full_like(s, 0.2, dtype=np.float64)
-
-    pec, lec = ecc.calc_energy(
-        begin_pos=200.0,
-        begin_speed=7.5,
-        acc=acc_profile_array_only,
-        distance=1e-8,
-        direction=1,
-        operation_time=None,
-        vehicle=vehicle,
-        trackprofile=track_profile,
-    )
-
-    assert np.isfinite(pec)
-    assert np.isfinite(lec)
-
-
-def test_calc_energy_rejects_non_vectorized_callback(
-    energy_consumption_calculator_case,
-):
-    ecc, vehicle, track_profile = energy_consumption_calculator_case
-
-    def scalar_only_callback(s):
-        if not isinstance(s, (float, np.floating)):
-            raise TypeError("scalar input only")
-        return 0.2
-
-    with pytest.raises(TypeError, match="vectorized callback required"):
-        ecc.calc_energy(
-            begin_pos=200.0,
-            begin_speed=7.5,
-            acc=scalar_only_callback,
-            distance=80.0,
-            direction=1,
-            operation_time=None,
-            vehicle=vehicle,
-            trackprofile=track_profile,
+        f_longitudinal = calc_longitudinal_force(
+            mass=vehicle.mass,
+            numoftrainsets=vehicle.numoftrainsets,
+            acc=acc_nodes,
+            speed=speed_nodes,
+            slope=get_slope(
+                p_nodes,
+                track.slopes,
+                track.slope_intervals,
+                dtype=np.float64,
+            ),
+        )
+        mechanic_energy_consumption = np.sum(
+            0.5
+            * (np.abs(f_longitudinal[:-1]) + np.abs(f_longitudinal[1:]))
+            * np.abs(delta_d)
+        )
+        motor_energy_consumption = trapezoid(
+            y=(2 * f_longitudinal**2 / (3 * ecc.h**2))
+            * (ecc.R_m + ecc.k_c**2 * ecc.R_k + (1 - ecc.k_c) ** 2 * ecc.R_k),
+            x=t_nodes,
+        ) + trapezoid(
+            y=(np.abs(f_longitudinal) * 2 / (3 * ecc.h**2))
+            * (ecc.L_d + ecc.k_c**2 * ecc.L_k + (1 - ecc.k_c) ** 2 * ecc.L_k),
+            x=np.abs(f_longitudinal),
         )
 
+    if operation_time is None:
+        if np.abs(acc) < 1e-9:
+            time = distance / np.maximum(begin_speed, 1e-6)
+        else:
+            next_speed_squared = begin_speed**2 + 2 * acc * distance
+            next_speed = np.sqrt(np.maximum(next_speed_squared, 0))
+            time = (next_speed - begin_speed) / acc
+    else:
+        time = operation_time
 
-def test_calc_energy_rejects_scalar_output_callback(energy_consumption_calculator_case):
-    ecc, vehicle, track_profile = energy_consumption_calculator_case
+    propulsion_energy_consumption = (
+        mechanic_energy_consumption + motor_energy_consumption
+    )
+    leviation_energy_consumption = (
+        ecc.Phi_1 * distance + ecc.Phi_2 * vehicle.mass * time
+    )
+    return float(propulsion_energy_consumption), float(leviation_energy_consumption)
 
-    def scalar_output_callback(s):
-        assert isinstance(s, np.ndarray)
-        return 0.2
 
-    with pytest.raises(ValueError, match="same ndim and shape"):
+@pytest.mark.parametrize(
+    ("begin_pos", "begin_speed", "acc", "distance", "direction", "operation_time"),
+    [
+        (100.0, 10.0, 0.35, 200.0, 1, None),
+        (1200.0, 18.0, -0.2, 350.0, -1, None),
+        (500.0, 12.0, 0.25, 100.0, 1, 12.34),
+        (200.0, 7.5, 0.2, 1e-8, 1, None),
+    ],
+)
+def test_calc_energy_constant_acc_matches_reference(
+    energy_consumption_calculator_case,
+    begin_pos,
+    begin_speed,
+    acc,
+    distance,
+    direction,
+    operation_time,
+):
+    ecc, vehicle, track = energy_consumption_calculator_case
+    expected_pec, expected_lec = _calc_energy_constant_acc_reference(
+        ecc,
+        vehicle,
+        track,
+        begin_pos=begin_pos,
+        begin_speed=begin_speed,
+        acc=acc,
+        distance=distance,
+        direction=direction,
+        operation_time=operation_time,
+    )
+    pec, lec = ecc.calc_energy(
+        begin_pos=begin_pos,
+        begin_speed=begin_speed,
+        acc=acc,
+        distance=distance,
+        direction=direction,
+        operation_time=operation_time,
+        vehicle=vehicle,
+        track=track,
+    )
+
+    assert np.isfinite(pec)
+    assert np.isfinite(lec)
+    assert pec == pytest.approx(expected_pec, rel=1e-10, abs=1e-10)
+    assert lec == pytest.approx(expected_lec, rel=1e-10, abs=1e-10)
+
+
+def test_calc_energy_rejects_callable_acc(energy_consumption_calculator_case):
+    ecc, vehicle, track = energy_consumption_calculator_case
+
+    with pytest.raises(TypeError, match="acc must be a float constant"):
         ecc.calc_energy(
             begin_pos=200.0,
             begin_speed=7.5,
-            acc=scalar_output_callback,
+            acc=lambda _: 0.2,  # type: ignore[arg-type]
             distance=80.0,
             direction=1,
             operation_time=None,
             vehicle=vehicle,
-            trackprofile=track_profile,
+            track=track,
         )

@@ -38,7 +38,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=DEFAULT_REWARD_PROFILE_NAME,
         help=(
             "奖励配置预设。basic 固定包含 energy/comfort；"
-            "其余预设仅沿 safety/docking/punctuality 三个 shaping 维度逐级打开。"
+            "其余预设仅沿 safety/stopping/punctuality 三个 shaping 维度逐级打开。"
         ),
     )
     parser.add_argument(
@@ -333,3 +333,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

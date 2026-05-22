@@ -111,10 +111,10 @@ RL 工作流脚本 `train_rl`、`train_reward_ablation`、`evaluate_rl`、`analy
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `--reward-profile` | `str` | `full_shaping` | 奖励预设：`basic`、`basic_safety`、`basic_safety_docking`、`basic_safety_docking_punctuality`、`full_shaping` |
+| `--reward-profile` | `str` | `full_shaping` | 奖励预设：`basic`、`basic_safety`、`basic_safety_stopping`、`basic_safety_stopping_punctuality`、`full_shaping` |
 | `--experiment-tag` | `str` | `None` | 附加实验标签，用于隔离输出目录与 TensorBoard 运行名 |
 
-`basic` 固定包含 `energy + comfort`；其余预设仅沿 `safety / docking / punctuality` 三个 shaping 维度逐级打开。
+`basic` 固定包含 `energy + comfort`；其余预设仅沿 `safety / stopping / punctuality` 三个 shaping 维度逐级打开。
 
 #### PPO 超参数
 
@@ -195,8 +195,8 @@ python -m scripts.train_rl --run-mode reproduce
 # 关闭高频回调，保留基础监控 + best-eval
 python -m scripts.train_rl --run-mode monitor_best
 
-# 使用 basic+safety+docking 预设，并附加实验标签
-python -m scripts.train_rl --run-mode monitor_best --reward-profile basic_safety_docking --experiment-tag exp_a
+# 使用 basic+safety+stopping 预设，并附加实验标签
+python -m scripts.train_rl --run-mode monitor_best --reward-profile basic_safety_stopping --experiment-tag exp_a
 
 # 仅预览 monitor_best 训练配置与输出路径
 python -m scripts.train_rl --run-mode monitor_best --reward-profile basic_safety --dry-run
@@ -223,8 +223,8 @@ python -m scripts.train_rl --output-root output/optimal/rl/safety_speed/ --sched
 默认 reward case 顺序如下：
 - `basic`
 - `basic_safety`
-- `basic_safety_docking`
-- `basic_safety_docking_punctuality`
+- `basic_safety_stopping`
+- `basic_safety_stopping_punctuality`
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -267,7 +267,7 @@ python -m scripts.train_reward_ablation \
 
 # 只跑两个 case，并预览运行矩阵
 python -m scripts.train_reward_ablation \
-    --reward-profiles basic basic_safety_docking \
+    --reward-profiles basic basic_safety_stopping \
     --seed-list 7 8 \
     --dry-run
 ```
@@ -313,7 +313,7 @@ python -m scripts.evaluate_rl \
 # 覆盖训练元数据中的 reward profile 与时间参数
 python -m scripts.evaluate_rl \
     --load-dir output/optimal/rl/.../final/ \
-    --reward-profile basic_safety_docking \
+    --reward-profile basic_safety_stopping \
     --schedule-time-s 430.0
 
 # 仅预览有效评估配置

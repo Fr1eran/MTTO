@@ -147,7 +147,7 @@ def _potential_safety_speed_asymmetric_v2(
     return scale * (phi_max + phi_min) * 4.0
 
 
-def _potential_docking_v1(
+def _potential_stopping_v1(
     pos,
     speed,
     target_pos,
@@ -180,7 +180,7 @@ def _potential_docking_v1(
     return phi_weak + phi_strong
 
 
-def _potential_docking_v2(
+def _potential_stopping_v2(
     pos,
     speed,
     target_pos,
@@ -234,7 +234,7 @@ def _potential_punctuality_v2(redundant_operation_time, schedule_time):
 def _potential_punctuality_v3(redundant_operation_time, schedule_time):
     K_base = 1.0
     K_safe = 1.0
-    K_late = 50.0
+    K_late = 10.0
     alpha = 5.0
 
     time_redundancy_norm = redundant_operation_time / schedule_time
@@ -550,7 +550,7 @@ def plot_safety_potential_heatmap_position(*, minimal: bool = False) -> Figure:
     return fig
 
 
-def plot_docking_potential_heatmap(
+def plot_stopping_potential_heatmap(
     view_mode: str = "3d",
     *,
     minimal: bool = False,
@@ -573,14 +573,14 @@ def plot_docking_potential_heatmap(
     POS, SPEED = np.meshgrid(pos_array, speed_array_ms)
 
     # version 1
-    POTENTIAL = _potential_docking_v1(
+    POTENTIAL = _potential_stopping_v1(
         pos=POS,
         speed=SPEED,
         target_pos=target_pos,
     )
 
     # version 2
-    # POTENTIAL = calc_potential_docking_v2(
+    # POTENTIAL = calc_potential_stopping_v2(
     #     pos=POS,
     #     speed=SPEED,
     #     target_pos=target_pos,
@@ -646,7 +646,7 @@ def plot_docking_potential_heatmap(
         else:
             ax.set_xlabel("Position (m)")
             ax.set_ylabel("Velocity (km/h)")
-            ax.set_zlabel("Parking Potential")
+            ax.set_zlabel("Stopping Potential")
 
         _apply_transparent_background(fig)
         plt.tight_layout()
@@ -655,7 +655,7 @@ def plot_docking_potential_heatmap(
     raise ValueError("view_mode 仅支持 '2d' 或 '3d'")
 
 
-def plot_docking_potential_slices(*, minimal: bool = False) -> Figure:
+def plot_stopping_potential_slices(*, minimal: bool = False) -> Figure:
     """
     绘制停站势函数在距离维与速度维上的一维切片，便于调参。
     """
@@ -669,12 +669,12 @@ def plot_docking_potential_slices(*, minimal: bool = False) -> Figure:
     pos_array = target_pos + distance_error_array
     speed_array_ms = np.linspace(0.0, 120.0 / 3.6, 1200)
 
-    potential_vs_distance = _potential_docking_v1(
+    potential_vs_distance = _potential_stopping_v1(
         pos=pos_array,
         speed=0.0,
         target_pos=target_pos,
     )
-    potential_vs_speed = _potential_docking_v1(
+    potential_vs_speed = _potential_stopping_v1(
         pos=target_pos,
         speed=speed_array_ms,
         target_pos=target_pos,
@@ -693,7 +693,7 @@ def plot_docking_potential_slices(*, minimal: bool = False) -> Figure:
         axes[0].axvline(0.0, color="black", linestyle="--", linewidth=1.2)
         axes[0].axvline(scale_pos, color="gray", linestyle=":", linewidth=1.2)
         axes[0].axvline(-scale_pos, color="gray", linestyle=":", linewidth=1.2)
-        axes[0].set_xlabel("docking error (m)")
+        axes[0].set_xlabel("stopping error (m)")
         axes[0].set_ylabel(r"$\Phi_D$")
         axes[0].set_title("v = 0")
         axes[0].grid(True, alpha=0.3, linestyle=":")
@@ -788,8 +788,8 @@ def plot_punctuality_potential_curve(
 PLOT_TYPE_CHOICES: tuple[str, ...] = (
     "safety-speed",
     "safety-position",
-    "docking-heatmap",
-    "docking-slices",
+    "stopping-heatmap",
+    "stopping-slices",
     "punctuality-curve",
 )
 
@@ -799,7 +799,7 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--plot-type",
         choices=PLOT_TYPE_CHOICES,
-        default="docking-heatmap",
+        default="stopping-heatmap",
         help="选择展示哪种势函数图。",
     )
     parser.add_argument(
@@ -835,11 +835,11 @@ def _resolve_plotter(plot_type: str, *, minimal: bool) -> Callable[[], Figure]:
         "safety-position": lambda: plot_safety_potential_heatmap_position(
             minimal=minimal
         ),
-        "docking-heatmap": lambda: plot_docking_potential_heatmap(
+        "stopping-heatmap": lambda: plot_stopping_potential_heatmap(
             view_mode="3d",
             minimal=minimal,
         ),
-        "docking-slices": lambda: plot_docking_potential_slices(minimal=minimal),
+        "stopping-slices": lambda: plot_stopping_potential_slices(minimal=minimal),
         "punctuality-curve": lambda: plot_punctuality_potential_curve(minimal=minimal),
     }
     return plotters[plot_type]

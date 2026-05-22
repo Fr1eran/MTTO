@@ -17,8 +17,8 @@ from rl.experiment_utils import (
 DEFAULT_ABLATION_REWARD_PROFILES: tuple[str, ...] = (
     "basic",
     "basic_safety",
-    "basic_safety_docking",
-    "basic_safety_docking_punctuality",
+    "basic_safety_stopping",
+    "basic_safety_stopping_punctuality",
 )
 ABLATION_MANIFEST_FILENAME = "ablation_manifest.json"
 
@@ -56,7 +56,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "要运行的奖励预设列表。\
-            默认按 basic -> safety -> docking -> punctuality 的四种消融情形执行。"
+            默认按 basic -> safety -> stopping -> punctuality 的四种消融情形执行。"
         ),
     )
     parser.add_argument(
@@ -429,3 +429,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
