@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 
 from model.ocs import SafeGuardUtility
 from utils.data_loader import load_safeguard_curves, load_speed_limits
+from utils.indexing_utils import get_interval_index, get_interval_index_scalar_numba
 
 
 def _build_safeguard_utility() -> SafeGuardUtility:
@@ -416,3 +417,117 @@ def test_get_min_and_max_position_real_data_sp7_regression(safeguard_utility):
     assert np.isfinite(min_pos)
     assert np.isfinite(max_pos)
     assert min_pos <= max_pos
+
+
+def test_get_interval_index_scalar_numba_matches_reference():
+    interval_points = np.array([0.0, 100.0, 230.0, 500.0], dtype=np.float64)
+    points = np.array(
+        [-50.0, 0.0, 10.0, 100.0, 229.9, 230.0, 499.9, 500.0, 900.0],
+        dtype=np.float64,
+    )
+
+    expected = np.asarray(get_interval_index(points, interval_points), dtype=np.int64)
+    actual = np.asarray(
+        [get_interval_index_scalar_numba(float(pos), interval_points) for pos in points],
+        dtype=np.int64,
+    )
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_get_interval_index_scalar_numba_supports_left_and_right_side():
+    interval_points = np.array([0.0, 100.0, 230.0, 500.0], dtype=np.float64)
+    points = np.array(
+        [-50.0, 0.0, 10.0, 100.0, 229.9, 230.0, 499.9, 500.0, 900.0],
+        dtype=np.float64,
+    )
+
+    expected_right = np.searchsorted(interval_points, points, side="right") - 1
+    actual_right = np.asarray(
+        [
+            get_interval_index_scalar_numba(
+                float(pos),
+                interval_points,
+                True,
+            )
+            for pos in points
+        ],
+        dtype=np.int64,
+    )
+    np.testing.assert_array_equal(actual_right, expected_right)
+
+    expected_left = np.searchsorted(interval_points, points, side="left") - 1
+    actual_left = np.asarray(
+        [
+            get_interval_index_scalar_numba(
+                float(pos),
+                interval_points,
+                False,
+            )
+            for pos in points
+        ],
+        dtype=np.int64,
+    )
+    np.testing.assert_array_equal(actual_left, expected_left)
+
+
+def test_get_min_and_max_speed_fast_matches_legacy(safeguard_utility):
+    rng = np.random.default_rng(0)
+    pos_random = rng.uniform(
+        low=float(safeguard_utility.speed_limit_intervals[0] - 500.0),
+        high=float(safeguard_utility.speed_limit_intervals[-1] + 500.0),
+        size=128,
+    )
+    pos_boundaries = safeguard_utility.speed_limit_intervals
+    positions = np.unique(np.concatenate([pos_random, pos_boundaries]))
+    stopping_points = list(range(-1, len(safeguard_utility.min_curves_list)))
+
+    legacy_results = [
+        safeguard_utility._get_min_and_max_speed_legacy(float(pos), int(sp))
+        for sp in stopping_points
+        for pos in positions
+    ]
+
+    fast_results = [
+        safeguard_utility.get_min_and_max_speed(float(pos), int(sp))
+        for sp in stopping_points
+        for pos in positions
+    ]
+
+    np.testing.assert_allclose(
+        np.asarray(fast_results, dtype=np.float64),
+        np.asarray(legacy_results, dtype=np.float64),
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+
+def test_get_min_speed_matches_get_min_and_max_speed(safeguard_utility):
+    rng = np.random.default_rng(1)
+    positions = rng.uniform(
+        low=float(safeguard_utility.speed_limit_intervals[0]),
+        high=float(safeguard_utility.speed_limit_intervals[-1]),
+        size=64,
+    )
+    stopping_points = list(range(-1, len(safeguard_utility.min_curves_list)))
+
+    for sp in stopping_points:
+        for pos in positions:
+            min_speed, _ = safeguard_utility.get_min_and_max_speed(float(pos), int(sp))
+            min_only = safeguard_utility.get_min_speed(float(pos), int(sp))
+            np.testing.assert_allclose(min_only, min_speed, rtol=0.0, atol=1e-12)
+
+
+def test_get_max_speed_matches_get_min_and_max_speed(safeguard_utility):
+    rng = np.random.default_rng(2)
+    positions = rng.uniform(
+        low=float(safeguard_utility.speed_limit_intervals[0]),
+        high=float(safeguard_utility.speed_limit_intervals[-1]),
+        size=64,
+    )
+    stopping_points = list(range(-1, len(safeguard_utility.min_curves_list)))
+
+    for sp in stopping_points:
+        for pos in positions:
+            _, max_speed = safeguard_utility.get_min_and_max_speed(float(pos), int(sp))
+            max_only = safeguard_utility.get_max_speed(float(pos), int(sp))
+            np.testing.assert_allclose(max_only, max_speed, rtol=0.0, atol=1e-12)

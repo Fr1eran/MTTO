@@ -1,5 +1,3 @@
-from gymnasium.wrappers import FlattenObservation
-
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
@@ -32,5 +30,4 @@ def make_env(
         render_mode=render_mode,
         reward_config=reward_config,
     )
-    env = FlattenObservation(env)
     return env

@@ -1,11 +1,16 @@
 from typing import NamedTuple, TypedDict
 
 import numpy as np
+from numba import njit
 from numpy.typing import NDArray
 
 from model.common.energy_consumption_calculator import ECC
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
+from utils.indexing_utils import (
+    find_speed_rise_entry_and_fall,
+    get_interval_index_scalar_numba,
+)
 
 
 class GeneralOperation(NamedTuple):
@@ -43,6 +48,133 @@ class DescendOperation(TypedDict):
     descend_end_interval: int
 
 
+@njit(cache=True)
+def _get_speed_limits_interval_index_numba(
+    speed_limit_intervals: NDArray[np.float64], pos: float, ascend: bool
+) -> int:
+    return get_interval_index_scalar_numba(pos, speed_limit_intervals, ascend)
+
+
+@njit(cache=True)
+def _calc_mb_descend_operation_numba(
+    end_pos: float,
+    end_speed: float,
+    speed_limits: NDArray[np.float64],
+    speed_limit_intervals: NDArray[np.float64],
+    gamma: float,
+    max_dec_abs: float,
+    tol: float,
+) -> tuple[float, float, int]:
+    n_limits = speed_limits.size
+    begin_interval = _get_speed_limits_interval_index_numba(
+        speed_limit_intervals, end_pos, False
+    )
+    begin_pos = end_pos
+    operation_time = 0.0
+
+    while begin_interval >= 0:
+        mark_pos = speed_limit_intervals[begin_interval]
+        begin_speed = speed_limits[begin_interval] * gamma
+        operation_time = (begin_speed - end_speed) / max_dec_abs
+        begin_pos = end_pos - (begin_speed * begin_speed - end_speed * end_speed) / (
+            2.0 * max_dec_abs
+        )
+
+        if begin_pos > mark_pos or np.abs(begin_pos - mark_pos) <= tol:
+            break
+
+        distance = end_pos - mark_pos
+        edge_speed_2 = end_speed * end_speed + 2.0 * max_dec_abs * distance
+        if edge_speed_2 < 0.0:
+            edge_speed_2 = 0.0
+        edge_speed = np.sqrt(edge_speed_2)
+
+        next_idx = begin_interval - 1
+        if next_idx < 0:
+            next_idx = 0
+        next_interval_speed_limit = speed_limits[next_idx] * gamma
+
+        if edge_speed < next_interval_speed_limit or np.abs(
+            edge_speed - next_interval_speed_limit
+        ) <= tol:
+            begin_interval -= 1
+        else:
+            break
+
+    if n_limits <= 0:
+        clipped_idx = 0
+    else:
+        if begin_interval < 0:
+            clipped_idx = 0
+        elif begin_interval >= n_limits:
+            clipped_idx = n_limits - 1
+        else:
+            clipped_idx = begin_interval
+
+    return begin_pos, operation_time, clipped_idx
+
+
+@njit(cache=True)
+def _calc_ma_ascend_operation_numba(
+    begin_pos: float,
+    begin_speed: float,
+    speed_limits: NDArray[np.float64],
+    speed_limit_intervals: NDArray[np.float64],
+    gamma: float,
+    max_acc: float,
+    tol: float,
+) -> tuple[float, float, int]:
+    n_limits = speed_limits.size
+    end_interval = _get_speed_limits_interval_index_numba(
+        speed_limit_intervals, begin_pos, True
+    )
+    end_pos = begin_pos
+    operation_time = 0.0
+
+    while end_interval <= n_limits - 1:
+        mark_pos = speed_limit_intervals[end_interval + 1]
+        end_speed = speed_limits[end_interval] * gamma
+        operation_time = (end_speed - begin_speed) / max_acc
+        end_pos = begin_pos + (end_speed * end_speed - begin_speed * begin_speed) / (
+            2.0 * max_acc
+        )
+
+        if end_pos < mark_pos or np.abs(end_pos - mark_pos) <= tol:
+            break
+
+        distance = mark_pos - begin_pos
+        edge_speed_2 = begin_speed * begin_speed + 2.0 * max_acc * distance
+        if edge_speed_2 < 0.0:
+            edge_speed_2 = 0.0
+        edge_speed = np.sqrt(edge_speed_2)
+
+        next_idx = end_interval + 1
+        if next_idx < 0:
+            next_idx = 0
+        elif next_idx >= n_limits:
+            next_idx = n_limits - 1
+        next_interval_speed_limit = speed_limits[next_idx] * gamma
+
+        if edge_speed < next_interval_speed_limit or np.abs(
+            edge_speed - next_interval_speed_limit
+        ) <= tol:
+            end_interval += 1
+        else:
+            break
+
+    if n_limits <= 0:
+        clipped_idx = 0
+    else:
+        if end_interval < 0:
+            clipped_idx = 0
+        elif end_interval >= n_limits:
+            clipped_idx = n_limits - 1
+        else:
+            clipped_idx = end_interval
+
+    return end_pos, operation_time, clipped_idx
+
+
 class ORS:
     """Operation Reference System"""
 
@@ -52,6 +184,23 @@ class ORS:
         self.vehicle = vehicle
         self.track = track
         self.gamma: float = factor
+        self._speed_limits_scaled: NDArray[np.float64] = (
+            self.track.speed_limits * self.gamma
+        )
+
+        rise_entries_all, fall_exits_all = find_speed_rise_entry_and_fall(
+            speed_limits=self.track.speed_limits,
+            interval_points=self.track.speed_limit_intervals,
+            speed_factor=1.0,
+        )
+        self._rise_edge_idx_all: NDArray[np.int64] = np.asarray(
+            [entry.next_interval - 1 for entry in rise_entries_all],
+            dtype=np.int64,
+        )
+        self._fall_edge_idx_all: NDArray[np.int64] = np.asarray(
+            [entry.prev_interval for entry in fall_exits_all],
+            dtype=np.int64,
+        )
 
     def _get_speed_limits_interval_index(
         self, pos: float, *, ascend: bool = True
@@ -98,33 +247,38 @@ class ORS:
         if n < 2:
             return [], []
 
-        diff = np.diff(self.track.speed_limits)
-        diff_indices = np.arange(n - 1)
-        idx_mask = (diff_indices >= int(start_idx)) & (diff_indices < int(end_idx))
+        resolved_start = max(0, int(start_idx))
+        resolved_end = min(n - 1, int(end_idx))
+        if resolved_start >= resolved_end:
+            return [], []
 
-        # 上升入口点：diff > 0 且在 idx_mask 范围内 -> boundary at pts[i+1]
-        inc_idxs = np.where((diff > 0) & idx_mask)[0]
-        AscendBeginPoints = [
+        rise_indices = self._rise_edge_idx_all[
+            (self._rise_edge_idx_all >= resolved_start)
+            & (self._rise_edge_idx_all < resolved_end)
+        ]
+        ascend_begin_points = [
             ForwardBeginPoint(
                 float(self.track.speed_limit_intervals[i + 1]),
-                float(self.track.speed_limits[i] * self.gamma),
+                float(self._speed_limits_scaled[i]),
                 int(i + 1),
             )
-            for i in inc_idxs
+            for i in rise_indices
         ]
 
-        # 下降出口点：diff < 0 且在 idx_mask 范围内
-        dec_idxs = np.where((diff < 0) & idx_mask)[0]
-        DescendEndPoints = [
+        fall_indices = self._fall_edge_idx_all[
+            (self._fall_edge_idx_all >= resolved_start)
+            & (self._fall_edge_idx_all < resolved_end)
+        ]
+        descend_end_points = [
             BackwardEndPoint(
                 float(self.track.speed_limit_intervals[j + 1]),
-                float(self.track.speed_limits[j + 1] * self.gamma),
+                float(self._speed_limits_scaled[j + 1]),
                 int(j),
             )
-            for j in dec_idxs
+            for j in fall_indices
         ]
 
-        return AscendBeginPoints, DescendEndPoints
+        return ascend_begin_points, descend_end_points
 
     def _calc_mb_descend_operation(
         self,
@@ -144,49 +298,16 @@ class ORS:
             最大制动模式的运行时间
             最大制动模式的起始区间
         """
-        begin_interval: int = self._get_speed_limits_interval_index(
-            end_pos, ascend=False
+        begin_pos, operation_time, begin_interval = _calc_mb_descend_operation_numba(
+            end_pos=float(end_pos),
+            end_speed=float(end_speed),
+            speed_limits=self.track.speed_limits,
+            speed_limit_intervals=self.track.speed_limit_intervals,
+            gamma=float(self.gamma),
+            max_dec_abs=float(self.vehicle.max_dec_abs),
+            tol=1e-9,
         )
-        while begin_interval >= 0:
-            mark_pos = self.track.speed_limit_intervals[
-                begin_interval
-            ]  # 限速区间左端点
-            begin_speed = self.track.speed_limits[begin_interval] * self.gamma
-            operation_time = (begin_speed - end_speed) / self.vehicle.max_dec_abs
-            begin_pos = end_pos - (begin_speed**2 - end_speed**2) / (
-                2 * self.vehicle.max_dec_abs
-            )
-            # begin_pos = end_pos - (begin_speed + end_speed) * (
-            #     begin_speed - end_speed
-            # ) / (2 * self.vehicle.max_dec)
-
-            # if begin_pos >= mark_pos:  # 达到顶棚速度的位置在当前限速区间内
-            if (begin_pos > mark_pos) or np.isclose(
-                begin_pos, mark_pos
-            ):  # 达到顶棚速度的位置在当前限速区间内
-                break
-            else:
-                distance = end_pos - mark_pos
-                edge_speed_2 = end_speed**2 + 2 * self.vehicle.max_dec_abs * distance
-                edge_speed = np.sqrt(edge_speed_2)
-                next_interval_speed_limit = (
-                    self.track.speed_limits[
-                        np.clip(begin_interval - 1, 0, len(self.track.speed_limits) - 1)
-                    ]
-                    * self.gamma
-                )
-                if (edge_speed < next_interval_speed_limit) or np.isclose(
-                    edge_speed, next_interval_speed_limit
-                ):
-                    begin_interval -= 1
-                else:
-                    break
-
-        return (
-            float(begin_pos),
-            float(operation_time),
-            int(np.clip(begin_interval, 0, len(self.track.speed_limits) - 1)),
-        )
+        return float(begin_pos), float(operation_time), int(begin_interval)
 
     def _calc_ma_ascend_operation(
         self,
@@ -205,48 +326,16 @@ class ORS:
             最大牵引模式下的运行时间
             最大牵引模式下的终止区间
         """
-        end_interval: int = self._get_speed_limits_interval_index(
-            begin_pos, ascend=True
+        end_pos, operation_time, end_interval = _calc_ma_ascend_operation_numba(
+            begin_pos=float(begin_pos),
+            begin_speed=float(begin_speed),
+            speed_limits=self.track.speed_limits,
+            speed_limit_intervals=self.track.speed_limit_intervals,
+            gamma=float(self.gamma),
+            max_acc=float(self.vehicle.max_acc),
+            tol=1e-9,
         )
-        while end_interval <= len(self.track.speed_limits) - 1:
-            mark_pos = self.track.speed_limit_intervals[
-                end_interval + 1
-            ]  # 限速区间右端点
-            end_speed = self.track.speed_limits[end_interval] * self.gamma
-            operation_time = (end_speed - begin_speed) / self.vehicle.max_acc
-            end_pos = begin_pos + (end_speed**2 - begin_speed**2) / (
-                2 * self.vehicle.max_acc
-            )
-            # end_pos = begin_pos + (end_speed + begin_speed) * (
-            #     end_speed - begin_speed
-            # ) / (2 * self.vehicle.max_acc)
-
-            if (end_pos < mark_pos) or np.isclose(
-                end_pos, mark_pos
-            ):  # 达到顶棚速度的位置在当前限速区间内
-                break
-            else:
-                distance = mark_pos - begin_pos
-                edge_speed_2 = begin_speed**2 + 2 * self.vehicle.max_acc * distance
-                edge_speed = np.sqrt(edge_speed_2)
-                next_interval_speed_limit = (
-                    self.track.speed_limits[
-                        np.clip(end_interval + 1, 0, len(self.track.speed_limits) - 1)
-                    ]
-                    * self.gamma
-                )
-                if (edge_speed < next_interval_speed_limit) or np.isclose(
-                    edge_speed, next_interval_speed_limit
-                ):
-                    end_interval += 1
-                else:
-                    break
-
-        return (
-            float(end_pos),
-            float(operation_time),
-            int(np.clip(end_interval, 0, len(self.track.speed_limits) - 1)),
-        )
+        return float(end_pos), float(operation_time), int(end_interval)
 
     def _calc_withnocruise_scenario(
         self, begin_pos: float, begin_speed: float, end_pos: float, end_speed: float
@@ -404,12 +493,11 @@ class ORS:
                     prev_ascend_end_interval = ascend_end_interval
 
             prev_descend_begin_interval = brake_begin_interval
-            descend_end_points.reverse()
             for (
                 descend_end_pos,
                 descend_end_speed,
                 descend_end_interval,
-            ) in descend_end_points:
+            ) in reversed(descend_end_points):
                 if descend_end_interval < prev_descend_begin_interval:
                     (
                         descend_begin_pos,
@@ -579,7 +667,7 @@ class ORS:
         begin_speed: float,
         end_pos: float,
         end_speed: float,
-    ) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         """计算在给定当前位置、速度下的最小运行速度曲线及其运行时间"""
         operations = self._calc_min_runtime_operation(
             current_pos=begin_pos,
@@ -612,14 +700,22 @@ class ORS:
             begin_pos = curve_pos_array[-1]
             begin_speed = curve_speed_array[-1]
 
+        # 输出 guard：自动去掉重复位置点，并同步保留对应速度。
+        if curve_pos_array.size > 1:
+            keep_mask = np.empty(curve_pos_array.size, dtype=bool)
+            keep_mask[0] = True
+            keep_mask[1:] = np.diff(curve_pos_array) != 0.0
+            curve_pos_array = curve_pos_array[keep_mask]
+            curve_speed_array = curve_speed_array[keep_mask]
+
         return (
-            curve_pos_array.astype(np.float32),
-            curve_speed_array.astype(np.float32),
+            curve_pos_array,
+            curve_speed_array,
         )
 
     def calc_min_operation_time(
         self, begin_pos: float, begin_speed: float, end_pos: float, end_speed: float
-    ):
+    ) -> float:
         """
         计算在给定起始位置、起始速度、终止位置、终止速度
         在参考系统运行模式下的最短运行时间

@@ -129,12 +129,16 @@ def test_best_eval_metrics_empty():
 
 def test_constraint_diagnostic_basic():
     series_map = {
-        "state/pos_m": _make_series("state/pos_m", [0.0, 500.0, 1000.0, 1500.0]),
+        "state/position": _make_series(
+            "state/position", [0.0, 500.0, 1000.0, 1500.0]
+        ),
         "constraint/is_truncated": _make_series(
             "constraint/is_truncated",
             [0.0, 1.0, 0.0, 1.0],
         ),
-        "state/current_sp": _make_series("state/current_sp", [-1.0, 0.0, 1.0, 1.0]),
+        "state/stopping_point_index": _make_series(
+            "state/stopping_point_index", [-1.0, 0.0, 1.0, 1.0]
+        ),
         "constraint/speed_limit_segment": _make_series(
             "constraint/speed_limit_segment",
             [0.0, 1.0, 1.0, 2.0],
@@ -164,6 +168,42 @@ def test_constraint_diagnostic_basic():
     assert "near_miss_risk" in top_bin
     assert "violation_risk" in top_bin
     assert "failure_risk" in top_bin
+
+
+def test_constraint_diagnostic_accepts_new_state_tags():
+    series_map = {
+        "state/position": _make_series(
+            "state/position", [0.0, 500.0, 1000.0, 1500.0]
+        ),
+        "constraint/is_truncated": _make_series(
+            "constraint/is_truncated",
+            [0.0, 1.0, 0.0, 1.0],
+        ),
+        "state/stopping_point_index": _make_series(
+            "state/stopping_point_index", [-1.0, 0.0, 1.0, 1.0]
+        ),
+        "constraint/speed_limit_segment": _make_series(
+            "constraint/speed_limit_segment",
+            [0.0, 1.0, 1.0, 2.0],
+        ),
+        "constraint/margin_to_vmax_mps": _make_series(
+            "constraint/margin_to_vmax_mps",
+            [2.0, -0.5, 1.0, 0.2],
+        ),
+        "constraint/margin_to_vmin_mps": _make_series(
+            "constraint/margin_to_vmin_mps",
+            [1.0, 0.3, 2.0, -0.1],
+        ),
+    }
+
+    diagnostic = compute_constraint_diagnostic(
+        series_map,
+        near_miss_threshold_mps=1.0,
+        position_bin_size_m=500.0,
+    )
+
+    assert diagnostic["available"] is True
+    assert diagnostic["geographic_failure_distribution"]["truncated_count"] == 2
 
 
 def test_build_episode_snapshots_with_state_episode_id():
@@ -213,12 +253,14 @@ def test_reward_component_episode_then_stage_aggregation():
 
 def test_constraint_boundary_adhesion_uses_distance_ratio():
     series_map = {
-        "state/pos_m": _make_series("state/pos_m", [0.0, 100.0, 300.0, 600.0]),
+        "state/position": _make_series("state/position", [0.0, 100.0, 300.0, 600.0]),
         "constraint/is_truncated": _make_series(
             "constraint/is_truncated",
             [0.0, 1.0, 0.0, 1.0],
         ),
-        "state/current_sp": _make_series("state/current_sp", [-1.0, 0.0, 1.0, 1.0]),
+        "state/stopping_point_index": _make_series(
+            "state/stopping_point_index", [-1.0, 0.0, 1.0, 1.0]
+        ),
         "constraint/speed_limit_segment": _make_series(
             "constraint/speed_limit_segment",
             [0.0, 1.0, 1.0, 2.0],
@@ -253,8 +295,8 @@ def test_constraint_boundary_adhesion_uses_distance_ratio():
 def test_evolution_metrics_transition_matrix():
     series_map = {
         "state/episode_id": _make_series("state/episode_id", [0, 0, 0, 1, 1, 1]),
-        "state/pos_m": _make_series(
-            "state/pos_m", [0.0, 100.0, 200.0, 0.0, 120.0, 200.0]
+        "state/position": _make_series(
+            "state/position", [0.0, 100.0, 200.0, 0.0, 120.0, 200.0]
         ),
         "constraint/is_truncated": _make_series(
             "constraint/is_truncated",
@@ -283,6 +325,27 @@ def test_evolution_metrics_transition_matrix():
     )
     assert np.array_equal(matrix, expected)
 
+
+def test_evolution_metrics_accepts_new_state_position_tag():
+    series_map = {
+        "state/episode_id": _make_series("state/episode_id", [0, 0, 0, 1, 1, 1]),
+        "state/position": _make_series(
+            "state/position", [0.0, 100.0, 200.0, 0.0, 120.0, 200.0]
+        ),
+        "constraint/is_truncated": _make_series(
+            "constraint/is_truncated",
+            [0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        ),
+        "constraint/violation_code": _make_series(
+            "constraint/violation_code",
+            [0.0, 1.0, 2.0, 0.0, 2.0, 1.0],
+        ),
+    }
+
+    evolution = compute_evolution_metrics(series_map, episode_window_size=1)
+
+    assert evolution["available"] is True
+    assert evolution["episode_count"] == 2
 
 def test_write_outputs_default_no_csv(tmp_path):
     payload = build_analysis_payload(
@@ -566,11 +629,11 @@ def _build_sparse_series_map() -> dict[str, ScalarSeries]:
         "state/episode_id": _make_series_with_steps(
             "state/episode_id", steps, [10.0, 120.0, 240.0]
         ),
-        "state/pos_m": _make_series_with_steps(
-            "state/pos_m", steps, [0.0, 5000.0, 9000.0]
+        "state/position": _make_series_with_steps(
+            "state/position", steps, [0.0, 5000.0, 9000.0]
         ),
-        "state/current_sp": _make_series_with_steps(
-            "state/current_sp", steps, [-1.0, 1.0, 2.0]
+        "state/stopping_point_index": _make_series_with_steps(
+            "state/stopping_point_index", steps, [-1.0, 1.0, 2.0]
         ),
         "constraint/is_truncated": _make_series_with_steps(
             "constraint/is_truncated", steps, [0.0, 0.0, 0.0]

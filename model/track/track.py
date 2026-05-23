@@ -7,7 +7,7 @@ import numpy as np
 from numba import njit
 from numpy.typing import ArrayLike, DTypeLike, NDArray
 
-from utils.indexing_utils import get_interval_index
+from utils.indexing_utils import get_interval_index, get_interval_index_scalar_numba
 from utils.type_utils import ScalarNumeric, restore_output_type
 
 
@@ -38,16 +38,7 @@ def get_slope_scalar_numba(
     slopes: NDArray[np.float64],
     slope_intervals: NDArray[np.float64],
 ) -> float:
-    left = 0
-    right = slope_intervals.size
-    while left < right:
-        mid = (left + right) // 2
-        if pos < slope_intervals[mid]:
-            right = mid
-        else:
-            left = mid + 1
-
-    idx = left - 1
+    idx = get_interval_index_scalar_numba(pos, slope_intervals)
     if idx < 0:
         idx = 0
     elif idx >= slopes.size:
@@ -73,16 +64,7 @@ def get_speed_limit_scalar_numba(
     speed_limits: NDArray[np.float64],
     speed_limit_intervals: NDArray[np.float64],
 ) -> float:
-    left = 0
-    right = speed_limit_intervals.size
-    while left < right:
-        mid = (left + right) // 2
-        if pos < speed_limit_intervals[mid]:
-            right = mid
-        else:
-            left = mid + 1
-
-    idx = left - 1
+    idx = get_interval_index_scalar_numba(pos, speed_limit_intervals)
     if idx < 0:
         idx = 0
     elif idx >= speed_limits.size:

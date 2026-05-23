@@ -3,13 +3,139 @@ from typing import overload
 
 import numpy as np
 from matplotlib.axes import Axes
+from numba import njit
 from numpy.typing import ArrayLike, NDArray
 
 from utils.curve_geometry import cal_regions, pad_2curve_lists
 from utils.curve_plot import concatenate_curves_with_NaN, draw_regions
-from utils.indexing_utils import get_interval_index
+from utils.indexing_utils import get_interval_index, get_interval_index_scalar_numba
 
 ScalarNumeric = float | np.floating
+
+
+@njit(cache=True)
+def _interp_scalar_numba(
+    x: float,
+    xp_row: NDArray[np.float64],
+    fp_row: NDArray[np.float64],
+    n: int,
+) -> float:
+    if n <= 0:
+        return 0.0
+    if x <= xp_row[0]:
+        return fp_row[0]
+    last = n - 1
+    if x >= xp_row[last]:
+        return fp_row[last]
+
+    lo = 0
+    hi = last
+    while lo + 1 < hi:
+        mid = (lo + hi) // 2
+        if x < xp_row[mid]:
+            hi = mid
+        else:
+            lo = mid
+
+    x0 = xp_row[lo]
+    x1 = xp_row[hi]
+    y0 = fp_row[lo]
+    y1 = fp_row[hi]
+    return y0 + (y1 - y0) * ((x - x0) / (x1 - x0))
+
+
+@njit(cache=True)
+def _get_min_speed_numba(
+    current_pos: float,
+    current_sp: int,
+    min_pos_packed: NDArray[np.float64],
+    min_speed_packed: NDArray[np.float64],
+    min_lengths: NDArray[np.int32],
+) -> float:
+    if current_sp == -1:
+        return 0.0
+
+    curve_len = int(min_lengths[current_sp])
+    if curve_len <= 0:
+        return 0.0
+
+    if current_pos > min_pos_packed[current_sp, curve_len - 1]:
+        return 0.0
+
+    return _interp_scalar_numba(
+        current_pos,
+        min_pos_packed[current_sp],
+        min_speed_packed[current_sp],
+        curve_len,
+    )
+
+
+@njit(cache=True)
+def _get_max_speed_numba(
+    current_pos: float,
+    current_sp: int,
+    max_pos_packed: NDArray[np.float64],
+    max_speed_packed: NDArray[np.float64],
+    max_lengths: NDArray[np.int32],
+    speed_limits: NDArray[np.float64],
+    speed_limit_intervals: NDArray[np.float64],
+    gamma: float,
+) -> float:
+    max_curve_idx = current_sp + 1
+    max_curve_len = int(max_lengths[max_curve_idx])
+    if current_pos > max_pos_packed[max_curve_idx, 0]:
+        current_max_speed = _interp_scalar_numba(
+            current_pos,
+            max_pos_packed[max_curve_idx],
+            max_speed_packed[max_curve_idx],
+            max_curve_len,
+        )
+        if current_max_speed < 0.0:
+            current_max_speed = 0.0
+    else:
+        idx = get_interval_index_scalar_numba(current_pos, speed_limit_intervals)
+        if idx < 0:
+            idx = 0
+        elif idx >= speed_limits.size:
+            idx = speed_limits.size - 1
+        current_max_speed = speed_limits[idx] * gamma
+    return current_max_speed
+
+
+@njit(cache=True)
+def _get_min_and_max_speed_numba(
+    current_pos: float,
+    current_sp: int,
+    min_pos_packed: NDArray[np.float64],
+    min_speed_packed: NDArray[np.float64],
+    min_lengths: NDArray[np.int32],
+    max_pos_packed: NDArray[np.float64],
+    max_speed_packed: NDArray[np.float64],
+    max_lengths: NDArray[np.int32],
+    speed_limits: NDArray[np.float64],
+    speed_limit_intervals: NDArray[np.float64],
+    gamma: float,
+) -> tuple[float, float]:
+    current_min_speed = _get_min_speed_numba(
+        current_pos,
+        current_sp,
+        min_pos_packed,
+        min_speed_packed,
+        min_lengths,
+    )
+
+    current_max_speed = _get_max_speed_numba(
+        current_pos,
+        current_sp,
+        max_pos_packed,
+        max_speed_packed,
+        max_lengths,
+        speed_limits,
+        speed_limit_intervals,
+        gamma,
+    )
+
+    return current_min_speed, current_max_speed
 
 
 class SafeGuardUtility:
@@ -117,6 +243,16 @@ class SafeGuardUtility:
         ]
 
         self.gamma = factor
+        self._speed_query_cache_ready = False
+
+        self._min_curves_pos_packed = np.zeros((0, 1), dtype=np.float64)
+        self._min_curves_speed_packed = np.zeros((0, 1), dtype=np.float64)
+        self._min_curves_lengths = np.zeros((0,), dtype=np.int32)
+        self._max_curves_pos_packed = np.zeros((0, 1), dtype=np.float64)
+        self._max_curves_speed_packed = np.zeros((0, 1), dtype=np.float64)
+        self._max_curves_lengths = np.zeros((0,), dtype=np.int32)
+
+        self._build_speed_query_cache()
 
         # render/detect 所需的区域缓存, 首次使用时按需计算
         self._region_cache_ready = False
@@ -184,6 +320,54 @@ class SafeGuardUtility:
             except ValueError as exc:
                 raise ValueError(f"{curve_name}[{idx}] is invalid: {exc}") from exc
         return sanitized_curves
+
+    def _build_speed_query_cache(self) -> None:
+        min_curve_count = len(self.min_curves_list)
+        max_curve_count = len(self.max_curves_list)
+
+        min_max_len = max((curve.shape[1] for curve in self.min_curves_list), default=1)
+        max_max_len = max((curve.shape[1] for curve in self.max_curves_list), default=1)
+
+        self._min_curves_pos_packed = np.empty(
+            (min_curve_count, min_max_len), dtype=np.float64
+        )
+        self._min_curves_speed_packed = np.empty(
+            (min_curve_count, min_max_len), dtype=np.float64
+        )
+        self._min_curves_lengths = np.empty((min_curve_count,), dtype=np.int32)
+
+        for idx, curve in enumerate(self.min_curves_list):
+            curve_len = int(curve.shape[1])
+            self._min_curves_lengths[idx] = curve_len
+            self._min_curves_pos_packed[idx, :curve_len] = curve[0, :]
+            self._min_curves_speed_packed[idx, :curve_len] = curve[1, :]
+            if curve_len < min_max_len:
+                self._min_curves_pos_packed[idx, curve_len:] = curve[0, curve_len - 1]
+                self._min_curves_speed_packed[idx, curve_len:] = curve[1, curve_len - 1]
+
+        self._max_curves_pos_packed = np.empty(
+            (max_curve_count, max_max_len), dtype=np.float64
+        )
+        self._max_curves_speed_packed = np.empty(
+            (max_curve_count, max_max_len), dtype=np.float64
+        )
+        self._max_curves_lengths = np.empty((max_curve_count,), dtype=np.int32)
+
+        for idx, curve in enumerate(self.max_curves_list):
+            curve_len = int(curve.shape[1])
+            self._max_curves_lengths[idx] = curve_len
+            self._max_curves_pos_packed[idx, :curve_len] = curve[0, :]
+            self._max_curves_speed_packed[idx, :curve_len] = curve[1, :]
+            if curve_len < max_max_len:
+                self._max_curves_pos_packed[idx, curve_len:] = curve[0, curve_len - 1]
+                self._max_curves_speed_packed[idx, curve_len:] = curve[1, curve_len - 1]
+
+        self._speed_query_cache_ready = True
+
+    def _ensure_speed_query_cache(self) -> None:
+        if self._speed_query_cache_ready:
+            return
+        self._build_speed_query_cache()
 
     @staticmethod
     def _get_speed_scale(speed_unit: str) -> float:
@@ -353,6 +537,77 @@ class SafeGuardUtility:
 
         return current_sp
 
+    def _get_min_and_max_speed_legacy(
+        self,
+        current_pos: float,
+        current_sp: int,
+    ) -> tuple[float, float]:
+        if current_sp == -1:
+            current_min_speed = 0.0
+        else:
+            current_min_curve = self.min_curves_list[current_sp]
+            if current_pos > current_min_curve[0, -1]:
+                current_min_speed = 0.0
+            else:
+                current_min_speed = np.interp(
+                    current_pos, current_min_curve[0, :], current_min_curve[1, :]
+                )
+
+        current_max_curve = self.max_curves_list[current_sp + 1]
+        if current_pos > current_max_curve[0, 0]:
+            current_max_speed = max(
+                0.0,
+                np.interp(
+                    current_pos,
+                    current_max_curve[0, :],
+                    current_max_curve[1, :],
+                ),
+            )
+        else:
+            current_max_speed = (
+                self.speed_limits[
+                    np.clip(
+                        get_interval_index(current_pos, self.speed_limit_intervals),
+                        0,
+                        len(self.speed_limits) - 1,
+                    )
+                ]
+                * self.gamma
+            )
+
+        return float(current_min_speed), float(current_max_speed)
+
+    def get_min_speed(self, current_pos: ScalarNumeric, current_sp: int) -> float:
+        current_pos_value = float(current_pos)
+        current_sp_value = int(current_sp)
+        self._ensure_speed_query_cache()
+        return float(
+            _get_min_speed_numba(
+                current_pos_value,
+                current_sp_value,
+                self._min_curves_pos_packed,
+                self._min_curves_speed_packed,
+                self._min_curves_lengths,
+            )
+        )
+
+    def get_max_speed(self, current_pos: ScalarNumeric, current_sp: int) -> float:
+        current_pos_value = float(current_pos)
+        current_sp_value = int(current_sp)
+        self._ensure_speed_query_cache()
+        return float(
+            _get_max_speed_numba(
+                current_pos_value,
+                current_sp_value,
+                self._max_curves_pos_packed,
+                self._max_curves_speed_packed,
+                self._max_curves_lengths,
+                self.speed_limits,
+                self.speed_limit_intervals,
+                float(self.gamma),
+            )
+        )
+
     def get_min_and_max_speed(
         self, current_pos: ScalarNumeric, current_sp: int
     ) -> tuple[float, float]:
@@ -367,50 +622,22 @@ class SafeGuardUtility:
             current_min_speed, current_max_speed
         """
 
-        # 根据当前状态计算最小防护速度
-        if current_sp == -1:
-            # 还在加速区, 尚未步进到第一个辅助停车区
-            current_min_speed = 0.0
-        else:
-            # 已开始停车点步进
-            # 根据当前状态计算最小防护速度
-            current_min_curve = self.min_curves_list[current_sp]
-            if current_pos > current_min_curve[0, -1]:
-                # 当前位置大于最小速度曲线的右端点
-                # 设置当前最小防护速度为0
-                current_min_speed = 0.0
-            else:
-                # 当前位置小于最小速度曲线的右端点
-                # 设置最小防护速度为最小速度曲线在当前位置的插值
-                current_min_speed = np.interp(
-                    current_pos, current_min_curve[0, :], current_min_curve[1, :]
-                )
-
-        # 根据当前状态计算最大防护速度
-        current_max_curve = self.max_curves_list[current_sp + 1]
-        if current_pos > current_max_curve[0, 0]:
-            # 当前位置大于最大速度曲线左端点
-            # 设置最大速度为最大速度曲线在当前位置的插值
-            current_max_speed = max(
-                0.0,
-                np.interp(
-                    current_pos, current_max_curve[0, :], current_max_curve[1, :]
-                ),
-            )
-        else:
-            # 当前位置小于最大速度曲线的左端点
-            # 设置最大速度为当前位置区间限速
-            current_max_speed = (
-                self.speed_limits[
-                    np.clip(
-                        get_interval_index(current_pos, self.speed_limit_intervals),
-                        0,
-                        len(self.speed_limits) - 1,
-                    )
-                ]
-                * self.gamma
-            )
-
+        current_pos_value = float(current_pos)
+        current_sp_value = int(current_sp)
+        self._ensure_speed_query_cache()
+        current_min_speed, current_max_speed = _get_min_and_max_speed_numba(
+            current_pos_value,
+            current_sp_value,
+            self._min_curves_pos_packed,
+            self._min_curves_speed_packed,
+            self._min_curves_lengths,
+            self._max_curves_pos_packed,
+            self._max_curves_speed_packed,
+            self._max_curves_lengths,
+            self.speed_limits,
+            self.speed_limit_intervals,
+            float(self.gamma),
+        )
         return float(current_min_speed), float(current_max_speed)
 
     def get_latest_traction_and_braking_intervention_points(

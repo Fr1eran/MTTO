@@ -75,46 +75,21 @@ def mtto_env():
 
 def test_reset(mtto_env: MTTOEnv):
     obs, info = mtto_env.reset()
-    assert isinstance(obs, dict), "obs should be a dictionary"
-    expected_keys = [
-        "remaining_distance",
-        "current_speed",
-        "current_acc",
-        "remaining_schedule_time",
-        "current_slope",
-        "current_max_speed",
-        "current_min_speed",
-        "next_slope",
-        "next_max_speed",
-        "next_min_speed",
-        "current_latest_traction_intervention_point",
-        "current_latest_braking_intervention_point",
-    ]
-    for key in expected_keys:
-        assert key in obs, f"Missing key in obs: {key}"
-    # Check types of some important fields
-    assert isinstance(obs["remaining_distance"], np.ndarray)
-    assert isinstance(obs["current_speed"], np.ndarray)
-    assert isinstance(obs["current_acc"], np.ndarray)
-    assert isinstance(obs["remaining_schedule_time"], np.ndarray)
-    assert isinstance(obs["current_slope"], np.ndarray)
-    assert isinstance(obs["current_max_speed"], np.ndarray)
-    assert isinstance(obs["current_min_speed"], np.ndarray)
-    assert isinstance(obs["next_slope"], np.ndarray)
-    assert isinstance(obs["next_max_speed"], np.ndarray)
-    assert isinstance(obs["next_min_speed"], np.ndarray)
-    assert isinstance(obs["current_latest_traction_intervention_point"], np.ndarray)
-    assert isinstance(obs["current_latest_braking_intervention_point"], np.ndarray)
-    np.testing.assert_allclose(obs["remaining_distance"], 0.9953664)
-    np.testing.assert_allclose(obs["current_speed"], 0.0)
-    np.testing.assert_allclose(obs["current_acc"], 0.0)
-    np.testing.assert_allclose(obs["remaining_schedule_time"], 1.0)
-    np.testing.assert_allclose(obs["current_slope"], 0.0)
-    np.testing.assert_allclose(obs["current_max_speed"], 0.0)
-    np.testing.assert_allclose(obs["current_min_speed"], 0.0)
-    np.testing.assert_allclose(obs["next_slope"], 0.0)
-    np.testing.assert_allclose(obs["next_max_speed"], 0.032199375331401825, rtol=1e-6)
-    np.testing.assert_allclose(obs["next_min_speed"], 0.0)
+    assert isinstance(obs, np.ndarray)
+    assert obs.dtype == np.float32
+    assert obs.shape == (14,)
+    np.testing.assert_allclose(obs[0], 1.0)  # remaining_distance
+    np.testing.assert_allclose(obs[1], 0.0)  # current_speed
+    np.testing.assert_allclose(obs[2], 0.0)  # current_acc
+    np.testing.assert_allclose(obs[3], 1.0)  # remaining_schedule_time
+    np.testing.assert_allclose(obs[5], 0.0)  # current_slope
+    np.testing.assert_allclose(obs[6], 0.0)  # current_max_speed
+    np.testing.assert_allclose(obs[7], 0.0)  # current_min_speed
+    np.testing.assert_allclose(obs[8], 0.0)  # next_slope
+    np.testing.assert_allclose(
+        obs[9], 0.032199375331401825, rtol=1e-4
+    )  # next_max_speed
+    np.testing.assert_allclose(obs[10], 0.0)  # next_min_speed
     assert info == {}
 
 

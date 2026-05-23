@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.animation import FuncAnimation
 from matplotlib.backends.backend_agg import FigureCanvasAgg
-from scipy.interpolate import PchipInterpolator
+from numpy.typing import NDArray
 
 from model.common import ECC, ORS
 from model.ocs import SPS, SafeGuardUtility, TrainService
@@ -28,33 +28,33 @@ class RewardInfoForTB(TypedDict, total=False):
 
 
 class StateInfoForTB(TypedDict, total=False):
-    pos_m: float
-    speed_mps: float
-    current_sp: float
+    position: float
+    speed: float
+    stopping_point_index: int
 
 
 class ConstraintInfoForTB(TypedDict, total=False):
     margin_to_vmax_mps: float
     margin_to_vmin_mps: float
-    is_truncated: float
-    violation_code: float
+    is_truncated: bool
+    violation_code: int
     speed_limit_mps: float
-    speed_limit_segment: float
-    is_near_miss: float
+    speed_limit_segment: int
+    is_near_miss: bool
 
 
 class EventInfoForTB(TypedDict, total=False):
-    episode_truncated_count: float
-    episode_low_violation_count: float
-    episode_high_violation_count: float
+    episode_truncated_count: int
+    episode_low_violation_count: int
+    episode_high_violation_count: int
 
 
 class BasicInfo(TypedDict, total=False):
-    energy_consumption: float
-    operation_time: float
     position: float
     speed: float
-    stopping_point_index: float
+    stopping_point_index: int
+    operation_time: float
+    energy_consumption: float
     comfort_tav: float
     comfort_er_pct: float
     comfort_rms: float
@@ -213,11 +213,14 @@ class MTTOEnv(gym.Env):
                 end_speed=0.0,
             )
         )
-        # 速度上限曲线采用三次埃尔米特插值
-        self.upper_speed_profile_interp_func = PchipInterpolator(
-            x=self.upper_speed_profile_pos_arr,
-            y=self.upper_speed_profile_speed_arr,
-            extrapolate=False,
+        # 使用 np.interp 预采样速度上限曲线，训练步进阶段通过数组查表获取上限速度。
+        (
+            self._upper_speed_lut_pos_min,
+            self._upper_speed_lut_step,
+            self._upper_speed_lut_speed_arr,
+        ) = self._build_upper_speed_lookup_table(
+            self.upper_speed_profile_pos_arr,
+            self.upper_speed_profile_speed_arr,
         )
 
         # 计算最大能耗和最短运行时间
@@ -269,11 +272,13 @@ class MTTOEnv(gym.Env):
             self.track.slopes,
             self.track.slope_intervals,
         )
-        self.current_sp: int = -1  # 初始时在加速区，尚未步进至第一个辅助停车区
+        self.current_stopping_point_index: int = (
+            -1
+        )  # 初始时在加速区，尚未步进至第一个辅助停车区
         self.current_min_speed, self.current_max_speed = (
             self.safeguard_utility.get_min_and_max_speed(
                 current_pos=self.current_pos,
-                current_sp=self.current_sp,
+                current_sp=self.current_stopping_point_index,
             )
         )
         self.current_max_speed = min(
@@ -288,7 +293,7 @@ class MTTOEnv(gym.Env):
         self.next_min_speed, self.next_max_speed = (
             self.safeguard_utility.get_min_and_max_speed(
                 current_pos=self.current_pos + self.max_step_distance * self.direction,
-                current_sp=self.current_sp,
+                current_sp=self.current_stopping_point_index,
             )
         )
         self.next_max_speed = min(
@@ -305,48 +310,50 @@ class MTTOEnv(gym.Env):
         # )
         self.is_final_approach = False
 
-        # 定义智能体能够观测的状态信息
-        self.observation_space = gym.spaces.Dict({
-            "remaining_distance": gym.spaces.Box(
-                0.0,
-                1.0,
-                shape=(1,),
-                dtype=np.float32,
-            ),
-            "current_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
-            "current_acc": gym.spaces.Box(
-                -1.0,
-                1.0,
-                shape=(1,),
-                dtype=np.float32,
-            ),
-            "remaining_schedule_time": gym.spaces.Box(
-                -1.0,
-                1.0,
-                shape=(1,),
-                dtype=np.float32,  # 允许超时或提前
-            ),
-            "time_redundancy": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
-            "current_slope": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
-            "current_max_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
-            "current_min_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
-            "next_slope": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
-            "next_max_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
-            "next_min_speed": gym.spaces.Box(0.0, 1.0, shape=(1,), dtype=np.float32),
-            # "current_latest_traction_intervention_point": gym.spaces.Box(
-            #     0.0, 1.0, shape=(1,), dtype=np.float32
-            # ),
-            # "current_latest_braking_intervention_point": gym.spaces.Box(
-            #     0.0, 1.0, shape=(1,), dtype=np.float32
-            # ),
-            "is_final_approach": gym.spaces.Box(
-                -1.0, 1.0, shape=(1,), dtype=np.float32
-            ),
-            "rel_dist_to_target": gym.spaces.Box(
-                -1.0, 1.0, shape=(1,), dtype=np.float32
-            ),
-            "required_dec": gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
-        })
+        # 定义智能体能够观测的状态信息（扁平化向量，避免每步构造字典对象）
+        obs_low = np.array(
+            [
+                0.0,  # remaining_distance
+                0.0,  # current_speed
+                -1.0,  # current_acc
+                -1.0,  # remaining_schedule_time
+                -1.0,  # time_redundancy
+                -1.0,  # current_slope
+                0.0,  # current_max_speed
+                0.0,  # current_min_speed
+                -1.0,  # next_slope
+                0.0,  # next_max_speed
+                0.0,  # next_min_speed
+                -1.0,  # is_final_approach
+                -1.0,  # rel_dist_to_target
+                -1.0,  # required_dec
+            ],
+            dtype=np.float32,
+        )
+        obs_high = np.array(
+            [
+                1.0,  # remaining_distance
+                1.0,  # current_speed
+                1.0,  # current_acc
+                1.0,  # remaining_schedule_time
+                1.0,  # time_redundancy
+                1.0,  # current_slope
+                1.0,  # current_max_speed
+                1.0,  # current_min_speed
+                1.0,  # next_slope
+                1.0,  # next_max_speed
+                1.0,  # next_min_speed
+                1.0,  # is_final_approach
+                1.0,  # rel_dist_to_target
+                1.0,  # required_dec
+            ],
+            dtype=np.float32,
+        )
+        self.observation_space = gym.spaces.Box(
+            low=obs_low,
+            high=obs_high,
+            dtype=np.float32,
+        )
 
         # 定义智能体的动作空间, 归一化
         self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
@@ -355,7 +362,7 @@ class MTTOEnv(gym.Env):
         self.current_steps: int = 0
 
         # 当前步进停车点编号
-        self.current_sp: int = -1
+        self.current_stopping_point_index: int = -1
 
         # 停车点步进机制模拟
         self.sps = SPS(
@@ -377,14 +384,6 @@ class MTTOEnv(gym.Env):
         self.episode_truncated_count: int = 0
         self.episode_low_violation_count: int = 0
         self.episode_high_violation_count: int = 0
-
-        self.current_speed_limit_mps: float = 0.0
-        self.current_speed_limit_segment: int = 0
-        self.last_constraint_is_truncated: bool = False
-        self.last_constraint_violation_code: int = 0
-
-        if self.enable_diagnostics:
-            self._set_speed_limit_diagnostic()
 
         # 状态历史记录
         self._reset_history()
@@ -428,29 +427,13 @@ class MTTOEnv(gym.Env):
         self.episode_low_violation_count = 0
         self.episode_high_violation_count = 0
 
-    def _set_speed_limit_diagnostic(self):
-        self.current_speed_limit_mps = float(
-            get_speed_limit_scalar_numba(
-                self.current_pos,
-                self.track.speed_limits,
-                self.track.speed_limit_intervals,
-            )
-        )
-        self.current_speed_limit_segment = self._get_speed_limit_segment(
-            self.current_pos
-        )
-
-    def _reset_constraint_violation_diagnostic(self):
-        self.last_constraint_is_truncated = False
-        self.last_constraint_violation_code = 0
-
-    def _get_obs(self):
+    def _get_obs(self) -> NDArray[np.float32]:
         """
         将内部状态转换为可观测形式，并进行归一化
         可观测状态全部由np.ndarray组成
 
         Returns:
-            dict: Observation with agent and target positions
+            np.ndarray: shape=(14,), dtype=np.float32 的扁平化观测向量
         """
 
         dist_to_target = self.train_service.target_position - self.current_pos
@@ -463,67 +446,26 @@ class MTTOEnv(gym.Env):
             required_dec = -(self.current_speed**2) / (2.0 * dist_abs)
             required_dec_normalized = self._normalize_acc_to_action(required_dec)
 
-        return {
-            "remaining_distance": np.array(
-                [dist_to_target / self.whole_distance],
-                dtype=np.float32,
-            ),
-            "current_speed": np.array(
-                [self.current_speed / self.vehicle.max_speed], dtype=np.float32
-            ),
-            "current_acc": np.array(
-                [self._normalize_acc_to_action(self.current_acc)], dtype=np.float32
-            ),
-            "remaining_schedule_time": np.array(
-                [
-                    (self.train_service.schedule_time - self.current_operation_time)
-                    / self.train_service.schedule_time
-                ],
-                dtype=np.float32,
-            ),
-            "time_redundancy": np.array(
-                [self.current_time_redundancy],
-                dtype=np.float32,
-            ),
-            "current_slope": np.array(
-                [self.current_slope / self.vehicle.max_slope_capacity], dtype=np.float32
-            ),
-            "current_max_speed": np.array(
-                [self.current_max_speed / self.vehicle.max_speed], dtype=np.float32
-            ),
-            "current_min_speed": np.array(
-                [self.current_min_speed / self.vehicle.max_speed], dtype=np.float32
-            ),
-            "next_slope": np.array(
-                [self.next_slope / self.vehicle.max_slope_capacity], dtype=np.float32
-            ),
-            "next_max_speed": np.array(
-                [self.next_max_speed / self.vehicle.max_speed], dtype=np.float32
-            ),
-            "next_min_speed": np.array(
-                [self.next_min_speed / self.vehicle.max_speed], dtype=np.float32
-            ),
-            # "current_latest_traction_intervention_point": np.array(
-            #     [self.current_latest_traction_intervention_point / self.whole_distance],  # noqa: E501
-            #     dtype=np.float32,
-            # ),
-            # "current_latest_braking_intervention_point": np.array(
-            #     [self.current_latest_braking_intervention_point / self.whole_distance],  # noqa: E501
-            #     dtype=np.float32,
-            # ),
-            "is_final_approach": np.array(
-                [1.0 if self.is_final_approach else 0.0],
-                dtype=np.float32,
-            ),
-            "rel_dist_to_target": np.array(
-                [rel_dist_to_target],
-                dtype=np.float32,
-            ),
-            "required_dec": np.array(
-                [required_dec_normalized],
-                dtype=np.float32,
-            ),
-        }
+        return np.array(
+            [
+                dist_to_target / self.whole_distance,
+                self.current_speed / self.vehicle.max_speed,
+                self._normalize_acc_to_action(self.current_acc),
+                (self.train_service.schedule_time - self.current_operation_time)
+                / self.train_service.schedule_time,
+                self.current_time_redundancy,
+                self.current_slope / self.vehicle.max_slope_capacity,
+                self.current_max_speed / self.vehicle.max_speed,
+                self.current_min_speed / self.vehicle.max_speed,
+                self.next_slope / self.vehicle.max_slope_capacity,
+                self.next_max_speed / self.vehicle.max_speed,
+                self.next_min_speed / self.vehicle.max_speed,
+                1.0 if self.is_final_approach else 0.0,
+                rel_dist_to_target,
+                required_dec_normalized,
+            ],
+            dtype=np.float32,
+        )
 
     def _normalize_acc_to_action(self, acc: float | np.floating) -> float:
         """将物理加速度映射到动作归一化区间[-1, 1]，并做截断。"""
@@ -554,62 +496,68 @@ class MTTOEnv(gym.Env):
         return self.current_steps % self.diagnostics_interval_steps == 0
 
     def _record_basic_info(self) -> None:
-        self.basic_info["energy_consumption"] = float(self.current_energy_consumption)
-        self.basic_info["operation_time"] = float(self.current_operation_time)
-        self.basic_info["position"] = float(self.current_pos)
-        self.basic_info["speed"] = float(self.current_speed)
-        self.basic_info["stopping_point_index"] = float(self.current_sp)
+        self.basic_info["energy_consumption"] = self.current_energy_consumption
+        self.basic_info["operation_time"] = self.current_operation_time
+        self.basic_info["position"] = self.current_pos
+        self.basic_info["speed"] = self.current_speed
+        self.basic_info["stopping_point_index"] = self.current_stopping_point_index
         self.basic_info["comfort_tav"] = self._comfort_tav
-        if self.current_steps > 0:
-            self.basic_info["comfort_er_pct"] = (
-                self._comfort_exceedance_count / self.current_steps * 100.0
-            )
-            self.basic_info["comfort_rms"] = math.sqrt(
-                self._comfort_sum_sq_delta_acc / self.current_steps
-            )
+        self.basic_info["comfort_er_pct"] = (
+            self._comfort_exceedance_count / self.current_steps * 100.0
+        )
+        self.basic_info["comfort_rms"] = math.sqrt(
+            self._comfort_sum_sq_delta_acc / self.current_steps
+        )
 
     def _record_step_diagnostics(
         self,
-        *,
-        truncated: bool,
-        violation_code: int,
-        margin_to_vmax: float,
-        margin_to_vmin: float,
         near_miss_margin_mps: float = 1.0,
     ) -> None:
-        self.last_constraint_is_truncated = truncated
-        self.last_constraint_violation_code = violation_code
+        margin_to_vmax = self.current_max_speed - self.current_speed
+        margin_to_vmin = self.current_speed - self.current_min_speed
 
-        if truncated:
+        if margin_to_vmin < 0.0:
+            is_truncated = True
+            violation_code = 1
             self.episode_truncated_count += 1
-            if violation_code == 1:
-                self.episode_low_violation_count += 1
-            elif violation_code == 2:
-                self.episode_high_violation_count += 1
+            self.episode_low_violation_count += 1
+        elif margin_to_vmax < 0.0:
+            is_truncated = True
+            violation_code = 2
+            self.episode_truncated_count += 1
+            self.episode_high_violation_count += 1
+        else:
+            is_truncated = False
+            violation_code = 0
 
         is_near_miss = (margin_to_vmax <= near_miss_margin_mps) or (
             margin_to_vmin <= near_miss_margin_mps
         )
 
-        self.state_info["pos_m"] = float(self.current_pos)
-        self.state_info["speed_mps"] = float(self.current_speed)
-        self.state_info["current_sp"] = float(self.current_sp)
+        self.state_info["position"] = self.current_pos
+        self.state_info["speed"] = self.current_speed
+        self.state_info["stopping_point_index"] = self.current_stopping_point_index
 
-        self.constraint_info["margin_to_vmax_mps"] = float(margin_to_vmax)
-        self.constraint_info["margin_to_vmin_mps"] = float(margin_to_vmin)
-        self.constraint_info["is_truncated"] = float(truncated)
-        self.constraint_info["violation_code"] = float(violation_code)
-        self.constraint_info["speed_limit_mps"] = float(self.current_speed_limit_mps)
-        self.constraint_info["speed_limit_segment"] = float(
-            self.current_speed_limit_segment
+        self.constraint_info["margin_to_vmax_mps"] = margin_to_vmax
+        self.constraint_info["margin_to_vmin_mps"] = margin_to_vmin
+        self.constraint_info["is_truncated"] = is_truncated
+        self.constraint_info["violation_code"] = violation_code
+        self.constraint_info["speed_limit_mps"] = get_speed_limit_scalar_numba(
+            self.current_pos,
+            self.track.speed_limits,
+            self.track.speed_limit_intervals,
         )
-        self.constraint_info["is_near_miss"] = float(is_near_miss)
+        self.constraint_info["speed_limit_segment"] = self._get_speed_limit_segment(
+            self.current_pos
+        )
+        self.constraint_info["is_near_miss"] = is_near_miss
 
-        self.event_info["episode_truncated_count"] = float(self.episode_truncated_count)
-        self.event_info["episode_low_violation_count"] = float(
+        self.event_info["episode_truncated_count"] = self.episode_truncated_count
+        self.event_info["episode_low_violation_count"] = (
             self.episode_low_violation_count
         )
-        self.event_info["episode_high_violation_count"] = float(
+
+        self.event_info["episode_high_violation_count"] = (
             self.episode_high_violation_count
         )
 
@@ -650,12 +598,13 @@ class MTTOEnv(gym.Env):
         )
 
         # 重置停车点步进
-        self.current_sp = -1
+        self.current_stopping_point_index = -1
         self.sps.reset()
 
         self.current_min_speed, self.current_max_speed = (
             self.safeguard_utility.get_min_and_max_speed(
-                current_pos=self.current_pos, current_sp=self.current_sp
+                current_pos=self.current_pos,
+                current_sp=self.current_stopping_point_index,
             )
         )
         self.current_max_speed = min(
@@ -672,7 +621,7 @@ class MTTOEnv(gym.Env):
             self.next_max_speed,
         ) = self.safeguard_utility.get_min_and_max_speed(
             current_pos=self.current_pos + self.max_step_distance,
-            current_sp=self.current_sp,
+            current_sp=self.current_stopping_point_index,
         )
         self.next_max_speed = min(
             self._get_upper_speed(self.current_pos + self.max_step_distance),
@@ -691,8 +640,6 @@ class MTTOEnv(gym.Env):
         if self.enable_diagnostics:
             self._reset_infos_diagnostic()
             self._reset_episode_counters()
-            self._set_speed_limit_diagnostic()
-            self._reset_constraint_violation_diagnostic()
 
             self._collect_step_diagnostics = False
 
@@ -765,16 +712,16 @@ class MTTOEnv(gym.Env):
             self.track.slopes,
             self.track.slope_intervals,
         )
-        self.current_sp = self.sps.step_to_next_stopping_point(
+        self.current_stopping_point_index = self.sps.step_to_next_stopping_point(
             current_pos=self.current_pos,
             current_speed=self.current_speed,
             current_time=self.current_operation_time,
-            current_sp=self.current_sp,
+            current_sp=self.current_stopping_point_index,
         )
         self.current_min_speed, self.current_max_speed = (
             self.safeguard_utility.get_min_and_max_speed(
                 current_pos=self.current_pos,
-                current_sp=self.current_sp,
+                current_sp=self.current_stopping_point_index,
             )
         )
         self.current_max_speed = min(
@@ -789,7 +736,7 @@ class MTTOEnv(gym.Env):
         self.next_min_speed, self.next_max_speed = (
             self.safeguard_utility.get_min_and_max_speed(
                 current_pos=self.current_pos + self.max_step_distance * self.direction,
-                current_sp=self.current_sp,
+                current_sp=self.current_stopping_point_index,
             )
         )
         self.next_max_speed = min(
@@ -798,29 +745,18 @@ class MTTOEnv(gym.Env):
             ),
             self.next_max_speed,
         )
-        (
-            self.current_latest_traction_intervention_point,
-            self.current_latest_braking_intervention_point,
-        ) = self.safeguard_utility.get_latest_traction_and_braking_intervention_points(
-            current_speed=self.current_speed, current_sp=self.current_sp
-        )
+        # (
+        #     self.current_latest_traction_intervention_point,
+        #     self.current_latest_braking_intervention_point,
+        # ) = self.safeguard_utility.get_latest_traction_and_braking_intervention_points(
+        #     current_speed=self.current_speed, current_sp=self.current_sp
+        # )
 
         self.is_final_approach = (
             True
             if abs(self.train_service.target_position - self.current_pos)
             <= self.target_attraction_domain_radius
             else False
-        )
-
-        self.current_speed_limit_mps = float(
-            get_speed_limit_scalar_numba(
-                self.current_pos,
-                self.track.speed_limits,
-                self.track.speed_limit_intervals,
-            )
-        )
-        self.current_speed_limit_segment = self._get_speed_limit_segment(
-            self.current_pos
         )
 
         # 判断智能体是否到达目标区域
@@ -853,21 +789,7 @@ class MTTOEnv(gym.Env):
         self._record_basic_info()
         info = self._get_basic_info()
         if self.enable_diagnostics and self._collect_step_diagnostics:
-            if self.current_speed < self.current_min_speed:
-                violation_code = 1
-            elif self.current_speed >= self.current_max_speed:
-                violation_code = 2
-            else:
-                violation_code = 0
-
-            margin_to_vmax = self.current_max_speed - self.current_speed
-            margin_to_vmin = self.current_speed - self.current_min_speed
-            self._record_step_diagnostics(
-                truncated=truncated,
-                violation_code=violation_code,
-                margin_to_vmax=margin_to_vmax,
-                margin_to_vmin=margin_to_vmin,
-            )
+            self._record_step_diagnostics()
 
             info["rewards"] = dict(self.rewards_info)
             info["state"] = dict(self.state_info)
@@ -939,6 +861,47 @@ class MTTOEnv(gym.Env):
 
         return ref_cum_time
 
+    def _build_upper_speed_lookup_table(
+        self,
+        pos_arr: np.ndarray,
+        speed_arr: np.ndarray,
+    ) -> tuple[float, float, np.ndarray]:
+        """构建速度上限查找表，供 step 阶段通过数组访问快速获取上限速度。"""
+        pos_raw = np.asarray(pos_arr, dtype=np.float64)
+        speed_raw = np.asarray(speed_arr, dtype=np.float64)
+        if pos_raw.size == 0:
+            return 0.0, 1.0, np.zeros(1, dtype=np.float32)
+
+        interp_pos = pos_raw
+        interp_speed = speed_raw
+        if interp_pos.size == 1:
+            return (
+                float(interp_pos[0]),
+                1.0,
+                np.array([max(0.0, float(interp_speed[0]))], dtype=np.float32),
+            )
+
+        # 兼容反向里程场景：统一转为升序位置进行预采样。
+        if interp_pos[0] > interp_pos[-1]:
+            interp_pos = interp_pos[::-1]
+            interp_speed = interp_speed[::-1]
+
+        # 预采样分辨率按 10m 固定，兼顾精度与查表成本。
+        lut_step = 10.0
+        pos_min = float(interp_pos[0])
+        pos_max = float(interp_pos[-1])
+        lut_size = int(np.ceil((pos_max - pos_min) / lut_step)) + 1
+        lut_positions = pos_min + np.arange(lut_size, dtype=np.float64) * lut_step
+        lut_speed = np.interp(
+            lut_positions,
+            interp_pos,
+            interp_speed,
+            left=float(interp_speed[0]),
+            right=float(interp_speed[-1]),
+        )
+
+        return pos_min, lut_step, np.maximum(lut_speed, 0.0).astype(np.float32)
+
     def _get_reference_cum_time(self, pos: float | np.floating) -> float:
         """根据位置在最短运行参考曲线上插值累计运行时间。"""
         if self.upper_speed_profile_pos_arr.size == 0:
@@ -991,7 +954,24 @@ class MTTOEnv(gym.Env):
         return self._calc_redundant_operation_time() / self.train_service.schedule_time
 
     def _get_upper_speed(self, pos: float | np.floating):
-        return max(0.0, self.upper_speed_profile_interp_func(pos))
+        if self._upper_speed_lut_speed_arr.size == 0:
+            return 0.0
+
+        idx_float = (
+            float(pos) - self._upper_speed_lut_pos_min
+        ) / self._upper_speed_lut_step
+        if idx_float <= 0.0:
+            return float(self._upper_speed_lut_speed_arr[0])
+
+        last_idx = self._upper_speed_lut_speed_arr.size - 1
+        if idx_float >= float(last_idx):
+            return float(self._upper_speed_lut_speed_arr[last_idx])
+
+        idx0 = int(idx_float)
+        frac = idx_float - idx0
+        v0 = float(self._upper_speed_lut_speed_arr[idx0])
+        v1 = float(self._upper_speed_lut_speed_arr[idx0 + 1])
+        return v0 + (v1 - v0) * frac
 
     def _get_reward(
         self,
@@ -1123,9 +1103,9 @@ class MTTOEnv(gym.Env):
             min_speed=self.current_min_speed,
             max_speed=self.current_max_speed,
             target_pos=self.sps.get_auxiliary_stopping_area_target_position(
-                sp=self.current_sp
+                sp=self.current_stopping_point_index
             )
-            if self.current_sp >= 0
+            if self.current_stopping_point_index >= 0
             else self.train_service.target_position,
         )
 
@@ -1209,9 +1189,9 @@ class MTTOEnv(gym.Env):
             # if self.last_state["stopping_point_index"] >= 0
             # else self.task.target_position,
             target_pos=self.sps.get_auxiliary_stopping_area_target_position(
-                sp=self.current_sp
+                sp=self.current_stopping_point_index
             )
-            if self.current_sp >= 0
+            if self.current_stopping_point_index >= 0
             else self.train_service.target_position,
         )
 
@@ -1508,7 +1488,7 @@ class MTTOEnv(gym.Env):
         self.last_state["operation_time"] = self.current_operation_time
         self.last_state["time_redundancy"] = self.current_time_redundancy
         self.last_state["energy_consumption"] = self.current_energy_consumption
-        self.last_state["stopping_point_index"] = self.current_sp
+        self.last_state["stopping_point_index"] = self.current_stopping_point_index
 
     def _reset_history(self) -> None:
         self.last_state: TrainState = {

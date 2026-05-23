@@ -654,9 +654,9 @@ def compute_constraint_diagnostic(
     episode_window_size: int = 20,
 ) -> dict[str, Any]:
     required_tags = [
-        "state/pos_m",
+        "state/position",
+        "state/stopping_point_index",
         "constraint/is_truncated",
-        "state/current_sp",
         "constraint/speed_limit_segment",
         "constraint/margin_to_vmax_mps",
         "constraint/margin_to_vmin_mps",
@@ -679,10 +679,10 @@ def compute_constraint_diagnostic(
     _, aligned = align_tags_to_reference_steps(
         series_map,
         required_tags + optional_tags,
-        reference_tag="state/pos_m",
+        reference_tag="state/position",
     )
 
-    if "state/pos_m" not in aligned:
+    if "state/position" not in aligned or "state/stopping_point_index" not in aligned:
         return {
             "available": False,
             "geographic_failure_distribution": {},
@@ -691,9 +691,9 @@ def compute_constraint_diagnostic(
             "critical_point_risk": {},
         }
 
-    positions = aligned["state/pos_m"]
+    positions = aligned["state/position"]
     truncated_flags = aligned["constraint/is_truncated"]
-    sp_values = aligned["state/current_sp"]
+    sp_values = aligned["state/stopping_point_index"]
     speed_segment_values = aligned["constraint/speed_limit_segment"]
     margin_to_vmax = aligned["constraint/margin_to_vmax_mps"]
     margin_to_vmin = aligned["constraint/margin_to_vmin_mps"]
@@ -913,7 +913,7 @@ def compute_evolution_metrics(
 ) -> dict[str, Any]:
     required_tags = [
         "state/episode_id",
-        "state/pos_m",
+        "state/position",
         "constraint/is_truncated",
         "constraint/violation_code",
     ]
@@ -937,7 +937,7 @@ def compute_evolution_metrics(
         }
 
     episode_ids = np.rint(aligned["state/episode_id"]).astype(np.int64)
-    positions = aligned["state/pos_m"]
+    positions = aligned["state/position"]
     truncated_flags = aligned["constraint/is_truncated"] >= 0.5
     violation_states = _to_violation_states(aligned["constraint/violation_code"])
 

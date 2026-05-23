@@ -53,10 +53,7 @@ class SPS:
             if next_sp <= self.num_of_stopping_points - 1:
                 # 未步进到最后一个停车点
                 # 可以尝试发起步进请求
-                (
-                    next_guard_curve_min_speed,
-                    _,
-                ) = self.sgu.get_min_and_max_speed(
+                next_guard_curve_min_speed = self.sgu.get_min_speed(
                     current_pos=current_pos,
                     current_sp=next_sp,
                 )
