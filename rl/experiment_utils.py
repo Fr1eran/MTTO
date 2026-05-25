@@ -661,7 +661,7 @@ def resolve_run_mode(
         "reproduce": {
             "tb": False,
             "callback": False,
-            "monitor": False,
+            "monitor": True,
             "env_diagnostics": False,
             "analysis": False,
             "best_eval": False,
@@ -1582,4 +1582,3 @@ def render_rl_curve_on_axes(
     ax.set_xlim((0.0, 30000.0))
     ax.set_ylim((0.0, 500.0))
     ax.grid(True, alpha=0.3)
-

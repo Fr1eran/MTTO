@@ -95,6 +95,11 @@ class RewardConfig:
 
 class MTTOEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"]}
+    VIOLATION_CODE_ONGOING = 0
+    VIOLATION_CODE_FAILED_STOP = 1
+    VIOLATION_CODE_SPEED_LOW = 2
+    VIOLATION_CODE_SPEED_HIGH = 3
+    VIOLATION_CODE_STEP_LIMIT = 4
 
     def __init__(
         self,
@@ -153,12 +158,14 @@ class MTTOEnv(gym.Env):
             + 1
         )
 
+        # 精确停站任务计分函数
         self._stopping_score_func = SigmoidVariant(
             x1=self.train_service.max_stop_error,
             x2=self.train_service.max_stop_error * 10.0,
             c=5.0,
         )
 
+        # 准点到站任务计分函数
         self._punctuality_score_func = SigmoidVariant(
             x1=self.train_service.schedule_time
             * self.train_service.max_arr_time_error_ratio,
@@ -260,15 +267,15 @@ class MTTOEnv(gym.Env):
         # - 当前状态所对应的最迟牵引干预位置, 单位: m/s
         # - 当前状态所对应的最迟制动干预位置, 单位: m/s
         # - 是否进入到精准停车阶段
-        self.current_pos: float = self.train_service.start_position
+        self.current_position: float = self.train_service.start_position
         self.current_speed: float = self.train_service.start_speed
         self.current_acc: float = 0.0
         self.current_operation_time: float = 0.0
         self.current_time_redundancy: float = self._calc_time_redundancy()
         self.current_energy_consumption: float = 0.0
         # self.mass = self.vehicle.mass
-        self.current_slope = get_slope_scalar_numba(
-            self.current_pos,
+        self.current_slope: float = get_slope_scalar_numba(
+            self.current_position,
             self.track.slopes,
             self.track.slope_intervals,
         )
@@ -277,28 +284,29 @@ class MTTOEnv(gym.Env):
         )  # 初始时在加速区，尚未步进至第一个辅助停车区
         self.current_min_speed, self.current_max_speed = (
             self.safeguard_utility.get_min_and_max_speed(
-                current_pos=self.current_pos,
+                current_pos=self.current_position,
                 current_sp=self.current_stopping_point_index,
             )
         )
-        self.current_max_speed = min(
-            self._get_upper_speed(self.current_pos),
+        self.current_max_speed: float = min(
+            self._get_upper_speed(self.current_position),
             self.current_max_speed,
         )
-        self.next_slope = get_slope_scalar_numba(
-            self.current_pos + self.max_step_distance * self.direction,
+        self.next_slope: float = get_slope_scalar_numba(
+            self.current_position + self.max_step_distance * self.direction,
             self.track.slopes,
             self.track.slope_intervals,
         )
         self.next_min_speed, self.next_max_speed = (
             self.safeguard_utility.get_min_and_max_speed(
-                current_pos=self.current_pos + self.max_step_distance * self.direction,
+                current_pos=self.current_position
+                + self.max_step_distance * self.direction,
                 current_sp=self.current_stopping_point_index,
             )
         )
-        self.next_max_speed = min(
+        self.next_max_speed: float = min(
             self._get_upper_speed(
-                self.current_pos + self.max_step_distance * self.direction
+                self.current_position + self.max_step_distance * self.direction
             ),
             self.next_max_speed,
         )
@@ -308,7 +316,15 @@ class MTTOEnv(gym.Env):
         # ) = self.safeguard_utility.get_latest_traction_and_braking_intervention_points(  # noqa: E501
         #     current_speed=self.current_speed, current_sp=self.current_sp
         # )
-        self.is_final_approach = False
+        self.is_final_approach: bool = False
+
+        self.stop_error: float = abs(
+            self.train_service.target_position - self.current_position
+        )
+        self.time_error_ratio: float = (
+            abs(self.current_operation_time - self.train_service.schedule_time)
+            / self.train_service.schedule_time
+        )
 
         # 定义智能体能够观测的状态信息（扁平化向量，避免每步构造字典对象）
         obs_low = np.array(
@@ -384,6 +400,7 @@ class MTTOEnv(gym.Env):
         self.episode_truncated_count: int = 0
         self.episode_low_violation_count: int = 0
         self.episode_high_violation_count: int = 0
+        self._last_violation_code: int = self.VIOLATION_CODE_ONGOING
 
         # 状态历史记录
         self._reset_history()
@@ -436,7 +453,7 @@ class MTTOEnv(gym.Env):
             np.ndarray: shape=(14,), dtype=np.float32 的扁平化观测向量
         """
 
-        dist_to_target = self.train_service.target_position - self.current_pos
+        dist_to_target = self.train_service.target_position - self.current_position
         rel_dist_to_target = 0.0
         required_dec_normalized = 0.0
         if self.is_final_approach:
@@ -498,7 +515,7 @@ class MTTOEnv(gym.Env):
     def _record_basic_info(self) -> None:
         self.basic_info["energy_consumption"] = self.current_energy_consumption
         self.basic_info["operation_time"] = self.current_operation_time
-        self.basic_info["position"] = self.current_pos
+        self.basic_info["position"] = self.current_position
         self.basic_info["speed"] = self.current_speed
         self.basic_info["stopping_point_index"] = self.current_stopping_point_index
         self.basic_info["comfort_tav"] = self._comfort_tav
@@ -517,38 +534,38 @@ class MTTOEnv(gym.Env):
         margin_to_vmin = self.current_speed - self.current_min_speed
 
         if margin_to_vmin < 0.0:
-            is_truncated = True
-            violation_code = 1
             self.episode_truncated_count += 1
             self.episode_low_violation_count += 1
         elif margin_to_vmax < 0.0:
-            is_truncated = True
-            violation_code = 2
             self.episode_truncated_count += 1
             self.episode_high_violation_count += 1
-        else:
-            is_truncated = False
-            violation_code = 0
+
+        is_truncated = self._last_violation_code in {
+            self.VIOLATION_CODE_FAILED_STOP,
+            self.VIOLATION_CODE_SPEED_LOW,
+            self.VIOLATION_CODE_SPEED_HIGH,
+            self.VIOLATION_CODE_STEP_LIMIT,
+        }
 
         is_near_miss = (margin_to_vmax <= near_miss_margin_mps) or (
             margin_to_vmin <= near_miss_margin_mps
         )
 
-        self.state_info["position"] = self.current_pos
+        self.state_info["position"] = self.current_position
         self.state_info["speed"] = self.current_speed
         self.state_info["stopping_point_index"] = self.current_stopping_point_index
 
         self.constraint_info["margin_to_vmax_mps"] = margin_to_vmax
         self.constraint_info["margin_to_vmin_mps"] = margin_to_vmin
         self.constraint_info["is_truncated"] = is_truncated
-        self.constraint_info["violation_code"] = violation_code
+        self.constraint_info["violation_code"] = self._last_violation_code
         self.constraint_info["speed_limit_mps"] = get_speed_limit_scalar_numba(
-            self.current_pos,
+            self.current_position,
             self.track.speed_limits,
             self.track.speed_limit_intervals,
         )
         self.constraint_info["speed_limit_segment"] = self._get_speed_limit_segment(
-            self.current_pos
+            self.current_position
         )
         self.constraint_info["is_near_miss"] = is_near_miss
 
@@ -584,7 +601,7 @@ class MTTOEnv(gym.Env):
         super().reset(seed=seed, options=options)
 
         # 重置运行状态
-        self.current_pos = self.train_service.start_position
+        self.current_position = self.train_service.start_position
         self.current_speed = self.train_service.start_speed
         self.current_acc = 0.0
         self.current_operation_time = 0.0
@@ -592,7 +609,7 @@ class MTTOEnv(gym.Env):
         self.current_energy_consumption = 0.0
         # self.mass = self.vehicle.mass
         self.current_slope = get_slope_scalar_numba(
-            self.current_pos,
+            self.current_position,
             self.track.slopes,
             self.track.slope_intervals,
         )
@@ -603,16 +620,16 @@ class MTTOEnv(gym.Env):
 
         self.current_min_speed, self.current_max_speed = (
             self.safeguard_utility.get_min_and_max_speed(
-                current_pos=self.current_pos,
+                current_pos=self.current_position,
                 current_sp=self.current_stopping_point_index,
             )
         )
         self.current_max_speed = min(
-            self._get_upper_speed(self.current_pos),
+            self._get_upper_speed(self.current_position),
             self.current_max_speed,
         )
         self.next_slope = get_slope_scalar_numba(
-            self.current_pos + self.max_step_distance,
+            self.current_position + self.max_step_distance,
             self.track.slopes,
             self.track.slope_intervals,
         )
@@ -620,11 +637,11 @@ class MTTOEnv(gym.Env):
             self.next_min_speed,
             self.next_max_speed,
         ) = self.safeguard_utility.get_min_and_max_speed(
-            current_pos=self.current_pos + self.max_step_distance,
+            current_pos=self.current_position + self.max_step_distance,
             current_sp=self.current_stopping_point_index,
         )
         self.next_max_speed = min(
-            self._get_upper_speed(self.current_pos + self.max_step_distance),
+            self._get_upper_speed(self.current_position + self.max_step_distance),
             self.next_max_speed,
         )
         # (
@@ -634,6 +651,14 @@ class MTTOEnv(gym.Env):
         #     current_speed=self.current_speed, current_sp=self.current_sp
         # )
         self.is_final_approach = False
+
+        self.stop_error = abs(
+            self.train_service.target_position - self.current_position
+        )
+        self.time_error_ratio = (
+            abs(self.current_operation_time - self.train_service.schedule_time)
+            / self.train_service.schedule_time
+        )
 
         self.basic_info = {}
 
@@ -656,6 +681,7 @@ class MTTOEnv(gym.Env):
 
         # 重置仿真步数
         self.current_steps = 0
+        self._last_violation_code = self.VIOLATION_CODE_ONGOING
 
         observation = self._get_obs()
         info = self._get_basic_info()
@@ -701,47 +727,48 @@ class MTTOEnv(gym.Env):
         energy_consumption = current_mec + current_lec
 
         # 更新运行状态
-        self.current_pos += distance * self.direction
+        self.current_position += distance * self.direction
         self.current_speed = next_speed
         self.current_operation_time += operation_time
         self.current_time_redundancy = self._calc_time_redundancy()
         self.current_energy_consumption += energy_consumption
         # self.mass = self.vehicle.mass
         self.current_slope = get_slope_scalar_numba(
-            self.current_pos,
+            self.current_position,
             self.track.slopes,
             self.track.slope_intervals,
         )
         self.current_stopping_point_index = self.sps.step_to_next_stopping_point(
-            current_pos=self.current_pos,
+            current_pos=self.current_position,
             current_speed=self.current_speed,
             current_time=self.current_operation_time,
             current_sp=self.current_stopping_point_index,
         )
         self.current_min_speed, self.current_max_speed = (
             self.safeguard_utility.get_min_and_max_speed(
-                current_pos=self.current_pos,
+                current_pos=self.current_position,
                 current_sp=self.current_stopping_point_index,
             )
         )
         self.current_max_speed = min(
-            self._get_upper_speed(self.current_pos),
+            self._get_upper_speed(self.current_position),
             self.current_max_speed,
         )
         self.next_slope = get_slope_scalar_numba(
-            self.current_pos + self.max_step_distance * self.direction,
+            self.current_position + self.max_step_distance * self.direction,
             self.track.slopes,
             self.track.slope_intervals,
         )
         self.next_min_speed, self.next_max_speed = (
             self.safeguard_utility.get_min_and_max_speed(
-                current_pos=self.current_pos + self.max_step_distance * self.direction,
+                current_pos=self.current_position
+                + self.max_step_distance * self.direction,
                 current_sp=self.current_stopping_point_index,
             )
         )
         self.next_max_speed = min(
             self._get_upper_speed(
-                self.current_pos + self.max_step_distance * self.direction
+                self.current_position + self.max_step_distance * self.direction
             ),
             self.next_max_speed,
         )
@@ -754,31 +781,53 @@ class MTTOEnv(gym.Env):
 
         self.is_final_approach = (
             True
-            if abs(self.train_service.target_position - self.current_pos)
+            if abs(self.train_service.target_position - self.current_position)
             <= self.target_attraction_domain_radius
             else False
         )
 
-        # 判断智能体是否到达目标区域
-        terminated = math.isclose(self.current_speed, 0.0, abs_tol=0.01)
+        self.stop_error = abs(
+            self.train_service.target_position - self.current_position
+        )
+        self.time_error_ratio = (
+            abs(self.current_operation_time - self.train_service.schedule_time)
+            / self.train_service.schedule_time
+        )
+        stopped = math.isclose(self.current_speed, 0.0, abs_tol=0.01)
+        success = (
+            stopped
+            and self.stop_error <= self.train_service.max_stop_error * 10.0
+            and self.time_error_ratio <= self.train_service.max_arr_time_error_ratio * 2
+        )
+        speed_low_violation = self.current_speed < self.current_min_speed
+        speed_high_violation = self.current_speed > self.current_max_speed
+        step_limit_reached = self.current_steps > self.max_episode_steps
+        failed_stop = stopped and not success
 
-        # 若智能体违反安全约束或者超过最大步数，则截断训练进程
+        # 仅成功任务视为正常终止。
+        terminated = success
+        # 失败停车与约束/步数超限统一视为截断结束。
         truncated = (
-            (self.current_speed < self.current_min_speed)
-            or (self.current_speed > self.current_max_speed)
-            or self.current_steps > self.max_episode_steps
+            speed_low_violation
+            or speed_high_violation
+            or step_limit_reached
+            or failed_stop
+        )
+        self._last_violation_code = self._resolve_violation_code(
+            terminated=terminated,
+            failed_stop=failed_stop,
+            speed_low_violation=speed_low_violation,
+            speed_high_violation=speed_high_violation,
+            step_limit_reached=step_limit_reached,
         )
 
         # 计算奖励
-        reward = self._get_reward(
-            terminated=terminated,
-            truncated=truncated,
-        )
+        reward = self._get_reward(terminated=terminated, truncated=truncated)
 
         if self.enable_trajectory_tracking:
             # 记录轨迹数据
             self._record_trajectory(
-                pos=self.current_pos,
+                pos=self.current_position,
                 speed=self.current_speed,
             )
 
@@ -797,6 +846,27 @@ class MTTOEnv(gym.Env):
             info["event"] = dict(self.event_info)
 
         return (observation, reward, terminated, truncated, info)
+
+    def _resolve_violation_code(
+        self,
+        *,
+        terminated: bool,
+        failed_stop: bool,
+        speed_low_violation: bool,
+        speed_high_violation: bool,
+        step_limit_reached: bool,
+    ) -> int:
+        if terminated:
+            return self.VIOLATION_CODE_ONGOING
+        if failed_stop:
+            return self.VIOLATION_CODE_FAILED_STOP
+        if speed_low_violation:
+            return self.VIOLATION_CODE_SPEED_LOW
+        if speed_high_violation:
+            return self.VIOLATION_CODE_SPEED_HIGH
+        if step_limit_reached:
+            return self.VIOLATION_CODE_STEP_LIMIT
+        return self.VIOLATION_CODE_ONGOING
 
     def _update_motion(self) -> tuple[float, float, float]:
         """
@@ -940,7 +1010,7 @@ class MTTOEnv(gym.Env):
     def _calc_redundant_operation_time(self) -> float:
         # min_remaining = self._get_reference_remaining_operation_time(self.current_pos)
         min_remaining = self.ors.calc_min_operation_time(
-            begin_pos=self.current_pos,
+            begin_pos=self.current_position,
             begin_speed=self.current_speed,
             end_pos=self.train_service.target_position,
             end_speed=0.0,
@@ -1098,7 +1168,7 @@ class MTTOEnv(gym.Env):
         # )
 
         phi_curr = self._potential_safety_speed_asymmetric_v2(
-            pos=self.current_pos,
+            pos=self.current_position,
             speed=self.current_speed,
             min_speed=self.current_min_speed,
             max_speed=self.current_max_speed,
@@ -1393,21 +1463,26 @@ class MTTOEnv(gym.Env):
         K_late = 10.0
         alpha = 5.0
 
-        if time_redundancy >= 0.0:
-            return K_base + K_safe * time_redundancy
+        time_redundancy_clipped = float(np.clip(time_redundancy, -1.0, 1.0))
+        if time_redundancy_clipped >= 0.0:
+            return K_base + K_safe * time_redundancy_clipped
         else:
             return (
                 K_base
-                + K_safe * time_redundancy
+                + K_safe * time_redundancy_clipped
                 - K_late
                 / alpha
-                * (np.exp(-alpha * time_redundancy) + alpha * time_redundancy - 1)
+                * (
+                    np.exp(-alpha * time_redundancy_clipped)
+                    + alpha * time_redundancy_clipped
+                    - 1
+                )
             )
 
     def _get_reward_stopping_dense(self):
 
         phi_curr = self._potential_stopping_v1(
-            pos=self.current_pos, speed=self.current_speed
+            pos=self.current_position, speed=self.current_speed
         )
 
         phi_prev = self._potential_stopping_v1(
@@ -1461,20 +1536,16 @@ class MTTOEnv(gym.Env):
         return reward_stopping + reward_punctuality
 
     def _calc_stopping_score(self) -> float:
-        stopping_pos_error = abs(self.train_service.target_position - self.current_pos)
-        return self._stopping_score_func(stopping_pos_error)
+        return self._stopping_score_func(self.stop_error)
 
     def _calc_punctuality_score(self) -> float:
-        ontime_error = abs(
-            self.train_service.schedule_time - self.current_operation_time
-        )
-        return self._punctuality_score_func(ontime_error)
+        return self._punctuality_score_func(self.time_error_ratio)
 
     def _gaussian_kernel(self, A: float, B: float, k: float, x: float) -> float:
         return A * np.exp(-k * x) + B
 
     def _record_history(self) -> None:
-        self.last_state["pos"] = self.current_pos
+        self.last_state["pos"] = self.current_position
         self.last_state["speed"] = self.current_speed
         self.last_state["acc"] = self.current_acc
         self.last_state["min_speed"] = self.current_min_speed
@@ -1577,10 +1648,12 @@ class MTTOEnv(gym.Env):
         self.fig.suptitle("磁悬浮列车智能体训练过程", fontsize=14)
 
         # 设置坐标轴范围
-        pos_margin = abs(self.train_service.target_position - self.current_pos) * 0.1
+        pos_margin = (
+            abs(self.train_service.target_position - self.current_position) * 0.1
+        )
         self.ax.set_xlim(
-            min(self.current_pos, self.train_service.target_position) - pos_margin,
-            max(self.current_pos, self.train_service.target_position) + pos_margin,
+            min(self.current_position, self.train_service.target_position) - pos_margin,
+            max(self.current_position, self.train_service.target_position) + pos_margin,
         )
         self.ax.set_ylim(0, 600.0)  # 速度范围，单位：km/h
 
@@ -1651,7 +1724,7 @@ class MTTOEnv(gym.Env):
         assert self.vehicle_dot is not None
         assert self.traj_line is not None
         # 更新列车位置
-        self.vehicle_dot.set_data([self.current_pos], [self.current_speed * 3.6])
+        self.vehicle_dot.set_data([self.current_position], [self.current_speed * 3.6])
         # 更新轨迹
         if (
             self.trajectory_pos is not None

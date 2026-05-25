@@ -9,6 +9,7 @@ from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
+from numpy.typing import NDArray
 
 from dp.experiment_utils import (
     DP_DEFAULT_SEARCH_DIR,
@@ -35,6 +36,12 @@ _VALID_OUTPUT_MODES = frozenset({
     _OUTPUT_MODE_PLOT,
     _OUTPUT_MODE_JSON,
 })
+_ANALYSIS_MODE_COMPARE = "compare"
+_ANALYSIS_MODE_SINGLE = "single"
+_VALID_ANALYSIS_MODES = (_ANALYSIS_MODE_SINGLE, _ANALYSIS_MODE_COMPARE)
+_TRAJECTORY_KIND_DP = "dp"
+_TRAJECTORY_KIND_RL = "rl"
+_VALID_TRAJECTORY_KINDS = (_TRAJECTORY_KIND_DP, _TRAJECTORY_KIND_RL)
 
 _EVENT_REQUEST_START = "REQUEST_START"
 _EVENT_STEP_COMPLETE = "STEP_COMPLETE"
@@ -109,22 +116,48 @@ def _metric_as_float(value: object) -> float | None:
 
 def _resolve_target_schedule_time(
     *,
-    dp_metrics: dict[str, object],
-    rl_metrics: dict[str, object],
+    dp_metrics: dict[str, object] | None = None,
+    rl_metrics: dict[str, object] | None = None,
+    single_metrics: dict[str, object] | None = None,
     schedule_time_s_override: float | None,
 ) -> float:
     if schedule_time_s_override is not None and schedule_time_s_override > 0.0:
         return float(schedule_time_s_override)
 
-    rl_target_time_s = _metric_as_float(rl_metrics.get("target_time_s"))
-    if rl_target_time_s is not None and rl_target_time_s > 0.0:
-        return rl_target_time_s
+    if single_metrics is not None:
+        single_target_time_s = _metric_as_float(single_metrics.get("target_time_s"))
+        if single_target_time_s is not None and single_target_time_s > 0.0:
+            return single_target_time_s
 
-    dp_target_time_s = _metric_as_float(dp_metrics.get("target_time_s"))
-    if dp_target_time_s is not None and dp_target_time_s > 0.0:
-        return dp_target_time_s
+    if rl_metrics is not None:
+        rl_target_time_s = _metric_as_float(rl_metrics.get("target_time_s"))
+        if rl_target_time_s is not None and rl_target_time_s > 0.0:
+            return rl_target_time_s
+
+    if dp_metrics is not None:
+        dp_target_time_s = _metric_as_float(dp_metrics.get("target_time_s"))
+        if dp_target_time_s is not None and dp_target_time_s > 0.0:
+            return dp_target_time_s
 
     return DEFAULT_SCHEDULE_TIME_S
+
+
+def _resolve_single_curve_artifact(
+    *,
+    trajectory_kind: str,
+    dp_curve_dir: str,
+    rl_curve_dir: str,
+    trajectory_source: str,
+) -> OptimizedCurveArtifact:
+    if trajectory_kind == _TRAJECTORY_KIND_DP:
+        return resolve_dp_curve_artifact(curve_dir=dp_curve_dir)
+    if trajectory_kind == _TRAJECTORY_KIND_RL:
+        return resolve_rl_curve_artifact(
+            curve_dir=rl_curve_dir,
+            trajectory_source=trajectory_source,
+        )
+    choices = ", ".join(_VALID_TRAJECTORY_KINDS)
+    raise ValueError(f"Unknown trajectory kind '{trajectory_kind}'. Choices: {choices}")
 
 
 def _resolve_curve_artifacts(
@@ -139,6 +172,19 @@ def _resolve_curve_artifacts(
         trajectory_source=trajectory_source,
     )
     return dp_artifact, rl_artifact
+
+
+def _load_curve_artifact(
+    *,
+    trajectory_kind: str,
+    artifact: OptimizedCurveArtifact,
+) -> tuple[NDArray[np.floating[Any]], NDArray[np.floating[Any]], dict[str, object]]:
+    if trajectory_kind == _TRAJECTORY_KIND_DP:
+        return load_dp_curve_artifact(artifact)
+    if trajectory_kind == _TRAJECTORY_KIND_RL:
+        return load_rl_curve_artifact(artifact)
+    choices = ", ".join(_VALID_TRAJECTORY_KINDS)
+    raise ValueError(f"Unknown trajectory kind '{trajectory_kind}'. Choices: {choices}")
 
 
 def _parse_output_mode(raw_mode: str) -> set[str]:
@@ -169,7 +215,8 @@ def _parse_output_mode(raw_mode: str) -> set[str]:
 def _build_cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Analyze SPS compliance for selected DP and RL trajectories. "
+            "Analyze SPS compliance for selected DP/RL trajectories in "
+            "single or compare mode. "
             "Default output mode is text+plot."
         )
     )
@@ -188,6 +235,18 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         choices=RL_TRAJECTORY_SOURCE_CHOICES,
         default="best",
         help="RL trajectory source: best, best_steps, best_episodes, final.",
+    )
+    parser.add_argument(
+        "--analysis-mode",
+        choices=_VALID_ANALYSIS_MODES,
+        default=_ANALYSIS_MODE_COMPARE,
+        help="Analysis mode: single (DP or RL only) or compare (DP and RL).",
+    )
+    parser.add_argument(
+        "--trajectory-kind",
+        choices=_VALID_TRAJECTORY_KINDS,
+        default=None,
+        help="Trajectory kind for single mode: dp or rl.",
     )
     parser.add_argument(
         "--schedule-time-s",
@@ -264,7 +323,14 @@ def _deduplicate_legend(ax: Any, *, loc: str = "upper right") -> None:
         ax.legend(filtered_handles, filtered_labels, loc=loc)
 
 
-def _compute_adaptive_delay_tolerance(time_arr: np.ndarray) -> float:
+def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if args.analysis_mode == _ANALYSIS_MODE_SINGLE and args.trajectory_kind is None:
+        parser.error("--trajectory-kind is required when --analysis-mode=single")
+    if args.analysis_mode == _ANALYSIS_MODE_COMPARE and args.trajectory_kind is not None:
+        parser.error("--trajectory-kind is only valid when --analysis-mode=single")
+
+
+def _compute_adaptive_delay_tolerance(time_arr: NDArray[np.float64]) -> float:
     if time_arr.size < 2:
         return 0.05
 
@@ -279,14 +345,14 @@ def _compute_adaptive_delay_tolerance(time_arr: np.ndarray) -> float:
 def replay_sps_compliance(
     *,
     label: str,
-    pos_arr: np.ndarray,
-    speed_arr: np.ndarray,
+    pos_arr: NDArray[np.floating[Any]],
+    speed_arr: NDArray[np.floating[Any]],
     sgu: SafeGuardUtility,
     asa_ap_list: list[float],
     asa_dp_list: list[float],
     step_delay_s: float,
     boundary_eps: float = 1e-6,
-    time_arr: np.ndarray | None = None,
+    time_arr: NDArray[np.floating[Any]] | None = None,
 ) -> SPSComplianceResult:
     pos = np.asarray(pos_arr, dtype=np.float64)
     speed = np.asarray(speed_arr, dtype=np.float64)
@@ -638,10 +704,10 @@ def _plot_event_markers(
 
 def _plot_sps_main_figure(
     *,
-    dp_pos_arr: np.ndarray,
-    dp_speed_arr: np.ndarray,
-    rl_pos_arr: np.ndarray,
-    rl_speed_arr: np.ndarray,
+    dp_pos_arr: NDArray[np.floating[Any]],
+    dp_speed_arr: NDArray[np.floating[Any]],
+    rl_pos_arr: NDArray[np.floating[Any]],
+    rl_speed_arr: NDArray[np.floating[Any]],
     dp_result: SPSComplianceResult,
     rl_result: SPSComplianceResult,
     no_safeguard: bool,
@@ -705,6 +771,64 @@ def _plot_sps_main_figure(
     plt.show()
 
 
+def _plot_sps_single_figure(
+    *,
+    pos_arr: NDArray[np.floating[Any]],
+    speed_arr: NDArray[np.floating[Any]],
+    result: SPSComplianceResult,
+    trajectory_kind: str,
+    no_safeguard: bool,
+    factor: float,
+    annotation_mode: str,
+    max_text_annotations: int,
+    safeguard: SafeGuardUtility | None,
+) -> None:
+    apply_rl_curve_plot_style()
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    if not no_safeguard:
+        resolved_safeguard = (
+            safeguard if safeguard is not None else build_safeguard_utility(factor)
+        )
+        resolved_safeguard.render(ax=ax, layers=SafeGuardUtility.DANGER_VIEW_LAYERS)
+
+    if trajectory_kind == _TRAJECTORY_KIND_DP:
+        curve_color = "tab:red"
+        curve_label = "DP trajectory"
+        marker_label = "DP"
+    else:
+        curve_color = "tab:blue"
+        curve_label = "RL trajectory"
+        marker_label = "RL"
+
+    ax.plot(
+        pos_arr,
+        speed_arr * 3.6,
+        color=curve_color,
+        linewidth=1.5,
+        alpha=0.9,
+        label=curve_label,
+        zorder=5,
+    )
+    _plot_event_markers(
+        ax=ax,
+        result=result,
+        color=curve_color,
+        trajectory_label=marker_label,
+        annotation_mode=annotation_mode,
+        max_text_annotations=max_text_annotations,
+    )
+
+    ax.set_title(f"{marker_label} SPS compliance (speed-position)")
+    ax.set_xlabel("Position (m)")
+    ax.set_ylabel("Speed (km/h)")
+    ax.grid(True, alpha=0.3)
+    _deduplicate_legend(ax)
+
+    plt.tight_layout()
+    plt.show()
+
+
 def _build_json_payload(
     *,
     schedule_time_s: float,
@@ -736,6 +860,30 @@ def _build_json_payload(
     }
 
 
+def _build_single_json_payload(
+    *,
+    schedule_time_s: float,
+    step_delay_s: float,
+    analysis_mode: str,
+    trajectory_kind: str,
+    trajectory_source: str,
+    artifact: OptimizedCurveArtifact,
+    result: SPSComplianceResult,
+) -> dict[str, object]:
+    return {
+        "analysis_mode": analysis_mode,
+        "trajectory_kind": trajectory_kind,
+        "trajectory_source": trajectory_source,
+        "schedule_time_s": schedule_time_s,
+        "step_delay_s": step_delay_s,
+        "artifact": {
+            "npz_path": artifact.npz_path,
+            "metrics_path": artifact.metrics_path,
+        },
+        "result": result.to_dict(),
+    }
+
+
 def main() -> None:
     parser = _build_cli_parser()
     args = parser.parse_args()
@@ -746,47 +894,131 @@ def main() -> None:
         parser.error("--boundary-eps must be >= 0")
     if args.max_text_annotations < 0:
         parser.error("--max-text-annotations must be >= 0")
+    _validate_cli_args(parser, args)
 
     try:
         output_modes = _parse_output_mode(args.output_mode)
     except ValueError as exc:
         parser.error(str(exc))
 
+    if args.analysis_mode == _ANALYSIS_MODE_COMPARE:
+        try:
+            dp_artifact, rl_artifact = _resolve_curve_artifacts(
+                dp_curve_dir=args.dp_curve_dir,
+                rl_curve_dir=args.rl_curve_dir,
+                trajectory_source=args.trajectory_source,
+            )
+        except FileNotFoundError as exc:
+            parser.error(str(exc))
+
+        dp_pos_arr, dp_speed_arr, dp_metrics = load_dp_curve_artifact(dp_artifact)
+        rl_pos_arr, rl_speed_arr, rl_metrics = load_rl_curve_artifact(rl_artifact)
+
+        schedule_time_s = _resolve_target_schedule_time(
+            dp_metrics=dp_metrics,
+            rl_metrics=rl_metrics,
+            schedule_time_s_override=args.schedule_time_s,
+        )
+
+        _, track, _, _ = build_scenario(schedule_time_s=schedule_time_s)
+        safeguard_utility = build_safeguard_utility(args.factor)
+
+        dp_result = replay_sps_compliance(
+            label="DP",
+            pos_arr=dp_pos_arr,
+            speed_arr=dp_speed_arr,
+            sgu=safeguard_utility,
+            asa_ap_list=track.ASA_aps,
+            asa_dp_list=track.ASA_dps,
+            step_delay_s=args.step_delay_s,
+            boundary_eps=args.boundary_eps,
+        )
+        rl_result = replay_sps_compliance(
+            label="RL",
+            pos_arr=rl_pos_arr,
+            speed_arr=rl_speed_arr,
+            sgu=safeguard_utility,
+            asa_ap_list=track.ASA_aps,
+            asa_dp_list=track.ASA_dps,
+            step_delay_s=args.step_delay_s,
+            boundary_eps=args.boundary_eps,
+        )
+
+        if _OUTPUT_MODE_TEXT in output_modes:
+            print(f"Using DP curve file: {dp_artifact.npz_path}")
+            print(f"Using RL curve file: {rl_artifact.npz_path}")
+            print(f"Resolved schedule_time_s: {schedule_time_s:.6f}")
+            print(f"Replay step_delay_s (T_s): {args.step_delay_s:.6f}")
+            print()
+            _print_result_summary(dp_result)
+            print()
+            _print_result_summary(rl_result)
+            _print_comparison_summary(dp_result=dp_result, rl_result=rl_result)
+
+        if _OUTPUT_MODE_JSON in output_modes:
+            payload = _build_json_payload(
+                schedule_time_s=schedule_time_s,
+                step_delay_s=args.step_delay_s,
+                trajectory_source=args.trajectory_source,
+                dp_artifact=dp_artifact,
+                rl_artifact=rl_artifact,
+                dp_result=dp_result,
+                rl_result=rl_result,
+            )
+            payload_text = json.dumps(payload, ensure_ascii=False, indent=2)
+            if args.json_output_path:
+                output_path = Path(args.json_output_path)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(payload_text, encoding="utf-8")
+                print(f"JSON report saved to: {output_path}")
+            else:
+                print(payload_text)
+
+        if _OUTPUT_MODE_PLOT in output_modes:
+            _plot_sps_main_figure(
+                dp_pos_arr=dp_pos_arr,
+                dp_speed_arr=dp_speed_arr,
+                rl_pos_arr=rl_pos_arr,
+                rl_speed_arr=rl_speed_arr,
+                dp_result=dp_result,
+                rl_result=rl_result,
+                no_safeguard=args.no_safeguard,
+                factor=args.factor,
+                annotation_mode=args.event_annotation,
+                max_text_annotations=args.max_text_annotations,
+                safeguard=safeguard_utility,
+            )
+        return
+
+    trajectory_kind = str(args.trajectory_kind)
     try:
-        dp_artifact, rl_artifact = _resolve_curve_artifacts(
+        artifact = _resolve_single_curve_artifact(
+            trajectory_kind=trajectory_kind,
             dp_curve_dir=args.dp_curve_dir,
             rl_curve_dir=args.rl_curve_dir,
             trajectory_source=args.trajectory_source,
         )
     except FileNotFoundError as exc:
         parser.error(str(exc))
+    except ValueError as exc:
+        parser.error(str(exc))
 
-    dp_pos_arr, dp_speed_arr, dp_metrics = load_dp_curve_artifact(dp_artifact)
-    rl_pos_arr, rl_speed_arr, rl_metrics = load_rl_curve_artifact(rl_artifact)
-
+    pos_arr, speed_arr, metrics = _load_curve_artifact(
+        trajectory_kind=trajectory_kind,
+        artifact=artifact,
+    )
     schedule_time_s = _resolve_target_schedule_time(
-        dp_metrics=dp_metrics,
-        rl_metrics=rl_metrics,
+        single_metrics=metrics,
         schedule_time_s_override=args.schedule_time_s,
     )
 
     _, track, _, _ = build_scenario(schedule_time_s=schedule_time_s)
     safeguard_utility = build_safeguard_utility(args.factor)
-
-    dp_result = replay_sps_compliance(
-        label="DP",
-        pos_arr=dp_pos_arr,
-        speed_arr=dp_speed_arr,
-        sgu=safeguard_utility,
-        asa_ap_list=track.ASA_aps,
-        asa_dp_list=track.ASA_dps,
-        step_delay_s=args.step_delay_s,
-        boundary_eps=args.boundary_eps,
-    )
-    rl_result = replay_sps_compliance(
-        label="RL",
-        pos_arr=rl_pos_arr,
-        speed_arr=rl_speed_arr,
+    label = "DP" if trajectory_kind == _TRAJECTORY_KIND_DP else "RL"
+    result = replay_sps_compliance(
+        label=label,
+        pos_arr=pos_arr,
+        speed_arr=speed_arr,
         sgu=safeguard_utility,
         asa_ap_list=track.ASA_aps,
         asa_dp_list=track.ASA_dps,
@@ -795,25 +1027,23 @@ def main() -> None:
     )
 
     if _OUTPUT_MODE_TEXT in output_modes:
-        print(f"Using DP curve file: {dp_artifact.npz_path}")
-        print(f"Using RL curve file: {rl_artifact.npz_path}")
+        print(f"Analysis mode: {args.analysis_mode}")
+        print(f"Trajectory kind: {trajectory_kind}")
+        print(f"Using {label} curve file: {artifact.npz_path}")
         print(f"Resolved schedule_time_s: {schedule_time_s:.6f}")
         print(f"Replay step_delay_s (T_s): {args.step_delay_s:.6f}")
         print()
-        _print_result_summary(dp_result)
-        print()
-        _print_result_summary(rl_result)
-        _print_comparison_summary(dp_result=dp_result, rl_result=rl_result)
+        _print_result_summary(result)
 
     if _OUTPUT_MODE_JSON in output_modes:
-        payload = _build_json_payload(
+        payload = _build_single_json_payload(
             schedule_time_s=schedule_time_s,
             step_delay_s=args.step_delay_s,
+            analysis_mode=args.analysis_mode,
+            trajectory_kind=trajectory_kind,
             trajectory_source=args.trajectory_source,
-            dp_artifact=dp_artifact,
-            rl_artifact=rl_artifact,
-            dp_result=dp_result,
-            rl_result=rl_result,
+            artifact=artifact,
+            result=result,
         )
         payload_text = json.dumps(payload, ensure_ascii=False, indent=2)
         if args.json_output_path:
@@ -825,13 +1055,11 @@ def main() -> None:
             print(payload_text)
 
     if _OUTPUT_MODE_PLOT in output_modes:
-        _plot_sps_main_figure(
-            dp_pos_arr=dp_pos_arr,
-            dp_speed_arr=dp_speed_arr,
-            rl_pos_arr=rl_pos_arr,
-            rl_speed_arr=rl_speed_arr,
-            dp_result=dp_result,
-            rl_result=rl_result,
+        _plot_sps_single_figure(
+            pos_arr=pos_arr,
+            speed_arr=speed_arr,
+            result=result,
+            trajectory_kind=trajectory_kind,
             no_safeguard=args.no_safeguard,
             factor=args.factor,
             annotation_mode=args.event_annotation,

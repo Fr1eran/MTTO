@@ -26,7 +26,7 @@ DEFAULT_REWARD_COMPONENT_TAGS = [
     "rewards/stopping",
 ]
 
-VIOLATION_STATE_LABELS = ["normal", "low_violation", "high_violation"]
+VIOLATION_STATE_LABELS = ["normal", "terminal_failure", "speed_violation"]
 
 
 def _series_values(
@@ -122,8 +122,10 @@ def _build_episode_windows(
 def _to_violation_states(violation_codes: np.ndarray) -> np.ndarray:
     rounded = np.rint(violation_codes).astype(np.int64)
     states = np.zeros_like(rounded, dtype=np.int64)
-    states[rounded == 1] = 1
-    states[rounded >= 2] = 2
+    # violation_code semantics from MTTOEnv:
+    # 0=ongoing, 1=failed_stop, 2=speed_low, 3=speed_high, 4=step_limit.
+    states[(rounded == 1) | (rounded == 4)] = 1
+    states[(rounded == 2) | (rounded == 3)] = 2
     return states
 
 
@@ -1100,6 +1102,15 @@ def compute_evolution_metrics(
             "terminal_state_ratio": terminal_state_ratio,
             "transition_matrix": stage_matrix.astype(np.int64).tolist(),
             "transition_probabilities": stage_probs.tolist(),
+            "normal_to_terminal_failure_transition_rate": float(stage_probs[0, 1]),
+            "normal_to_speed_violation_transition_rate": float(stage_probs[0, 2]),
+            "terminal_failure_to_speed_violation_transition_rate": float(
+                stage_probs[1, 2]
+            ),
+            "speed_violation_to_terminal_failure_transition_rate": float(
+                stage_probs[2, 1]
+            ),
+            # Backward-compatible aliases for older report templates.
             "normal_to_low_transition_rate": float(stage_probs[0, 1]),
             "normal_to_high_transition_rate": float(stage_probs[0, 2]),
             "low_to_high_transition_rate": float(stage_probs[1, 2]),

@@ -347,6 +347,32 @@ def test_evolution_metrics_accepts_new_state_position_tag():
     assert evolution["available"] is True
     assert evolution["episode_count"] == 2
 
+
+def test_evolution_metrics_maps_step_limit_to_terminal_failure_state():
+    series_map = {
+        "state/episode_id": _make_series("state/episode_id", [0.0, 0.0, 0.0]),
+        "state/position": _make_series("state/position", [0.0, 50.0, 100.0]),
+        "constraint/is_truncated": _make_series(
+            "constraint/is_truncated",
+            [0.0, 0.0, 1.0],
+        ),
+        "constraint/violation_code": _make_series(
+            "constraint/violation_code",
+            [0.0, 0.0, 4.0],  # step_limit
+        ),
+    }
+
+    evolution = compute_evolution_metrics(series_map, episode_window_size=1)
+
+    assert evolution["available"] is True
+    assert evolution["state_labels"] == [
+        "normal",
+        "terminal_failure",
+        "speed_violation",
+    ]
+    terminal_state_ratio = evolution["overall_terminal_state_ratio"]
+    assert terminal_state_ratio["terminal_failure"] == pytest.approx(1.0)
+
 def test_write_outputs_default_no_csv(tmp_path):
     payload = build_analysis_payload(
         run_name="unit_test_run",

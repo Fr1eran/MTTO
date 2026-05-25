@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
+from numpy.typing import NDArray
 
 from model.common import ECC
 from model.track import TrackInfo
@@ -28,11 +30,11 @@ class OptimizedCurveArtifact:
 
 
 def _deduplicate_consecutive_positions(
-    pos_arr: np.ndarray,
-    speed_arr: np.ndarray,
+    pos_arr: NDArray[np.float64],
+    speed_arr: NDArray[np.float64],
     *,
     tolerance: float,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     if pos_arr.size < 2:
         return pos_arr.copy(), speed_arr.copy()
 
@@ -56,14 +58,14 @@ def _deduplicate_consecutive_positions(
 
 
 def smooth_trajectory(
-    pos_arr: Sequence[float] | np.ndarray,
-    speed_arr: Sequence[float] | np.ndarray,
+    pos_arr: Sequence[float] | NDArray[np.floating[Any]],
+    speed_arr: Sequence[float] | NDArray[np.floating[Any]],
     *,
     samples_per_segment: int = 20,
     method: str = "uniform_acceleration",
     remove_duplicate_pos: bool = True,
     duplicate_tolerance: float = 1e-9,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """对离散轨迹进行平滑采样（用于展示/分析）。
 
     默认方法按匀变速模型分段加密采样。输入输出均以位置(m)和速度(m/s)
@@ -104,8 +106,8 @@ def smooth_trajectory(
     if pos.size < 2:
         return pos.copy(), speed.copy()
 
-    smooth_pos_parts: list[np.ndarray] = []
-    smooth_speed_parts: list[np.ndarray] = []
+    smooth_pos_parts: list[NDArray[np.float64]] = []
+    smooth_speed_parts: list[NDArray[np.float64]] = []
 
     for seg_idx in range(pos.size - 1):
         p0 = float(pos[seg_idx])
@@ -144,12 +146,12 @@ def smooth_trajectory(
 
 
 def recover_time_axis_from_trajectory(
-    pos_arr: Sequence[float] | np.ndarray,
-    speed_arr: Sequence[float] | np.ndarray,
+    pos_arr: Sequence[float] | NDArray[np.floating[Any]],
+    speed_arr: Sequence[float] | NDArray[np.floating[Any]],
     *,
     position_tolerance: float = 1e-9,
     speed_tolerance: float = 1e-9,
-) -> np.ndarray:
+) -> NDArray[np.float64]:
     """按匀变速近似从离散位置/速度序列恢复累计时间轴。
 
     该函数主要用于离线回放分析。返回长度与输入位置序列一致，
@@ -211,9 +213,9 @@ def recover_time_axis_from_trajectory(
 
 
 def compute_segment_accelerations(
-    pos_arr: Sequence[float] | np.ndarray,
-    speed_arr: Sequence[float] | np.ndarray,
-) -> np.ndarray:
+    pos_arr: Sequence[float] | NDArray[np.floating[Any]],
+    speed_arr: Sequence[float] | NDArray[np.floating[Any]],
+) -> NDArray[np.float64]:
     """由离散位置/速度序列反推每段加速度。
 
     使用匀变速模型：a = (v₁² - v₀²) / (2 * ds)。
@@ -247,8 +249,8 @@ def compute_segment_accelerations(
 
 
 def compute_comfort_metrics_from_trajectory(
-    pos_arr: Sequence[float] | np.ndarray,
-    speed_arr: Sequence[float] | np.ndarray,
+    pos_arr: Sequence[float] | NDArray[np.floating[Any]],
+    speed_arr: Sequence[float] | NDArray[np.floating[Any]],
     *,
     max_acc_change: float,
 ) -> dict[str, float]:
@@ -297,13 +299,13 @@ def compute_comfort_metrics_from_trajectory(
 
 
 def compute_cumulative_energy_from_trajectory(
-    pos_arr: Sequence[float] | np.ndarray,
-    speed_arr: Sequence[float] | np.ndarray,
+    pos_arr: Sequence[float] | NDArray[np.floating[Any]],
+    speed_arr: Sequence[float] | NDArray[np.floating[Any]],
     *,
     vehicle: VehicleInfo,
     track: TrackInfo,
     ecc: ECC,
-) -> np.ndarray:
+) -> NDArray[np.float64]:
     """从位置/速度序列逐段重计算累积牵引能耗曲线。
 
     使用匀变速模型反推每段加速度后，调用 ECC.calc_energy 计算各段能耗，

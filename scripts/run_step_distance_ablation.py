@@ -2,45 +2,29 @@ from __future__ import annotations
 
 import argparse
 import json
-import multiprocessing as mp
 import os
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
-from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import BaseCallback
-from stable_baselines3.common.monitor import load_results
-from stable_baselines3.common.utils import set_random_seed
-from stable_baselines3.common.vec_env import (
-    DummyVecEnv,
-    SubprocVecEnv,
-    VecMonitor,
-    VecNormalize,
-)
 
-from model.ocs import SafeGuardUtility, TrainService
-from model.track import TrackInfo
-from model.vehicle import VehicleInfo
-from rl.env_factory import make_env
 from rl.experiment_utils import (
     TrainingRunSpec,
     apply_rl_curve_plot_style,
     build_default_training_args,
     resolve_training_run_spec,
-    save_run_metadata,
+    train_single_experiment,
 )
 from utils.io_utils import format_float_token
-from utils.scenario import build_scenario
 
 DEFAULT_STEP_DISTANCES: tuple[float, ...] = (50.0, 100.0, 200.0, 500.0)
-DEFAULT_SEEDS: tuple[int, ...] = (42, 43, 44)
+DEFAULT_SEEDS: tuple[int, ...] = (42,)
 DEFAULT_OUTPUT_ROOT = "output/optimal/rl/step_distance_ablation"
 STEP_DISTANCE_MANIFEST_FILENAME = "step_distance_ablation_manifest.json"
-FIXED_REWARD_PROFILE = "basic"
+FIXED_REWARD_PROFILE = "full"
+CURVE_SMOOTH_WINDOW = 9
 
 
 @dataclass(frozen=True)
@@ -49,18 +33,18 @@ class StepDistanceRunEntry:
     repeat_index: int
     seed: int
     experiment_tag: str
-    monitor_path: str
+    episode_metrics_path: str
     train_args: argparse.Namespace
     training_run_spec: TrainingRunSpec
 
 
 @dataclass(frozen=True)
-class MonitorRunArtifact:
+class EpisodeMetricsRunArtifact:
     max_step_distance: float
     repeat_index: int
     seed: int
-    monitor_path: str
-    episode_index: np.ndarray
+    episode_metrics_path: str
+    step_index: np.ndarray
     episode_reward: np.ndarray
     episode_length: np.ndarray
 
@@ -68,76 +52,18 @@ class MonitorRunArtifact:
 @dataclass(frozen=True)
 class StepDistanceCurveAggregate:
     max_step_distance: float
-    reference_episodes: np.ndarray
+    reference_steps: np.ndarray
     mean_reward: np.ndarray
     std_reward: np.ndarray
     mean_length: np.ndarray
     std_length: np.ndarray
     valid_run_count: int
-    monitor_paths: tuple[str, ...]
-
-
-class MaxEpisodesStopCallback(BaseCallback):
-    """Stop learning once the vectorized env has completed enough episodes."""
-
-    def __init__(self, max_episodes: int, verbose: int = 0):
-        super().__init__(verbose)
-        self.max_episodes = max(1, int(max_episodes))
-        self.completed_episodes = 0
-
-    def _on_step(self) -> bool:
-        dones_raw = self.locals.get("dones")
-        if dones_raw is None:
-            return True
-        try:
-            dones = list(dones_raw)
-        except TypeError:
-            return True
-
-        self.completed_episodes += sum(1 for done in dones if bool(done))
-        return self.completed_episodes < self.max_episodes
-
-
-def _linear_schedule(initial_value: float) -> Callable[[float], float]:
-    def func(progress_remaining: float) -> float:
-        return progress_remaining * initial_value
-
-    return func
-
-
-def _resolve_subproc_start_method() -> str:
-    available_start_methods = set(mp.get_all_start_methods())
-    return "forkserver" if "forkserver" in available_start_methods else "spawn"
-
-
-def _build_env_initializer(
-    *,
-    vehicle: VehicleInfo,
-    track: TrackInfo,
-    safeguard_utility: SafeGuardUtility,
-    train_service: TrainService,
-    gamma: float,
-    max_step_distance: float,
-) -> Callable[[], Any]:
-    def _init():
-        return make_env(
-            vehicle=vehicle,
-            track=track,
-            safeguard_utility=safeguard_utility,
-            train_service=train_service,
-            gamma=gamma,
-            max_step_distance=max_step_distance,
-            enable_diagnostics=False,
-            diagnostics_interval_steps=1,
-            reward_config=None,
-        )
-
-    return _init
+    episode_metrics_paths: tuple[str, ...]
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run max-step-distance ablation with fixed basic reward.",
+        description="Run max-step-distance ablation with basic reward + PBRS.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -169,16 +95,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Seeds to run for every max-step-distance value.",
     )
     train_parser.add_argument(
-        "--max-train-episodes",
-        type=int,
-        default=10000,
-        help="Training budget measured by completed episodes.",
-    )
-    train_parser.add_argument(
         "--total-timesteps",
         type=int,
-        default=10_000_000,
-        help="Safety fallback for SB3 learn(); episodes stop training first.",
+        default=1_000_000,
+        help="Maximum simulation training timesteps.",
     )
     train_parser.add_argument("--schedule-time-s", type=float, default=430.0)
     train_parser.add_argument("--reward-discount", type=float, default=0.99)
@@ -199,7 +119,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Resolve the run matrix without starting training.",
     )
 
-    show_parser = subparsers.add_parser("show", help="Plot monitor learning curves.")
+    show_parser = subparsers.add_parser(
+        "show", help="Plot episode-metrics learning curves."
+    )
     show_parser.add_argument(
         "--output-root",
         "--ablation-root",
@@ -269,7 +191,7 @@ def _build_train_args(
         max_step_distance=max_step_distance,
         repeat_index=repeat_index,
     )
-    train_args.run_mode = "monitor_best"
+    train_args.run_mode = "reproduce"
     train_args.enable_tb = False
     train_args.enable_callback = False
     train_args.enable_monitor = True
@@ -297,8 +219,6 @@ def resolve_step_distance_run_matrix(
 ) -> list[StepDistanceRunEntry]:
     step_distances = _dedupe_float_sequence(args.max_step_distances)
     seeds = _resolve_seed_list(args.seed_list)
-    if int(args.max_train_episodes) < 1:
-        raise ValueError("--max-train-episodes must be >= 1.")
 
     run_entries: list[StepDistanceRunEntry] = []
     for max_step_distance in step_distances:
@@ -310,14 +230,16 @@ def resolve_step_distance_run_matrix(
                 seed=seed,
             )
             spec = resolve_training_run_spec(train_args)
-            monitor_path = os.path.join(spec.output_dir, "monitor", "monitor.csv")
+            episode_metrics_path = os.path.join(
+                spec.final_output_dir, "episode_metrics.npz"
+            )
             run_entries.append(
                 StepDistanceRunEntry(
                     max_step_distance=max_step_distance,
                     repeat_index=repeat_index,
                     seed=seed,
                     experiment_tag=train_args.experiment_tag,
-                    monitor_path=monitor_path,
+                    episode_metrics_path=episode_metrics_path,
                     train_args=train_args,
                     training_run_spec=spec,
                 )
@@ -346,7 +268,7 @@ def build_step_distance_manifest(
             "experiment_tag": entry.experiment_tag,
             "output_dir": spec.output_dir,
             "final_output_dir": spec.final_output_dir,
-            "monitor_path": entry.monitor_path,
+            "episode_metrics_path": entry.episode_metrics_path,
             "run_metadata_path": spec.run_metadata_path,
             **status_payload,
         })
@@ -358,7 +280,6 @@ def build_step_distance_manifest(
             float(value) for value in _dedupe_float_sequence(args.max_step_distances)
         ],
         "seed_list": [int(seed) for seed in _resolve_seed_list(args.seed_list)],
-        "max_train_episodes": int(args.max_train_episodes),
         "training": {
             "schedule_time_s": float(args.schedule_time_s),
             "reward_discount": float(args.reward_discount),
@@ -366,9 +287,9 @@ def build_step_distance_manifest(
             "vec_env_type": str(args.vec_env_type),
             "rollout_steps_per_update": int(args.rollout_steps_per_update),
             "n_steps_per_env": args.n_steps_per_env,
-            "total_timesteps_fallback": int(args.total_timesteps),
+            "total_timesteps": int(args.total_timesteps),
             "device": str(args.device),
-            "enable_monitor": True,
+            "enable_monitor": False,
             "enable_callback": False,
             "enable_env_diagnostics": False,
             "enable_auto_analysis": False,
@@ -394,81 +315,44 @@ def load_step_distance_manifest(output_root: str) -> dict[str, Any]:
         return json.load(file_obj)
 
 
-def _build_vec_env(spec: TrainingRunSpec):
-    vehicle, track, safeguard_utility, train_service = build_scenario(
-        schedule_time_s=spec.schedule_time_s
-    )
-    env_initializers = [
-        _build_env_initializer(
-            vehicle=vehicle,
-            track=track,
-            safeguard_utility=safeguard_utility,
-            train_service=train_service,
-            gamma=spec.reward_discount,
-            max_step_distance=spec.max_step_distance,
-        )
-        for _ in range(spec.num_envs)
-    ]
-
-    if spec.use_subproc:
-        return SubprocVecEnv(
-            env_initializers,
-            start_method=spec.subproc_start_method or _resolve_subproc_start_method(),
-        )
-    return DummyVecEnv(env_initializers)
-
-
 def train_step_distance_run(
     entry: StepDistanceRunEntry,
-    *,
-    max_train_episodes: int,
 ) -> TrainingRunSpec:
-    spec = entry.training_run_spec
-    if spec.seed is not None:
-        set_random_seed(spec.seed, using_cuda=spec.device == "cuda")
-
-    os.makedirs(spec.output_dir, exist_ok=True)
-    os.makedirs(spec.final_output_dir, exist_ok=True)
-    save_run_metadata(spec.output_dir, spec.run_metadata)
-
-    venv_train = _build_vec_env(spec)
-    venv_train = VecMonitor(venv_train, filename=entry.monitor_path)
-    venv_train = VecNormalize(
-        venv=venv_train,
-        norm_obs=False,
-        norm_reward=True,
-        gamma=spec.reward_discount,
+    return train_single_experiment(
+        entry.train_args,
+        spec=entry.training_run_spec,
     )
 
-    model = PPO(
-        "MlpPolicy",
-        venv_train,
-        device=spec.device,
-        verbose=0,
-        learning_rate=_linear_schedule(3e-4),
-        n_steps=spec.n_steps_per_env,
-        batch_size=256,
-        n_epochs=15,
-        gamma=spec.reward_discount,
-        gae_lambda=0.95,
-        clip_range=0.2,
-        ent_coef=0.01,
-        vf_coef=0.5,
-        max_grad_norm=0.5,
-        tensorboard_log=None,
-        policy_kwargs=dict(net_arch=dict(pi=[256, 256], vf=[256, 256])),
-    )
 
-    model.learn(
-        total_timesteps=spec.total_timesteps,
-        callback=MaxEpisodesStopCallback(max_train_episodes),
-        log_interval=spec.log_interval,
-        progress_bar=True,
+def _load_episode_metrics_run(
+    *,
+    run_entry: dict[str, Any],
+) -> EpisodeMetricsRunArtifact:
+    episode_metrics_path = Path(str(run_entry["episode_metrics_path"]))
+    if not episode_metrics_path.is_file():
+        raise FileNotFoundError(
+            f"episode_metrics.npz not found: {episode_metrics_path}"
+        )
+
+    with np.load(episode_metrics_path) as data:
+        index = np.asarray(data["index"], dtype=np.float64)
+        rewards = np.asarray(data["ep_reward"], dtype=np.float64)
+        lengths = np.asarray(data["ep_len"], dtype=np.float64)
+
+    if index.size == 0 or rewards.size == 0 or lengths.size == 0:
+        raise ValueError(f"Empty episode metrics arrays: {episode_metrics_path}")
+    if rewards.size != lengths.size or rewards.size != index.size:
+        raise ValueError(f"Mismatched episode metrics arrays: {episode_metrics_path}")
+
+    return EpisodeMetricsRunArtifact(
+        max_step_distance=float(run_entry["max_step_distance"]),
+        repeat_index=int(run_entry.get("repeat_index", 0)),
+        seed=int(run_entry["seed"]),
+        episode_metrics_path=str(episode_metrics_path),
+        step_index=np.cumsum(lengths, dtype=np.float64),
+        episode_reward=rewards,
+        episode_length=lengths,
     )
-    model.save(spec.final_model_save_path)
-    venv_train.save(spec.final_vecnormalize_save_path)
-    venv_train.close()
-    return spec
 
 
 def _print_run_matrix(run_entries: list[StepDistanceRunEntry]) -> None:
@@ -477,27 +361,9 @@ def _print_run_matrix(run_entries: list[StepDistanceRunEntry]) -> None:
         print(
             f"[{index}] max_step_distance={entry.max_step_distance:g} "
             f"repeat={entry.repeat_index + 1} seed={entry.seed} "
-            f"output_dir={entry.training_run_spec.output_dir}"
+            f"output_dir={entry.training_run_spec.output_dir} "
+            f"total_timesteps={entry.training_run_spec.total_timesteps}"
         )
-
-
-def _load_monitor_run(run_entry: dict[str, Any]) -> MonitorRunArtifact:
-    monitor_path = Path(str(run_entry["monitor_path"]))
-    data_frame = load_results(str(monitor_path.parent))
-    rewards = np.asarray(data_frame["r"], dtype=np.float64)
-    lengths = np.asarray(data_frame["l"], dtype=np.float64)
-    if rewards.size == 0 or lengths.size == 0:
-        raise ValueError(f"Empty monitor data: {monitor_path}")
-
-    return MonitorRunArtifact(
-        max_step_distance=float(run_entry["max_step_distance"]),
-        repeat_index=int(run_entry.get("repeat_index", 0)),
-        seed=int(run_entry["seed"]),
-        monitor_path=str(monitor_path),
-        episode_index=np.arange(rewards.size, dtype=np.float64),
-        episode_reward=rewards,
-        episode_length=lengths,
-    )
 
 
 def _resolve_display_distances(
@@ -509,6 +375,31 @@ def _resolve_display_distances(
     return [float(value) for value in manifest.get("max_step_distances", [])]
 
 
+def _smooth_series(
+    values: np.ndarray, window_size: int = CURVE_SMOOTH_WINDOW
+) -> np.ndarray:
+    series = np.asarray(values, dtype=np.float64)
+    if series.size < 2:
+        return series.copy()
+    window = max(1, int(window_size))
+    if window <= 1:
+        return series.copy()
+    if window > series.size:
+        window = series.size
+
+    kernel = np.ones(window, dtype=np.float64) / float(window)
+    valid_mask = np.isfinite(series).astype(np.float64)
+    filled = np.where(np.isfinite(series), series, 0.0)
+    smooth_num = np.convolve(filled, kernel, mode="same")
+    smooth_den = np.convolve(valid_mask, kernel, mode="same")
+    return np.divide(
+        smooth_num,
+        smooth_den,
+        out=np.full_like(smooth_num, np.nan),
+        where=smooth_den > 1e-12,
+    )
+
+
 def build_curve_aggregates(
     manifest: dict[str, Any],
     max_step_distances: list[float] | None = None,
@@ -518,7 +409,7 @@ def build_curve_aggregates(
     selected_distances = _resolve_display_distances(manifest, max_step_distances)
 
     for max_step_distance in selected_distances:
-        monitor_runs: list[MonitorRunArtifact] = []
+        metrics_runs: list[EpisodeMetricsRunArtifact] = []
         for run_entry in manifest.get("runs", []):
             if not isinstance(run_entry, dict):
                 continue
@@ -534,49 +425,50 @@ def build_curve_aggregates(
                 )
                 continue
             try:
-                monitor_runs.append(_load_monitor_run(run_entry))
+                metrics_runs.append(_load_episode_metrics_run(run_entry=run_entry))
             except (FileNotFoundError, KeyError, ValueError, OSError) as exc:
                 warnings.append(str(exc))
 
-        if not monitor_runs:
+        if not metrics_runs:
             warnings.append(
-                f"No valid monitor runs for max_step_distance={max_step_distance:g}."
+                f"No valid episode_metrics runs for max_step_distance={max_step_distance:g}."
             )
             continue
 
-        max_len = max(len(run.episode_index) for run in monitor_runs)
-        reference = np.arange(max_len, dtype=np.float64)
+        reference = np.unique(np.concatenate([run.step_index for run in metrics_runs]))
         aligned_rewards = np.vstack([
             np.interp(
                 reference,
-                run.episode_index,
+                run.step_index,
                 run.episode_reward,
                 left=np.nan,
                 right=np.nan,
             )
-            for run in monitor_runs
+            for run in metrics_runs
         ])
         aligned_lengths = np.vstack([
             np.interp(
                 reference,
-                run.episode_index,
+                run.step_index,
                 run.episode_length,
                 left=np.nan,
                 right=np.nan,
             )
-            for run in monitor_runs
+            for run in metrics_runs
         ])
 
         aggregates.append(
             StepDistanceCurveAggregate(
                 max_step_distance=float(max_step_distance),
-                reference_episodes=reference,
+                reference_steps=reference,
                 mean_reward=np.nanmean(aligned_rewards, axis=0),
                 std_reward=np.nanstd(aligned_rewards, axis=0),
                 mean_length=np.nanmean(aligned_lengths, axis=0),
                 std_length=np.nanstd(aligned_lengths, axis=0),
-                valid_run_count=len(monitor_runs),
-                monitor_paths=tuple(run.monitor_path for run in monitor_runs),
+                valid_run_count=len(metrics_runs),
+                episode_metrics_paths=tuple(
+                    run.episode_metrics_path for run in metrics_runs
+                ),
             )
         )
 
@@ -600,40 +492,45 @@ def plot_curve_aggregates(aggregates: list[StepDistanceCurveAggregate]) -> None:
     for index, aggregate in enumerate(aggregates):
         color = _color_for_index(index)
         label = f"{aggregate.max_step_distance:g} m"
+        smooth_mean_reward = _smooth_series(aggregate.mean_reward)
+        smooth_std_reward = _smooth_series(aggregate.std_reward)
+        smooth_mean_length = _smooth_series(aggregate.mean_length)
+        smooth_std_length = _smooth_series(aggregate.std_length)
         ax_reward.plot(
-            aggregate.reference_episodes,
-            aggregate.mean_reward,
+            aggregate.reference_steps,
+            smooth_mean_reward,
             color=color,
             label=label,
         )
         ax_reward.fill_between(
-            aggregate.reference_episodes,
-            aggregate.mean_reward - aggregate.std_reward,
-            aggregate.mean_reward + aggregate.std_reward,
+            aggregate.reference_steps,
+            smooth_mean_reward - smooth_std_reward,
+            smooth_mean_reward + smooth_std_reward,
             color=color,
             alpha=0.18,
         )
         ax_length.plot(
-            aggregate.reference_episodes,
-            aggregate.mean_length,
+            aggregate.reference_steps,
+            smooth_mean_length,
             color=color,
             label=label,
         )
         ax_length.fill_between(
-            aggregate.reference_episodes,
-            aggregate.mean_length - aggregate.std_length,
-            aggregate.mean_length + aggregate.std_length,
+            aggregate.reference_steps,
+            smooth_mean_length - smooth_std_length,
+            smooth_mean_length + smooth_std_length,
             color=color,
             alpha=0.18,
         )
 
-    ax_reward.set_xlabel("Episode")
+    ax_reward.set_xlabel("Training steps")
     ax_reward.set_ylabel("Mean episode reward")
     ax_reward.grid(True, alpha=0.3)
-    ax_length.set_xlabel("Episode")
+    ax_length.set_xlabel("Training steps")
     ax_length.set_ylabel("Mean episode length")
     ax_length.grid(True, alpha=0.3)
-    fig.legend(loc="upper center", ncol=min(4, len(aggregates)))
+    handles, labels = ax_reward.get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", ncol=min(4, len(aggregates)))
     plt.tight_layout(rect=(0.0, 0.0, 1.0, 0.92))
     plt.show()
 
@@ -644,11 +541,17 @@ def _print_curve_summary(aggregates: list[StepDistanceCurveAggregate]) -> None:
         print("  no valid step-distance curves available.")
         return
     for aggregate in aggregates:
+        step_end = (
+            float(aggregate.reference_steps[-1])
+            if aggregate.reference_steps.size > 0
+            else 0.0
+        )
         print(
             "  - "
             f"max_step_distance={aggregate.max_step_distance:g} "
             f"valid_runs={aggregate.valid_run_count} "
-            f"episodes={aggregate.reference_episodes.size}"
+            f"steps_points={aggregate.reference_steps.size} "
+            f"step_end={step_end:g}"
         )
 
 
@@ -681,13 +584,11 @@ def _run_train_command(args: argparse.Namespace) -> int:
         print(
             f"Running step-distance job {index}/{len(run_entries)}: "
             f"max_step_distance={entry.max_step_distance:g}, "
-            f"repeat={entry.repeat_index + 1}, seed={entry.seed}"
+            f"repeat={entry.repeat_index + 1}, seed={entry.seed}, "
+            f"total_timesteps={entry.training_run_spec.total_timesteps}"
         )
         try:
-            train_step_distance_run(
-                entry,
-                max_train_episodes=int(args.max_train_episodes),
-            )
+            train_step_distance_run(entry)
             statuses[(entry.max_step_distance, entry.repeat_index)] = {
                 "status": "completed"
             }
@@ -725,7 +626,7 @@ def _run_show_command(args: argparse.Namespace) -> int:
     _print_curve_summary(aggregates)
 
     if args.dry_run:
-        print("Dry run completed: monitor curve inputs resolved.")
+        print("Dry run completed: episode-metrics curve inputs resolved.")
         return 0
     if not aggregates:
         raise SystemExit("No valid monitor curves available for plotting.")

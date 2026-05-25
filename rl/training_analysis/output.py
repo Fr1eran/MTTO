@@ -213,7 +213,7 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
     evolution_available = bool(evolution.get("available", False))
     evolution_stage_profiles = evolution.get("stage_profiles", [])
     state_labels = evolution.get(
-        "state_labels", ["normal", "low_violation", "high_violation"]
+        "state_labels", ["normal", "terminal_failure", "speed_violation"]
     )
     overall_transition_matrix = evolution.get("overall_transition_matrix", [])
 
@@ -244,7 +244,7 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
         f"{_format_number(evolution.get('mean_survival_distance_m'))}"
     )
     lines.append(
-        "- overall_normal_to_high_transition_rate: "
+        "- overall_normal_to_speed_violation_transition_rate: "
         f"{
             _format_percent(
                 (evolution.get('overall_transition_probabilities') or [[0, 0, 0]])[0][2]
@@ -560,7 +560,7 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
         lines.append("### Stage Evolution")
         lines.append("")
         lines.append(
-            "| stage | episode_range | avg_survival_m | growth_vs_prev | normal->high | low->high | high->low |"  # noqa: E501
+            "| stage | episode_range | avg_survival_m | growth_vs_prev | normal->speed | terminal_failure->speed | speed->terminal_failure |"  # noqa: E501
         )
         lines.append("| --- | --- | --- | --- | --- | --- | --- |")
         for stage in evolution_stage_profiles[:10]:
@@ -568,6 +568,18 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
                 continue
             growth = stage.get("survival_growth_rate_vs_prev")
             growth_text = _format_percent(growth) if growth is not None else "N/A"
+            normal_to_speed_rate = stage.get(
+                "normal_to_speed_violation_transition_rate",
+                stage.get("normal_to_high_transition_rate"),
+            )
+            terminal_to_speed_rate = stage.get(
+                "terminal_failure_to_speed_violation_transition_rate",
+                stage.get("low_to_high_transition_rate"),
+            )
+            speed_to_terminal_rate = stage.get(
+                "speed_violation_to_terminal_failure_transition_rate",
+                stage.get("high_to_low_transition_rate"),
+            )
             lines.append(
                 "| "
                 f"{stage.get('window_index', 'N/A')} | "
@@ -575,9 +587,9 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
                 {stage.get('episode_end', 'N/A')}) | "
                 f"{_format_number(stage.get('avg_survival_distance_m'))} | "
                 f"{growth_text} | "
-                f"{_format_percent(stage.get('normal_to_high_transition_rate'))} | "
-                f"{_format_percent(stage.get('low_to_high_transition_rate'))} | "
-                f"{_format_percent(stage.get('high_to_low_transition_rate'))} |"
+                f"{_format_percent(normal_to_speed_rate)} | "
+                f"{_format_percent(terminal_to_speed_rate)} | "
+                f"{_format_percent(speed_to_terminal_rate)} |"
             )
 
     lines.append("")

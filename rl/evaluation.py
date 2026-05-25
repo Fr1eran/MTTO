@@ -160,7 +160,7 @@ def evaluate_policy_once(
         dtype=np.float32,
     )
 
-    final_position = float(basic_info.get("position", mtto_env.current_pos))
+    final_position = float(basic_info.get("position", mtto_env.current_position))
     target_time_s = float(mtto_env.train_service.schedule_time)
     total_time_s = float(
         basic_info.get("operation_time", mtto_env.current_operation_time)

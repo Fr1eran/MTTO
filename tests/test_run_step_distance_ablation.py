@@ -2,34 +2,41 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
+import scripts.run_step_distance_ablation as step_distance_ablation
 from scripts.run_step_distance_ablation import (
     DEFAULT_OUTPUT_ROOT,
     DEFAULT_SEEDS,
     DEFAULT_STEP_DISTANCES,
     FIXED_REWARD_PROFILE,
+    StepDistanceCurveAggregate,
     STEP_DISTANCE_MANIFEST_FILENAME,
     build_arg_parser,
     build_curve_aggregates,
     build_step_distance_manifest,
     load_step_distance_manifest,
+    plot_curve_aggregates,
     resolve_step_distance_run_matrix,
+    train_step_distance_run,
 )
 
 
-def _write_monitor_csv(
-    monitor_dir: Path,
+def _write_episode_metrics_npz(
+    final_dir: Path,
     *,
     rewards: list[float],
     lengths: list[float],
 ) -> Path:
-    monitor_dir.mkdir(parents=True, exist_ok=True)
-    monitor_path = monitor_dir / "monitor.csv"
-    rows = ["#{\"t_start\": 0.0, \"env_id\": \"None\"}", "r,l,t"]
-    for index, (reward, length) in enumerate(zip(rewards, lengths, strict=True)):
-        rows.append(f"{reward},{length},{float(index)}")
-    monitor_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
-    return monitor_path
+    final_dir.mkdir(parents=True, exist_ok=True)
+    episode_metrics_path = final_dir / "episode_metrics.npz"
+    np.savez(
+        episode_metrics_path,
+        index=np.asarray([float(i) for i in range(len(rewards))], dtype=np.float64),
+        ep_reward=np.asarray(rewards, dtype=np.float64),
+        ep_len=np.asarray(lengths, dtype=np.float64),
+    )
+    return episode_metrics_path
 
 
 def test_train_cli_defaults() -> None:
@@ -39,7 +46,7 @@ def test_train_cli_defaults() -> None:
     assert args.output_root == DEFAULT_OUTPUT_ROOT
     assert tuple(args.max_step_distances) == DEFAULT_STEP_DISTANCES
     assert tuple(args.seed_list) == DEFAULT_SEEDS
-    assert args.max_train_episodes == 1000
+    assert not hasattr(args, "max_train_episodes")
     assert args.dry_run is False
 
 
@@ -53,6 +60,7 @@ def test_resolve_run_matrix_expands_distances_and_seeds() -> None:
     assert [entry.max_step_distance for entry in run_entries[:3]] == [50.0] * 3
     assert [entry.seed for entry in run_entries[:3]] == [42, 43, 44]
     assert run_entries[0].experiment_tag == "ds50p0__r01"
+    assert not hasattr(run_entries[0].train_args, "max_train_episodes")
 
 
 def test_run_matrix_keeps_basic_reward_and_fixed_hyperparameters() -> None:
@@ -116,29 +124,96 @@ def test_build_and_load_manifest_records_step_distance_runs(tmp_path: Path) -> N
     assert loaded["seed_list"] == [42, 43]
     assert loaded["runs"][0]["status"] == "completed"
     assert loaded["runs"][1]["status"] == "pending"
-    assert loaded["runs"][0]["monitor_path"].endswith("monitor.csv")
+    assert loaded["runs"][0]["episode_metrics_path"].endswith("episode_metrics.npz")
+
+
+def test_manifest_uses_total_timesteps_training_budget(
+    tmp_path: Path,
+) -> None:
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "train",
+        "--output-root",
+        str(tmp_path),
+        "--max-step-distances",
+        "50",
+        "--seed-list",
+        "42",
+    ])
+    run_entries = resolve_step_distance_run_matrix(args)
+
+    manifest = build_step_distance_manifest(args, run_entries)
+
+    assert manifest["training"]["total_timesteps"] == int(args.total_timesteps)
+    assert "stop_mode" not in manifest
+    assert "max_train_episodes" not in manifest
+
+
+def test_train_step_distance_run_delegates_to_train_single_experiment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parser = build_arg_parser()
+    args = parser.parse_args([
+        "train",
+        "--output-root",
+        str(tmp_path),
+        "--max-step-distances",
+        "50",
+        "--seed-list",
+        "42",
+    ])
+    entry = resolve_step_distance_run_matrix(args)[0]
+
+    calls: list[tuple[object, object]] = []
+
+    def _fake_train_single_experiment(train_args, *, spec):
+        calls.append((train_args, spec))
+        final_output_dir = Path(spec.final_output_dir)
+        final_output_dir.mkdir(parents=True, exist_ok=True)
+        np.savez(
+            final_output_dir / "episode_metrics.npz",
+            index=np.asarray([0.0, 1.0], dtype=np.float64),
+            ep_reward=np.asarray([1.5, 2.5], dtype=np.float64),
+            ep_len=np.asarray([10.0, 20.0], dtype=np.float64),
+        )
+        return spec
+
+    monkeypatch.setattr(
+        step_distance_ablation,
+        "train_single_experiment",
+        _fake_train_single_experiment,
+    )
+
+    train_step_distance_run(entry)
+
+    assert len(calls) == 1
+    assert calls[0][0] is entry.train_args
+    assert calls[0][1] is entry.training_run_spec
+    episode_metrics_path = Path(entry.episode_metrics_path)
+    assert episode_metrics_path.is_file()
 
 
 def test_build_curve_aggregates_groups_monitor_data_by_step_distance(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "step_distance"
-    run_50_r1 = root / "run_50_r1"
-    run_50_r2 = root / "run_50_r2"
-    run_100_r1 = root / "run_100_r1"
+    run_50_r1 = root / "run_50_r1" / "final"
+    run_50_r2 = root / "run_50_r2" / "final"
+    run_100_r1 = root / "run_100_r1" / "final"
 
-    monitor_50_r1 = _write_monitor_csv(
-        run_50_r1 / "monitor",
+    metrics_50_r1 = _write_episode_metrics_npz(
+        run_50_r1,
         rewards=[1.0, 3.0, 5.0],
         lengths=[10.0, 9.0, 8.0],
     )
-    monitor_50_r2 = _write_monitor_csv(
-        run_50_r2 / "monitor",
+    metrics_50_r2 = _write_episode_metrics_npz(
+        run_50_r2,
         rewards=[2.0, 4.0],
         lengths=[12.0, 10.0],
     )
-    monitor_100_r1 = _write_monitor_csv(
-        run_100_r1 / "monitor",
+    metrics_100_r1 = _write_episode_metrics_npz(
+        run_100_r1,
         rewards=[10.0, 12.0],
         lengths=[5.0, 4.0],
     )
@@ -150,21 +225,21 @@ def test_build_curve_aggregates_groups_monitor_data_by_step_distance(
                 "max_step_distance": 50.0,
                 "repeat_index": 0,
                 "seed": 42,
-                "monitor_path": str(monitor_50_r1),
+                "episode_metrics_path": str(metrics_50_r1),
                 "status": "completed",
             },
             {
                 "max_step_distance": 50.0,
                 "repeat_index": 1,
                 "seed": 43,
-                "monitor_path": str(monitor_50_r2),
+                "episode_metrics_path": str(metrics_50_r2),
                 "status": "completed",
             },
             {
                 "max_step_distance": 100.0,
                 "repeat_index": 0,
                 "seed": 42,
-                "monitor_path": str(monitor_100_r1),
+                "episode_metrics_path": str(metrics_100_r1),
                 "status": "completed",
             },
         ],
@@ -176,6 +251,54 @@ def test_build_curve_aggregates_groups_monitor_data_by_step_distance(
     assert [aggregate.max_step_distance for aggregate in aggregates] == [50.0, 100.0]
     aggregate_50 = aggregates[0]
     assert aggregate_50.valid_run_count == 2
-    np.testing.assert_allclose(aggregate_50.reference_episodes, [0.0, 1.0, 2.0])
-    np.testing.assert_allclose(aggregate_50.mean_reward, [1.5, 3.5, 5.0])
-    np.testing.assert_allclose(aggregate_50.mean_length, [11.0, 9.5, 8.0])
+    np.testing.assert_allclose(aggregate_50.reference_steps, [10.0, 12.0, 19.0, 22.0, 27.0])
+    np.testing.assert_allclose(
+        aggregate_50.mean_reward,
+        [1.0, 1.7222222222222223, 3.2, 3.875, 5.0],
+    )
+    np.testing.assert_allclose(
+        aggregate_50.mean_length,
+        [10.0, 10.88888888888889, 9.8, 9.3125, 8.0],
+    )
+
+
+def test_plot_curve_aggregates_uses_step_axis_and_deduped_legend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(step_distance_ablation, "apply_rl_curve_plot_style", lambda: None)
+    monkeypatch.setattr(step_distance_ablation.plt, "show", lambda: None)
+
+    aggregates = [
+        StepDistanceCurveAggregate(
+            max_step_distance=50.0,
+            reference_steps=np.asarray([10.0, 20.0, 30.0], dtype=np.float64),
+            mean_reward=np.asarray([1.0, 2.0, 3.0], dtype=np.float64),
+            std_reward=np.asarray([0.1, 0.2, 0.3], dtype=np.float64),
+            mean_length=np.asarray([12.0, 11.0, 10.0], dtype=np.float64),
+            std_length=np.asarray([0.3, 0.2, 0.1], dtype=np.float64),
+            valid_run_count=2,
+            episode_metrics_paths=("a", "b"),
+        ),
+        StepDistanceCurveAggregate(
+            max_step_distance=100.0,
+            reference_steps=np.asarray([10.0, 20.0, 30.0], dtype=np.float64),
+            mean_reward=np.asarray([0.5, 1.0, 1.5], dtype=np.float64),
+            std_reward=np.asarray([0.1, 0.1, 0.1], dtype=np.float64),
+            mean_length=np.asarray([14.0, 13.0, 12.0], dtype=np.float64),
+            std_length=np.asarray([0.2, 0.2, 0.2], dtype=np.float64),
+            valid_run_count=2,
+            episode_metrics_paths=("c", "d"),
+        ),
+    ]
+
+    plot_curve_aggregates(aggregates)
+
+    fig = step_distance_ablation.plt.gcf()
+    assert len(fig.axes) == 2
+    assert fig.axes[0].get_xlabel() == "Training steps"
+    assert fig.axes[1].get_xlabel() == "Training steps"
+
+    assert fig.legends, "Expected a figure-level legend."
+    legend_labels = [text.get_text() for text in fig.legends[0].texts]
+    assert legend_labels == ["50 m", "100 m"]
+    step_distance_ablation.plt.close(fig)

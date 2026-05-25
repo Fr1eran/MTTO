@@ -8,7 +8,9 @@ from scripts.analyze_sps_compliance import (
     _build_cli_parser,
     _parse_output_mode,
     _resolve_curve_artifacts,
+    _resolve_single_curve_artifact,
     _resolve_target_schedule_time,
+    _validate_cli_args,
     replay_sps_compliance,
 )
 from rl.experiment_utils import DEFAULT_SCHEDULE_TIME_S
@@ -67,6 +69,8 @@ def test_analyze_sps_compliance_cli_defaults() -> None:
     assert args.dp_curve_dir == "output/optimal/dp"
     assert args.rl_curve_dir == "output/optimal/rl"
     assert args.trajectory_source == "best"
+    assert args.analysis_mode == "compare"
+    assert args.trajectory_kind is None
     assert args.output_mode == "text+plot"
     assert args.event_annotation == "auto"
     assert args.step_delay_s == pytest.approx(2.0)
@@ -86,6 +90,33 @@ def test_analyze_sps_compliance_cli_accepts_marker_only_and_json() -> None:
     assert args.output_mode == "json"
     assert args.event_annotation == "marker-only"
     assert args.step_delay_s == pytest.approx(1.5)
+
+
+def test_analyze_sps_compliance_cli_accepts_single_mode_and_kind() -> None:
+    parser = _build_cli_parser()
+    args = parser.parse_args([
+        "--analysis-mode",
+        "single",
+        "--trajectory-kind",
+        "rl",
+    ])
+    _validate_cli_args(parser, args)
+    assert args.analysis_mode == "single"
+    assert args.trajectory_kind == "rl"
+
+
+def test_validate_cli_args_requires_trajectory_kind_for_single_mode() -> None:
+    parser = _build_cli_parser()
+    args = parser.parse_args(["--analysis-mode", "single"])
+    with pytest.raises(SystemExit):
+        _validate_cli_args(parser, args)
+
+
+def test_validate_cli_args_rejects_trajectory_kind_for_compare_mode() -> None:
+    parser = _build_cli_parser()
+    args = parser.parse_args(["--trajectory-kind", "dp"])
+    with pytest.raises(SystemExit):
+        _validate_cli_args(parser, args)
 
 
 def test_parse_output_mode_supports_text_plot_and_csv_like_list() -> None:
@@ -126,6 +157,13 @@ def test_resolve_target_schedule_time_prefers_override_then_rl_then_dp_then_defa
     ) == pytest.approx(DEFAULT_SCHEDULE_TIME_S)
 
 
+def test_resolve_target_schedule_time_single_metrics_takes_effect() -> None:
+    assert _resolve_target_schedule_time(
+        single_metrics={"target_time_s": 450.0},
+        schedule_time_s_override=None,
+    ) == pytest.approx(450.0)
+
+
 def test_resolve_curve_artifacts_loads_latest_dp_and_latest_rl_best(
     tmp_path: Path,
 ) -> None:
@@ -164,6 +202,36 @@ def test_resolve_curve_artifacts_loads_latest_dp_and_latest_rl_best(
     assert dp_artifact.metrics_path == str(new_dp_metrics)
     assert rl_artifact.npz_path == str(new_rl_curve)
     assert rl_artifact.metrics_path == str(new_rl_metrics)
+
+
+def test_resolve_single_curve_artifact_by_kind(tmp_path: Path) -> None:
+    dp_root = tmp_path / "dp_runs"
+    rl_root = tmp_path / "rl_runs"
+    dp_dir = dp_root / "run"
+    rl_dir = rl_root / "430p0_100p0__full_shaping" / "best_steps"
+    dp_dir.mkdir(parents=True)
+    rl_dir.mkdir(parents=True)
+
+    dp_curve, dp_metrics = _write_dp_artifact(dp_dir)
+    rl_curve, rl_metrics = _write_rl_artifact(rl_dir, file_name="best_trajectory.npz")
+
+    dp_artifact = _resolve_single_curve_artifact(
+        trajectory_kind="dp",
+        dp_curve_dir=str(dp_root),
+        rl_curve_dir=str(rl_root),
+        trajectory_source="best_steps",
+    )
+    rl_artifact = _resolve_single_curve_artifact(
+        trajectory_kind="rl",
+        dp_curve_dir=str(dp_root),
+        rl_curve_dir=str(rl_root),
+        trajectory_source="best_steps",
+    )
+
+    assert dp_artifact.npz_path == str(dp_curve)
+    assert dp_artifact.metrics_path == str(dp_metrics)
+    assert rl_artifact.npz_path == str(rl_curve)
+    assert rl_artifact.metrics_path == str(rl_metrics)
 
 
 @pytest.mark.parametrize(

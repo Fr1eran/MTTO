@@ -10,7 +10,7 @@
 - [快速开始](#快速开始)
 - [脚本详解](#脚本详解)
   - [RL 训练 · `train_rl`](#rl-训练--train_rl)
-    - [RL 消融训练 · `train_reward_ablation`](#rl-消融训练--train_reward_ablation)
+  - [RL 消融训练 · `train_reward_ablation`](#rl-消融训练--train_reward_ablation)
   - [RL 评估 · `evaluate_rl`](#rl-评估--evaluate_rl)
   - [训练日志分析 · `analyze_training_data`](#训练日志分析--analyze_training_data)
   - [DP 基线复现 · `reproduce_dp`](#dp-基线复现--reproduce_dp)
