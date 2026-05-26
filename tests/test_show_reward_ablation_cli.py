@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from scripts.show_reward_ablation import (
     EPISODE_METRICS_FILENAME,
@@ -224,29 +225,18 @@ def _write_run_metadata(
     return metadata_path
 
 
-def test_build_curve_aggregates_episode_mode(tmp_path: Path) -> None:
+def test_build_curve_aggregates_rejects_episode_mode_artifacts(tmp_path: Path) -> None:
     ablation_root = tmp_path / "ablation_ep"
-    run_r1 = ablation_root / "430p0_100p0__basic__r01"
-    run_r2 = ablation_root / "430p0_100p0__basic__r02"
+    run_dir = ablation_root / "430p0_100p0__basic__r01"
 
     _write_episode_metrics(
-        run_r1 / "final",
+        run_dir / "final",
         steps=[0, 1, 2],
         rewards=[1.0, 3.0, 5.0],
         lengths=[10.0, 9.0, 8.0],
     )
-    _write_episode_metrics(
-        run_r2 / "final",
-        steps=[0, 1, 2, 3],
-        rewards=[2.0, 4.0, 6.0, 8.0],
-        lengths=[12.0, 10.0, 8.0, 6.0],
-    )
     _write_run_metadata(
-        run_r1 / "final",
-        {"rollout_record_trigger_mode": "episodes"},
-    )
-    _write_run_metadata(
-        run_r2 / "final",
+        run_dir / "final",
         {"rollout_record_trigger_mode": "episodes"},
     )
 
@@ -258,38 +248,80 @@ def test_build_curve_aggregates_episode_mode(tmp_path: Path) -> None:
                 "reward_profile_name": "basic",
                 "repeat_index": 0,
                 "seed": 10,
-                "output_dir": str(run_r1),
-                "final_output_dir": str(run_r1 / "final"),
+                "output_dir": str(run_dir),
+                "final_output_dir": str(run_dir / "final"),
                 "status": "completed",
-            },
-            {
-                "reward_profile_name": "basic",
-                "repeat_index": 1,
-                "seed": 11,
-                "output_dir": str(run_r2),
-                "final_output_dir": str(run_r2 / "final"),
-                "status": "completed",
-            },
+            }
         ],
     }
-    manifest_path = ablation_root / "ablation_manifest.json"
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    aggregates, warnings = build_curve_aggregates(manifest)
+    with pytest.raises(ValueError, match="no longer supports episodes-based"):
+        build_curve_aggregates(manifest)
 
-    assert warnings == []
-    assert len(aggregates) == 1
-    aggregate = aggregates[0]
-    assert aggregate.record_mode == "episodes"
-    assert aggregate.valid_repeat_count == 2
-    np.testing.assert_allclose(aggregate.reference_steps, [0.0, 1.0, 2.0, 3.0])
-    np.testing.assert_allclose(
-        aggregate.mean_reward, [1.5, 3.5, 5.5, 8.0]
+
+def test_build_curve_aggregates_rejects_missing_record_mode(tmp_path: Path) -> None:
+    ablation_root = tmp_path / "ablation_missing_mode"
+    run_dir = ablation_root / "430p0_100p0__basic__r01"
+
+    _write_episode_metrics(
+        run_dir / "final",
+        steps=[0, 100, 200],
+        rewards=[1.0, 2.0, 3.0],
+        lengths=[10.0, 9.0, 8.0],
     )
-    np.testing.assert_allclose(
-        aggregate.mean_length, [11.0, 9.5, 8.0, 6.0]
+    _write_run_metadata(run_dir / "final", {"reward_profile_name": "basic"})
+
+    manifest = {
+        "ablation_output_root": str(ablation_root),
+        "reward_profiles": ["basic"],
+        "runs": [
+            {
+                "reward_profile_name": "basic",
+                "repeat_index": 0,
+                "seed": 10,
+                "output_dir": str(run_dir),
+                "final_output_dir": str(run_dir / "final"),
+                "status": "completed",
+            }
+        ],
+    }
+
+    with pytest.raises(ValueError, match="rollout_record_trigger_mode='steps'"):
+        build_curve_aggregates(manifest)
+
+
+def test_build_curve_aggregates_rejects_invalid_record_mode(tmp_path: Path) -> None:
+    ablation_root = tmp_path / "ablation_invalid_mode"
+    run_dir = ablation_root / "430p0_100p0__basic__r01"
+
+    _write_episode_metrics(
+        run_dir / "final",
+        steps=[0, 100, 200],
+        rewards=[1.0, 2.0, 3.0],
+        lengths=[10.0, 9.0, 8.0],
     )
+    _write_run_metadata(
+        run_dir / "final",
+        {"rollout_record_trigger_mode": "invalid"},
+    )
+
+    manifest = {
+        "ablation_output_root": str(ablation_root),
+        "reward_profiles": ["basic"],
+        "runs": [
+            {
+                "reward_profile_name": "basic",
+                "repeat_index": 0,
+                "seed": 10,
+                "output_dir": str(run_dir),
+                "final_output_dir": str(run_dir / "final"),
+                "status": "completed",
+            }
+        ],
+    }
+
+    with pytest.raises(ValueError, match="rollout_record_trigger_mode='steps'"):
+        build_curve_aggregates(manifest)
 
 
 def test_panel_label_for_index_uses_sci_style() -> None:

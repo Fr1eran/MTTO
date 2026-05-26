@@ -35,7 +35,7 @@ class AblationRunEntry:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="运行 PBRS 奖励消融实验",
+        description="运行 PBRS 奖励消融实验（训练曲线记录模式固定为 steps）",
     )
     parser.add_argument(
         "--ablation-output-root",
@@ -57,17 +57,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "要运行的奖励预设列表。\
             默认按 basic -> safety -> stopping -> punctuality 的四种消融情形执行。"
-        ),
-    )
-    parser.add_argument(
-        "--rollout-record-trigger-mode",
-        type=str,
-        choices=["steps", "episodes"],
-        default="episodes",
-        help=(
-            "EpisodeMetricsCollector 记录触发模式。"
-            "steps=按训练步数采样滑动窗口均值；"
-            "episodes=每个回合终止时记录该回合的原始 reward 与长度。"
         ),
     )
     parser.add_argument(
@@ -260,7 +249,6 @@ def _apply_ablation_overrides(
         "best_eval_trigger_mode",
         "best_eval_trigger_interval",
         "best_eval_deterministic",
-        "rollout_record_trigger_mode",
         "device",
     ):
         setattr(train_args, field_name, getattr(args, field_name))
@@ -280,6 +268,7 @@ def _apply_ablation_overrides(
     train_args.enable_auto_analysis = None
     train_args.enable_best_eval = None
     train_args.tb_log_name = None
+    train_args.rollout_record_trigger_mode = "steps"
     train_args.seed = seed
     train_args.dry_run = False
     return train_args
@@ -365,6 +354,7 @@ def _write_ablation_manifest(output_root: str, manifest: dict[str, Any]) -> str:
 
 def _print_run_matrix(run_entries: list[AblationRunEntry]) -> None:
     print("Resolved ablation run matrix:")
+    print("rollout_record_trigger_mode is fixed to 'steps' for reward ablation.")
     for index, entry in enumerate(run_entries, start=1):
         print(
             f"[{index}] profile={entry.reward_profile_name} \

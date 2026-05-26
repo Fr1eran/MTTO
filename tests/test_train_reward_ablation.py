@@ -39,6 +39,13 @@ def test_ablation_cli_rejects_removed_subproc_start_method_option() -> None:
         parser.parse_args(["--subproc-start-method", "spawn"])
 
 
+def test_ablation_cli_rejects_removed_rollout_record_trigger_mode_option() -> None:
+    parser = build_arg_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--rollout-record-trigger-mode", "episodes"])
+
+
 def test_resolve_ablation_seeds_prefers_seed_list() -> None:
     parser = build_arg_parser()
     args = parser.parse_args([
@@ -56,7 +63,7 @@ def test_resolve_ablation_seeds_requires_source_for_multiple_repeats() -> None:
     parser = build_arg_parser()
     args = parser.parse_args(["--repeats", "2"])
 
-    with pytest.raises(ValueError, match="base-seed or --seed-list"):
+    with pytest.raises(ValueError, match="--base-seed 或 --seed-list"):
         resolve_ablation_seeds(args)
 
 
@@ -87,6 +94,7 @@ def test_resolve_ablation_run_matrix_enforces_monitor_best_semantics() -> None:
     assert first_entry.training_run_spec.enable_callback is False
     assert first_entry.training_run_spec.enable_best_eval is True
     assert first_entry.training_run_spec.log_interval == 3
+    assert first_entry.train_args.rollout_record_trigger_mode == "steps"
     assert (
         Path(first_entry.training_run_spec.output_dir).name
         == "430p0_100p0__basic__trial_a_r01"
