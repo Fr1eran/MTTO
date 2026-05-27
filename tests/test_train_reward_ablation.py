@@ -14,7 +14,7 @@ def test_ablation_cli_defaults() -> None:
     parser = build_arg_parser()
     args = parser.parse_args([])
 
-    assert args.ablation_output_root == "output/optimal/rl/ablation"
+    assert args.ablation_output_root == "output/optimal/rl/reward_ablation"
     assert args.reward_profiles is None
     assert args.repeats == 1
     assert args.base_seed is None
@@ -97,7 +97,7 @@ def test_resolve_ablation_run_matrix_enforces_monitor_best_semantics() -> None:
     assert first_entry.train_args.rollout_record_trigger_mode == "steps"
     assert (
         Path(first_entry.training_run_spec.output_dir).name
-        == "430p0_100p0__basic__trial_a_r01"
+        == "430p0_30p0__basic__trial_a_r01"
     )
 
     assert fifth_entry.reward_profile_name == "basic"

@@ -162,9 +162,8 @@ def test_show_reward_ablation_cli_defaults() -> None:
     parser = build_arg_parser()
     args = parser.parse_args([])
 
-    assert args.ablation_root == "output/optimal/rl/ablation"
+    assert args.ablation_root == "output/optimal/rl/reward_ablation"
     assert args.trajectory_source == "best"
-    assert args.curve_layout == "overlay"
     assert args.trajectory_layout == "separate"
     assert args.dry_run is False
 

@@ -797,7 +797,8 @@ class MTTOEnv(gym.Env):
         success = (
             stopped
             and self.stop_error <= self.train_service.max_stop_error * 10.0
-            and self.time_error_ratio <= self.train_service.max_arr_time_error_ratio * 2
+            and self.time_error_ratio
+            <= self.train_service.max_arr_time_error_ratio * 2.0
         )
         speed_low_violation = self.current_speed < self.current_min_speed
         speed_high_violation = self.current_speed > self.current_max_speed
@@ -1505,8 +1506,8 @@ class MTTOEnv(gym.Env):
         x_hat = dist_error_abs / self.target_attraction_domain_radius
         v_hat = speed / self.vehicle.max_speed
 
-        phi_weak = 2.0 * np.exp(-x_hat - v_hat)
-        phi_strong = 30.0 * np.exp(-x_hat / 0.01 - v_hat / 0.1)
+        phi_weak = 10.0 * np.exp(-x_hat - v_hat)
+        phi_strong = 20.0 * np.exp(-x_hat / 0.01 - v_hat / 0.1)
 
         return phi_weak + phi_strong
 

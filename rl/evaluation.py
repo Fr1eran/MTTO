@@ -125,9 +125,10 @@ def is_success_within_train_service_limits(
         return False
 
     time_error_ratio = abs(float(time_error_s)) / schedule_time_s
-    return float(stop_error_m) <= float(
-        train_service.max_stop_error
-    ) and time_error_ratio <= float(train_service.max_arr_time_error_ratio)
+    return (
+        float(stop_error_m) <= float(train_service.max_stop_error)
+        and time_error_ratio <= float(train_service.max_arr_time_error_ratio)
+    )
 
 
 def evaluate_policy_once(

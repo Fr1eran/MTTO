@@ -44,14 +44,14 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--precompute-mode",
         choices=("serial", "parallel"),
-        default="serial",
+        default="parallel",
         help="状态转移图预计算模式。serial 为单进程，parallel 为多进程。",
     )
     parser.add_argument(
         "--precompute-workers",
         type=int,
-        default=None,
-        help="并行模式下的进程数。未指定时自动使用 (CPU-1)。",
+        default=4,
+        help="并行模式下的进程数。默认值为4",
     )
     parser.add_argument(
         "--precompute-chunk-size",

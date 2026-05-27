@@ -21,7 +21,8 @@ def test_reproduce_dp_cli_defaults() -> None:
     assert args.schedule_time_s == pytest.approx(430.0)
     assert args.delta_speed_mps == pytest.approx(0.1)
     assert args.max_outer_iterations == 100
-    assert args.precompute_mode == "serial"
+    assert args.precompute_mode == "parallel"
+    assert args.precompute_workers == 4
     assert args.stage_division == "variable"
     assert args.uniform_step_size == pytest.approx(100.0)
     assert args.sub_stage_count == 30

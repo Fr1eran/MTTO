@@ -171,8 +171,8 @@ def _potential_stopping_v1(
     v_hat = np.abs(speed / speed_max)
 
     # 增益参数
-    K_W = 2.0
-    K_S = 30.0
+    K_W = 10.0
+    K_S = 20.0
 
     phi_weak = K_W * np.exp(-x_hat / sigma_x_hat_weak - v_hat / sigma_v_hat_weak)
     phi_strong = K_S * np.exp(-x_hat / sigma_x_hat_strong - v_hat / sigma_v_hat_strong)
@@ -185,27 +185,18 @@ def _potential_stopping_v2(
     speed,
     target_pos,
 ):
-    """
-    向量化停站势函数
-    """
-    # 基础参数
-    d_scale = 3000.0
-    speed_max = 500.0 / 3.6
+    stop_error_abs = np.abs(target_pos - pos)
 
-    sigma_x_hat = 0.3
-    sigma_v_hat = 0.2
+    x_hat = stop_error_abs / 3000.0
+    v_hat = np.abs(speed * 3.6 / 500.0)
 
-    # 正则化项
-    dist_error = np.abs(target_pos - pos)
-    x_hat = dist_error / d_scale
-    v_hat = np.abs(speed / speed_max)
+    phi_far = 2.0 * np.exp(-x_hat)
 
-    # 增益参数
-    K_G = 20.0
+    phi_mid = 8.0 * np.exp(-x_hat / 0.1 - v_hat / 0.2)
 
-    phi_strong = K_G * np.exp(-x_hat / sigma_x_hat) * np.exp(-v_hat / sigma_v_hat)
+    phi_near = 20.0 * np.exp(-x_hat / 0.01 - v_hat / 0.01)
 
-    return phi_strong
+    return phi_far + phi_mid + phi_near
 
 
 def _potential_punctuality_v1(
@@ -567,8 +558,8 @@ def plot_stopping_potential_heatmap(
     K_G = 30.0
 
     # 扩大位置与速度展示范围
-    pos_array = np.linspace(target_pos - 1000.0, target_pos + 1000.0, 1200)
-    speed_array_ms = np.linspace(-200.0 / 3.6, 200.0 / 3.6, 1000)
+    pos_array = np.linspace(target_pos - 3000.0, target_pos + 3000.0, 1200)
+    speed_array_ms = np.linspace(-500.0 / 3.6, 500.0 / 3.6, 1000)
 
     POS, SPEED = np.meshgrid(pos_array, speed_array_ms)
 
@@ -580,7 +571,7 @@ def plot_stopping_potential_heatmap(
     )
 
     # version 2
-    # POTENTIAL = calc_potential_stopping_v2(
+    # POTENTIAL = _potential_stopping_v2(
     #     pos=POS,
     #     speed=SPEED,
     #     target_pos=target_pos,

@@ -39,6 +39,19 @@ def _write_episode_metrics_npz(
     return episode_metrics_path
 
 
+def _write_run_metadata(
+    final_dir: Path,
+    metadata: dict[str, object] | None = None,
+) -> Path:
+    final_dir.mkdir(parents=True, exist_ok=True)
+    metadata_path = final_dir / "run_metadata.json"
+    payload = {"rollout_record_trigger_mode": "steps"}
+    if metadata:
+        payload.update(metadata)
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+    return metadata_path
+
+
 def test_train_cli_defaults() -> None:
     parser = build_arg_parser()
     args = parser.parse_args(["train"])
@@ -57,9 +70,11 @@ def test_resolve_run_matrix_expands_distances_and_seeds() -> None:
     run_entries = resolve_step_distance_run_matrix(args)
 
     assert len(run_entries) == len(DEFAULT_STEP_DISTANCES) * len(DEFAULT_SEEDS)
-    assert [entry.max_step_distance for entry in run_entries[:3]] == [50.0] * 3
-    assert [entry.seed for entry in run_entries[:3]] == [42, 43, 44]
-    assert run_entries[0].experiment_tag == "ds50p0__r01"
+    assert [entry.max_step_distance for entry in run_entries[:3]] == [
+        DEFAULT_STEP_DISTANCES[0]
+    ] * 3
+    assert [entry.seed for entry in run_entries[:3]] == list(DEFAULT_SEEDS)
+    assert run_entries[0].experiment_tag == "ds10p0__r01"
     assert not hasattr(run_entries[0].train_args, "max_train_episodes")
 
 
@@ -217,6 +232,9 @@ def test_build_curve_aggregates_groups_monitor_data_by_step_distance(
         rewards=[10.0, 12.0],
         lengths=[5.0, 4.0],
     )
+    _write_run_metadata(run_50_r1)
+    _write_run_metadata(run_50_r2)
+    _write_run_metadata(run_100_r1)
 
     manifest = {
         "max_step_distances": [50.0, 100.0],
@@ -225,6 +243,7 @@ def test_build_curve_aggregates_groups_monitor_data_by_step_distance(
                 "max_step_distance": 50.0,
                 "repeat_index": 0,
                 "seed": 42,
+                "final_output_dir": str(run_50_r1),
                 "episode_metrics_path": str(metrics_50_r1),
                 "status": "completed",
             },
@@ -232,6 +251,7 @@ def test_build_curve_aggregates_groups_monitor_data_by_step_distance(
                 "max_step_distance": 50.0,
                 "repeat_index": 1,
                 "seed": 43,
+                "final_output_dir": str(run_50_r2),
                 "episode_metrics_path": str(metrics_50_r2),
                 "status": "completed",
             },
@@ -239,6 +259,7 @@ def test_build_curve_aggregates_groups_monitor_data_by_step_distance(
                 "max_step_distance": 100.0,
                 "repeat_index": 0,
                 "seed": 42,
+                "final_output_dir": str(run_100_r1),
                 "episode_metrics_path": str(metrics_100_r1),
                 "status": "completed",
             },
@@ -251,14 +272,14 @@ def test_build_curve_aggregates_groups_monitor_data_by_step_distance(
     assert [aggregate.max_step_distance for aggregate in aggregates] == [50.0, 100.0]
     aggregate_50 = aggregates[0]
     assert aggregate_50.valid_run_count == 2
-    np.testing.assert_allclose(aggregate_50.reference_steps, [10.0, 12.0, 19.0, 22.0, 27.0])
+    np.testing.assert_allclose(aggregate_50.reference_steps, [0.0, 1.0, 2.0])
     np.testing.assert_allclose(
         aggregate_50.mean_reward,
-        [1.0, 1.7222222222222223, 3.2, 3.875, 5.0],
+        [1.5, 3.5, 5.0],
     )
     np.testing.assert_allclose(
         aggregate_50.mean_length,
-        [10.0, 10.88888888888889, 9.8, 9.3125, 8.0],
+        [11.0, 9.5, 8.0],
     )
 
 

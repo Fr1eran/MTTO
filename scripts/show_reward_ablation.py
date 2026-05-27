@@ -26,11 +26,10 @@ from rl.experiment_utils import (
 )
 from utils.scenario import build_safeguard_utility
 
-ABLATION_MANIFEST_FILENAME = "ablation_manifest.json"
+ABLATION_MANIFEST_FILENAME = "reward_ablation_manifest.json"
 EPISODE_METRICS_FILENAME = "episode_metrics.npz"
-CURVE_LAYOUT_CHOICES = ("overlay", "separate")
 TRAJECTORY_LAYOUT_CHOICES = ("separate",)
-DEFAULT_ABLATION_ROOT = "output/optimal/rl/ablation"
+DEFAULT_ABLATION_ROOT = "output/optimal/rl/reward_ablation"
 PROFILE_COLORS: dict[str, str] = {
     "basic": "#1f77b4",
     "basic_safety": "#2ca02c",
@@ -74,24 +73,18 @@ class SelectedTrajectoryCandidate:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="展示奖励消融实验的学习曲线和代表性轨迹"
+        description="展示奖励消融实验的学习曲线(固定为overlay)和代表性轨迹"
     )
     parser.add_argument(
         "--ablation-root",
         default=DEFAULT_ABLATION_ROOT,
-        help="奖励消融实验输出根目录, 应包含 ablation_manifest.json。",
+        help="奖励消融实验输出根目录, 应包含 reward_ablation_manifest.json。",
     )
     parser.add_argument(
         "--trajectory-source",
         choices=RL_TRAJECTORY_SOURCE_CHOICES,
         default="best",
         help="展示最终轨迹或不同 best artifact 来源。",
-    )
-    parser.add_argument(
-        "--curve-layout",
-        choices=CURVE_LAYOUT_CHOICES,
-        default="overlay",
-        help="训练曲线布局。overlay 为两张叠加子图, separate 为每种奖励情形单独子图。",
     )
     parser.add_argument(
         "--trajectory-layout",
@@ -429,64 +422,12 @@ def _build_profile_legend_handles(reward_profiles: list[str]) -> list[Line2D]:
 
 def _plot_curve_aggregates(
     aggregates: list[CurveAggregateResult],
-    *,
-    curve_layout: str,
 ) -> None:
     if not aggregates:
         print("No curve aggregates available; skipped curve figure.")
         return
 
     apply_rl_curve_plot_style()
-    if curve_layout == "separate":
-        fig, axes = plt.subplots(
-            nrows=len(aggregates),
-            ncols=2,
-            figsize=(12, max(4.0 * len(aggregates), 4.5)),
-            squeeze=False,
-        )
-        for row_index, aggregate in enumerate(aggregates):
-            color = _resolve_profile_color(aggregate.reward_profile_name)
-            ax_reward = axes[row_index][0]
-            ax_length = axes[row_index][1]
-            ax_reward.plot(
-                aggregate.reference_steps, aggregate.mean_reward, color=color
-            )
-            ax_reward.fill_between(
-                aggregate.reference_steps,
-                aggregate.mean_reward - aggregate.std_reward,
-                aggregate.mean_reward + aggregate.std_reward,
-                color=color,
-                alpha=0.18,
-            )
-            ax_reward.set_xlabel("Training steps")
-            ax_reward.set_ylabel("Mean episode reward")
-            ax_reward.grid(True, alpha=0.3)
-
-            ax_length.plot(
-                aggregate.reference_steps, aggregate.mean_length, color=color
-            )
-            ax_length.fill_between(
-                aggregate.reference_steps,
-                aggregate.mean_length - aggregate.std_length,
-                aggregate.mean_length + aggregate.std_length,
-                color=color,
-                alpha=0.18,
-            )
-            ax_length.set_xlabel("Training steps")
-            ax_length.set_ylabel("Mean episode length")
-            ax_length.grid(True, alpha=0.3)
-
-        fig.legend(
-            handles=_build_profile_legend_handles([
-                aggregate.reward_profile_name for aggregate in aggregates
-            ]),
-            loc="upper center",
-            ncol=min(4, len(aggregates)),
-        )
-        plt.tight_layout(rect=(0.0, 0.0, 1.0, 0.94))
-        plt.show()
-        return
-
     fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(12, 4.8), squeeze=False)
     ax_reward = axes[0][0]
     ax_length = axes[0][1]
@@ -673,7 +614,7 @@ def main() -> None:
         parser.error("No valid ablation artifacts available for plotting.")
         return
 
-    _plot_curve_aggregates(curve_aggregates, curve_layout=args.curve_layout)
+    _plot_curve_aggregates(curve_aggregates)
     _plot_selected_trajectories(
         selected_candidates,
         no_safeguard=args.no_safeguard,
@@ -683,4 +624,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

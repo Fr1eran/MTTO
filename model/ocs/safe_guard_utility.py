@@ -749,14 +749,31 @@ class SafeGuardUtility:
         Returns:
             当前磁浮列车状态是否危险
         """
-        pos = np.asarray(pos, dtype=np.float64)
-        speed = np.asarray(speed, dtype=np.float64)
+        pos, speed = np.broadcast_arrays(
+            np.asarray(pos, dtype=np.float64),
+            np.asarray(speed, dtype=np.float64),
+        )
         result1 = self._detect_speed_exceed(pos, speed)
         result2 = self._detect_dangerous_region_enter(pos, speed)
         result = result1 | result2
         if result.ndim == 0:
             return bool(result)
         return result
+
+    def detect_any_danger(
+        self,
+        pos: ScalarNumeric | ArrayLike,
+        speed: ScalarNumeric | ArrayLike,
+    ) -> bool:
+        """检查输入序列中是否存在任一危险状态(早停语义)。"""
+        pos_arr, speed_arr = np.broadcast_arrays(
+            np.asarray(pos, dtype=np.float64),
+            np.asarray(speed, dtype=np.float64),
+        )
+
+        if self._detect_speed_exceed_any(pos_arr, speed_arr):
+            return True
+        return self._detect_dangerous_region_enter_any(pos_arr, speed_arr)
 
     def _detect_speed_exceed(self, pos: NDArray, speed: NDArray):
         speed_limit = self.speed_limits[
@@ -768,8 +785,49 @@ class SafeGuardUtility:
         ]
         return speed >= speed_limit * self.gamma
 
+    def _detect_speed_exceed_any(self, pos: NDArray, speed: NDArray) -> bool:
+        if pos.ndim == 0:
+            idx = int(get_interval_index(float(pos), self.speed_limit_intervals))
+            idx = min(max(idx, 0), len(self.speed_limits) - 1)
+            return bool(float(speed) >= self.speed_limits[idx] * self.gamma)
+
+        speed_limit = self.speed_limits[
+            np.clip(
+                np.searchsorted(self.speed_limit_intervals, pos, side="right") - 1,
+                0,
+                len(self.speed_limits) - 1,
+            )
+        ]
+        return bool(np.any(speed >= speed_limit * self.gamma))
+
     def _detect_dangerous_region_enter(self, pos: NDArray, speed: NDArray):
         self._ensure_region_cache()
+
+        if pos.ndim == 0:
+            pos_value = float(pos)
+            speed_value = float(speed)
+            for i in range(self._num_regions):
+                if not (
+                    pos_value > self._idp_points_x[i]
+                    and pos_value < self._min_curves_part_x_padded[i][-1]
+                ):
+                    continue
+                above_v = float(
+                    np.interp(
+                        pos_value,
+                        self._min_curves_part_x_padded[i],
+                        self._min_curves_part_y_padded[i],
+                    )
+                )
+                below_v = float(
+                    np.interp(
+                        pos_value,
+                        self._max_curves_part_x_padded[i],
+                        self._max_curves_part_y_padded[i],
+                    )
+                )
+                return bool(speed_value <= above_v and speed_value >= below_v)
+            return False
 
         result = np.zeros_like(pos, dtype=bool)
         for i in range(self._num_regions):
@@ -777,24 +835,54 @@ class SafeGuardUtility:
             mask = (pos > self._idp_points_x[i]) & (
                 pos < self._min_curves_part_x_padded[i][-1]
             )
+            if not np.any(mask):
+                continue
+
+            pos_masked = pos[mask]
+            speed_masked = speed[mask]
             # 上下界插值
             above_v = np.interp(
-                pos,  # type: ignore[arg-type]
+                pos_masked,
                 self._min_curves_part_x_padded[i],
                 self._min_curves_part_y_padded[i],
             )
             below_v = np.interp(
-                pos,  # type: ignore[arg-type]
+                pos_masked,
                 self._max_curves_part_x_padded[i],
                 self._max_curves_part_y_padded[i],
             )
             # 速度判断
-            mask = mask & (speed <= above_v) & (speed >= below_v)
-            result = result | mask
-        if np.isscalar(pos):
-            return bool(result)
-        else:
-            return result
+            result[mask] |= (speed_masked <= above_v) & (speed_masked >= below_v)
+        return result
+
+    def _detect_dangerous_region_enter_any(self, pos: NDArray, speed: NDArray) -> bool:
+        self._ensure_region_cache()
+
+        if pos.ndim == 0:
+            return bool(self._detect_dangerous_region_enter(pos, speed))
+
+        for i in range(self._num_regions):
+            mask = (pos > self._idp_points_x[i]) & (
+                pos < self._min_curves_part_x_padded[i][-1]
+            )
+            if not np.any(mask):
+                continue
+
+            pos_masked = pos[mask]
+            speed_masked = speed[mask]
+            above_v = np.interp(
+                pos_masked,
+                self._min_curves_part_x_padded[i],
+                self._min_curves_part_y_padded[i],
+            )
+            below_v = np.interp(
+                pos_masked,
+                self._max_curves_part_x_padded[i],
+                self._max_curves_part_y_padded[i],
+            )
+            if np.any((speed_masked <= above_v) & (speed_masked >= below_v)):
+                return True
+        return False
 
     def render(
         self,

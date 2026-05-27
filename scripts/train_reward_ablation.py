@@ -20,7 +20,7 @@ DEFAULT_ABLATION_REWARD_PROFILES: tuple[str, ...] = (
     "basic_safety_stopping",
     "basic_safety_stopping_punctuality",
 )
-ABLATION_MANIFEST_FILENAME = "ablation_manifest.json"
+ABLATION_MANIFEST_FILENAME = "reward_ablation_manifest.json"
 
 
 @dataclass(frozen=True)
@@ -40,7 +40,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ablation-output-root",
         type=str,
-        default="output/optimal/rl/ablation",
+        default="output/optimal/rl/reward_ablation",
         help="四种奖励方案消融实验的输出根目录。",
     )
     parser.add_argument(
@@ -88,7 +88,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-step-distance",
         type=float,
-        default=100.0,
+        default=30.0,
         help="训练环境相邻状态转移间的最大移动距离。",
     )
     parser.add_argument(
@@ -419,4 +419,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

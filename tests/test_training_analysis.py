@@ -789,12 +789,12 @@ def test_resolve_log_interval_defaults_and_override():
 
 @pytest.mark.parametrize(
     "run_mode, expected",
-    [
-        ("tune", (True, True, True, True, True, True)),
-        ("reproduce", (False, False, False, False, False, False)),
-        ("monitor_best", (True, False, True, False, False, True)),
-        ("best_only", (False, False, False, False, False, True)),
-    ],
+        [
+            ("tune", (True, True, True, True, True, True)),
+            ("reproduce", (False, False, True, False, False, False)),
+            ("monitor_best", (True, False, True, False, False, True)),
+            ("best_only", (False, False, False, False, False, True)),
+        ],
 )
 def test_resolve_run_mode_defaults(run_mode: str, expected: tuple[bool, ...]) -> None:
     args = argparse.Namespace(
@@ -909,7 +909,7 @@ def test_resolve_training_run_spec_plans_paths_and_switches() -> None:
     assert Path(spec.run_metadata_path).name == "run_metadata.json"
     assert spec.run_metadata["reward_profile_name"] == "basic_safety"
     assert spec.subproc_start_method is None
-    assert spec.run_metadata["subproc_start_method"] is None
+    assert "subproc_start_method" not in spec.run_metadata
     assert spec.dry_run is True
 
 

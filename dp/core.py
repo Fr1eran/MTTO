@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import math
 import multiprocessing as mp
 import os
 import pickle
@@ -69,10 +70,10 @@ def _calculate_transition_with_context(
     ecc: ECC,
     track: TrackInfo,
 ) -> tuple[bool, float, float]:
-    if np.isclose(displacement, 0.0):
+    if math.isclose(displacement, 0.0):
         return False, np.inf, np.inf
 
-    if np.isclose(speed_k + speed_k_1, 0.0):
+    if math.isclose(speed_k + speed_k_1, 0.0):
         return False, np.inf, np.inf
 
     # 匀变速模型: a = (v1^2 - v0^2) / (2 * ds)
@@ -91,7 +92,7 @@ def _calculate_transition_with_context(
     speed_sample = np.sqrt(np.maximum(speed_sq_sample, 0.0))
 
     # 检查是否进入危险速度域
-    if safeguard_utility.detect_danger(pos=pos_sample, speed=speed_sample).any():
+    if safeguard_utility.detect_any_danger(pos=pos_sample, speed=speed_sample):
         return False, np.inf, np.inf
 
     if np.abs(acc) < 1e-9:
@@ -1042,7 +1043,7 @@ class VariableSpacingDPOptimizer:
             速度步长为 {delta_speed:.2f}m/s"
         )
 
-        lambda_time = 1e5
+        lambda_time = 1e3
         lambda_min = 0.0
         lambda_max = 1e8
         best_result = None
