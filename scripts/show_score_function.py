@@ -58,10 +58,10 @@ def visualize_stopping_score_function():
 
 def visualize_punctuality_score_function():
     schedule_time = 430.0
-    max_arr_time_ratio = 0.05
+    max_arr_time_ratio = 0.01
     punctuality_score_func = SigmoidVariant(
         x1=schedule_time * max_arr_time_ratio,
-        x2=schedule_time * max_arr_time_ratio * 5,
+        x2=schedule_time * max_arr_time_ratio * 10.0,
         c=8.0,
     )
 
@@ -117,10 +117,10 @@ def visualize_combined_score_functions():
     """在同一画幅中上下布局展示停站分数和准时分数的函数图像和导函数图像"""
     stopping_score_func = SigmoidVariant(x1=0.3, x2=3.0, c=5.0)
     schedule_time = 430.0
-    max_arr_time_ratio = 0.05
+    max_arr_time_ratio = 0.01
     punctuality_score_func = SigmoidVariant(
         x1=schedule_time * max_arr_time_ratio,
-        x2=schedule_time * max_arr_time_ratio * 2,
+        x2=schedule_time * max_arr_time_ratio * 10.0,
         c=6.0,
     )
 
@@ -166,7 +166,7 @@ def visualize_combined_score_functions():
     )
 
     # ---- 下子图：准时分 ----
-    x_punct = np.linspace(0, 100.0, 1000)
+    x_punct = np.linspace(0, 60.0, 1000)
     rewards_punct = punctuality_score_func(x_punct)
     gradients_punct = punctuality_score_func.gradient(x_punct)
 
@@ -190,7 +190,7 @@ def visualize_combined_score_functions():
     )
     ax2.axhline(y=0, color="black", linewidth=1)
     ax2.grid(True, alpha=0.3)
-    ax2.set_xlim(0, 140.0)
+    ax2.set_xlim(0, 60.0)
     ax2.text(
         0.5,
         -0.20,
@@ -230,4 +230,3 @@ if __name__ == "__main__":
         savefig_dpi=300.0,
     )
     visualize_combined_score_functions()
-

@@ -171,7 +171,7 @@ class MTTOEnv(gym.Env):
             * self.train_service.max_arr_time_error_ratio,
             x2=self.train_service.schedule_time
             * self.train_service.max_arr_time_error_ratio
-            * 2,
+            * 10.0,
             c=6.0,
         )
 
@@ -385,7 +385,7 @@ class MTTOEnv(gym.Env):
             sgu=self.safeguard_utility,
             ASA_ap_list=self.track.ASA_aps,
             ASA_dp_list=self.track.ASA_dps,
-            T_s=1.0,
+            T_s=2.0,
         )
 
         # Q初始值
@@ -798,7 +798,7 @@ class MTTOEnv(gym.Env):
             stopped
             and self.stop_error <= self.train_service.max_stop_error * 10.0
             and self.time_error_ratio
-            <= self.train_service.max_arr_time_error_ratio * 2.0
+            <= self.train_service.max_arr_time_error_ratio * 10.0
         )
         speed_low_violation = self.current_speed < self.current_min_speed
         speed_high_violation = self.current_speed > self.current_max_speed
@@ -1054,7 +1054,7 @@ class MTTOEnv(gym.Env):
             # 基本生存奖励
             small_bonus = 150.0 / self.max_episode_steps
             if terminated:
-                reward_total = self._get_reward_goal()
+                reward_total = self._get_reward_goal() + 10.0
             else:
                 reward_total = self._get_reward_dense()
 
@@ -1381,7 +1381,7 @@ class MTTOEnv(gym.Env):
         scale = 1.0 + 1.0 * np.exp(-0.001 * distance_to_target)
 
         # 最终势能为两侧惩罚之和
-        return scale * (phi_max + phi_min) * 3.0
+        return scale * (phi_max + phi_min) * 2.0
 
     def _potential_safety_position(
         self, pos: float, min_pos: float, max_pos: float, target_pos: float
@@ -1435,12 +1435,22 @@ class MTTOEnv(gym.Env):
         #     time_redundancy=self.last_state["time_redundancy"]
         # )
 
-        phi_curr = self._potential_punctuality_v3(
-            time_redundancy=self.current_time_redundancy
+        # phi_curr = self._potential_punctuality_v4(
+        #     time_redundancy=self.current_time_redundancy
+        # )
+
+        # phi_prev = self._potential_punctuality_v4(
+        #     time_redundancy=self.last_state["time_redundancy"]
+        # )
+
+        phi_curr = self._potential_punctuality_v5(
+            operation_time=self.current_operation_time,
+            time_redundancy=self.current_time_redundancy,
         )
 
-        phi_prev = self._potential_punctuality_v3(
-            time_redundancy=self.last_state["time_redundancy"]
+        phi_prev = self._potential_punctuality_v5(
+            operation_time=self.last_state["operation_time"],
+            time_redundancy=self.last_state["time_redundancy"],
         )
 
         return self.gamma * phi_curr - phi_prev
@@ -1479,6 +1489,43 @@ class MTTOEnv(gym.Env):
                     - 1
                 )
             )
+
+    def _potential_punctuality_v4(self, time_redundancy: float):
+        """准点势能：预计准点到达时最大，预计晚点时快速下降。"""
+
+        K_peak = 4.0
+        K_early = 4.0
+        K_late = 20.0
+        alpha_late = 8.0
+
+        time_redundancy_clipped = float(np.clip(time_redundancy, -1.0, 1.0))
+        if time_redundancy_clipped >= 0.0:
+            return K_peak - K_early * time_redundancy_clipped**2
+
+        late_error_ratio = -time_redundancy_clipped
+        return K_peak - K_late / alpha_late * (
+            np.exp(alpha_late * late_error_ratio) - 1.0
+        )
+
+    def _potential_punctuality_v5(self, operation_time: float, time_redundancy: float):
+        K_T = 10.0
+        sigma_tau_1 = 200.0
+        sigma_tau_2 = 100.0
+        sigma_rho = 0.1
+
+        remaining_schedule_time = self.train_service.schedule_time - operation_time
+
+        if remaining_schedule_time > 0.0:
+            e_time = np.exp(-((remaining_schedule_time / sigma_tau_1) ** 2))
+        else:
+            e_time = np.exp(-((remaining_schedule_time / sigma_tau_2) ** 2))
+
+        if time_redundancy > 0.0:
+            e_redundancy = 1.0
+        else:
+            e_redundancy = np.exp(-((time_redundancy / sigma_rho) ** 2))
+
+        return K_T * e_time * e_redundancy
 
     def _get_reward_stopping_dense(self):
 

@@ -241,6 +241,79 @@ def _potential_punctuality_v3(redundant_operation_time, schedule_time):
     )
 
 
+def _potential_punctuality_v4(redundant_operation_time, schedule_time):
+    K_peak = 4.0
+    K_early = 4.0
+    K_late = 20.0
+    alpha_late = 8.0
+
+    time_redundancy_norm = np.clip(
+        redundant_operation_time / schedule_time,
+        -1.0,
+        1.0,
+    )
+    late_error_ratio = -time_redundancy_norm
+
+    return np.where(
+        time_redundancy_norm >= 0,
+        K_peak - K_early * time_redundancy_norm**2,
+        K_peak - K_late / alpha_late * (np.exp(alpha_late * late_error_ratio) - 1),
+    )
+
+
+def _potential_punctuality_v5(operation_time, redundant_operation_time, schedule_time):
+    K_progress = 5.0  # 时间推进系数
+    lambda_val = 0.01  # 控制时间推进梯度
+    K_redundant = 2.0  # 冗余度奖励系数
+    K_late = 5.0  # 晚点衰减系数
+    alpha = 5.0  # 晚点惩罚敏感系数
+    K_overtime = 15.0  # 超时惩罚系数
+    beta = 0.5  # 超时惩罚敏感系数
+
+    time_redundancy_norm = np.clip(redundant_operation_time / schedule_time, -1.0, 1.0)
+    remaining_operation_time = schedule_time - operation_time
+
+    progress = K_progress * np.exp(
+        -lambda_val * np.maximum(remaining_operation_time, 0.0)
+    )
+
+    phi_safe = progress + K_redundant * time_redundancy_norm
+
+    late_penalty = K_late * (np.exp(-alpha * time_redundancy_norm) - 1.0)
+    phi_late = progress - late_penalty
+
+    phi = np.where(time_redundancy_norm >= 0.0, phi_safe, phi_late)
+
+    overtime_seconds = np.clip(-remaining_operation_time, 0.0, 60.0)
+    cliff_penalty = K_overtime * (np.exp(beta * overtime_seconds) - 1.0)
+
+    phi -= cliff_penalty
+
+    return phi
+
+
+def _potential_punctuality_v6(operation_time, redundant_operation_time, schedule_time):
+    K_T = 10.0
+    sigma_tau_1 = 200.0
+    sigma_tau_2 = 100.0
+    sigma_rho = 0.1
+
+    remaining_schedule_time = schedule_time - operation_time
+    time_redundancy = redundant_operation_time / schedule_time
+
+    e_time = np.where(
+        remaining_schedule_time > 0.0,
+        np.exp(-((remaining_schedule_time / sigma_tau_1) ** 2)),
+        np.exp(-((remaining_schedule_time / sigma_tau_2) ** 2)),
+    )
+
+    e_redundancy = np.where(
+        time_redundancy >= 0.0, 1.0, np.exp(-((time_redundancy / sigma_rho) ** 2))
+    )
+
+    return K_T * e_time * e_redundancy
+
+
 def infer_position_from_speed(curve_pos, curve_speed, target_speed):
     """
     在最小速度曲线随位置单调递减时，根据目标速度反推对应位置。
@@ -273,6 +346,7 @@ def interp_with_constant_fill(x, y, query, left_value, right_value):
 def _apply_minimal_axis_style(ax) -> None:
     ax.grid(False)
     ax.set_axis_on()
+    ax.axison = True
 
 
 def _apply_transparent_background(fig: Figure) -> None:
@@ -744,7 +818,13 @@ def plot_punctuality_potential_curve(
     # )
 
     # version 3
-    potential_array = _potential_punctuality_v3(
+    # potential_array = _potential_punctuality_v3(
+    #     redundant_operation_time=redundant_operation_time_array,
+    #     schedule_time=schedule_time,
+    # )
+
+    # version 4
+    potential_array = _potential_punctuality_v4(
         redundant_operation_time=redundant_operation_time_array,
         schedule_time=schedule_time,
     )
@@ -776,12 +856,155 @@ def plot_punctuality_potential_curve(
     return fig
 
 
+def plot_punctuality_potential_heatmap(
+    schedule_time: float = 430.0,
+    operation_time_lower: float = 0.0,
+    operation_time_upper: float = 530.0,
+    redundant_time_lower: float = -100.0,
+    redundant_time_upper: float = 52.0,
+    *,
+    minimal: bool = False,
+) -> Figure:
+    operation_time_array = np.linspace(
+        operation_time_lower, operation_time_upper, 1000, dtype=np.float64
+    )
+    redundant_time_array = np.linspace(
+        redundant_time_lower, redundant_time_upper, 1000, dtype=np.float64
+    )
+    OPERATION_TIME, REDUNDANT_TIME = np.meshgrid(
+        operation_time_array, redundant_time_array
+    )
+    POTENTIAL = _potential_punctuality_v6(
+        operation_time=OPERATION_TIME,
+        redundant_operation_time=REDUNDANT_TIME,
+        schedule_time=schedule_time,
+    )
+
+    # 二维图形
+    # fig, ax = plt.subplots(figsize=(10, 6))
+    # c = ax.pcolormesh(
+    #     OPERATION_TIME,
+    #     REDUNDANT_TIME,
+    #     POTENTIAL,
+    #     cmap="YlGnBu",
+    #     shading="auto",
+    #     vmin=0.0,
+    #     vmax=10.0,
+    # )
+
+    # ax.axvline(schedule_time, color="black", linestyle="--", linewidth=1.2)
+    # ax.axhline(0.0, color="black", linestyle=":", linewidth=1.2)
+
+    # 三维图形
+    fig = plt.figure(figsize=(10, 6))
+    ax = fig.add_subplot(111, projection="3d")
+
+    ax.plot_surface(
+        OPERATION_TIME,
+        REDUNDANT_TIME,
+        POTENTIAL,
+        cmap="YlGnBu",
+        linewidth=0,
+        antialiased=True,
+        alpha=0.82,
+        vmin=0.0,
+        vmax=10.0,
+    )
+
+    boundary_z_offset = 0.05
+
+    def plot_contour_boundary_on_surface(
+        contour_field,
+        level: float,
+        *,
+        color: str,
+        linestyle: str,
+        label: str,
+    ) -> None:
+        tmp_fig, tmp_ax = plt.subplots()
+        contour_set = tmp_ax.contour(
+            OPERATION_TIME,
+            REDUNDANT_TIME,
+            contour_field,
+            levels=[level],
+        )
+        segments = contour_set.allsegs[0]
+        plt.close(tmp_fig)
+
+        for idx, segment in enumerate(segments):
+            operation_time_segment = segment[:, 0]
+            redundant_time_segment = segment[:, 1]
+            potential_segment = _potential_punctuality_v6(
+                operation_time=operation_time_segment,
+                redundant_operation_time=redundant_time_segment,
+                schedule_time=schedule_time,
+            )
+            ax.plot(
+                operation_time_segment,
+                redundant_time_segment,
+                potential_segment + boundary_z_offset,
+                color="white",
+                linestyle=linestyle,
+                linewidth=2.0,
+                alpha=0.95,
+            )
+            ax.plot(
+                operation_time_segment,
+                redundant_time_segment,
+                potential_segment + boundary_z_offset,
+                color=color,
+                linestyle=linestyle,
+                linewidth=2.0,
+                label=label if idx == 0 else None,
+            )
+
+    plot_contour_boundary_on_surface(
+        OPERATION_TIME,
+        schedule_time,
+        color="#111111",
+        linestyle=":",
+        label="operation_time = 430 s",
+    )
+    plot_contour_boundary_on_surface(
+        REDUNDANT_TIME,
+        0.0,
+        color="#8b0000",
+        linestyle=":",
+        label="redundant_time = 0 s",
+    )
+
+    ax.set_xlim(operation_time_lower, operation_time_upper)
+    ax.set_ylim(redundant_time_lower, redundant_time_upper)
+    ax.set_zlim(0.0, 10.0)
+    ax.view_init(elev=28, azim=-135)
+
+    if minimal:
+        _apply_minimal_axis_style(ax)
+    else:
+        # 二维图形
+        # fig.colorbar(c, ax=ax)
+        # ax.set_xlabel("Operation Time(s)")
+        # ax.set_ylabel("Redundant Operation Time(s)")
+        # ax.grid(True, alpha=0.3, linestyle=":")
+
+        # 三维图形
+        ax.set_xlabel("Operation Time(s)")
+        ax.set_ylabel("Redundant Operation Time(s)")
+        ax.set_zlabel("Punctuality Potential")
+        ax.legend(loc="upper right", framealpha=0.9)
+
+    _apply_transparent_background(fig)
+    plt.tight_layout()
+    return fig
+
+
 PLOT_TYPE_CHOICES: tuple[str, ...] = (
     "safety-speed",
     "safety-position",
     "stopping-heatmap",
     "stopping-slices",
     "punctuality-curve",
+    "punctuality-heatmap",
 )
 
 
@@ -832,6 +1055,9 @@ def _resolve_plotter(plot_type: str, *, minimal: bool) -> Callable[[], Figure]:
         ),
         "stopping-slices": lambda: plot_stopping_potential_slices(minimal=minimal),
         "punctuality-curve": lambda: plot_punctuality_potential_curve(minimal=minimal),
+        "punctuality-heatmap": lambda: plot_punctuality_potential_heatmap(
+            minimal=minimal
+        ),
     }
     return plotters[plot_type]
 

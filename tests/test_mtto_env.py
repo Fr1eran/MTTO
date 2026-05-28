@@ -347,6 +347,34 @@ def test_potential_punctuality_v3_is_finite_for_extreme_negative_input(
     assert np.isfinite(val)
 
 
+def test_potential_punctuality_v4_peaks_at_zero_time_error(
+    mtto_env: MTTOEnv,
+) -> None:
+    peak = mtto_env._potential_punctuality_v4(0.0)
+    early = mtto_env._potential_punctuality_v4(0.1)
+    late = mtto_env._potential_punctuality_v4(-0.1)
+
+    assert peak > early
+    assert peak > late
+    assert late < early
+
+
+def test_potential_punctuality_v4_late_side_drops_monotonically(
+    mtto_env: MTTOEnv,
+) -> None:
+    slightly_late = mtto_env._potential_punctuality_v4(-0.05)
+    clearly_late = mtto_env._potential_punctuality_v4(-0.2)
+
+    assert clearly_late < slightly_late
+
+
+def test_potential_punctuality_v4_is_finite_for_extreme_input(
+    mtto_env: MTTOEnv,
+) -> None:
+    assert np.isfinite(mtto_env._potential_punctuality_v4(-100.0))
+    assert np.isfinite(mtto_env._potential_punctuality_v4(100.0))
+
+
 def test_punctuality_dense_reward_is_stable_for_extreme_time_redundancy(
     mtto_env: MTTOEnv,
 ) -> None:

@@ -69,7 +69,7 @@ def build_scenario(
         target_position=putong_end_position,
         schedule_time=schedule_time_s,
         max_acc_change=0.75,
-        max_arr_time_error_ratio=0.05,
+        max_arr_time_error_ratio=0.01,
         max_stop_error=0.3,
     )
 
