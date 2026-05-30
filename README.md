@@ -12,6 +12,7 @@
   - [RL 训练 · `train_rl`](#rl-训练--train_rl)
   - [RL 消融训练 · `train_reward_ablation`](#rl-消融训练--train_reward_ablation)
   - [RL 评估 · `evaluate_rl`](#rl-评估--evaluate_rl)
+  - [RL 中途计划时间突变实验 · `run_schedule_time_change`](#rl-中途计划时间突变实验--run_schedule_time_change)
   - [训练日志分析 · `analyze_training_data`](#训练日志分析--analyze_training_data)
   - [DP 基线复现 · `reproduce_dp`](#dp-基线复现--reproduce_dp)
   - [DP 结果可视化 · `show_dp_result`](#dp-结果可视化--show_dp_result)
@@ -64,6 +65,7 @@ MTTO/
 | RL 训练 | `python -m scripts.train_rl` |
 | RL 消融训练 | `python -m scripts.train_reward_ablation` |
 | RL 评估 | `python -m scripts.evaluate_rl` |
+| RL 中途计划时间突变实验 | `python -m scripts.run_schedule_time_change evaluate` / `python -m scripts.run_schedule_time_change show` |
 | 训练日志分析 | `python -m scripts.analyze_training_data` |
 | DP 基线复现 | `python -m scripts.reproduce_dp` |
 | DP 结果可视化 | `python -m scripts.show_dp_result` |
@@ -78,7 +80,7 @@ MTTO/
 | 奖励函数可视化 | `python -m scripts.show_reward_function` |
 | 势函数可视化 | `python -m scripts.show_potential_function` |
 
-RL 工作流脚本 `train_rl`、`train_reward_ablation`、`evaluate_rl`、`analyze_training_data`、`show_rl_result`、`show_reward_ablation` 统一支持 `--dry-run`，用于预览有效配置、路径解析结果、运行矩阵或展示计划，而不执行训练/评估/分析/绘图。
+RL 工作流脚本 `train_rl`、`train_reward_ablation`、`evaluate_rl`、`run_schedule_time_change evaluate`、`analyze_training_data`、`show_rl_result`、`show_reward_ablation` 统一支持 `--dry-run`，用于预览有效配置、路径解析结果、运行矩阵或展示计划，而不执行训练/评估/分析/绘图。
 
 ---
 
@@ -318,6 +320,80 @@ python -m scripts.evaluate_rl \
 
 # 仅预览有效评估配置
 python -m scripts.evaluate_rl --load-dir output/optimal/rl/.../final/ --dry-run
+```
+
+---
+
+### RL 中途计划时间突变实验 · `run_schedule_time_change`
+
+批量评估同一 PPO 策略在“运行途中计划运行时间突然变化”场景下的响应，并展示多条速度曲线对比。脚本包含两个子命令：
+
+- `evaluate`：加载模型，按多组时间变化量执行 rollout，并保存轨迹与指标。
+- `show`：加载已保存的突变实验结果，绘制速度-距离对比图与安全防护背景。
+
+默认批量运行 `Original`、`Minus 10s`、`Plus 10s`、`Minus 20s`、`Plus 20s` 五种情形。其中 `Original` 不触发计划时间变化，其余情形会在列车首次跨过 `--change-distance-m` 指定位置时调用环境的 `change_schedule_time()`。
+
+#### `evaluate` 参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--load-dir` | `str` | `output/optimal/rl/final/` | 模型与 VecNormalize 文件所在目录 |
+| `--output-dir` | `str` | `output/optimal/rl/schedule_time_change_eval/` | 突变实验输出根目录；每次运行会创建时间戳子目录 |
+| `--reward-discount` | `float` | 从 `run_metadata.json` 读取，否则 `0.99` | 折扣因子（重建环境用） |
+| `--schedule-time-s` | `float` | 从 `run_metadata.json` 读取，否则 `430.0` | 突变前的初始规划运行时间 |
+| `--step-distance` | `float` | 从 `run_metadata.json` 读取，否则 `100.0` | 环境最大步距 (m) |
+| `--reward-profile` | `str` | 从 `run_metadata.json` 读取，否则 `full_shaping` | 评估所使用的奖励预设 |
+| `--device` | `str` | `cpu` | 推理设备 |
+| `--deterministic` | `bool` | `True` | 是否使用确定性策略 |
+| `--change-distance-m` | `float` | `800.0` | 触发计划时间变化的位置 (m) |
+| `--delta-times-s` | `str` | `0,-10,10,-20,20` | 逗号分隔的计划时间变化量；新计划时间为 `schedule_time_s + delta` |
+| `--dry-run` | `bool` | `False` | 仅解析配置与路径，不加载模型或运行 rollout |
+
+`evaluate` 模式会在输出目录中保存：
+
+- `trajectory_{case}.npz`
+- `trajectory_{case}_metrics.json`
+- `schedule_time_change_summary.json`
+
+#### `show` 参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--load-dir` | `str` | `output/optimal/rl/schedule_time_change_eval/` | 突变实验结果目录；可指向根目录或单次时间戳实验目录 |
+| `--save-figure` | `bool` | `True` | 是否保存对比图 |
+| `--show` | `bool` | `True` | 是否弹出图窗 |
+| `--figure-name` | `str` | `schedule_time_change_comparison.png` | 保存图像文件名 |
+| `--factor` | `float` | `0.99` | 绘制安全防护背景时使用的安全系数 |
+
+当 `--load-dir` 指向输出根目录时，`show` 会自动选择其中最新的时间戳实验目录；当它已经指向单次实验目录时，会直接加载该目录下的 `schedule_time_change_summary.json` 与轨迹文件。
+
+```bash
+# 仅预览将要运行的突变实验矩阵
+python -m scripts.run_schedule_time_change evaluate --dry-run
+
+# 使用训练得到的 final 模型运行默认五组突变实验
+python -m scripts.run_schedule_time_change evaluate \
+    --load-dir output/optimal/rl/.../final/ \
+    --change-distance-m 800.0
+
+# 自定义突变位置和时间变化组合
+python -m scripts.run_schedule_time_change evaluate \
+    --load-dir output/optimal/rl/.../final/ \
+    --change-distance-m 12000.0 \
+    --delta-times-s 0,-5,5,-15,15
+
+# 展示最新一次突变实验结果，并保存对比图
+python -m scripts.run_schedule_time_change show \
+    --load-dir output/optimal/rl/schedule_time_change_eval/
+
+# 只保存图像，不弹出图窗
+python -m scripts.run_schedule_time_change show \
+    --load-dir output/optimal/rl/schedule_time_change_eval/ \
+    --no-show
+
+# 展示某一次具体实验目录
+python -m scripts.run_schedule_time_change show \
+    --load-dir output/optimal/rl/schedule_time_change_eval/20260101_120000
 ```
 
 ---

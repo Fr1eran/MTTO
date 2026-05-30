@@ -585,6 +585,25 @@ class MTTOEnv(gym.Env):
             + action * (self.vehicle.max_acc - self.vehicle.max_dec) / 2
         )
 
+    def change_schedule_time(self, new_schedule_time: float):
+        if new_schedule_time != self.train_service.schedule_time:
+            self.train_service.schedule_time = new_schedule_time
+            self._punctuality_score_func = SigmoidVariant(
+                x1=self.train_service.schedule_time
+                * self.train_service.max_arr_time_error_ratio,
+                x2=self.train_service.schedule_time
+                * self.train_service.max_arr_time_error_ratio
+                * 10.0,
+                c=6.0,
+            )
+            self.current_time_redundancy = self._calc_time_redundancy()
+            self.time_error_ratio = (
+                abs(self.current_operation_time - self.train_service.schedule_time)
+                / self.train_service.schedule_time
+            )
+
+        return self._get_obs()
+
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
         """
         开启新回合
@@ -1266,7 +1285,10 @@ class MTTOEnv(gym.Env):
             else self.train_service.target_position,
         )
 
-        return self.gamma * phi_curr - phi_prev
+        # return self.gamma * phi_curr - phi_prev
+        return (
+            phi_curr - phi_prev
+        )  # 轻微地偏离PBRS的最优性保证，但能换来更好的训练稳定性
 
     def _potential_safety_speed(
         self,
@@ -1453,7 +1475,20 @@ class MTTOEnv(gym.Env):
             time_redundancy=self.last_state["time_redundancy"],
         )
 
-        return self.gamma * phi_curr - phi_prev
+        # phi_curr = self._potential_punctuality_v6(
+        #     operation_time=self.current_operation_time,
+        #     time_redundancy=self.current_time_redundancy,
+        # )
+
+        # phi_prev = self._potential_punctuality_v6(
+        #     operation_time=self.last_state["operation_time"],
+        #     time_redundancy=self.last_state["time_redundancy"],
+        # )
+
+        # return self.gamma * phi_curr - phi_prev
+        return (
+            phi_curr - phi_prev
+        )  # 轻微地偏离PBRS的最优性保证，但能换来更好的训练稳定性
 
     def _potential_punctuality_v1(self, time_redundancy: float):
         return -4.0 * np.log1p(np.exp(-1.0 * time_redundancy))
@@ -1509,9 +1544,9 @@ class MTTOEnv(gym.Env):
 
     def _potential_punctuality_v5(self, operation_time: float, time_redundancy: float):
         K_T = 10.0
-        sigma_tau_1 = 200.0
-        sigma_tau_2 = 100.0
-        sigma_rho = 0.1
+        sigma_tau_1 = 1000.0
+        sigma_tau_2 = 10.0
+        sigma_rho = 1.0
 
         remaining_schedule_time = self.train_service.schedule_time - operation_time
 
@@ -1525,7 +1560,26 @@ class MTTOEnv(gym.Env):
         else:
             e_redundancy = np.exp(-((time_redundancy / sigma_rho) ** 2))
 
-        return K_T * e_time * e_redundancy
+        return K_T * (e_time * e_redundancy)
+
+    def _potential_punctuality_v6(self, operation_time: float, time_redundancy: float):
+        K_T = 10.0
+        sigma_tau = 10.0
+        sigma_rho = 0.1
+
+        remaining_schedule_time = self.train_service.schedule_time - operation_time
+
+        if remaining_schedule_time > 0.0:
+            e_time = 1.0
+        else:
+            e_time = np.exp(-((remaining_schedule_time / sigma_tau) ** 2))
+
+        if time_redundancy > 0.0:
+            e_redundancy = 1.0
+        else:
+            e_redundancy = np.exp(-((time_redundancy / sigma_rho) ** 2))
+
+        return K_T * (e_time * e_redundancy)
 
     def _get_reward_stopping_dense(self):
 
@@ -1545,7 +1599,10 @@ class MTTOEnv(gym.Env):
         #     pos=self.last_state["pos"], speed=self.last_state["speed"]
         # )
 
-        return self.gamma * phi_curr - phi_prev
+        # return self.gamma * phi_curr - phi_prev
+        return (
+            phi_curr - phi_prev
+        )  # 轻微地偏离PBRS的最优性保证，但能换来更好的训练稳定性
 
     def _potential_stopping_v1(self, pos: float, speed: float):
         dist_error_abs = abs(self.train_service.target_position - pos)
