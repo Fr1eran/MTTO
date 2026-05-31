@@ -79,6 +79,8 @@ def _build_result(
         final_speed_mps=0.0 if success else 3.0,
         stop_error_m=resolved_stop_error,
         time_error_s=resolved_time_error_s,
+        strict_stop_error_limit_m=0.3,
+        strict_time_error_limit_s=22.0,
         comfort_tav=1.0,
         comfort_er_pct=2.0,
         comfort_rms=3.0,
@@ -212,7 +214,7 @@ def test_best_eval_callback_persists_artifact_metadata(
     assert metrics["trajectory_source"] == "best"
 
 
-def test_best_eval_callback_prefers_lower_energy_among_successes(
+def test_best_eval_callback_prefers_lower_energy_after_strict_requirements(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -241,7 +243,7 @@ def test_best_eval_callback_prefers_lower_energy_among_successes(
     metrics = json.loads(
         (tmp_path / "best_trajectory_metrics.json").read_text(encoding="utf-8")
     )
-    assert metrics["best_update_reason"] == "lower_energy_among_successes"
+    assert metrics["best_update_reason"] == "lower_energy_after_strict_requirements"
     assert metrics["success"] is True
 
 
@@ -274,6 +276,18 @@ def test_to_metrics_includes_selection_rule() -> None:
     metrics = result.to_metrics()
 
     assert metrics["selection_rule"] == BEST_TRAJECTORY_SELECTION_RULE
+    assert metrics["strict_stop_error_limit_m"] == 0.3
+    assert metrics["strict_time_error_limit_s"] == 22.0
+    assert metrics["strict_stop_requirement_met"] is True
+    assert metrics["strict_time_requirement_met"] is True
+    assert metrics["selection_comparison_key"] == [
+        1.0,
+        1.0,
+        0.0,
+        1.0,
+        0.0,
+        -3000.0,
+    ]
 
 
 def test_describe_best_update_reason_reports_success_upgrade() -> None:
@@ -283,6 +297,98 @@ def test_describe_best_update_reason_reports_success_upgrade() -> None:
     assert (
         describe_best_update_reason(candidate, previous)
         == "success_replaces_reward_fallback"
+    )
+
+
+def test_describe_best_update_reason_prefers_strict_stop_requirement() -> None:
+    candidate = _build_result(
+        success=True,
+        total_reward=1.0,
+        total_energy_j=20_000.0,
+        stop_error_m=0.2,
+        time_error_s=0.0,
+    )
+    previous = _build_result(
+        success=True,
+        total_reward=100.0,
+        total_energy_j=1_000.0,
+        stop_error_m=0.5,
+        time_error_s=0.0,
+    )
+
+    assert (
+        describe_best_update_reason(candidate, previous)
+        == "strict_stop_requirement_reached"
+    )
+
+
+def test_describe_best_update_reason_prefers_lower_stop_error_before_strict_stop() -> (
+    None
+):
+    candidate = _build_result(
+        success=True,
+        total_reward=1.0,
+        total_energy_j=20_000.0,
+        stop_error_m=0.6,
+        time_error_s=0.0,
+    )
+    previous = _build_result(
+        success=True,
+        total_reward=100.0,
+        total_energy_j=1_000.0,
+        stop_error_m=0.7,
+        time_error_s=0.0,
+    )
+
+    assert (
+        describe_best_update_reason(candidate, previous)
+        == "lower_stop_error_before_strict_stop"
+    )
+
+
+def test_describe_best_update_reason_prefers_strict_time_requirement() -> None:
+    candidate = _build_result(
+        success=True,
+        total_reward=1.0,
+        total_energy_j=20_000.0,
+        stop_error_m=0.2,
+        time_error_s=10.0,
+    )
+    previous = _build_result(
+        success=True,
+        total_reward=100.0,
+        total_energy_j=1_000.0,
+        stop_error_m=0.2,
+        time_error_s=30.0,
+    )
+
+    assert (
+        describe_best_update_reason(candidate, previous)
+        == "strict_time_requirement_reached"
+    )
+
+
+def test_describe_best_update_reason_prefers_lower_time_error_before_strict_time() -> (
+    None
+):
+    candidate = _build_result(
+        success=True,
+        total_reward=1.0,
+        total_energy_j=20_000.0,
+        stop_error_m=0.2,
+        time_error_s=-30.0,
+    )
+    previous = _build_result(
+        success=True,
+        total_reward=100.0,
+        total_energy_j=1_000.0,
+        stop_error_m=0.2,
+        time_error_s=40.0,
+    )
+
+    assert (
+        describe_best_update_reason(candidate, previous)
+        == "lower_time_error_before_strict_time"
     )
 
 
@@ -302,7 +408,7 @@ def test_success_within_train_service_limits_rejects_stop_error_outside_limit() 
     train_service = _build_train_service()
     assert (
         is_success_within_train_service_limits(
-            stop_error_m=0.30001,
+            stop_error_m=0.3001,
             time_error_s=0.0,
             train_service=train_service,
         )

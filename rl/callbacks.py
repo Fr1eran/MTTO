@@ -1,4 +1,5 @@
 import os
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,6 +33,7 @@ class TensorboardCallback(BaseCallback):
         tb_sample_interval_steps: int = 1,
         force_dump_interval_steps: int | None = None,
         batch_dump_records: int | None = None,
+        async_dump: bool = True,
     ):
         super().__init__(verbose)
         self.min_tb_sample_interval_steps = max(1, int(tb_sample_interval_steps))
@@ -51,9 +53,14 @@ class TensorboardCallback(BaseCallback):
         self._pending_events: list[BufferedScalarEvent] = []
         self._episode_ids_by_env: list[int] = []
         self._tb_writer: Any = None
+        self._async_dump = bool(async_dump)
+        self._async_executor: ThreadPoolExecutor | None = None
+        self._async_futures: list[Future[None]] = []
 
     def _init_callback(self) -> None:
         self._tb_writer = self._resolve_tensorboard_writer()
+        if self._tb_writer is not None and self._async_dump:
+            self._start_async_writer()
 
     def _resolve_tensorboard_writer(self):
         output_formats = getattr(self.logger, "output_formats", None)
@@ -68,6 +75,64 @@ class TensorboardCallback(BaseCallback):
             ):
                 return writer
         return None
+
+    def _start_async_writer(self) -> None:
+        self._async_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="tensorboard-callback-writer",
+        )
+
+    def _write_events_to_writer(
+        self, writer: Any, events: tuple[BufferedScalarEvent, ...]
+    ) -> None:
+        for event in events:
+            for tag, value in event.scalars.items():
+                writer.add_scalar(tag, value, event.step)
+
+        writer.flush()
+
+    def _raise_completed_async_errors(self) -> None:
+        if not self._async_futures:
+            return
+
+        pending_futures: list[Future[None]] = []
+        for future in self._async_futures:
+            if future.done():
+                future.result()
+            else:
+                pending_futures.append(future)
+        self._async_futures = pending_futures
+
+    def _dispatch_events_to_writer(
+        self, events: tuple[BufferedScalarEvent, ...]
+    ) -> None:
+        if not events:
+            return
+
+        if self._async_executor is None:
+            self._write_events_to_writer(self._tb_writer, events)
+            return
+
+        self._raise_completed_async_errors()
+        future = self._async_executor.submit(
+            self._write_events_to_writer,
+            self._tb_writer,
+            events,
+        )
+        self._async_futures.append(future)
+
+    def _finish_async_writer(self) -> None:
+        if self._async_executor is None:
+            return
+
+        async_executor = self._async_executor
+        try:
+            for future in self._async_futures:
+                future.result()
+        finally:
+            self._async_futures.clear()
+            self._async_executor = None
+            async_executor.shutdown(wait=True)
 
     def _sync_episode_tracker(self, num_envs: int) -> None:
         if num_envs < 0:
@@ -162,7 +227,7 @@ class TensorboardCallback(BaseCallback):
             for key, value in payload.items():
                 try:
                     scalar_value = float(value)
-                except TypeError, ValueError:
+                except (TypeError, ValueError):
                     continue
                 aggregated_values.setdefault(key, []).append(scalar_value)
 
@@ -216,11 +281,8 @@ class TensorboardCallback(BaseCallback):
             self._last_dump_step = int(self.num_timesteps)
             return
 
-        for event in self._pending_events:
-            for tag, value in event.scalars.items():
-                writer.add_scalar(tag, value, event.step)
-
-        writer.flush()
+        events_to_flush = tuple(self._pending_events)
+        self._dispatch_events_to_writer(events_to_flush)
         self._pending_events.clear()
         self._pending_sample_records = 0
         self._last_dump_step = int(self.num_timesteps)
@@ -273,15 +335,16 @@ class TensorboardCallback(BaseCallback):
     def _on_training_end(self) -> None:
         if self._pending_events:
             self._flush_pending_events()
+            self._finish_async_writer()
             return
 
-        if self._pending_sample_records <= 0:
-            return
+        if self._pending_sample_records > 0:
+            current_step = int(self.num_timesteps)
+            self.logger.dump(current_step)
+            self._last_dump_step = current_step
+            self._pending_sample_records = 0
 
-        current_step = int(self.num_timesteps)
-        self.logger.dump(current_step)
-        self._last_dump_step = current_step
-        self._pending_sample_records = 0
+        self._finish_async_writer()
 
 
 class BestTrajectoryEvalCallback(BaseCallback):

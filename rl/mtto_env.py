@@ -77,7 +77,7 @@ class TrainState(TypedDict, total=True):
     # latest_traction_intervention_point: float
     # latest_braking_intervention_point: float
     operation_time: float
-    time_redundancy: float
+    redundant_operation_time: float
     energy_consumption: float
     stopping_point_index: int
 
@@ -271,7 +271,9 @@ class MTTOEnv(gym.Env):
         self.current_speed: float = self.train_service.start_speed
         self.current_acc: float = 0.0
         self.current_operation_time: float = 0.0
-        self.current_time_redundancy: float = self._calc_time_redundancy()
+        self.current_redundant_operation_time: float = (
+            self._calc_redundant_operation_time()
+        )
         self.current_energy_consumption: float = 0.0
         # self.mass = self.vehicle.mass
         self.current_slope: float = get_slope_scalar_numba(
@@ -470,7 +472,8 @@ class MTTOEnv(gym.Env):
                 self._normalize_acc_to_action(self.current_acc),
                 (self.train_service.schedule_time - self.current_operation_time)
                 / self.train_service.schedule_time,
-                self.current_time_redundancy,
+                self.current_redundant_operation_time
+                / self.train_service.schedule_time,
                 self.current_slope / self.vehicle.max_slope_capacity,
                 self.current_max_speed / self.vehicle.max_speed,
                 self.current_min_speed / self.vehicle.max_speed,
@@ -596,7 +599,9 @@ class MTTOEnv(gym.Env):
                 * 10.0,
                 c=6.0,
             )
-            self.current_time_redundancy = self._calc_time_redundancy()
+            self.current_redundant_operation_time = (
+                self._calc_redundant_operation_time()
+            )
             self.time_error_ratio = (
                 abs(self.current_operation_time - self.train_service.schedule_time)
                 / self.train_service.schedule_time
@@ -624,7 +629,7 @@ class MTTOEnv(gym.Env):
         self.current_speed = self.train_service.start_speed
         self.current_acc = 0.0
         self.current_operation_time = 0.0
-        self.current_time_redundancy = self._calc_time_redundancy()
+        self.current_redundant_operation_time = self._calc_redundant_operation_time()
         self.current_energy_consumption = 0.0
         # self.mass = self.vehicle.mass
         self.current_slope = get_slope_scalar_numba(
@@ -749,7 +754,7 @@ class MTTOEnv(gym.Env):
         self.current_position += distance * self.direction
         self.current_speed = next_speed
         self.current_operation_time += operation_time
-        self.current_time_redundancy = self._calc_time_redundancy()
+        self.current_redundant_operation_time = self._calc_redundant_operation_time()
         self.current_energy_consumption += energy_consumption
         # self.mass = self.vehicle.mass
         self.current_slope = get_slope_scalar_numba(
@@ -814,10 +819,7 @@ class MTTOEnv(gym.Env):
         )
         stopped = math.isclose(self.current_speed, 0.0, abs_tol=0.01)
         success = (
-            stopped
-            and self.stop_error <= self.train_service.max_stop_error * 10.0
-            and self.time_error_ratio
-            <= self.train_service.max_arr_time_error_ratio * 10.0
+            stopped and self.stop_error <= self.train_service.max_stop_error * 10.0
         )
         speed_low_violation = self.current_speed < self.current_min_speed
         speed_high_violation = self.current_speed > self.current_max_speed
@@ -1040,9 +1042,6 @@ class MTTOEnv(gym.Env):
         )
         return actual_remaining - min_remaining
 
-    def _calc_time_redundancy(self) -> float:
-        return self._calc_redundant_operation_time() / self.train_service.schedule_time
-
     def _get_upper_speed(self, pos: float | np.floating):
         if self._upper_speed_lut_speed_arr.size == 0:
             return 0.0
@@ -1071,9 +1070,9 @@ class MTTOEnv(gym.Env):
     ) -> float:
         if not truncated:
             # 基本生存奖励
-            small_bonus = 150.0 / self.max_episode_steps
+            small_bonus = 100.0 / self.max_episode_steps
             if terminated:
-                reward_total = self._get_reward_goal() + 10.0
+                reward_total = self._get_reward_goal()
             else:
                 reward_total = self._get_reward_dense()
 
@@ -1441,75 +1440,50 @@ class MTTOEnv(gym.Env):
         return val
 
     def _get_reward_punctuality_dense(self) -> float:
-        # phi_curr = self._potential_punctuality_v1(
-        #     time_redundancy=self.current_time_redundancy
-        # )
-
-        # phi_prev = self._potential_punctuality_v1(
-        #     time_redundancy=self.last_state["time_redundancy"]
-        # )
-
-        # phi_curr = self._potential_punctuality_v2(
-        #     time_redundancy=self.current_time_redundancy
-        # )
-
-        # phi_prev = self._potential_punctuality_v2(
-        #     time_redundancy=self.last_state["time_redundancy"]
-        # )
-
-        # phi_curr = self._potential_punctuality_v4(
-        #     time_redundancy=self.current_time_redundancy
-        # )
-
-        # phi_prev = self._potential_punctuality_v4(
-        #     time_redundancy=self.last_state["time_redundancy"]
-        # )
 
         phi_curr = self._potential_punctuality_v5(
             operation_time=self.current_operation_time,
-            time_redundancy=self.current_time_redundancy,
+            redundant_operaton_time=self.current_redundant_operation_time,
         )
 
         phi_prev = self._potential_punctuality_v5(
             operation_time=self.last_state["operation_time"],
-            time_redundancy=self.last_state["time_redundancy"],
+            redundant_operaton_time=self.last_state["redundant_operation_time"],
         )
-
-        # phi_curr = self._potential_punctuality_v6(
-        #     operation_time=self.current_operation_time,
-        #     time_redundancy=self.current_time_redundancy,
-        # )
-
-        # phi_prev = self._potential_punctuality_v6(
-        #     operation_time=self.last_state["operation_time"],
-        #     time_redundancy=self.last_state["time_redundancy"],
-        # )
 
         # return self.gamma * phi_curr - phi_prev
         return (
             phi_curr - phi_prev
         )  # 轻微地偏离PBRS的最优性保证，但能换来更好的训练稳定性
 
-    def _potential_punctuality_v1(self, time_redundancy: float):
-        return -4.0 * np.log1p(np.exp(-1.0 * time_redundancy))
+    def _potential_punctuality_v1(self, redundant_operation_time: float):
+        return -4.0 * np.log1p(
+            np.exp(-1.0 * redundant_operation_time / self.train_service.schedule_time)
+        )
 
-    def _potential_punctuality_v2(self, time_redundancy: float):
+    def _potential_punctuality_v2(self, redundant_operation_time: float):
         K_base = 0.5
         K_safe = 0.1
         K_late = 1.0
+
+        time_redundancy = redundant_operation_time / self.train_service.schedule_time
 
         if time_redundancy >= 0.0:
             return K_base + K_safe * time_redundancy
         else:
             return K_base + K_safe * time_redundancy - K_late * time_redundancy**2
 
-    def _potential_punctuality_v3(self, time_redundancy: float):
+    def _potential_punctuality_v3(self, redundant_operation_time: float):
         K_base = 1.0
         K_safe = 1.0
         K_late = 10.0
         alpha = 5.0
 
-        time_redundancy_clipped = float(np.clip(time_redundancy, -1.0, 1.0))
+        time_redundancy_clipped = float(
+            np.clip(
+                redundant_operation_time / self.train_service.schedule_time, -1.0, 1.0
+            )
+        )
         if time_redundancy_clipped >= 0.0:
             return K_base + K_safe * time_redundancy_clipped
         else:
@@ -1525,7 +1499,7 @@ class MTTOEnv(gym.Env):
                 )
             )
 
-    def _potential_punctuality_v4(self, time_redundancy: float):
+    def _potential_punctuality_v4(self, redundant_operation_time: float):
         """准点势能：预计准点到达时最大，预计晚点时快速下降。"""
 
         K_peak = 4.0
@@ -1533,7 +1507,11 @@ class MTTOEnv(gym.Env):
         K_late = 20.0
         alpha_late = 8.0
 
-        time_redundancy_clipped = float(np.clip(time_redundancy, -1.0, 1.0))
+        time_redundancy_clipped = float(
+            np.clip(
+                redundant_operation_time / self.train_service.schedule_time, -1.0, 1.0
+            )
+        )
         if time_redundancy_clipped >= 0.0:
             return K_peak - K_early * time_redundancy_clipped**2
 
@@ -1542,30 +1520,35 @@ class MTTOEnv(gym.Env):
             np.exp(alpha_late * late_error_ratio) - 1.0
         )
 
-    def _potential_punctuality_v5(self, operation_time: float, time_redundancy: float):
+    def _potential_punctuality_v5(
+        self, operation_time: float, redundant_operaton_time: float
+    ):
         K_T = 20.0
-        sigma_tau_1 = 500.0
-        sigma_tau_2 = 500.0
-        sigma_rho = 0.4
+        sigma_tau_early = 300.0
+        sigma_tau_late = 180.0
+        sigma_rho_early = 240.0
+        sigma_rho_late = 60.0
 
         remaining_schedule_time = self.train_service.schedule_time - operation_time
 
         if remaining_schedule_time > 0.0:
-            e_time = np.exp(-((remaining_schedule_time / sigma_tau_1) ** 2))
+            e_time = np.exp(-((remaining_schedule_time / sigma_tau_early) ** 2))
         else:
-            e_time = np.exp(-((remaining_schedule_time / sigma_tau_2) ** 2))
+            e_time = np.exp(-((remaining_schedule_time / sigma_tau_late) ** 2))
 
-        if time_redundancy > 0.0:
-            e_redundancy = 1.0
+        if redundant_operaton_time > 0.0:
+            e_redundancy = np.exp(-((redundant_operaton_time / sigma_rho_early) ** 2))
         else:
-            e_redundancy = np.exp(-((time_redundancy / sigma_rho) ** 2))
+            e_redundancy = np.exp(-((redundant_operaton_time / sigma_rho_late) ** 2))
 
         return K_T * (e_time * e_redundancy)
 
-    def _potential_punctuality_v6(self, operation_time: float, time_redundancy: float):
+    def _potential_punctuality_v6(
+        self, operation_time: float, redundant_operation_time: float
+    ):
         K_T = 10.0
         sigma_tau = 10.0
-        sigma_rho = 0.1
+        sigma_rho = 100.0
 
         remaining_schedule_time = self.train_service.schedule_time - operation_time
 
@@ -1574,10 +1557,10 @@ class MTTOEnv(gym.Env):
         else:
             e_time = np.exp(-((remaining_schedule_time / sigma_tau) ** 2))
 
-        if time_redundancy > 0.0:
+        if redundant_operation_time > 0.0:
             e_redundancy = 1.0
         else:
-            e_redundancy = np.exp(-((time_redundancy / sigma_rho) ** 2))
+            e_redundancy = np.exp(-((redundant_operation_time / sigma_rho) ** 2))
 
         return K_T * (e_time * e_redundancy)
 
@@ -1662,7 +1645,9 @@ class MTTOEnv(gym.Env):
         #     self.current_latest_braking_intervention_point
         # )
         self.last_state["operation_time"] = self.current_operation_time
-        self.last_state["time_redundancy"] = self.current_time_redundancy
+        self.last_state["redundant_operation_time"] = (
+            self.current_redundant_operation_time
+        )
         self.last_state["energy_consumption"] = self.current_energy_consumption
         self.last_state["stopping_point_index"] = self.current_stopping_point_index
 
@@ -1676,7 +1661,7 @@ class MTTOEnv(gym.Env):
             # "latest_traction_intervention_point": 0.0,
             # "latest_braking_intervention_point": 0.0,
             "operation_time": 0.0,
-            "time_redundancy": 0.0,
+            "redundant_operation_time": 0.0,
             "energy_consumption": 0.0,
             "stopping_point_index": -1,
         }

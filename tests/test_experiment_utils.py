@@ -88,27 +88,15 @@ def test_load_run_metadata_falls_back_to_parent_directory(tmp_path: Path) -> Non
     assert load_run_metadata(final_dir) == expected_metadata
 
 
-def test_build_rl_trajectory_comparison_key_prefers_success_then_lower_energy() -> None:
+def test_build_rl_trajectory_comparison_key_uses_selection_key() -> None:
     success_high_energy = {
-        "success": True,
-        "total_energy_j": 8_000.0,
-        "stop_error_m": 0.2,
-        "time_error_s": 1.0,
-        "total_reward": 50.0,
+        "selection_comparison_key": [1.0, 1.0, 0.0, 1.0, 0.0, -8_000.0],
     }
     success_low_energy = {
-        "success": True,
-        "total_energy_j": 4_000.0,
-        "stop_error_m": 0.2,
-        "time_error_s": 1.0,
-        "total_reward": 10.0,
+        "selection_comparison_key": [1.0, 1.0, 0.0, 1.0, 0.0, -4_000.0],
     }
     failure_high_reward = {
-        "success": False,
-        "total_energy_j": 100.0,
-        "stop_error_m": 0.1,
-        "time_error_s": 0.1,
-        "total_reward": 999.0,
+        "selection_comparison_key": [0.0, 999.0],
     }
 
     assert build_rl_trajectory_comparison_key(
@@ -117,6 +105,44 @@ def test_build_rl_trajectory_comparison_key_prefers_success_then_lower_energy() 
     assert build_rl_trajectory_comparison_key(
         success_low_energy
     ) > build_rl_trajectory_comparison_key(failure_high_reward)
+
+
+def test_build_rl_trajectory_comparison_key_requires_new_metrics() -> None:
+    with pytest.raises(ValueError, match="required trajectory selection fields"):
+        build_rl_trajectory_comparison_key(
+            {
+                "success": True,
+                "total_energy_j": 4_000.0,
+                "stop_error_m": 0.2,
+                "time_error_s": 1.0,
+                "total_reward": 10.0,
+            }
+        )
+
+
+def test_build_rl_trajectory_comparison_key_rebuilds_from_strict_limits() -> None:
+    strict_time = {
+        "success": True,
+        "total_energy_j": 8_000.0,
+        "stop_error_m": 0.2,
+        "time_error_s": 1.0,
+        "total_reward": 10.0,
+        "strict_stop_error_limit_m": 0.3,
+        "strict_time_error_limit_s": 5.0,
+    }
+    loose_time = {
+        "success": True,
+        "total_energy_j": 1_000.0,
+        "stop_error_m": 0.2,
+        "time_error_s": 8.0,
+        "total_reward": 100.0,
+        "strict_stop_error_limit_m": 0.3,
+        "strict_time_error_limit_s": 5.0,
+    }
+
+    assert build_rl_trajectory_comparison_key(
+        strict_time
+    ) > build_rl_trajectory_comparison_key(loose_time)
 
 
 def test_add_panel_label_places_text_on_axes() -> None:

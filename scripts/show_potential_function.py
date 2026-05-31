@@ -293,22 +293,24 @@ def _potential_punctuality_v5(operation_time, redundant_operation_time, schedule
 
 
 def _potential_punctuality_v6(operation_time, redundant_operation_time, schedule_time):
-    K_T = 30.0
-    sigma_tau_1 = 500.0
-    sigma_tau_2 = 500.0
-    sigma_rho = 0.4
+    K_T = 20.0
+    sigma_tau_early = 300.0
+    sigma_tau_late = 180.0
+    sigma_rho_early = 240.0
+    sigma_rho_late = 60.0
 
     remaining_schedule_time = schedule_time - operation_time
-    time_redundancy = redundant_operation_time / schedule_time
 
     e_time = np.where(
         remaining_schedule_time > 0.0,
-        np.exp(-((remaining_schedule_time / sigma_tau_1) ** 2)),
-        np.exp(-((remaining_schedule_time / sigma_tau_2) ** 2)),
+        np.exp(-((remaining_schedule_time / sigma_tau_early) ** 2)),
+        np.exp(-((remaining_schedule_time / sigma_tau_late) ** 2)),
     )
 
     e_redundancy = np.where(
-        time_redundancy >= 0.0, 1.0, np.exp(-((time_redundancy / sigma_rho) ** 2))
+        redundant_operation_time >= 0.0,
+        np.exp(-((redundant_operation_time / sigma_rho_early) ** 2)),
+        np.exp(-((redundant_operation_time / sigma_rho_late) ** 2)),
     )
 
     return K_T * (e_time * e_redundancy)

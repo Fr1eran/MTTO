@@ -1323,63 +1323,77 @@ def _metric_as_float(value: object) -> float | None:
 
 def build_rl_trajectory_comparison_key(
     metrics: dict[str, object],
-) -> tuple[float, float, float, float, float]:
-    """构建用于多轨迹排序对比的五元组键。
+) -> tuple[float, ...]:
+    """构建用于多轨迹排序对比的键。
 
-    排序优先级：success > 低能耗 > 小停站误差 > 小时间误差 > 高总奖励。
+    排序优先级：success > 高总奖励(仅非success) > 严格停车 > 小停站误差
+    > 严格到时 > 小时间误差 > 低能耗。
 
     Args:
         metrics: 轨迹指标字典。
 
     Returns:
-        (success_flag, neg_energy_j, neg_stop_error_m,
-        neg_abs_time_error_s, total_reward)
+        可直接用于 max() 的比较键。
     """
     raw_key = metrics.get("selection_comparison_key")
-    if isinstance(raw_key, list) and len(raw_key) == 5:
+    if isinstance(raw_key, (list, tuple)) and len(raw_key) > 0:
         converted: list[float] = []
         for value in raw_key:
             numeric_value = _metric_as_float(value)
             if numeric_value is None:
-                break
+                raise ValueError("selection_comparison_key must contain only numbers")
             converted.append(numeric_value)
-        if len(converted) == 5:
-            return tuple(converted)  # type: ignore[return-value]
+        return tuple(converted)
+
+    if raw_key is not None:
+        raise ValueError("selection_comparison_key must be a non-empty numeric list")
 
     success = bool(metrics.get("success", False))
     total_reward = _metric_as_float(metrics.get("total_reward"))
     total_energy_j = _metric_as_float(metrics.get("total_energy_j"))
     stop_error_m = _metric_as_float(metrics.get("stop_error_m"))
     time_error_s = _metric_as_float(metrics.get("time_error_s"))
-
-    resolved_total_reward = (
-        float(total_reward) if total_reward is not None else float("-inf")
+    strict_stop_error_limit_m = _metric_as_float(
+        metrics.get("strict_stop_error_limit_m")
     )
-    resolved_total_energy_j = (
-        float(total_energy_j) if total_energy_j is not None else float("inf")
-    )
-    resolved_stop_error_m = (
-        float(stop_error_m) if stop_error_m is not None else float("inf")
-    )
-    resolved_abs_time_error_s = (
-        abs(float(time_error_s)) if time_error_s is not None else float("inf")
+    strict_time_error_limit_s = _metric_as_float(
+        metrics.get("strict_time_error_limit_s")
     )
 
-    if success:
-        return (
-            1.0,
-            -resolved_total_energy_j,
-            -resolved_stop_error_m,
-            -resolved_abs_time_error_s,
-            resolved_total_reward,
+    required = {
+        "total_reward": total_reward,
+        "total_energy_j": total_energy_j,
+        "stop_error_m": stop_error_m,
+        "time_error_s": time_error_s,
+        "strict_stop_error_limit_m": strict_stop_error_limit_m,
+        "strict_time_error_limit_s": strict_time_error_limit_s,
+    }
+    missing = [key for key, value in required.items() if value is None]
+    if missing:
+        raise ValueError(
+            "metrics are missing required trajectory selection fields: "
+            + ", ".join(missing)
         )
 
+    assert total_reward is not None
+    assert total_energy_j is not None
+    assert stop_error_m is not None
+    assert time_error_s is not None
+    assert strict_stop_error_limit_m is not None
+    assert strict_time_error_limit_s is not None
+
+    if not success:
+        return (0.0, float(total_reward))
+
+    strict_stop_met = float(stop_error_m) <= float(strict_stop_error_limit_m)
+    strict_time_met = abs(float(time_error_s)) <= float(strict_time_error_limit_s)
     return (
-        0.0,
-        resolved_total_reward,
-        -resolved_stop_error_m,
-        -resolved_abs_time_error_s,
-        -resolved_total_energy_j,
+        1.0,
+        1.0 if strict_stop_met else 0.0,
+        0.0 if strict_stop_met else -float(stop_error_m),
+        1.0 if strict_time_met else 0.0,
+        0.0 if strict_time_met else -abs(float(time_error_s)),
+        -float(total_energy_j),
     )
 
 

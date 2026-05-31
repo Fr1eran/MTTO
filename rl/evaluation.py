@@ -12,12 +12,14 @@ from rl.env_factory import make_env
 from rl.mtto_env import MTTOEnv, RewardConfig
 from utils.io_utils import save_curve_and_metrics
 
-BEST_TRAJECTORY_SELECTION_RULE = "success_then_energy_else_reward"
+BEST_TRAJECTORY_SELECTION_RULE = "success_strict_stop_strict_time_energy_else_reward"
 BEST_TRAJECTORY_SELECTION_RULE_DESCRIPTION = (
     "Any successful evaluation outranks any non-successful evaluation. "
-    "Among successful evaluations, lower total_energy_j wins. "
-    "If no success is available, higher total_reward wins. "
-    "stop_error_m and abs(time_error_s) are deterministic tie-breakers."
+    "Among non-successful evaluations, higher total_reward wins. "
+    "Among successful evaluations, strict stop accuracy wins first; if neither "
+    "trajectory meets it, lower stop_error_m wins. Strict arrival time wins next; "
+    "if neither trajectory meets it, lower abs(time_error_s) wins. Lower "
+    "total_energy_j wins only after those strict requirements."
 )
 
 
@@ -35,6 +37,8 @@ class PolicyEvaluationResult:
     final_speed_mps: float
     stop_error_m: float
     time_error_s: float
+    strict_stop_error_limit_m: float
+    strict_time_error_limit_s: float
     comfort_tav: float
     comfort_er_pct: float
     comfort_rms: float
@@ -43,6 +47,14 @@ class PolicyEvaluationResult:
     episode_steps: int
     trajectory_pos_m: NDArray[np.float32]
     trajectory_speed_mps: NDArray[np.float32]
+
+    @property
+    def strict_stop_requirement_met(self) -> bool:
+        return float(self.stop_error_m) <= float(self.strict_stop_error_limit_m)
+
+    @property
+    def strict_time_requirement_met(self) -> bool:
+        return abs(float(self.time_error_s)) <= float(self.strict_time_error_limit_s)
 
     def to_metrics(
         self,
@@ -68,6 +80,13 @@ class PolicyEvaluationResult:
             "comfort_rms": self.comfort_rms,
             "episode_steps": self.episode_steps,
             "success": self.success,
+            "strict_stop_error_limit_m": self.strict_stop_error_limit_m,
+            "strict_time_error_limit_s": self.strict_time_error_limit_s,
+            "strict_stop_requirement_met": self.strict_stop_requirement_met,
+            "strict_time_requirement_met": self.strict_time_requirement_met,
+            "selection_comparison_key": list(
+                build_policy_evaluation_comparison_key(self)
+            ),
         }
         metrics["selection_rule"] = BEST_TRAJECTORY_SELECTION_RULE
         if num_timesteps is not None:
@@ -131,6 +150,16 @@ def is_success_within_train_service_limits(
     )
 
 
+def get_strict_stop_error_limit_m(train_service: TrainService) -> float:
+    return float(train_service.max_stop_error)
+
+
+def get_strict_time_error_limit_s(train_service: TrainService) -> float:
+    return float(train_service.schedule_time) * float(
+        train_service.max_arr_time_error_ratio
+    )
+
+
 def evaluate_policy_once(
     model: Any,
     env: gym.Env[Any, Any],
@@ -190,6 +219,12 @@ def evaluate_policy_once(
         final_speed_mps=float(basic_info.get("speed", mtto_env.current_speed)),
         stop_error_m=stop_error_m,
         time_error_s=time_error_s,
+        strict_stop_error_limit_m=get_strict_stop_error_limit_m(
+            mtto_env.train_service
+        ),
+        strict_time_error_limit_s=get_strict_time_error_limit_s(
+            mtto_env.train_service
+        ),
         comfort_tav=float(basic_info.get("comfort_tav", 0.0)),
         comfort_er_pct=float(basic_info.get("comfort_er_pct", 0.0)),
         comfort_rms=float(basic_info.get("comfort_rms", 0.0)),
@@ -219,6 +254,61 @@ def save_policy_evaluation_curve(
     )
 
 
+def build_policy_evaluation_comparison_key(
+    result: PolicyEvaluationResult,
+) -> tuple[float, ...]:
+    if not result.success:
+        return (0.0, float(result.total_reward))
+
+    strict_stop_met = result.strict_stop_requirement_met
+    strict_time_met = result.strict_time_requirement_met
+    stop_component = 0.0 if strict_stop_met else -float(result.stop_error_m)
+    time_component = 0.0 if strict_time_met else -abs(float(result.time_error_s))
+
+    return (
+        1.0,
+        1.0 if strict_stop_met else 0.0,
+        stop_component,
+        1.0 if strict_time_met else 0.0,
+        time_component,
+        -float(result.total_energy_j),
+    )
+
+
+def _best_update_reason_for_successes(
+    candidate: PolicyEvaluationResult,
+    previous: PolicyEvaluationResult,
+) -> str | None:
+    if (
+        candidate.strict_stop_requirement_met
+        and not previous.strict_stop_requirement_met
+    ):
+        return "strict_stop_requirement_reached"
+    if (
+        not candidate.strict_stop_requirement_met
+        and not previous.strict_stop_requirement_met
+        and float(candidate.stop_error_m) < float(previous.stop_error_m)
+    ):
+        return "lower_stop_error_before_strict_stop"
+
+    if (
+        candidate.strict_time_requirement_met
+        and not previous.strict_time_requirement_met
+    ):
+        return "strict_time_requirement_reached"
+    if (
+        not candidate.strict_time_requirement_met
+        and not previous.strict_time_requirement_met
+        and abs(float(candidate.time_error_s)) < abs(float(previous.time_error_s))
+    ):
+        return "lower_time_error_before_strict_time"
+
+    if float(candidate.total_energy_j) < float(previous.total_energy_j):
+        return "lower_energy_after_strict_requirements"
+
+    return None
+
+
 def describe_best_update_reason(
     candidate: PolicyEvaluationResult,
     previous: PolicyEvaluationResult | None,
@@ -226,17 +316,16 @@ def describe_best_update_reason(
     if previous is None:
         return "first_evaluation"
 
-    if not candidate.success and previous.success:
+    if build_policy_evaluation_comparison_key(
+        candidate
+    ) <= build_policy_evaluation_comparison_key(previous):
         return None
-    elif candidate.success and not previous.success:
+
+    if candidate.success and not previous.success:
         return "success_replaces_reward_fallback"
-    elif candidate.success and previous.success:
-        if float(candidate.total_energy_j) < float(previous.total_energy_j):
-            return "lower_energy_among_successes"
-        else:
-            return None
-    else:
-        if float(candidate.total_reward) > float(previous.total_reward):
-            return "higher_total_reward_without_success"
-        else:
-            return None
+    if not candidate.success and not previous.success:
+        return "higher_total_reward_without_success"
+    if candidate.success and previous.success:
+        return _best_update_reason_for_successes(candidate, previous)
+
+    return None

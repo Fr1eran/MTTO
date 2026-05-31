@@ -298,9 +298,7 @@ def test_step_failed_stop_is_truncated_with_fixed_penalty(
     mtto_env.enable_diagnostics = True
     mtto_env.diagnostics_interval_steps = 1
     mtto_env.reset()
-    _patch_step_dependencies_for_outcome_tests(
-        mtto_env, monkeypatch, next_speed=0.0
-    )
+    _patch_step_dependencies_for_outcome_tests(mtto_env, monkeypatch, next_speed=0.0)
 
     _, reward, terminated, truncated, info = mtto_env.step(
         np.asarray([0.0], dtype=np.float32)
@@ -310,9 +308,7 @@ def test_step_failed_stop_is_truncated_with_fixed_penalty(
     assert truncated is True
     assert reward == pytest.approx(-10.0)
     assert "constraint" in info
-    assert (
-        info["constraint"]["violation_code"] == MTTOEnv.VIOLATION_CODE_FAILED_STOP
-    )
+    assert info["constraint"]["violation_code"] == MTTOEnv.VIOLATION_CODE_FAILED_STOP
 
 
 def test_step_success_is_terminated_without_truncation(
@@ -322,22 +318,19 @@ def test_step_success_is_terminated_without_truncation(
     mtto_env.enable_diagnostics = True
     mtto_env.diagnostics_interval_steps = 1
     mtto_env.reset()
-    _patch_step_dependencies_for_outcome_tests(
-        mtto_env, monkeypatch, next_speed=0.0
-    )
+    _patch_step_dependencies_for_outcome_tests(mtto_env, monkeypatch, next_speed=0.0)
     mtto_env.current_position = mtto_env.train_service.target_position
     mtto_env.current_speed = 0.0
     mtto_env.current_operation_time = mtto_env.train_service.schedule_time
 
-    _, _, terminated, truncated, info = mtto_env.step(np.asarray([0.0], dtype=np.float32))
+    _, _, terminated, truncated, info = mtto_env.step(
+        np.asarray([0.0], dtype=np.float32)
+    )
 
     assert terminated is True
     assert truncated is False
     assert "constraint" in info
-    assert (
-        info["constraint"]["violation_code"]
-        == MTTOEnv.VIOLATION_CODE_ONGOING
-    )
+    assert info["constraint"]["violation_code"] == MTTOEnv.VIOLATION_CODE_ONGOING
 
 
 def test_potential_punctuality_v3_is_finite_for_extreme_negative_input(
@@ -379,7 +372,7 @@ def test_punctuality_dense_reward_is_stable_for_extreme_time_redundancy(
     mtto_env: MTTOEnv,
 ) -> None:
     mtto_env.reset()
-    mtto_env.current_time_redundancy = -100.0
+    mtto_env.current_redundant_operation_time = -100.0
     mtto_env.last_state["time_redundancy"] = 0.0
     val = mtto_env._get_reward_punctuality_dense()
 
