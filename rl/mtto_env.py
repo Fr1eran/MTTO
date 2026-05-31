@@ -1543,10 +1543,10 @@ class MTTOEnv(gym.Env):
         )
 
     def _potential_punctuality_v5(self, operation_time: float, time_redundancy: float):
-        K_T = 10.0
-        sigma_tau_1 = 1000.0
-        sigma_tau_2 = 10.0
-        sigma_rho = 1.0
+        K_T = 20.0
+        sigma_tau_1 = 500.0
+        sigma_tau_2 = 500.0
+        sigma_rho = 0.4
 
         remaining_schedule_time = self.train_service.schedule_time - operation_time
 
