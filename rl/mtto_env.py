@@ -323,10 +323,6 @@ class MTTOEnv(gym.Env):
         self.stop_error: float = abs(
             self.train_service.target_position - self.current_position
         )
-        self.time_error_ratio: float = (
-            abs(self.current_operation_time - self.train_service.schedule_time)
-            / self.train_service.schedule_time
-        )
 
         # 定义智能体能够观测的状态信息（扁平化向量，避免每步构造字典对象）
         obs_low = np.array(
@@ -602,10 +598,6 @@ class MTTOEnv(gym.Env):
             self.current_redundant_operation_time = (
                 self._calc_redundant_operation_time()
             )
-            self.time_error_ratio = (
-                abs(self.current_operation_time - self.train_service.schedule_time)
-                / self.train_service.schedule_time
-            )
 
         return self._get_obs()
 
@@ -678,10 +670,6 @@ class MTTOEnv(gym.Env):
 
         self.stop_error = abs(
             self.train_service.target_position - self.current_position
-        )
-        self.time_error_ratio = (
-            abs(self.current_operation_time - self.train_service.schedule_time)
-            / self.train_service.schedule_time
         )
 
         self.basic_info = {}
@@ -813,34 +801,30 @@ class MTTOEnv(gym.Env):
         self.stop_error = abs(
             self.train_service.target_position - self.current_position
         )
-        self.time_error_ratio = (
-            abs(self.current_operation_time - self.train_service.schedule_time)
-            / self.train_service.schedule_time
-        )
-        stopped = math.isclose(self.current_speed, 0.0, abs_tol=0.01)
+        is_stopped = math.isclose(self.current_speed, 0.0, abs_tol=0.01)
         success = (
-            stopped and self.stop_error <= self.train_service.max_stop_error * 10.0
+            is_stopped and self.stop_error <= self.train_service.max_stop_error * 10.0
         )
-        speed_low_violation = self.current_speed < self.current_min_speed
-        speed_high_violation = self.current_speed > self.current_max_speed
-        step_limit_reached = self.current_steps > self.max_episode_steps
-        failed_stop = stopped and not success
+        is_speed_low_violation = self.current_speed < self.current_min_speed
+        is_speed_high_violation = self.current_speed > self.current_max_speed
+        is_step_limit_reached = self.current_steps > self.max_episode_steps
+        is_failed_stop = is_stopped and not success
 
         # 仅成功任务视为正常终止。
         terminated = success
         # 失败停车与约束/步数超限统一视为截断结束。
         truncated = (
-            speed_low_violation
-            or speed_high_violation
-            or step_limit_reached
-            or failed_stop
+            is_speed_low_violation
+            or is_speed_high_violation
+            or is_step_limit_reached
+            or is_failed_stop
         )
         self._last_violation_code = self._resolve_violation_code(
             terminated=terminated,
-            failed_stop=failed_stop,
-            speed_low_violation=speed_low_violation,
-            speed_high_violation=speed_high_violation,
-            step_limit_reached=step_limit_reached,
+            failed_stop=is_failed_stop,
+            speed_low_violation=is_speed_low_violation,
+            speed_high_violation=is_speed_high_violation,
+            step_limit_reached=is_step_limit_reached,
         )
 
         # 计算奖励
@@ -1139,46 +1123,10 @@ class MTTOEnv(gym.Env):
     def _get_reward_safety_dense(self) -> float:
         # 计算当前状态势能
 
-        # phi_curr = self._potential_safety_speed(
-        #     pos=self.current_pos,
-        #     speed=self.current_speed,
-        #     min_speed=self.current_min_speed,
-        #     max_speed=self.current_max_speed,
-        #     target_pos=self.sps.get_auxiliary_stopping_area_target_position(
-        #         sp=self.current_sp
-        #     )
-        #     if self.current_sp >= 0
-        #     else self.train_service.target_position,
-        # )
-
         # phi_curr = self._potential_safety_position(
         #     pos=self.current_pos,
         #     min_pos=self.current_latest_traction_intervention_point,
         #     max_pos=self.current_latest_braking_intervention_point,
-        #     target_pos=self.sps.get_auxiliary_stopping_area_target_position(
-        #         sp=self.current_sp
-        #     )
-        #     if self.current_sp >= 0
-        #     else self.train_service.target_position,
-        # )
-
-        # phi_curr = self._potential_safety_speed_adaptive(
-        #     pos=self.current_pos,
-        #     speed=self.current_speed,
-        #     min_speed=self.current_min_speed,
-        #     max_speed=self.current_max_speed,
-        #     target_pos=self.sps.get_auxiliary_stopping_area_target_position(
-        #         sp=self.current_sp
-        #     )
-        #     if self.current_sp >= 0
-        #     else self.train_service.target_position,
-        # )
-
-        # phi_curr = self._potential_safety_speed_asymmetric_v1(
-        #     pos=self.current_pos,
-        #     speed=self.current_speed,
-        #     min_speed=self.current_min_speed,
-        #     max_speed=self.current_max_speed,
         #     target_pos=self.sps.get_auxiliary_stopping_area_target_position(
         #         sp=self.current_sp
         #     )
@@ -1200,61 +1148,10 @@ class MTTOEnv(gym.Env):
 
         # 计算上个状态势能
 
-        # phi_prev = self._potential_safety_speed(
-        #     pos=self.last_state["pos"],
-        #     speed=self.last_state["speed"],
-        #     min_speed=self.last_state["min_speed"],
-        #     max_speed=self.last_state["max_speed"],
-        #     # target_pos=self.sps.get_auxiliary_stopping_area_target_position(
-        #     #     sp=self.last_state["stopping_point_index"]
-        #     # )
-        #     # if self.last_state["stopping_point_index"] >= 0
-        #     # else self.task.target_position,
-        #     target_pos=self.sps.get_auxiliary_stopping_area_target_position(
-        #         sp=self.current_sp
-        #     )
-        #     if self.current_sp >= 0
-        #     else self.train_service.target_position,
-        # )
-
         # phi_prev = self._potential_safety_position(
         #     pos=self.last_state["pos"],
         #     min_pos=self.last_state["latest_traction_intervention_point"],
         #     max_pos=self.last_state["latest_braking_intervention_point"],
-        #     # target_pos=self.sps.get_auxiliary_stopping_area_target_position(
-        #     #     sp=self.last_state["stopping_point_index"]
-        #     # )
-        #     # if self.last_state["stopping_point_index"] >= 0
-        #     # else self.task.target_position,
-        #     target_pos=self.sps.get_auxiliary_stopping_area_target_position(
-        #         sp=self.current_sp
-        #     )
-        #     if self.current_sp >= 0
-        #     else self.train_service.target_position,
-        # )
-
-        # phi_prev = self._potential_safety_speed_adaptive(
-        #     pos=self.last_state["pos"],
-        #     speed=self.last_state["speed"],
-        #     min_speed=self.last_state["min_speed"],
-        #     max_speed=self.last_state["max_speed"],
-        #     # target_pos=self.sps.get_auxiliary_stopping_area_target_position(
-        #     #     sp=self.last_state["stopping_point_index"]
-        #     # )
-        #     # if self.last_state["stopping_point_index"] >= 0
-        #     # else self.task.target_position,
-        #     target_pos=self.sps.get_auxiliary_stopping_area_target_position(
-        #         sp=self.current_sp
-        #     )
-        #     if self.current_sp >= 0
-        #     else self.train_service.target_position,
-        # )
-
-        # phi_prev = self._potential_safety_speed_asymmetric_v1(
-        #     pos=self.last_state["pos"],
-        #     speed=self.last_state["speed"],
-        #     min_speed=self.last_state["min_speed"],
-        #     max_speed=self.last_state["max_speed"],
         #     # target_pos=self.sps.get_auxiliary_stopping_area_target_position(
         #     #     sp=self.last_state["stopping_point_index"]
         #     # )
@@ -1284,10 +1181,10 @@ class MTTOEnv(gym.Env):
             else self.train_service.target_position,
         )
 
-        # return self.gamma * phi_curr - phi_prev
-        return (
-            phi_curr - phi_prev
-        )  # 轻微地偏离PBRS的最优性保证，但能换来更好的训练稳定性
+        return self.gamma * phi_curr - phi_prev
+        # return (
+        #     phi_curr - phi_prev
+        # )  # 轻微地偏离PBRS的最优性保证，但能换来更好的训练稳定性
 
     def _potential_safety_speed(
         self,
@@ -1382,7 +1279,7 @@ class MTTOEnv(gym.Env):
         distance_to_target = np.abs(target_pos - pos)
 
         # 设定一个危险缓冲距离 (m/s)，仅当距离边界小于该值时才触发惩罚
-        upper_bound = 8.0
+        upper_bound = 5.0
         lower_bound = 5.0
 
         # 1. 上限惩罚 (始终激活)
@@ -1424,7 +1321,7 @@ class MTTOEnv(gym.Env):
     def _get_reward_energy_dense(self) -> float:
 
         val = (
-            -10.0
+            -5.0
             * (self.current_energy_consumption - self.last_state["energy_consumption"])
             / self.max_energy_consumption
         )
@@ -1435,20 +1332,30 @@ class MTTOEnv(gym.Env):
         delta_acc = abs(self.last_state["acc"] - self.current_acc)
         norm_jerk = delta_acc / (self.train_service.max_acc_change)
 
-        val = -15.0 / self.max_episode_steps * norm_jerk**2
+        val = -8.0 / self.max_episode_steps * norm_jerk**2
 
         return val
 
     def _get_reward_punctuality_dense(self) -> float:
 
-        phi_curr = self._potential_punctuality_v5(
+        # phi_curr = self._potential_punctuality_v5(
+        #     operation_time=self.current_operation_time,
+        #     redundant_operation_time=self.current_redundant_operation_time,
+        # )
+
+        # phi_prev = self._potential_punctuality_v5(
+        #     operation_time=self.last_state["operation_time"],
+        #     redundant_operation_time=self.last_state["redundant_operation_time"],
+        # )
+
+        phi_curr = self._potential_punctuality_v7(
             operation_time=self.current_operation_time,
-            redundant_operaton_time=self.current_redundant_operation_time,
+            redundant_operation_time=self.current_redundant_operation_time,
         )
 
-        phi_prev = self._potential_punctuality_v5(
+        phi_prev = self._potential_punctuality_v7(
             operation_time=self.last_state["operation_time"],
-            redundant_operaton_time=self.last_state["redundant_operation_time"],
+            redundant_operation_time=self.last_state["redundant_operation_time"],
         )
 
         # return self.gamma * phi_curr - phi_prev
@@ -1521,7 +1428,7 @@ class MTTOEnv(gym.Env):
         )
 
     def _potential_punctuality_v5(
-        self, operation_time: float, redundant_operaton_time: float
+        self, operation_time: float, redundant_operation_time: float
     ):
         K_T = 20.0
         sigma_tau_early = 300.0
@@ -1536,10 +1443,10 @@ class MTTOEnv(gym.Env):
         else:
             e_time = np.exp(-((remaining_schedule_time / sigma_tau_late) ** 2))
 
-        if redundant_operaton_time > 0.0:
-            e_redundancy = np.exp(-((redundant_operaton_time / sigma_rho_early) ** 2))
+        if redundant_operation_time > 0.0:
+            e_redundancy = np.exp(-((redundant_operation_time / sigma_rho_early) ** 2))
         else:
-            e_redundancy = np.exp(-((redundant_operaton_time / sigma_rho_late) ** 2))
+            e_redundancy = np.exp(-((redundant_operation_time / sigma_rho_late) ** 2))
 
         return K_T * (e_time * e_redundancy)
 
@@ -1564,6 +1471,39 @@ class MTTOEnv(gym.Env):
 
         return K_T * (e_time * e_redundancy)
 
+    def _potential_punctuality_v7(
+        self, operation_time: float, redundant_operation_time: float
+    ):
+        K_T = 15.0
+        early_time_lambda = 0.6
+        early_redundancy_lambda = 0.6
+        late_time_sigma = 60.0
+        late_redundancy_sigma = 40.0
+        schedule_time = self.train_service.schedule_time
+
+        e_time = (
+            (1 - np.exp(-early_time_lambda * (operation_time / schedule_time)))
+            / (1 - np.exp(-early_time_lambda))
+            if operation_time < schedule_time
+            else np.exp(-(((operation_time - schedule_time) / late_time_sigma) ** 2))
+        )
+
+        e_redundancy = (
+            (
+                1
+                - np.exp(
+                    -early_redundancy_lambda
+                    * (schedule_time - redundant_operation_time)
+                    / schedule_time
+                )
+            )
+            / (1 - np.exp(-early_redundancy_lambda))
+            if redundant_operation_time > 0.0
+            else np.exp(-((redundant_operation_time / late_redundancy_sigma) ** 2))
+        )
+
+        return K_T * (e_time * e_redundancy)
+
     def _get_reward_stopping_dense(self):
 
         phi_curr = self._potential_stopping_v1(
@@ -1582,10 +1522,10 @@ class MTTOEnv(gym.Env):
         #     pos=self.last_state["pos"], speed=self.last_state["speed"]
         # )
 
-        # return self.gamma * phi_curr - phi_prev
-        return (
-            phi_curr - phi_prev
-        )  # 轻微地偏离PBRS的最优性保证，但能换来更好的训练稳定性
+        return self.gamma * phi_curr - phi_prev
+        # return (
+        #     phi_curr - phi_prev
+        # )  # 轻微地偏离PBRS的最优性保证，但能换来更好的训练稳定性
 
     def _potential_stopping_v1(self, pos: float, speed: float):
         dist_error_abs = abs(self.train_service.target_position - pos)
@@ -1594,7 +1534,7 @@ class MTTOEnv(gym.Env):
         v_hat = speed / self.vehicle.max_speed
 
         phi_weak = 10.0 * np.exp(-x_hat - v_hat)
-        phi_strong = 20.0 * np.exp(-x_hat / 0.01 - v_hat / 0.1)
+        phi_strong = 20.0 * np.exp(-x_hat / 0.1 - v_hat / 0.1)
 
         return phi_weak + phi_strong
 
@@ -1614,8 +1554,8 @@ class MTTOEnv(gym.Env):
     ) -> float:
         _stopping = self._calc_stopping_score()
         _punctuality = self._calc_punctuality_score()
-        reward_stopping = _stopping * 20.0
-        reward_punctuality = _stopping * _punctuality * 30.0
+        reward_stopping = _stopping * 40.0
+        reward_punctuality = _stopping * _punctuality * 60.0
 
         if self.enable_diagnostics and self._collect_step_diagnostics:
             self.rewards_info["stopping"] = reward_stopping
@@ -1627,7 +1567,9 @@ class MTTOEnv(gym.Env):
         return self._stopping_score_func(self.stop_error)
 
     def _calc_punctuality_score(self) -> float:
-        return self._punctuality_score_func(self.time_error_ratio)
+        return self._punctuality_score_func(
+            abs(self.train_service.schedule_time - self.current_operation_time)
+        )
 
     def _gaussian_kernel(self, A: float, B: float, k: float, x: float) -> float:
         return A * np.exp(-k * x) + B

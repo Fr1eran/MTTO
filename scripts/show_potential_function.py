@@ -337,6 +337,37 @@ def _potential_punctuality_v7(operation_time, redundant_operation_time, schedule
     return K_T * (e_time * e_redundancy)
 
 
+def _potential_punctuality_v8(operation_time, redundant_operation_time, schedule_time):
+    K_T = 15.0
+    early_time_lambda = 0.6
+    early_redundancy_lambda = 0.6
+    late_time_sigma = 60.0
+    late_redundancy_sigma = 40.0
+
+    e_time = np.where(
+        operation_time <= schedule_time,
+        (1 - np.exp(-early_time_lambda * (operation_time / schedule_time)))
+        / (1 - np.exp(-early_time_lambda)),
+        np.exp(-(((operation_time - schedule_time) / late_time_sigma) ** 2)),
+    )
+
+    e_redundancy = np.where(
+        redundant_operation_time >= 0.0,
+        (
+            1
+            - np.exp(
+                -early_redundancy_lambda
+                * (schedule_time - redundant_operation_time)
+                / schedule_time
+            )
+        )
+        / (1 - np.exp(-early_redundancy_lambda)),
+        np.exp(-((redundant_operation_time / late_redundancy_sigma) ** 2)),
+    )
+
+    return K_T * (e_time * e_redundancy)
+
+
 def infer_position_from_speed(curve_pos, curve_speed, target_speed):
     """
     在最小速度曲线随位置单调递减时，根据目标速度反推对应位置。
@@ -846,8 +877,9 @@ def plot_punctuality_potential_curve(
     #     schedule_time=schedule_time,
     # )
 
-    # version 4
-    potential_array = _potential_punctuality_v4(
+    # version 8
+    potential_array = _potential_punctuality_v8(
+        operation_time=schedule_time,
         redundant_operation_time=redundant_operation_time_array,
         schedule_time=schedule_time,
     )
@@ -888,7 +920,7 @@ def plot_punctuality_potential_heatmap(
     *,
     minimal: bool = False,
 ) -> Figure:
-    K_T = 30.0
+    K_T = 15.0
     operation_time_array = np.linspace(
         operation_time_lower, operation_time_upper, 1000, dtype=np.float64
     )
@@ -898,7 +930,7 @@ def plot_punctuality_potential_heatmap(
     OPERATION_TIME, REDUNDANT_TIME = np.meshgrid(
         operation_time_array, redundant_time_array
     )
-    POTENTIAL = _potential_punctuality_v6(
+    POTENTIAL = _potential_punctuality_v8(
         operation_time=OPERATION_TIME,
         redundant_operation_time=REDUNDANT_TIME,
         schedule_time=schedule_time,
@@ -958,7 +990,7 @@ def plot_punctuality_potential_heatmap(
         for idx, segment in enumerate(segments):
             operation_time_segment = segment[:, 0]
             redundant_time_segment = segment[:, 1]
-            potential_segment = _potential_punctuality_v6(
+            potential_segment = _potential_punctuality_v8(
                 operation_time=operation_time_segment,
                 redundant_operation_time=redundant_time_segment,
                 schedule_time=schedule_time,
