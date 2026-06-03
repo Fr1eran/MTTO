@@ -1299,7 +1299,7 @@ class MTTOEnv(gym.Env):
         scale = 1.0 + 1.0 * np.exp(-0.001 * distance_to_target)
 
         # 最终势能为两侧惩罚之和
-        return scale * (phi_max + phi_min) * 2.0
+        return scale * (phi_max + phi_min) * 6.0
 
     def _potential_safety_position(
         self, pos: float, min_pos: float, max_pos: float, target_pos: float
@@ -1321,7 +1321,7 @@ class MTTOEnv(gym.Env):
     def _get_reward_energy_dense(self) -> float:
 
         val = (
-            -5.0
+            -20.0
             * (self.current_energy_consumption - self.last_state["energy_consumption"])
             / self.max_energy_consumption
         )
@@ -1332,7 +1332,7 @@ class MTTOEnv(gym.Env):
         delta_acc = abs(self.last_state["acc"] - self.current_acc)
         norm_jerk = delta_acc / (self.train_service.max_acc_change)
 
-        val = -8.0 / self.max_episode_steps * norm_jerk**2
+        val = -40.0 / self.max_episode_steps * norm_jerk**2
 
         return val
 
@@ -1358,10 +1358,10 @@ class MTTOEnv(gym.Env):
             redundant_operation_time=self.last_state["redundant_operation_time"],
         )
 
-        # return self.gamma * phi_curr - phi_prev
-        return (
-            phi_curr - phi_prev
-        )  # 轻微地偏离PBRS的最优性保证，但能换来更好的训练稳定性
+        return self.gamma * phi_curr - phi_prev
+        # return (
+        #     phi_curr - phi_prev
+        # )  # 轻微地偏离PBRS的最优性保证，但能换来更好的训练稳定性
 
     def _potential_punctuality_v1(self, redundant_operation_time: float):
         return -4.0 * np.log1p(
@@ -1474,11 +1474,11 @@ class MTTOEnv(gym.Env):
     def _potential_punctuality_v7(
         self, operation_time: float, redundant_operation_time: float
     ):
-        K_T = 15.0
+        K_T = 30.0
         early_time_lambda = 0.6
         early_redundancy_lambda = 0.6
-        late_time_sigma = 60.0
-        late_redundancy_sigma = 40.0
+        late_time_sigma = 30.0
+        late_redundancy_sigma = 20.0
         schedule_time = self.train_service.schedule_time
 
         e_time = (
@@ -1533,8 +1533,8 @@ class MTTOEnv(gym.Env):
         x_hat = dist_error_abs / self.target_attraction_domain_radius
         v_hat = speed / self.vehicle.max_speed
 
-        phi_weak = 10.0 * np.exp(-x_hat - v_hat)
-        phi_strong = 20.0 * np.exp(-x_hat / 0.1 - v_hat / 0.1)
+        phi_weak = 50.0 * np.exp(-x_hat - v_hat)
+        phi_strong = 100.0 * np.exp(-x_hat / 0.1 - v_hat / 0.1)
 
         return phi_weak + phi_strong
 

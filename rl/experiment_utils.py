@@ -106,7 +106,7 @@ _RL_TRAJECTORY_METRICS_SUFFIX = "_metrics.json"
 # =============================================================================
 
 DEFAULT_SCHEDULE_TIME_S = 430.0
-DEFAULT_REWARD_DISCOUNT = 0.99
+DEFAULT_REWARD_DISCOUNT = 0.995
 DEFAULT_MAX_STEP_DISTANCE = 100.0
 DEFAULT_REWARD_PROFILE_NAME = "full_shaping"
 

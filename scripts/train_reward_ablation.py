@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from rl.experiment_utils import (
+    DEFAULT_REWARD_DISCOUNT,
     TrainingRunSpec,
     build_default_training_args,
     resolve_training_run_spec,
@@ -94,7 +95,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--reward-discount",
         type=float,
-        default=0.99,
+        default=DEFAULT_REWARD_DISCOUNT,
         help="回报折扣因子。",
     )
     parser.add_argument(

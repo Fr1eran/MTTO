@@ -146,7 +146,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Maximum simulation training timesteps.",
     )
     train_parser.add_argument("--schedule-time-s", type=float, default=430.0)
-    train_parser.add_argument("--reward-discount", type=float, default=0.99)
+    train_parser.add_argument(
+        "--reward-discount", type=float, default=DEFAULT_REWARD_DISCOUNT
+    )
     train_parser.add_argument("--num-envs", type=int, default=1)
     train_parser.add_argument(
         "--vec-env-type",

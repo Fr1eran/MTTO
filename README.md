@@ -122,7 +122,7 @@ RL 工作流脚本 `train_rl`、`train_reward_ablation`、`evaluate_rl`、`run_s
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `--reward-discount` | `float` | `0.99` | 回报折扣因子 γ |
+| `--reward-discount` | `float` | `0.995` | 回报折扣因子 γ |
 | `--rollout-steps-per-update` | `int` | `2048` | 每次更新的 rollout 总步数 |
 | `--n-steps-per-env` | `int` | 自动推导 | 每个环境的步数（优先级高于 `--rollout-steps-per-update`） |
 | `--total-timesteps` | `int` | `200000` | 训练总步数 |
@@ -238,7 +238,7 @@ python -m scripts.train_rl --output-root output/optimal/rl/safety_speed/ --sched
 | `--base-seed` | `int` | `None` | 当 `repeats > 1` 时按 `base-seed + repeat_index` 推导各轮 seed |
 | `--schedule-time-s` | `float` | `430.0` | 规划运行时间 |
 | `--max-step-distance` | `float` | `100.0` | 相邻状态转移最大移动距离 |
-| `--reward-discount` | `float` | `0.99` | 回报折扣因子 |
+| `--reward-discount` | `float` | `0.995` | 回报折扣因子 |
 | `--num-envs` | `int` | `1` | 训练环境数量 |
 | `--vec-env-type` | `str` | `subproc` | 向量化环境后端（启动方式自动选择） |
 | `--rollout-steps-per-update` | `int` | `2048` | PPO rollout 步数 |
@@ -283,7 +283,7 @@ python -m scripts.train_reward_ablation \
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `--load-dir` | `str` | `output/optimal/rl/final/` | 模型与 VecNormalize 文件所在目录 |
-| `--reward-discount` | `float` | 从 `run_metadata.json` 读取，否则 `0.99` | 折扣因子（重建环境用） |
+| `--reward-discount` | `float` | 从 `run_metadata.json` 读取，否则 `0.995` | 折扣因子（重建环境用） |
 | `--schedule-time-s` | `float` | 从 `run_metadata.json` 读取，否则 `430.0` | 规划运行时间 |
 | `--step-distance` | `float` | 从 `run_metadata.json` 读取，否则 `100.0` | 环境最大步距 (m) |
 | `--reward-profile` | `str` | 从 `run_metadata.json` 读取，否则 `full_shaping` | 评估所使用的奖励预设 |
@@ -339,7 +339,7 @@ python -m scripts.evaluate_rl --load-dir output/optimal/rl/.../final/ --dry-run
 |------|------|--------|------|
 | `--load-dir` | `str` | `output/optimal/rl/final/` | 模型与 VecNormalize 文件所在目录 |
 | `--output-dir` | `str` | `output/optimal/rl/schedule_time_change_eval/` | 突变实验输出根目录；每次运行会创建时间戳子目录 |
-| `--reward-discount` | `float` | 从 `run_metadata.json` 读取，否则 `0.99` | 折扣因子（重建环境用） |
+| `--reward-discount` | `float` | 从 `run_metadata.json` 读取，否则 `0.995` | 折扣因子（重建环境用） |
 | `--schedule-time-s` | `float` | 从 `run_metadata.json` 读取，否则 `430.0` | 突变前的初始规划运行时间 |
 | `--step-distance` | `float` | 从 `run_metadata.json` 读取，否则 `100.0` | 环境最大步距 (m) |
 | `--reward-profile` | `str` | 从 `run_metadata.json` 读取，否则 `full_shaping` | 评估所使用的奖励预设 |

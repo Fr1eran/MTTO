@@ -1,6 +1,7 @@
 import argparse
 
 from rl.experiment_utils import (
+    DEFAULT_REWARD_DISCOUNT,
     DEFAULT_REWARD_PROFILE_NAME,
     TrainingRunSpec,
     resolve_training_run_spec,
@@ -130,7 +131,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--reward-discount",
         type=float,
-        default=0.99,
+        default=DEFAULT_REWARD_DISCOUNT,
         help="回报折扣因子。",
     )
     parser.add_argument(
@@ -333,4 +334,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
