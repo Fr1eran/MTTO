@@ -1338,22 +1338,12 @@ class MTTOEnv(gym.Env):
 
     def _get_reward_punctuality_dense(self) -> float:
 
-        # phi_curr = self._potential_punctuality_v5(
-        #     operation_time=self.current_operation_time,
-        #     redundant_operation_time=self.current_redundant_operation_time,
-        # )
-
-        # phi_prev = self._potential_punctuality_v5(
-        #     operation_time=self.last_state["operation_time"],
-        #     redundant_operation_time=self.last_state["redundant_operation_time"],
-        # )
-
-        phi_curr = self._potential_punctuality_v7(
+        phi_curr = self._potential_punctuality_v8(
             operation_time=self.current_operation_time,
             redundant_operation_time=self.current_redundant_operation_time,
         )
 
-        phi_prev = self._potential_punctuality_v7(
+        phi_prev = self._potential_punctuality_v8(
             operation_time=self.last_state["operation_time"],
             redundant_operation_time=self.last_state["redundant_operation_time"],
         )
@@ -1474,9 +1464,9 @@ class MTTOEnv(gym.Env):
     def _potential_punctuality_v7(
         self, operation_time: float, redundant_operation_time: float
     ):
-        K_T = 30.0
-        early_time_lambda = 0.6
-        early_redundancy_lambda = 0.6
+        K_T = 10.0
+        early_time_lambda = 0.1
+        early_redundancy_lambda = 0.1
         late_time_sigma = 30.0
         late_redundancy_sigma = 20.0
         schedule_time = self.train_service.schedule_time
@@ -1503,6 +1493,30 @@ class MTTOEnv(gym.Env):
         )
 
         return K_T * (e_time * e_redundancy)
+
+    def _potential_punctuality_v8(
+        self, operation_time: float, redundant_operation_time: float
+    ):
+        K_T = 5.0
+        gamma_t = 0.1
+        gamma_r = 0.1
+        sigma_t = 60.0
+        sigma_r = 40.0
+        schedule_time = self.train_service.schedule_time
+
+        e_time = (
+            1.0 + gamma_t * (1.0 - operation_time / schedule_time) ** 2
+            if operation_time < schedule_time
+            else np.exp(-(((operation_time - schedule_time) / sigma_t) ** 2))
+        )
+
+        e_redundancy = (
+            1.0 + gamma_r * (redundant_operation_time / schedule_time) ** 2
+            if redundant_operation_time > 0.0
+            else np.exp(-((redundant_operation_time / sigma_r) ** 2))
+        )
+
+        return K_T * e_time * e_redundancy
 
     def _get_reward_stopping_dense(self):
 
