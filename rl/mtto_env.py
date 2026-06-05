@@ -1338,12 +1338,29 @@ class MTTOEnv(gym.Env):
 
     def _get_reward_punctuality_dense(self) -> float:
 
-        phi_curr = self._potential_punctuality_v8(
+        # phi_curr = self._potential_punctuality_v8(
+        #     operation_time=self.current_operation_time,
+        #     redundant_operation_time=self.current_redundant_operation_time,
+        # )
+
+        # phi_prev = self._potential_punctuality_v8(
+        #     operation_time=self.last_state["operation_time"],
+        #     redundant_operation_time=self.last_state["redundant_operation_time"],
+        # )
+
+        # phi_curr = self._potential_punctuality_v9(
+        #     redundant_operation_time=self.current_redundant_operation_time
+        # )
+        # phi_prev = self._potential_punctuality_v9(
+        #     redundant_operation_time=self.last_state["redundant_operation_time"]
+        # )
+
+        phi_curr = self._potential_punctuality_v10(
             operation_time=self.current_operation_time,
             redundant_operation_time=self.current_redundant_operation_time,
         )
 
-        phi_prev = self._potential_punctuality_v8(
+        phi_prev = self._potential_punctuality_v10(
             operation_time=self.last_state["operation_time"],
             redundant_operation_time=self.last_state["redundant_operation_time"],
         )
@@ -1500,8 +1517,8 @@ class MTTOEnv(gym.Env):
         K_T = 5.0
         gamma_t = 0.1
         gamma_r = 0.1
-        sigma_t = 60.0
-        sigma_r = 40.0
+        sigma_t = 100.0
+        sigma_r = 80.0
         schedule_time = self.train_service.schedule_time
 
         e_time = (
@@ -1517,6 +1534,48 @@ class MTTOEnv(gym.Env):
         )
 
         return K_T * e_time * e_redundancy
+
+    def _potential_punctuality_v9(self, redundant_operation_time: float):
+        K_T = 10.0
+        gamma = 10.0
+        omega = 100.0
+
+        e_redundancy = (
+            (gamma * (redundant_operation_time / self.train_service.schedule_time) ** 2)
+            if redundant_operation_time > 0.0
+            else -omega
+            * (redundant_operation_time / self.train_service.schedule_time) ** 2
+        )
+
+        return K_T * e_redundancy
+
+    def _potential_punctuality_v10(
+        self, redundant_operation_time: float, operation_time: float
+    ):
+        K_T = 5.0
+        gamma = 0.1
+        omega = 30.0
+        alpha = 20.0
+
+        ratio = redundant_operation_time / self.train_service.schedule_time
+
+        e_redundancy = (
+            gamma * (ratio**2)
+            if redundant_operation_time > 0.0
+            else -omega
+            * (ratio**2)
+            * (
+                1
+                + alpha
+                * (
+                    max(operation_time - self.train_service.schedule_time, 0.0)
+                    / self.train_service.schedule_time
+                )
+                ** 2
+            )
+        )
+
+        return K_T * e_redundancy
 
     def _get_reward_stopping_dense(self):
 
@@ -1542,13 +1601,17 @@ class MTTOEnv(gym.Env):
         # )  # 轻微地偏离PBRS的最优性保证，但能换来更好的训练稳定性
 
     def _potential_stopping_v1(self, pos: float, speed: float):
-        dist_error_abs = abs(self.train_service.target_position - pos)
+        K_weak = 10.0
+        K_strong = 50.0
+        P_weak = 1500.0
+        P_strong = 300.0
+        V_weak = 0.75 * self.vehicle.max_speed
+        V_strong = 0.15 * self.vehicle.max_speed
 
-        x_hat = dist_error_abs / self.target_attraction_domain_radius
-        v_hat = speed / self.vehicle.max_speed
+        dist_error_abs = abs(pos - self.train_service.target_position)
 
-        phi_weak = 50.0 * np.exp(-x_hat - v_hat)
-        phi_strong = 100.0 * np.exp(-x_hat / 0.1 - v_hat / 0.1)
+        phi_weak = K_weak * np.exp(-dist_error_abs / P_weak - speed / V_weak)
+        phi_strong = K_strong * np.exp(-dist_error_abs / P_strong - speed / V_strong)
 
         return phi_weak + phi_strong
 
