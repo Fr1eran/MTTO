@@ -368,6 +368,51 @@ def test_potential_punctuality_v4_is_finite_for_extreme_input(
     assert np.isfinite(mtto_env._potential_punctuality_v4(100.0))
 
 
+def test_potential_punctuality_v10_negative_redundancy_decay_grows_with_time(
+    mtto_env: MTTOEnv,
+) -> None:
+    early = mtto_env._potential_punctuality_v10(
+        redundant_operation_time=-10.0,
+        operation_time=100.0,
+    )
+    late = mtto_env._potential_punctuality_v10(
+        redundant_operation_time=-10.0,
+        operation_time=300.0,
+    )
+
+    assert late < early
+
+
+def test_potential_punctuality_v10_warning_band_does_not_use_time_decay(
+    mtto_env: MTTOEnv,
+) -> None:
+    early = mtto_env._potential_punctuality_v10(
+        redundant_operation_time=2.5,
+        operation_time=100.0,
+    )
+    late = mtto_env._potential_punctuality_v10(
+        redundant_operation_time=2.5,
+        operation_time=300.0,
+    )
+
+    np.testing.assert_allclose(early, late)
+
+
+def test_potential_punctuality_v10_positive_side_does_not_use_time_decay(
+    mtto_env: MTTOEnv,
+) -> None:
+    early = mtto_env._potential_punctuality_v10(
+        redundant_operation_time=10.0,
+        operation_time=100.0,
+    )
+    late = mtto_env._potential_punctuality_v10(
+        redundant_operation_time=10.0,
+        operation_time=300.0,
+    )
+
+    np.testing.assert_allclose(early, late)
+
+
 def test_punctuality_dense_reward_is_stable_for_extreme_time_redundancy(
     mtto_env: MTTOEnv,
 ) -> None:

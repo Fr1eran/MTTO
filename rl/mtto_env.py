@@ -1552,27 +1552,24 @@ class MTTOEnv(gym.Env):
     def _potential_punctuality_v10(
         self, redundant_operation_time: float, operation_time: float
     ):
-        K_T = 5.0
-        gamma = 0.1
+        K_T = 10.0
+        gamma = 1.0
         omega = 30.0
-        alpha = 20.0
+        alpha = 20.0  # 负冗余后随已运行时间放大惩罚
 
-        ratio = redundant_operation_time / self.train_service.schedule_time
+        ratio = (redundant_operation_time - 5.0) / self.train_service.schedule_time
+        late_time_decay_factor = (
+            1.0
+            + alpha
+            * (operation_time / self.train_service.schedule_time) ** 2
+            if redundant_operation_time < 0.0
+            else 1.0
+        )
 
         e_redundancy = (
             gamma * (ratio**2)
-            if redundant_operation_time > 0.0
-            else -omega
-            * (ratio**2)
-            * (
-                1
-                + alpha
-                * (
-                    max(operation_time - self.train_service.schedule_time, 0.0)
-                    / self.train_service.schedule_time
-                )
-                ** 2
-            )
+            if ratio > 0.0
+            else -omega * (ratio**2) * late_time_decay_factor
         )
 
         return K_T * e_redundancy

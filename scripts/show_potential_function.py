@@ -270,23 +270,22 @@ def _potential_punctuality_v10(redundant_operation_time, schedule_time):
 
 def _potential_punctuality_v11(redundant_operation_time, operation_time, schedule_time):
     """优化版二维准点势函数"""
-    K_T = 5.0
-    gamma = 0.1  # 弱化正冗余激励，避免策略为攒余量而激进运行
+    K_T = 10.0
+    gamma = 1.0  # 弱化正冗余激励，避免策略为攒余量而激进运行
     omega = 30.0  # 保留负冗余约束，同时避免晚点侧梯度压制其他目标
-    alpha = 20.0  # 实际超时后适度放大负冗余惩罚
+    alpha = 20.0  # 负冗余后随已运行时间放大惩罚
 
-    ratio = redundant_operation_time / schedule_time
+    ratio = (redundant_operation_time - 5.0) / schedule_time
+    late_time_decay_factor = np.where(
+        redundant_operation_time < 0.0,
+        1.0 + alpha * ((operation_time / schedule_time) ** 2),
+        1.0,
+    )
 
     e_redundancy = np.where(
-        redundant_operation_time > 0,
+        ratio > 0.0,
         gamma * (ratio**2),
-        -omega
-        * (ratio**2)
-        * (
-            1
-            + alpha
-            * ((np.maximum(operation_time - schedule_time, 0.0) / schedule_time) ** 2)
-        ),
+        -omega * (ratio**2) * late_time_decay_factor,
     )
 
     return K_T * e_redundancy
