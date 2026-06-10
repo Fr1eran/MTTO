@@ -271,11 +271,12 @@ def _potential_punctuality_v10(redundant_operation_time, schedule_time):
 def _potential_punctuality_v11(redundant_operation_time, operation_time, schedule_time):
     """优化版二维准点势函数"""
     K_T = 10.0
-    gamma = 1.0  # 弱化正冗余激励，避免策略为攒余量而激进运行
-    omega = 30.0  # 保留负冗余约束，同时避免晚点侧梯度压制其他目标
-    alpha = 20.0  # 负冗余后随已运行时间放大惩罚
+    gamma = 2.0
+    omega = 12.0
+    alpha = 2.0
+    margin = 0.0
 
-    ratio = (redundant_operation_time - 5.0) / schedule_time
+    ratio = (redundant_operation_time - margin) / schedule_time
     late_time_decay_factor = np.where(
         redundant_operation_time < 0.0,
         1.0 + alpha * ((operation_time / schedule_time) ** 2),
@@ -289,6 +290,29 @@ def _potential_punctuality_v11(redundant_operation_time, operation_time, schedul
     )
 
     return K_T * e_redundancy
+
+
+def _potential_punctuality_v12(redundant_operation_time, operation_time, schedule_time):
+    K_T = 8.0
+    min_stage_weight = 0.2
+    sigma_early = 0.14
+    sigma_late = 0.06
+    tail_smooth = 1.0e-6
+
+    progress = np.clip(operation_time / schedule_time, 0.0, 1.0)
+    rho = redundant_operation_time / schedule_time
+
+    smooth_progress = progress * progress * (3.0 - 2.0 * progress)
+    stage_weight = min_stage_weight + (1.0 - min_stage_weight) * smooth_progress
+
+    sigma = np.where(rho >= 0.0, sigma_early, sigma_late)
+    normalized_error = rho / sigma
+    pseudo_huber_error = np.sqrt(normalized_error**2 + tail_smooth) - np.sqrt(
+        tail_smooth
+    )
+    punctuality_peak = np.exp(-pseudo_huber_error)
+
+    return K_T * stage_weight * punctuality_peak
 
 
 # 二元函数
@@ -889,6 +913,8 @@ def plot_stopping_potential_slices(*, minimal: bool = False) -> Figure:
 
 def plot_punctuality_potential_curve(
     schedule_time: float = 430.0,
+    operation_time_lower: float = 0.0,
+    operation_time_upper: float = 530.0,
     redundant_time_upper: float = 52.0,
     redundant_time_lower: float = -120.0,
     num_points: int = 1200,
@@ -896,71 +922,74 @@ def plot_punctuality_potential_curve(
     minimal: bool = False,
 ) -> Figure:
     """
-    绘制准点势函数关于冗余运行时间的一维曲线。
+    绘制二维准点势函数关于运行时间的一维切片曲线。
 
     Args:
         schedule_time: 规划运行时间(s)。
+        operation_time_lower: 运行时间下界(s)。
+        operation_time_upper: 运行时间上界(s)。
         redundant_time_upper: 冗余运行时间上界(s)。
         redundant_time_lower: 冗余运行时间下界(s)。
         num_points: 采样点数。
     """
+    if schedule_time <= 0.0:
+        raise ValueError("schedule_time must be positive")
+    if operation_time_lower >= operation_time_upper:
+        raise ValueError("operation_time_lower must be less than operation_time_upper")
+    if redundant_time_lower >= redundant_time_upper:
+        raise ValueError("redundant_time_lower must be less than redundant_time_upper")
 
     num_points = max(int(num_points), 2)
-    redundant_operation_time_array = np.linspace(
-        redundant_time_upper,
-        redundant_time_lower,
+    operation_time_array = np.linspace(
+        operation_time_lower,
+        operation_time_upper,
         num_points,
         dtype=np.float64,
     )
 
-    # version 1
-    # potential_array = _potential_punctuality_v1(
-    #     redundant_operation_time=redundant_operation_time_array,
-    #     schedule_time=schedule_time,
-    # )
-
-    # version 2
-    # potential_array = _potential_punctuality_v2(
-    #     redundant_operation_time=redundant_operation_time_array,
-    #     schedule_time=schedule_time,
-    # )
-
-    # version 3
-    # potential_array = _potential_punctuality_v3(
-    #     redundant_operation_time=redundant_operation_time_array,
-    #     schedule_time=schedule_time,
-    # )
-
-    # version 4
-    # potential_array = _potential_punctuality_v4(
-    #     redundant_operation_time=redundant_operation_time_array,
-    #     schedule_time=schedule_time,
-    # )
-
-    # version 10
-    potential_array = _potential_punctuality_v10(
-        redundant_operation_time=redundant_operation_time_array,
-        schedule_time=schedule_time,
+    redundant_time_slices = np.array(
+        [
+            redundant_time_lower,
+            0.0,
+            redundant_time_upper,
+        ],
+        dtype=np.float64,
     )
+    redundant_time_slices = redundant_time_slices[
+        (redundant_time_lower <= redundant_time_slices)
+        & (redundant_time_slices <= redundant_time_upper)
+    ]
 
     fig, ax = plt.subplots(figsize=(8, 6))
 
-    ax.plot(
-        redundant_operation_time_array,
-        potential_array,
-        color="tab:green",
-        linewidth=2,
-    )
+    colors = ("tab:red", "tab:green", "tab:blue")
+    for redundant_time, color in zip(redundant_time_slices, colors, strict=False):
+        potential_array = _potential_punctuality_v12(
+            operation_time=operation_time_array,
+            redundant_operation_time=np.full_like(operation_time_array, redundant_time),
+            schedule_time=schedule_time,
+        )
+        ax.plot(
+            operation_time_array,
+            potential_array,
+            color=color,
+            linewidth=2,
+            label=rf"$\rho = {redundant_time:.0f}s$",
+        )
 
-    ax.set_xlim(redundant_time_upper, redundant_time_lower)
+    ax.set_xlim(operation_time_lower, operation_time_upper)
 
     if minimal:
         _apply_minimal_axis_style(ax)
     else:
         ax.axvline(
-            0.0, color="black", linestyle="--", linewidth=1.2, label=r"$\rho =0$"
+            schedule_time,
+            color="black",
+            linestyle="--",
+            linewidth=1.2,
+            label=r"$t = T_p$",
         )
-        ax.set_xlabel("Redunctant Operation Time (s)")
+        ax.set_xlabel("Operation Time (s)")
         ax.set_ylabel("Punctuality Potential")
         ax.legend(loc="upper right", framealpha=0.9)
         ax.grid(True, alpha=0.3, linestyle=":")
@@ -996,7 +1025,7 @@ def plot_punctuality_potential_heatmap(
         operation_time_array, redundant_time_array
     )
 
-    potential = _potential_punctuality_v11(
+    potential = _potential_punctuality_v12(
         operation_time=OPERATION_TIME,
         redundant_operation_time=REDUNDANT_TIME,
         schedule_time=schedule_time,
@@ -1047,7 +1076,7 @@ def plot_punctuality_potential_heatmap(
     ) -> None:
         if operation_time.size < 2:
             return
-        boundary_potential = _potential_punctuality_v11(
+        boundary_potential = _potential_punctuality_v12(
             operation_time=operation_time,
             redundant_operation_time=redundant_time,
             schedule_time=schedule_time,

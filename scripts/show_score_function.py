@@ -124,7 +124,19 @@ def visualize_combined_score_functions():
         c=6.0,
     )
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 12))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
+
+    def add_panel_label(ax, label: str) -> None:
+        ax.text(
+            0.5,
+            -0.24,
+            label,
+            transform=ax.transAxes,
+            ha="center",
+            va="top",
+            fontweight="normal",
+            clip_on=False,
+        )
 
     # ---- 上子图：停站分数 ----
     x_stop = np.linspace(0, 4.0, 1000)
@@ -154,16 +166,11 @@ def visualize_combined_score_functions():
     )
     ax1.axhline(y=0, color="black", linewidth=1)
     ax1.grid(True, alpha=0.3)
-    ax1.set_xlim(0, 4.0)
-    ax1.text(
-        0.5,
-        -0.20,
-        "(a)",
-        transform=ax1.transAxes,
-        ha="center",
-        va="top",
-        fontweight="normal",
-    )
+    ax1.set_xlim(0.0, 4.0)
+    ax1.set_ylim(0.0, 1.5)
+    ax1.set_xlabel("∆x")
+    ax1.set_ylabel("stopping score")
+    add_panel_label(ax1, "(a)")
 
     # ---- 下子图：准时分 ----
     x_punct = np.linspace(0, 60.0, 1000)
@@ -191,15 +198,10 @@ def visualize_combined_score_functions():
     ax2.axhline(y=0, color="black", linewidth=1)
     ax2.grid(True, alpha=0.3)
     ax2.set_xlim(0, 60.0)
-    ax2.text(
-        0.5,
-        -0.20,
-        "(b)",
-        transform=ax2.transAxes,
-        ha="center",
-        va="top",
-        fontweight="normal",
-    )
+    ax2.set_ylim(0.0, 1.0)
+    ax2.set_xlabel("∆y")
+    ax2.set_ylabel("punctuality score")
+    add_panel_label(ax2, "(b)")
 
     # 共用图例，置于整张画布正上方
     handles, labels = ax1.get_legend_handles_labels()
@@ -214,7 +216,7 @@ def visualize_combined_score_functions():
         frameon=True,
     )
 
-    fig.subplots_adjust(top=0.90, bottom=0.15, hspace=0.55)
+    fig.subplots_adjust(top=0.88, bottom=0.28, wspace=0.28)
     plt.show()
 
 

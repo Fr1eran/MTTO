@@ -1014,13 +1014,15 @@ class MTTOEnv(gym.Env):
         )
 
     def _calc_redundant_operation_time(self) -> float:
-        # min_remaining = self._get_reference_remaining_operation_time(self.current_pos)
-        min_remaining = self.ors.calc_min_operation_time(
-            begin_pos=self.current_position,
-            begin_speed=self.current_speed,
-            end_pos=self.train_service.target_position,
-            end_speed=0.0,
+        min_remaining = self._get_reference_remaining_operation_time(
+            self.current_position
         )
+        # min_remaining = self.ors.calc_min_operation_time(
+        #     begin_pos=self.current_position,
+        #     begin_speed=self.current_speed,
+        #     end_pos=self.train_service.target_position,
+        #     end_speed=0.0,
+        # )
         actual_remaining = (
             self.train_service.schedule_time - self.current_operation_time
         )
@@ -1056,7 +1058,7 @@ class MTTOEnv(gym.Env):
             # 基本生存奖励
             small_bonus = 100.0 / self.max_episode_steps
             if terminated:
-                reward_total = self._get_reward_goal()
+                reward_total = self._get_reward_goal() + 10.0
             else:
                 reward_total = self._get_reward_dense()
 
@@ -1299,7 +1301,7 @@ class MTTOEnv(gym.Env):
         scale = 1.0 + 1.0 * np.exp(-0.001 * distance_to_target)
 
         # 最终势能为两侧惩罚之和
-        return scale * (phi_max + phi_min) * 6.0
+        return scale * (phi_max + phi_min) * 4.0
 
     def _potential_safety_position(
         self, pos: float, min_pos: float, max_pos: float, target_pos: float
@@ -1321,7 +1323,7 @@ class MTTOEnv(gym.Env):
     def _get_reward_energy_dense(self) -> float:
 
         val = (
-            -20.0
+            -25.0
             * (self.current_energy_consumption - self.last_state["energy_consumption"])
             / self.max_energy_consumption
         )
@@ -1332,7 +1334,7 @@ class MTTOEnv(gym.Env):
         delta_acc = abs(self.last_state["acc"] - self.current_acc)
         norm_jerk = delta_acc / (self.train_service.max_acc_change)
 
-        val = -40.0 / self.max_episode_steps * norm_jerk**2
+        val = -50.0 / self.max_episode_steps * norm_jerk**2
 
         return val
 
@@ -1355,14 +1357,36 @@ class MTTOEnv(gym.Env):
         #     redundant_operation_time=self.last_state["redundant_operation_time"]
         # )
 
-        phi_curr = self._potential_punctuality_v10(
+        # phi_curr = self._potential_punctuality_v10(
+        #     operation_time=self.current_operation_time,
+        #     redundant_operation_time=self.current_redundant_operation_time,
+        # )
+
+        # phi_prev = self._potential_punctuality_v10(
+        #     operation_time=self.last_state["operation_time"],
+        #     redundant_operation_time=self.last_state["redundant_operation_time"],
+        # )
+
+        # phi_curr = self._potential_punctuality_v12(
+        #     operation_time=self.current_operation_time,
+        #     redundant_operation_time=self.current_redundant_operation_time,
+        # )
+
+        # phi_prev = self._potential_punctuality_v12(
+        #     operation_time=self.last_state["operation_time"],
+        #     redundant_operation_time=self.last_state["redundant_operation_time"],
+        # )
+
+        phi_curr = self._potential_punctuality_v13(
+            pos=self.current_position,
+            speed=self.current_speed,
             operation_time=self.current_operation_time,
-            redundant_operation_time=self.current_redundant_operation_time,
         )
 
-        phi_prev = self._potential_punctuality_v10(
+        phi_prev = self._potential_punctuality_v13(
+            pos=self.last_state["pos"],
+            speed=self.last_state["speed"],
             operation_time=self.last_state["operation_time"],
-            redundant_operation_time=self.last_state["redundant_operation_time"],
         )
 
         return self.gamma * phi_curr - phi_prev
@@ -1552,16 +1576,15 @@ class MTTOEnv(gym.Env):
     def _potential_punctuality_v10(
         self, redundant_operation_time: float, operation_time: float
     ):
-        K_T = 10.0
-        gamma = 1.0
-        omega = 30.0
-        alpha = 20.0  # 负冗余后随已运行时间放大惩罚
+        K_T = 15.0
+        gamma = 1.0  # 只加不减
+        omega = 15.0
+        alpha = 4.0
+        margin = 2.0
 
-        ratio = (redundant_operation_time - 5.0) / self.train_service.schedule_time
+        ratio = (redundant_operation_time - margin) / self.train_service.schedule_time
         late_time_decay_factor = (
-            1.0
-            + alpha
-            * (operation_time / self.train_service.schedule_time) ** 2
+            1.0 + alpha * (operation_time / self.train_service.schedule_time) ** 2
             if redundant_operation_time < 0.0
             else 1.0
         )
@@ -1573,6 +1596,81 @@ class MTTOEnv(gym.Env):
         )
 
         return K_T * e_redundancy
+
+    def _potential_punctuality_v11(
+        self, redundant_operation_time: float, operation_time: float
+    ):
+        K_T = 5.0
+        lambda_plus = 0.5
+        lambda_minus = 0.8
+        scale = 0.08
+        tau = (
+            self.train_service.schedule_time - operation_time
+        ) / self.train_service.schedule_time
+
+        rho = redundant_operation_time / self.train_service.schedule_time
+
+        def _sigmoid(x):
+            return 1.0 / (1.0 + np.exp(-x))
+
+        sig_norm = _sigmoid(-rho / scale)
+
+        e_time = (
+            (1.0 + lambda_plus * sig_norm) * tau**2
+            if tau > 0.0
+            else -(1.0 + lambda_minus * sig_norm) * tau**2
+        )
+
+        return K_T * e_time
+
+    def _potential_punctuality_v12(
+        self, redundant_operation_time: float, operation_time: float
+    ):
+        K_T = 8.0
+        min_stage_weight = 0.1
+        sigma_early = 0.14
+        sigma_late = 0.06
+        tail_smooth = 1.0e-6
+
+        progress = operation_time / self.train_service.schedule_time
+        rho = redundant_operation_time / self.train_service.schedule_time
+
+        smooth_progress = progress * progress * (3.0 - 2.0 * progress)
+        stage_weight = min_stage_weight + (1.0 - min_stage_weight) * smooth_progress
+
+        sigma = sigma_early if rho >= 0.0 else sigma_late
+        normalized_error = rho / sigma
+        pseudo_huber_error = np.sqrt(normalized_error**2 + tail_smooth) - np.sqrt(
+            tail_smooth
+        )
+        punctuality_peak = np.exp(-pseudo_huber_error)
+
+        return K_T * stage_weight * punctuality_peak
+
+    def _potential_punctuality_v13(
+        self,
+        pos: float,
+        speed: float,
+        operation_time: float,
+    ):
+        """
+        e_ETA > 0 时，说明按照当前速度开下去，到终点会晚点
+        e_ETA < 0 时，说明按照当前速度开下去，到终点会早到
+        e_ETA = 0 时，说明按照当前速度是完美的“准点巡航速度”
+        """
+        K_T = 2.0
+        epsilon = 0.5
+        sigma_early = 20.0
+        sigma_late = 10.0
+        e_ETA = (
+            operation_time
+            + (self.train_service.target_position - pos) / (speed + epsilon)
+            - self.train_service.schedule_time
+        )
+
+        sigma = sigma_early if e_ETA <= 0.0 else sigma_late
+
+        return K_T * np.exp(-((e_ETA / sigma) ** 2))
 
     def _get_reward_stopping_dense(self):
 
@@ -1628,7 +1726,7 @@ class MTTOEnv(gym.Env):
     ) -> float:
         _stopping = self._calc_stopping_score()
         _punctuality = self._calc_punctuality_score()
-        reward_stopping = _stopping * 40.0
+        reward_stopping = _stopping * 20.0
         reward_punctuality = _stopping * _punctuality * 60.0
 
         if self.enable_diagnostics and self._collect_step_diagnostics:
