@@ -198,6 +198,7 @@ def _run_optimization(*, cli_args: argparse.Namespace, output_dir: str) -> int:
             pos_arr=result["pos"],
             speed_arr=result["speed"],
             output_path=output_file,
+            extra_arrays={"cum_time_s": result["cum_time_s"]},
             metrics={
                 "target_time_s": float(train_service.schedule_time),
                 "total_time_s": float(result["total_time"]),
@@ -206,7 +207,9 @@ def _run_optimization(*, cli_args: argparse.Namespace, output_dir: str) -> int:
                 ),
                 "total_energy_kj": float(result["total_energy"]),
                 "start_position_m": float(train_service.start_position),
+                "start_speed_mps": float(train_service.start_speed),
                 "target_position_m": float(train_service.target_position),
+                "target_speed_mps": 0.0,
                 **comfort_metrics,
             },
         )

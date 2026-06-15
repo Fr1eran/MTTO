@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -12,6 +15,7 @@ from utils.data_loader import (
     load_stations_goal_positions,
 )
 from utils.indexing_utils import find_speed_rise_entry_and_fall
+from utils.io_utils import save_curve_and_metrics
 
 
 @pytest.fixture(scope="module")
@@ -50,6 +54,61 @@ def operation_reference_system():
 
 def _sum_operation_time(operations) -> float:
     return float(sum(float(time) for _, time in operations))
+
+
+def _build_fake_reference_ors() -> ORS:
+    ors = ORS.__new__(ORS)
+
+    def _fake_calc_min_operation_time(
+        *,
+        begin_pos: float,
+        begin_speed: float,
+        end_pos: float,
+        end_speed: float,
+    ) -> float:
+        del end_speed
+        return (float(end_pos) - float(begin_pos)) / 10.0 + 0.1 * float(begin_speed)
+
+    ors.calc_min_operation_time = _fake_calc_min_operation_time
+    return ors
+
+
+def _write_dp_reference_artifact(
+    run_dir: Path,
+    *,
+    include_cum_time: bool = True,
+    schedule_time_s: float = 10.0,
+    start_position: float = 0.0,
+    start_speed: float = 0.0,
+    target_position: float = 20.0,
+    target_speed: float = 0.0,
+) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    metrics = {
+        "target_time_s": schedule_time_s,
+        "start_position_m": start_position,
+        "start_speed_mps": start_speed,
+        "target_position_m": target_position,
+        "target_speed_mps": target_speed,
+    }
+    if include_cum_time:
+        save_curve_and_metrics(
+            pos_arr=[0.0, 10.0, 20.0],
+            speed_arr=[0.0, 2.0, 0.0],
+            output_path=str(run_dir / "optimized_speed_curve.npz"),
+            extra_arrays={"cum_time_s": [0.0, 2.0, 5.0]},
+            metrics=metrics,
+        )
+    else:
+        np.savez_compressed(
+            run_dir / "optimized_speed_curve.npz",
+            pos_m=np.asarray([0.0, 1.0, 3.0], dtype=np.float32),
+            speed_mps=np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
+        )
+        (run_dir / "optimized_speed_curve_metrics.json").write_text(
+            json.dumps(metrics),
+            encoding="utf-8",
+        )
 
 
 def test_find_speed_rise_entry_and_fall_is_stable_under_repeated_calls(
@@ -155,3 +214,98 @@ def test_calc_min_operation_time_matches_runtime_operation_sum(
         )
         operations_time = _sum_operation_time(operations)
         np.testing.assert_allclose(runtime_time, operations_time, rtol=0.0, atol=1e-9)
+
+
+def test_load_or_build_ref_redundant_operation_time_loads_matching_dp_artifact(
+    tmp_path: Path,
+) -> None:
+    _write_dp_reference_artifact(tmp_path / "run")
+    ors = _build_fake_reference_ors()
+
+    pos, speed, cum_time, ref_redundant = (
+        ors.load_or_build_ref_redundant_operation_time_from_dp(
+            start_position=0.0,
+            start_speed=0.0,
+            target_position=20.0,
+            schedule_time_s=10.0,
+            target_speed=0.0,
+            dp_curve_dir=tmp_path,
+        )
+    )
+
+    np.testing.assert_allclose(pos, np.asarray([0.0, 10.0, 20.0]))
+    np.testing.assert_allclose(speed, np.asarray([0.0, 2.0, 0.0]))
+    np.testing.assert_allclose(cum_time, np.asarray([0.0, 2.0, 5.0]))
+    np.testing.assert_allclose(ref_redundant, np.asarray([8.0, 6.8, 5.0]))
+
+
+def test_load_or_build_ref_redundant_operation_time_recovers_legacy_cum_time(
+    tmp_path: Path,
+) -> None:
+    _write_dp_reference_artifact(tmp_path / "legacy", include_cum_time=False)
+    ors = _build_fake_reference_ors()
+
+    pos, speed, cum_time, ref_redundant = (
+        ors.load_or_build_ref_redundant_operation_time_from_dp(
+            start_position=0.0,
+            start_speed=0.0,
+            target_position=20.0,
+            schedule_time_s=10.0,
+            target_speed=0.0,
+            dp_curve_dir=tmp_path,
+        )
+    )
+
+    np.testing.assert_allclose(pos, np.asarray([0.0, 1.0, 3.0]))
+    np.testing.assert_allclose(speed, np.asarray([1.0, 1.0, 1.0]))
+    np.testing.assert_allclose(cum_time, np.asarray([0.0, 1.0, 3.0]))
+    np.testing.assert_allclose(ref_redundant, np.asarray([7.9, 7.0, 5.2]))
+
+
+def test_load_or_build_ref_redundant_operation_time_raises_without_dp_source(
+    tmp_path: Path,
+) -> None:
+    ors = _build_fake_reference_ors()
+
+    with pytest.raises(FileNotFoundError, match="matching DP trajectory"):
+        ors.load_or_build_ref_redundant_operation_time_from_dp(
+            start_position=0.0,
+            start_speed=0.0,
+            target_position=20.0,
+            schedule_time_s=10.0,
+            dp_curve_dir=tmp_path,
+        )
+
+
+def test_load_or_build_ref_redundant_operation_time_uses_injected_compute_callback(
+    tmp_path: Path,
+) -> None:
+    ors = _build_fake_reference_ors()
+    called_kwargs: dict[str, float] = {}
+
+    def _compute_dp_curve(**kwargs):
+        called_kwargs.update(kwargs)
+        return (
+            np.asarray([0.0, 20.0], dtype=np.float32),
+            np.asarray([0.0, 0.0], dtype=np.float32),
+            np.asarray([0.0, 6.0], dtype=np.float32),
+            {"target_time_s": 10.0},
+        )
+
+    pos, speed, cum_time, ref_redundant = (
+        ors.load_or_build_ref_redundant_operation_time_from_dp(
+            start_position=0.0,
+            start_speed=0.0,
+            target_position=20.0,
+            schedule_time_s=10.0,
+            target_speed=0.0,
+            dp_curve_dir=tmp_path,
+            compute_dp_curve=_compute_dp_curve,
+        )
+    )
+
+    assert called_kwargs["schedule_time_s"] == pytest.approx(10.0)
+    np.testing.assert_allclose(pos, np.asarray([0.0, 20.0]))
+    np.testing.assert_allclose(speed, np.asarray([0.0, 0.0]))
+    np.testing.assert_allclose(cum_time, np.asarray([0.0, 6.0]))
+    np.testing.assert_allclose(ref_redundant, np.asarray([8.0, 4.0]))

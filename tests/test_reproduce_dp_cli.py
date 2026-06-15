@@ -1,10 +1,14 @@
 import os
+from argparse import Namespace
+from types import SimpleNamespace
 
+import json
 import pytest
 
 from scripts.reproduce_dp import (
     _build_cli_parser,
     _resolve_output_dir,
+    _run_optimization,
     _validate_cli_args,
     main,
 )
@@ -224,3 +228,70 @@ def test_main_rejects_invalid_args(argv: list[str]) -> None:
         main(argv)
 
     assert exc_info.value.code == 2
+
+
+def test_run_optimization_metrics_include_start_and_target_speed(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    class FakeOptimizer:
+        def __init__(self, **kwargs):
+            del kwargs
+
+        def optimize(self, *, max_speed: float, delta_speed: float, max_iters: int):
+            del max_speed, delta_speed, max_iters
+            return {
+                "pos": [0.0, 20.0],
+                "speed": [1.5, 0.0],
+                "cum_time_s": [0.0, 9.0],
+                "total_time": 9.0,
+                "total_energy": 12.0,
+            }
+
+    train_service = SimpleNamespace(
+        schedule_time=10.0,
+        start_position=0.0,
+        start_speed=1.5,
+        target_position=20.0,
+        max_acc_change=0.75,
+    )
+    monkeypatch.setattr(
+        "scripts.reproduce_dp.build_scenario",
+        lambda *, schedule_time_s: (
+            SimpleNamespace(max_speed=30.0),
+            object(),
+            object(),
+            train_service,
+        ),
+    )
+    monkeypatch.setattr("scripts.reproduce_dp.VariableSpacingDPOptimizer", FakeOptimizer)
+    monkeypatch.setattr(
+        "scripts.reproduce_dp.compute_comfort_metrics_from_trajectory",
+        lambda **kwargs: {
+            "comfort_tav": 0.0,
+            "comfort_er_pct": 0.0,
+            "comfort_rms": 0.0,
+        },
+    )
+
+    args = Namespace(
+        schedule_time_s=10.0,
+        hide_precompute_progress=True,
+        precompute_mode="serial",
+        precompute_workers=1,
+        precompute_chunk_size=None,
+        mp_start_method=None,
+        stage_division="variable",
+        uniform_step_size=100.0,
+        sub_stage_count=30,
+        skip_disk_cache=False,
+        delta_speed_mps=0.1,
+        max_outer_iterations=1,
+    )
+
+    assert _run_optimization(cli_args=args, output_dir=str(tmp_path)) == 0
+
+    metrics_path = tmp_path / "optimized_speed_curve_metrics.json"
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    assert metrics["start_speed_mps"] == pytest.approx(1.5)
+    assert metrics["target_speed_mps"] == pytest.approx(0.0)

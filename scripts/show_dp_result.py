@@ -101,7 +101,7 @@ def main() -> None:
     print(f"Using curve file: {artifact.npz_path}")
     print(f"Using metrics file: {artifact.metrics_path}")
 
-    pos_arr, speed_arr, metrics = load_dp_curve_artifact(artifact)
+    pos_arr, speed_arr, _cum_time_arr, metrics = load_dp_curve_artifact(artifact)
 
     _print_metrics(metrics)
 

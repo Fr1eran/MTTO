@@ -70,11 +70,45 @@ def load_optimized_curve_and_metrics(
     return pos_arr, speed_arr, metrics
 
 
+def load_curve_with_cum_time_and_metrics(
+    npz_path: str,
+    metrics_path: str | None = None,
+    *,
+    dtype: np.dtype | type[np.floating] = np.float32,
+    use_metrics_cache: bool = True,
+) -> tuple[
+    NDArray[np.floating],
+    NDArray[np.floating],
+    NDArray[np.floating],
+    dict[str, Any],
+]:
+    """Load trajectory arrays, including cumulative time when available."""
+    pos_arr, speed_arr, metrics = load_optimized_curve_and_metrics(
+        npz_path=npz_path,
+        metrics_path=metrics_path,
+        dtype=dtype,
+        use_metrics_cache=use_metrics_cache,
+    )
+    with np.load(npz_path, allow_pickle=False) as npz_data:
+        if "cum_time_s" in npz_data.files:
+            cum_time_arr = np.asarray(npz_data["cum_time_s"], dtype=dtype)
+        else:
+            from utils.trajectory import recover_time_axis_from_trajectory
+
+            cum_time_arr = recover_time_axis_from_trajectory(
+                pos_arr,
+                speed_arr,
+            ).astype(dtype, copy=False)
+
+    return pos_arr, speed_arr, cum_time_arr, metrics
+
+
 def save_curve_and_metrics(
     pos_arr: Sequence[float] | NDArray,
     speed_arr: Sequence[float] | NDArray,
     output_path: str,
     metrics: dict[str, Any] | None = None,
+    extra_arrays: dict[str, Sequence[float] | NDArray] | None = None,
 ) -> tuple[str, str]:
     """Save trajectory arrays to NPZ and metrics payload to JSON."""
     pos = np.asarray(pos_arr, dtype=np.float32)
@@ -88,12 +122,16 @@ def save_curve_and_metrics(
     base_name = os.path.splitext(os.path.basename(output_path))[0]
     metrics_json_path = os.path.join(output_dir, f"{base_name}_metrics.json")
 
-    np.savez_compressed(
-        output_path,
-        pos_m=pos,
-        speed_mps=speed,
-        created_at=np.asarray([created_at], dtype=str),
-    )
+    npz_payload: dict[str, NDArray] = {
+        "pos_m": pos,
+        "speed_mps": speed,
+        "created_at": np.asarray([created_at], dtype=str),
+    }
+    if extra_arrays:
+        for key, value in extra_arrays.items():
+            npz_payload[str(key)] = np.asarray(value, dtype=np.float32)
+
+    np.savez_compressed(output_path, **npz_payload)
 
     metrics_payload: dict[str, Any] = {"created_at": created_at}
     if metrics:

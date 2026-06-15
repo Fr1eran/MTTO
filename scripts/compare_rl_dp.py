@@ -183,7 +183,9 @@ def main() -> None:
     print(f"Using RL curve file: {rl_artifact.npz_path}")
     print(f"Using RL metrics file: {rl_artifact.metrics_path}")
 
-    dp_pos_arr, dp_speed_arr, dp_metrics = load_dp_curve_artifact(dp_artifact)
+    dp_pos_arr, dp_speed_arr, _dp_cum_time_arr, dp_metrics = load_dp_curve_artifact(
+        dp_artifact
+    )
     rl_pos_arr, rl_speed_arr, rl_metrics = load_rl_curve_artifact(rl_artifact)
 
     _print_metrics(

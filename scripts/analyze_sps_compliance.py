@@ -180,7 +180,8 @@ def _load_curve_artifact(
     artifact: OptimizedCurveArtifact,
 ) -> tuple[NDArray[np.floating[Any]], NDArray[np.floating[Any]], dict[str, object]]:
     if trajectory_kind == _TRAJECTORY_KIND_DP:
-        return load_dp_curve_artifact(artifact)
+        pos_arr, speed_arr, _cum_time_arr, metrics = load_dp_curve_artifact(artifact)
+        return pos_arr, speed_arr, metrics
     if trajectory_kind == _TRAJECTORY_KIND_RL:
         return load_rl_curve_artifact(artifact)
     choices = ", ".join(_VALID_TRAJECTORY_KINDS)
@@ -911,7 +912,9 @@ def main() -> None:
         except FileNotFoundError as exc:
             parser.error(str(exc))
 
-        dp_pos_arr, dp_speed_arr, dp_metrics = load_dp_curve_artifact(dp_artifact)
+        dp_pos_arr, dp_speed_arr, _dp_cum_time_arr, dp_metrics = (
+            load_dp_curve_artifact(dp_artifact)
+        )
         rl_pos_arr, rl_speed_arr, rl_metrics = load_rl_curve_artifact(rl_artifact)
 
         schedule_time_s = _resolve_target_schedule_time(

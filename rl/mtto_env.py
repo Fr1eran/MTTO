@@ -1,4 +1,5 @@
 import math
+import os
 from dataclasses import dataclass
 from typing import Any, TypedDict, cast
 
@@ -16,6 +17,8 @@ from model.vehicle import VehicleInfo
 from utils.indexing_utils import get_interval_index
 from utils.plot_utils import set_chinese_font
 from utils.score_function import SigmoidVariant
+
+DEFAULT_PUNCTUALITY_DP_CURVE_DIR = os.path.join("output", "optimal", "dp")
 
 
 class RewardInfoForTB(TypedDict, total=False):
@@ -54,6 +57,7 @@ class BasicInfo(TypedDict, total=False):
     speed: float
     stopping_point_index: int
     operation_time: float
+    redundant_operation_time: float
     energy_consumption: float
     comfort_tav: float
     comfort_er_pct: float
@@ -115,6 +119,10 @@ class MTTOEnv(gym.Env):
         render_mode: str | None = None,
         use_animation: bool = False,
         reward_config: RewardConfig | None = None,
+        punctuality_dp_curve_dir: str | os.PathLike[str] | None = (
+            DEFAULT_PUNCTUALITY_DP_CURVE_DIR
+        ),
+        punctuality_reference_match_tolerance: float = 1e-3,
     ):
         super().__init__()
 
@@ -136,6 +144,10 @@ class MTTOEnv(gym.Env):
         # 奖励分量配置
         self.reward_config = (
             reward_config if reward_config is not None else RewardConfig()
+        )
+        self.punctuality_dp_curve_dir = punctuality_dp_curve_dir
+        self.punctuality_reference_match_tolerance = float(
+            punctuality_reference_match_tolerance
         )
 
         # 是否采集诊断信息
@@ -249,6 +261,10 @@ class MTTOEnv(gym.Env):
         self.ref_total_operation_time = self._get_reference_cum_time(
             self.train_service.target_position
         )
+        self.ref_redundant_operation_time_pos_arr = np.asarray([], dtype=np.float64)
+        self.ref_redundant_operation_time_arr = np.asarray([], dtype=np.float64)
+        if self.reward_config.enable_potential_punctuality:
+            self._load_ref_redundant_operation_time_from_dp()
 
         # 初始化状态
         # 包含:
@@ -514,6 +530,9 @@ class MTTOEnv(gym.Env):
     def _record_basic_info(self) -> None:
         self.basic_info["energy_consumption"] = self.current_energy_consumption
         self.basic_info["operation_time"] = self.current_operation_time
+        self.basic_info["redundant_operation_time"] = (
+            self.current_redundant_operation_time
+        )
         self.basic_info["position"] = self.current_position
         self.basic_info["speed"] = self.current_speed
         self.basic_info["stopping_point_index"] = self.current_stopping_point_index
@@ -584,6 +603,69 @@ class MTTOEnv(gym.Env):
             + action * (self.vehicle.max_acc - self.vehicle.max_dec) / 2
         )
 
+    def _load_ref_redundant_operation_time_from_dp(self) -> None:
+        if self.punctuality_dp_curve_dir is None:
+            raise FileNotFoundError(
+                "punctuality_dp_curve_dir must be provided to load the v18 "
+                "DP reference redundant operation-time manifold."
+            )
+
+        pos_arr, _speed_arr, _cum_time_arr, ref_redundant_operation_time_arr = (
+            self.ors.load_or_build_ref_redundant_operation_time_from_dp(
+                start_position=self.train_service.start_position,
+                start_speed=self.train_service.start_speed,
+                target_position=self.train_service.target_position,
+                target_speed=0.0,
+                schedule_time_s=self.train_service.schedule_time,
+                dp_curve_dir=self.punctuality_dp_curve_dir,
+                force_recompute=False,
+                match_tolerance=self.punctuality_reference_match_tolerance,
+            )
+        )
+
+        pos = np.asarray(pos_arr, dtype=np.float64)
+        ref_redundant = np.asarray(ref_redundant_operation_time_arr, dtype=np.float64)
+        if pos.ndim != 1 or ref_redundant.ndim != 1:
+            raise ValueError(
+                "DP v18 reference position and redundant-time arrays must be 1-D"
+            )
+        if pos.size != ref_redundant.size:
+            raise ValueError(
+                "DP v18 reference position and redundant-time arrays must have "
+                "equal length"
+            )
+        if pos.size == 0:
+            raise ValueError("DP v18 reference redundant-time manifold is empty")
+
+        order = np.argsort(pos)
+        pos_sorted = pos[order]
+        ref_sorted = ref_redundant[order]
+        keep_mask = np.empty(pos_sorted.size, dtype=bool)
+        keep_mask[0] = True
+        keep_mask[1:] = np.diff(pos_sorted) != 0.0
+
+        self.ref_redundant_operation_time_pos_arr = pos_sorted[keep_mask]
+        self.ref_redundant_operation_time_arr = ref_sorted[keep_mask]
+
+    def _get_ref_redundant_operation_time(self, pos: float | np.floating) -> float:
+        if (
+            self.ref_redundant_operation_time_pos_arr.size == 0
+            or self.ref_redundant_operation_time_arr.size == 0
+        ):
+            raise RuntimeError(
+                "DP v18 reference redundant operation-time manifold is not initialized."
+            )
+
+        return float(
+            np.interp(
+                float(pos),
+                self.ref_redundant_operation_time_pos_arr,
+                self.ref_redundant_operation_time_arr,
+                left=float(self.ref_redundant_operation_time_arr[0]),
+                right=float(self.ref_redundant_operation_time_arr[-1]),
+            )
+        )
+
     def change_schedule_time(self, new_schedule_time: float):
         if new_schedule_time != self.train_service.schedule_time:
             self.train_service.schedule_time = new_schedule_time
@@ -595,6 +677,8 @@ class MTTOEnv(gym.Env):
                 * 10.0,
                 c=6.0,
             )
+            if self.reward_config.enable_potential_punctuality:
+                self._load_ref_redundant_operation_time_from_dp()
             self.current_redundant_operation_time = (
                 self._calc_redundant_operation_time()
             )
@@ -787,8 +871,11 @@ class MTTOEnv(gym.Env):
         # (
         #     self.current_latest_traction_intervention_point,
         #     self.current_latest_braking_intervention_point,
-        # ) = self.safeguard_utility.get_latest_traction_and_braking_intervention_points(
-        #     current_speed=self.current_speed, current_sp=self.current_sp
+        # ) = (
+        #     self.safeguard_utility
+        #     .get_latest_traction_and_braking_intervention_points(
+        #         current_speed=self.current_speed, current_sp=self.current_sp
+        #     )
         # )
 
         self.is_final_approach = (
@@ -1014,15 +1101,15 @@ class MTTOEnv(gym.Env):
         )
 
     def _calc_redundant_operation_time(self) -> float:
-        min_remaining = self._get_reference_remaining_operation_time(
-            self.current_position
-        )
-        # min_remaining = self.ors.calc_min_operation_time(
-        #     begin_pos=self.current_position,
-        #     begin_speed=self.current_speed,
-        #     end_pos=self.train_service.target_position,
-        #     end_speed=0.0,
+        # min_remaining = self._get_reference_remaining_operation_time(
+        #     self.current_position
         # )
+        min_remaining = self.ors.calc_min_operation_time(
+            begin_pos=self.current_position,
+            begin_speed=self.current_speed,
+            end_pos=self.train_service.target_position,
+            end_speed=0.0,
+        )
         actual_remaining = (
             self.train_service.schedule_time - self.current_operation_time
         )
@@ -1357,16 +1444,6 @@ class MTTOEnv(gym.Env):
         #     redundant_operation_time=self.last_state["redundant_operation_time"]
         # )
 
-        # phi_curr = self._potential_punctuality_v10(
-        #     operation_time=self.current_operation_time,
-        #     redundant_operation_time=self.current_redundant_operation_time,
-        # )
-
-        # phi_prev = self._potential_punctuality_v10(
-        #     operation_time=self.last_state["operation_time"],
-        #     redundant_operation_time=self.last_state["redundant_operation_time"],
-        # )
-
         # phi_curr = self._potential_punctuality_v12(
         #     operation_time=self.current_operation_time,
         #     redundant_operation_time=self.current_redundant_operation_time,
@@ -1377,17 +1454,47 @@ class MTTOEnv(gym.Env):
         #     redundant_operation_time=self.last_state["redundant_operation_time"],
         # )
 
-        phi_curr = self._potential_punctuality_v13(
+        # phi_curr = self._potential_punctuality_v13(
+        #     pos=self.current_position,
+        #     speed=self.current_speed,
+        #     operation_time=self.current_operation_time,
+        # )
+
+        # phi_prev = self._potential_punctuality_v13(
+        #     pos=self.last_state["pos"],
+        #     speed=self.last_state["speed"],
+        #     operation_time=self.last_state["operation_time"],
+        # )
+
+        # phi_curr = self._potential_punctuality_v14(
+        #     operation_time=self.current_operation_time,
+        #     redundant_operation_time=self.current_redundant_operation_time,
+        # )
+
+        # phi_prev = self._potential_punctuality_v14(
+        #     operation_time=self.last_state["operation_time"],
+        #     redundant_operation_time=self.last_state["redundant_operation_time"],
+        # )
+
+        phi_curr = self._potential_punctuality_v18(
             pos=self.current_position,
-            speed=self.current_speed,
-            operation_time=self.current_operation_time,
+            redundant_operation_time=self.current_redundant_operation_time,
         )
 
-        phi_prev = self._potential_punctuality_v13(
+        phi_prev = self._potential_punctuality_v18(
             pos=self.last_state["pos"],
-            speed=self.last_state["speed"],
-            operation_time=self.last_state["operation_time"],
+            redundant_operation_time=self.last_state["redundant_operation_time"],
         )
+
+        # phi_curr = self._potential_punctuality_v19(
+        #     pos=self.current_position,
+        #     redundant_operation_time=self.current_redundant_operation_time,
+        # )
+
+        # phi_prev = self._potential_punctuality_v19(
+        #     pos=self.last_state["pos"],
+        #     redundant_operation_time=self.last_state["redundant_operation_time"],
+        # )
 
         return self.gamma * phi_curr - phi_prev
         # return (
@@ -1576,23 +1683,21 @@ class MTTOEnv(gym.Env):
     def _potential_punctuality_v10(
         self, redundant_operation_time: float, operation_time: float
     ):
+        """随机数种子为19937时性能表现较好"""
         K_T = 15.0
-        gamma = 1.0  # 只加不减
+        gamma = 1.0  # 只加不减 1.0
         omega = 15.0
         alpha = 4.0
         margin = 2.0
 
-        ratio = (redundant_operation_time - margin) / self.train_service.schedule_time
-        late_time_decay_factor = (
-            1.0 + alpha * (operation_time / self.train_service.schedule_time) ** 2
-            if redundant_operation_time < 0.0
-            else 1.0
-        )
+        schedule_time = self.train_service.schedule_time
+        ratio = (redundant_operation_time - margin) / schedule_time
+        progress = operation_time / schedule_time
 
         e_redundancy = (
             gamma * (ratio**2)
             if ratio > 0.0
-            else -omega * (ratio**2) * late_time_decay_factor
+            else -omega * (ratio**2) * (1.0 + alpha * (progress**2))
         )
 
         return K_T * e_redundancy
@@ -1672,6 +1777,148 @@ class MTTOEnv(gym.Env):
 
         return K_T * np.exp(-((e_ETA / sigma) ** 2))
 
+    def _potential_punctuality_v14(
+        self, redundant_operation_time: float, operation_time: float
+    ):
+        K_T = 8.0
+        alpha = 0.1
+        gamma_pot = 0.2
+        omega = 80.0
+
+        schedule_time = self.train_service.schedule_time
+
+        # 物理可行域校验
+        if operation_time + redundant_operation_time > schedule_time + 1e-3:
+            # 违反则回归到零势能面
+            return 0.0
+
+        # 时空状态变量归一化解耦
+        progress = operation_time / schedule_time
+        ratio = redundant_operation_time / schedule_time
+
+        # 计算时光流逝带来的基础线性势能衰减基底
+        time_consumption_base = 1.0 - alpha * progress
+
+        # 分段冗余协同流形
+        e_redundancy = (
+            1.0 + gamma_pot * (ratio**2)
+            if ratio > 0.0
+            else 1.0 / (1.0 + omega * (ratio**2))
+        )
+
+        return K_T * time_consumption_base * e_redundancy
+
+    def _potential_punctuality_v15(
+        self, redundant_operation_time: float, operation_time: float
+    ):
+        K_T = 10.0
+        omega_pos = 5.0
+        omega_neg = 2.0
+        T_ref = 100.0
+        margin = 2.0
+
+        progress = operation_time / self.train_service.schedule_time
+        ratio = (redundant_operation_time - margin) / T_ref
+
+        e_redundancy = (
+            omega_pos * (ratio**2) * (1.0 - progress)
+            if ratio > 0.0
+            else -omega_neg * np.log1p(ratio**2) * (1.0 + progress)
+        )
+
+        return K_T * e_redundancy
+
+    def _potential_punctuality_v16(
+        self, redundant_operation_time: float, operation_time: float
+    ):
+        omega_pos = 15.0
+        omega_neg = 20.0
+        T_ref_pos = 100.0
+        T_ref_neg = 50.0
+        margin = 0.0
+
+        # progress = operation_time / self.train_service.schedule_time
+        if redundant_operation_time - margin > 0.0:
+            # e_redundancy = omega_pos * (ratio**2) * (1.0 - progress)
+            ratio = (redundant_operation_time - margin) / T_ref_pos
+            phi = omega_pos * (ratio**2)
+        else:
+            # ratio_clipped = max(ratio, -2.0)
+            # rational_linear_flow = (ratio**2) / (1.0 + 0.8 * abs(ratio))
+            dist_to_target = abs(
+                self.train_service.target_position - self.current_position
+            )
+            if dist_to_target < 3000.0:
+                fade_factor = max(dist_to_target / 3000.0, 0.1)
+            else:
+                fade_factor = 1.0
+            ratio = (redundant_operation_time - margin) / T_ref_neg
+            phi = (
+                # -omega_neg * abs(ratio_clipped) * np.exp(0.5 * progress)
+                # -omega_neg * rational_linear_flow * (1.0 + 0.5 * progress)
+                # -omega_neg * rational_linear_flow * np.exp(2.0 * progress)
+                # -omega_neg * np.log1p(1.2 * ratio**2) * (1.0 + 2.0 * progress)
+                # -omega_neg * np.log1p(1.2 * ratio**2) * (2.0 - progress)
+                -omega_neg * np.log1p(-ratio) * fade_factor
+            )
+
+        return phi
+
+    def _potential_punctuality_v17(
+        self, redundant_operation_time: float, operation_time: float
+    ):
+        omega_pos = 15.0
+        omega_neg = 4.5
+        phi_zero = 10.0
+        T_ref = 100.0
+        margin = 2.0
+
+        progress = operation_time / self.train_service.schedule_time
+        ratio = (redundant_operation_time - margin) / T_ref
+        if ratio > 0.0:
+            phi = phi_zero + omega_pos * ratio * (1.0 - progress)
+        else:
+            phi = phi_zero * np.exp(omega_neg * ratio * (1.0 + progress))
+
+        return phi
+
+    def _potential_punctuality_v18(self, pos: float, redundant_operation_time: float):
+        K_T = 1.0
+        T_scale = 10.0
+        # if (
+        #     self.ref_redundant_operation_time_pos_arr.size == 0
+        #     or self.ref_redundant_operation_time_arr.size == 0
+        # ):
+        #     raise RuntimeError(
+        #         "DP v18 reference redundant operation-time manifold is not initialized."
+        #     )
+
+        return (
+            -K_T
+            * (
+                (redundant_operation_time - self._get_ref_redundant_operation_time(pos))
+                / T_scale
+            )
+            ** 2
+        )
+
+    def _potential_punctuality_v19(self, pos: float, redundant_operation_time: float):
+        K_T = 5.0
+        T_scale = 10.0
+
+        return K_T * np.exp(
+            -(
+                (
+                    (
+                        redundant_operation_time
+                        - self._get_ref_redundant_operation_time(pos)
+                    )
+                    / T_scale
+                )
+                ** 2
+            )
+        )
+
     def _get_reward_stopping_dense(self):
 
         phi_curr = self._potential_stopping_v1(
@@ -1726,8 +1973,8 @@ class MTTOEnv(gym.Env):
     ) -> float:
         _stopping = self._calc_stopping_score()
         _punctuality = self._calc_punctuality_score()
-        reward_stopping = _stopping * 20.0
-        reward_punctuality = _stopping * _punctuality * 60.0
+        reward_stopping = _stopping * 10.0
+        reward_punctuality = _stopping * _punctuality * 30.0
 
         if self.enable_diagnostics and self._collect_step_diagnostics:
             self.rewards_info["stopping"] = reward_stopping

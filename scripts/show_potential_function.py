@@ -7,8 +7,11 @@ import numpy as np
 from matplotlib.colors import TwoSlopeNorm
 from matplotlib.figure import Figure
 
+from dp.experiment_utils import DP_DEFAULT_SEARCH_DIR
+from model.common import ORS
 from utils.data_loader import load_safeguard_curves
 from utils.plot_utils import set_global_plot_style
+from utils.scenario import build_scenario
 
 
 def _potential_safety_speed(pos, speed, min_speed, max_speed, target_pos):
@@ -270,23 +273,18 @@ def _potential_punctuality_v10(redundant_operation_time, schedule_time):
 
 def _potential_punctuality_v11(redundant_operation_time, operation_time, schedule_time):
     """优化版二维准点势函数"""
-    K_T = 10.0
-    gamma = 2.0
-    omega = 12.0
-    alpha = 2.0
-    margin = 0.0
+    K_T = 15.0
+    gamma = 1.0
+    omega = 15.0
+    alpha = 4.0
+    margin = 2.0
 
     ratio = (redundant_operation_time - margin) / schedule_time
-    late_time_decay_factor = np.where(
-        redundant_operation_time < 0.0,
-        1.0 + alpha * ((operation_time / schedule_time) ** 2),
-        1.0,
-    )
 
     e_redundancy = np.where(
         ratio > 0.0,
         gamma * (ratio**2),
-        -omega * (ratio**2) * late_time_decay_factor,
+        -omega * (ratio**2) * (1.0 + alpha * ((operation_time / schedule_time) ** 2)),
     )
 
     return K_T * e_redundancy
@@ -298,9 +296,10 @@ def _potential_punctuality_v12(redundant_operation_time, operation_time, schedul
     sigma_early = 0.14
     sigma_late = 0.06
     tail_smooth = 1.0e-6
+    T_ref = 100.0
 
     progress = np.clip(operation_time / schedule_time, 0.0, 1.0)
-    rho = redundant_operation_time / schedule_time
+    rho = redundant_operation_time / T_ref
 
     smooth_progress = progress * progress * (3.0 - 2.0 * progress)
     stage_weight = min_stage_weight + (1.0 - min_stage_weight) * smooth_progress
@@ -313,6 +312,92 @@ def _potential_punctuality_v12(redundant_operation_time, operation_time, schedul
     punctuality_peak = np.exp(-pseudo_huber_error)
 
     return K_T * stage_weight * punctuality_peak
+
+
+def _potential_punctuality_v13(redundant_operation_time, operation_time, schedule_time):
+    """
+    特征：全域恒正防刷分、C1连续可导抗振荡、多项式长尾防摆烂、时光减损自驱动
+    """
+    K_T = 15.0
+    alpha = 0.3  # 时光绝对流逝成本系数 (0.3确保全域恒正底线)
+    gamma_pot = 0.2  # 安全裕量区二次项非线性增益
+    omega = 80.0  # 晚点危险区有理屏崖壁阻垒系数
+
+    redundant_operation_time = np.asarray(redundant_operation_time, dtype=np.float64)
+    operation_time = np.asarray(operation_time, dtype=np.float64)
+    schedule_time = np.asarray(schedule_time, dtype=np.float64)
+
+    # 3. 时空状态变量归一化解耦
+    progress = operation_time / schedule_time
+    ratio = redundant_operation_time / schedule_time
+
+    # 4. 计算时光无情流逝带来的基础线性势能衰减基底 (缓慢下降驱动源)
+    time_consumption_base = 1.0 - alpha * progress
+
+    # 5. 高效向量化解算分段协同流形 (通过数学形态确保C1连续)
+    e_redundancy = np.where(
+        ratio > 0.0,
+        1.0 + gamma_pot * (ratio**2),  # 安全区：抛物线平滑减损向脊线靠拢
+        1.0 / (1.0 + omega * (ratio**2)),  # 危险区：逆多项式急速下坠，长尾保持梯度
+    )
+
+    # 6. 合成最终全域安全、数值极度稳定的高大梯度势能输出
+    potential = K_T * time_consumption_base * e_redundancy
+
+    # 2. 物理可行域安全性约束强校验 (t + r <= T)
+    feasible_mask = operation_time + redundant_operation_time <= schedule_time + 1e-3
+    return np.where(feasible_mask, potential, 0.0)
+
+
+def _potential_punctuality_v14(redundant_operation_time, operation_time, schedule_time):
+    K_T = 10.0
+    omega_pos = 5.0
+    omega_neg = 2.0
+    T_ref = 100.0
+    margin = 2.0
+
+    progress = operation_time / schedule_time
+    ratio = (redundant_operation_time - margin) / T_ref
+
+    e_redundancy = np.where(
+        ratio > 0.0,
+        omega_pos * (ratio**2) * (1.0 - progress),
+        -omega_neg * np.log1p(ratio**2) * (1.0 + progress),
+    )
+
+    return K_T * e_redundancy
+
+
+def _potential_punctuality_v16(redundant_operation_time, operation_time, schedule_time):
+    omega_pos = 10.0
+    omega_neg = 6.0
+    T_ref = 100.0
+    margin = 2.0
+    C_shaping = 10.0
+
+    progress = operation_time / schedule_time
+    ratio = (redundant_operation_time - margin) / T_ref
+
+    e_redundancy = np.where(
+        ratio > 0.0,
+        omega_pos * (ratio**2) * (1.0 - progress),
+        -omega_neg * np.arcsinh(-ratio) * (1.0 + 0.6 * progress),
+    )
+
+    return e_redundancy + C_shaping
+
+
+def _potential_punctuality_v18(
+    redundant_operation_time,
+    ref_redundant_operation_time,
+):
+    K_T = 10.0
+    T_scale = 50.0
+
+    return (
+        -K_T
+        * ((redundant_operation_time - ref_redundant_operation_time) / T_scale) ** 2
+    )
 
 
 # 二元函数
@@ -1001,44 +1086,92 @@ def plot_punctuality_potential_curve(
 
 def plot_punctuality_potential_heatmap(
     schedule_time: float = 430.0,
-    operation_time_lower: float = 0.0,
-    operation_time_upper: float = 530.0,
-    redundant_time_lower: float = -120.0,
-    redundant_time_upper: float = 52.0,
+    dp_curve_dir: str = DP_DEFAULT_SEARCH_DIR,
+    position_points: int = 500,
+    relative_band_points: int = 240,
+    band_ratio: float = 0.1,
+    min_band_half_width: float = 1.0,
     *,
     minimal: bool = False,
 ) -> Figure:
     if schedule_time <= 0.0:
         raise ValueError("schedule_time must be positive")
-    if operation_time_lower >= operation_time_upper:
-        raise ValueError("operation_time_lower must be less than operation_time_upper")
-    if redundant_time_lower >= redundant_time_upper:
-        raise ValueError("redundant_time_lower must be less than redundant_time_upper")
+    if band_ratio <= 0.0:
+        raise ValueError("band_ratio must be positive")
+    if min_band_half_width <= 0.0:
+        raise ValueError("min_band_half_width must be positive")
 
-    operation_time_array = np.linspace(
-        operation_time_lower, operation_time_upper, 500, dtype=np.float64
+    vehicle, track, safeguard_utility, train_service = build_scenario(
+        schedule_time_s=schedule_time
     )
-    redundant_time_array = np.linspace(
-        redundant_time_lower, redundant_time_upper, 500, dtype=np.float64
-    )
-    OPERATION_TIME, REDUNDANT_TIME = np.meshgrid(
-        operation_time_array, redundant_time_array
+    ors = ORS(vehicle=vehicle, track=track, factor=safeguard_utility.gamma)
+    (
+        ref_pos_arr,
+        _ref_speed_arr,
+        _ref_cum_time_arr,
+        ref_redundant_arr,
+    ) = ors.load_or_build_ref_redundant_operation_time_from_dp(
+        start_position=train_service.start_position,
+        start_speed=train_service.start_speed,
+        target_position=train_service.target_position,
+        target_speed=0.0,
+        schedule_time_s=schedule_time,
+        dp_curve_dir=dp_curve_dir,
     )
 
-    potential = _potential_punctuality_v12(
-        operation_time=OPERATION_TIME,
+    ref_pos_arr = np.asarray(ref_pos_arr, dtype=np.float64)
+    ref_redundant_arr = np.asarray(ref_redundant_arr, dtype=np.float64)
+    if ref_pos_arr.ndim != 1 or ref_redundant_arr.ndim != 1:
+        raise ValueError("Reference position and redundancy arrays must be 1-D")
+    if ref_pos_arr.size != ref_redundant_arr.size:
+        raise ValueError("Reference position and redundancy arrays must match length")
+    if ref_pos_arr.size < 2:
+        raise ValueError("Reference DP curve must contain at least two points")
+
+    sort_idx = np.argsort(ref_pos_arr)
+    ref_pos_sorted = ref_pos_arr[sort_idx]
+    ref_redundant_sorted = ref_redundant_arr[sort_idx]
+    unique_pos, unique_idx = np.unique(ref_pos_sorted, return_index=True)
+    unique_ref_redundant = ref_redundant_sorted[unique_idx]
+    if unique_pos.size < 2:
+        raise ValueError("Reference DP curve must contain at least two unique positions")
+
+    position_array = np.linspace(
+        float(unique_pos[0]),
+        float(unique_pos[-1]),
+        max(int(position_points), 2),
+        dtype=np.float64,
+    )
+    ref_redundant_at_pos = np.interp(
+        position_array,
+        unique_pos,
+        unique_ref_redundant,
+    )
+    half_width = np.maximum(
+        band_ratio * np.abs(ref_redundant_at_pos),
+        float(min_band_half_width),
+    )
+    relative_band = np.linspace(
+        -1.0,
+        1.0,
+        max(int(relative_band_points), 2),
+        dtype=np.float64,
+    )
+    POSITION, RELATIVE_BAND = np.meshgrid(position_array, relative_band)
+    REF_REDUNDANT = np.broadcast_to(
+        ref_redundant_at_pos,
+        POSITION.shape,
+    )
+    HALF_WIDTH = np.broadcast_to(half_width, POSITION.shape)
+    REDUNDANT_TIME = REF_REDUNDANT + RELATIVE_BAND * HALF_WIDTH
+    potential = _potential_punctuality_v18(
         redundant_operation_time=REDUNDANT_TIME,
-        schedule_time=schedule_time,
+        ref_redundant_operation_time=REF_REDUNDANT,
     )
 
-    # r = T - t - t_min_remaining, so physically reachable states satisfy t + r <= T.
-    reachable_mask = OPERATION_TIME + REDUNDANT_TIME <= schedule_time
-    potential_reachable = np.where(reachable_mask, potential, np.nan)
-    finite_potential = potential_reachable[np.isfinite(potential_reachable)]
+    finite_potential = potential[np.isfinite(potential)]
     if finite_potential.size == 0:
-        raise ValueError(
-            "The configured ranges do not contain physically reachable states"
-        )
+        raise ValueError("The configured ranges do not contain finite potential values")
 
     z_min = float(np.min(finite_potential))
     z_max = float(np.max(finite_potential))
@@ -1047,130 +1180,38 @@ def plot_punctuality_potential_heatmap(
     else:
         color_norm = None
 
-    fig = plt.figure(figsize=(10, 6))
-    ax = fig.add_subplot(111, projection="3d")
-
-    ax.plot_surface(
-        OPERATION_TIME,
+    fig, ax = plt.subplots(figsize=(10, 6))
+    heatmap = ax.contourf(
+        POSITION,
         REDUNDANT_TIME,
-        potential_reachable,
+        potential,
+        levels=60,
         cmap="coolwarm",
         norm=color_norm,
-        linewidth=0,
-        antialiased=True,
-        alpha=0.88,
-        rcount=180,
-        ccount=180,
     )
-
-    z_span = max(z_max - z_min, 1.0)
-    boundary_z_offset = 0.01 * z_span
-
-    def plot_boundary(
-        operation_time: np.ndarray,
-        redundant_time: np.ndarray,
-        *,
-        color: str,
-        linestyle: str,
-        label: str,
-    ) -> None:
-        if operation_time.size < 2:
-            return
-        boundary_potential = _potential_punctuality_v12(
-            operation_time=operation_time,
-            redundant_operation_time=redundant_time,
-            schedule_time=schedule_time,
-        )
-        boundary_z = boundary_potential + boundary_z_offset
-        ax.plot(
-            operation_time,
-            redundant_time,
-            boundary_z,
-            color="white",
-            linestyle=linestyle,
-            linewidth=3.4,
-            alpha=0.95,
-        )
-        ax.plot(
-            operation_time,
-            redundant_time,
-            boundary_z,
-            color=color,
-            linestyle=linestyle,
-            linewidth=2.0,
-            label=label,
-        )
-
-    # Planned-time boundary: t = T. Reachability further requires r <= 0.
-    if operation_time_lower <= schedule_time <= operation_time_upper:
-        planned_redundancy_upper = min(0.0, redundant_time_upper)
-        if redundant_time_lower < planned_redundancy_upper:
-            planned_redundancy = np.linspace(
-                redundant_time_lower,
-                planned_redundancy_upper,
-                300,
-                dtype=np.float64,
-            )
-            plot_boundary(
-                np.full_like(planned_redundancy, schedule_time),
-                planned_redundancy,
-                color="#111111",
-                linestyle="--",
-                label=r"$t = T_p$",
-            )
-
-    # Redundancy sign boundary: r = 0. Reachability further requires t <= T.
-    if redundant_time_lower <= 0.0 <= redundant_time_upper:
-        redundancy_operation_upper = min(schedule_time, operation_time_upper)
-        if operation_time_lower < redundancy_operation_upper:
-            redundancy_operation_time = np.linspace(
-                operation_time_lower,
-                redundancy_operation_upper,
-                300,
-                dtype=np.float64,
-            )
-            plot_boundary(
-                redundancy_operation_time,
-                np.zeros_like(redundancy_operation_time),
-                color="#8b0000",
-                linestyle=":",
-                label=r"$\rho = 0s$",
-            )
-
-    # Reachability boundary: t + r = T, corresponding to zero minimum remaining time.
-    reachable_operation_lower = max(
-        operation_time_lower, schedule_time - redundant_time_upper
+    ax.plot(
+        position_array,
+        ref_redundant_at_pos,
+        color="#111111",
+        linestyle="--",
+        linewidth=2.0,
+        label="DP reference redundancy",
     )
-    reachable_operation_upper = min(
-        operation_time_upper, schedule_time - redundant_time_lower
+    ax.set_xlim(float(position_array[0]), float(position_array[-1]))
+    ax.set_ylim(
+        float(np.nanmin(REDUNDANT_TIME)),
+        float(np.nanmax(REDUNDANT_TIME)),
     )
-    if reachable_operation_lower < reachable_operation_upper:
-        reachable_operation_time = np.linspace(
-            reachable_operation_lower,
-            reachable_operation_upper,
-            400,
-            dtype=np.float64,
-        )
-        plot_boundary(
-            reachable_operation_time,
-            schedule_time - reachable_operation_time,
-            color="#136f63",
-            linestyle="-.",
-            label=r"$t + \rho = T_p$",
-        )
-
-    ax.set_xlim(operation_time_lower, operation_time_upper)
-    ax.set_ylim(redundant_time_lower, redundant_time_upper)
-    ax.set_zlim(z_min - 0.03 * z_span, z_max + 0.05 * z_span)
-    ax.view_init(elev=28, azim=-135)
 
     if minimal:
         _apply_minimal_axis_style(ax)
     else:
-        ax.set_xlabel("Operation Time(s)")
-        ax.set_ylabel("Redundant Operation Time(s)")
-        ax.set_zlabel("Punctuality Potential")
+        colorbar = fig.colorbar(heatmap, ax=ax)
+        colorbar.set_label("Punctuality Potential v18")
+        ax.set_xlabel("Position (m)")
+        ax.set_ylabel("Redundant Operation Time (s)")
         ax.legend(loc="upper right", framealpha=0.9)
+        ax.grid(True, alpha=0.25, linestyle=":")
 
     _apply_transparent_background(fig)
     plt.tight_layout()

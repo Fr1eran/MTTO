@@ -38,6 +38,7 @@ __all__ = [
 class OptimalSpeedProfile(TypedDict):
     pos: Sequence[float] | NDArray
     speed: Sequence[float] | NDArray
+    cum_time_s: Sequence[float] | NDArray
     total_time: float
     total_energy: float
 
@@ -1021,10 +1022,18 @@ class VariableSpacingDPOptimizer:
         ]
         total_time = dp_time_accum[0, 0]
         total_energy = dp_cost[0, 0] - lambda_time * total_time  # 剥离时间惩罚
+        remaining_time_on_path = dp_time_accum[
+            np.arange(total_steps + 1, dtype=int),
+            np.asarray(optimal_speed_indices, dtype=int),
+        ]
+        cum_time_s = total_time - remaining_time_on_path
+        cum_time_s[0] = 0.0
+        cum_time_s[-1] = total_time
 
         return {
             "pos": stages.tolist(),
             "speed": optimal_speed_profile.tolist(),
+            "cum_time_s": cum_time_s.tolist(),
             "total_time": total_time,
             "total_energy": total_energy,
         }

@@ -1,4 +1,8 @@
-from typing import NamedTuple, TypedDict
+import json
+import os
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any, NamedTuple, TypedDict
 
 import numpy as np
 from numba import njit
@@ -11,6 +15,7 @@ from utils.indexing_utils import (
     find_speed_rise_entry_and_fall,
     get_interval_index_scalar_numba,
 )
+from utils.io_utils import load_curve_with_cum_time_and_metrics
 
 
 class GeneralOperation(NamedTuple):
@@ -46,6 +51,12 @@ class DescendOperation(TypedDict):
     descend_begin_pos: float
     descend_begin_interval: int
     descend_end_interval: int
+
+
+def _metric_as_float(value: object) -> float | None:
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return float(value)
+    return None
 
 
 @njit(cache=True)
@@ -94,9 +105,10 @@ def _calc_mb_descend_operation_numba(
             next_idx = 0
         next_interval_speed_limit = speed_limits[next_idx] * gamma
 
-        if edge_speed < next_interval_speed_limit or np.abs(
-            edge_speed - next_interval_speed_limit
-        ) <= tol:
+        if (
+            edge_speed < next_interval_speed_limit
+            or np.abs(edge_speed - next_interval_speed_limit) <= tol
+        ):
             begin_interval -= 1
         else:
             break
@@ -155,9 +167,10 @@ def _calc_ma_ascend_operation_numba(
             next_idx = n_limits - 1
         next_interval_speed_limit = speed_limits[next_idx] * gamma
 
-        if edge_speed < next_interval_speed_limit or np.abs(
-            edge_speed - next_interval_speed_limit
-        ) <= tol:
+        if (
+            edge_speed < next_interval_speed_limit
+            or np.abs(edge_speed - next_interval_speed_limit) <= tol
+        ):
             end_interval += 1
         else:
             break
@@ -201,6 +214,141 @@ class ORS:
             [entry.prev_interval for entry in fall_exits_all],
             dtype=np.int64,
         )
+
+    @staticmethod
+    def _dp_metrics_path_for_curve(curve_path: Path) -> Path:
+        return curve_path.with_name(f"{curve_path.stem}_metrics.json")
+
+    @staticmethod
+    def _metric_matches(
+        metrics: dict[str, object],
+        key: str,
+        expected: float,
+        *,
+        tolerance: float,
+        required: bool,
+    ) -> bool:
+        actual = _metric_as_float(metrics.get(key))
+        if actual is None:
+            return not required
+        return abs(actual - float(expected)) <= tolerance
+
+    @classmethod
+    def _dp_metrics_match_task(
+        cls,
+        metrics: dict[str, object],
+        *,
+        start_position: float,
+        start_speed: float,
+        target_position: float,
+        target_speed: float,
+        schedule_time_s: float,
+        match_tolerance: float,
+    ) -> bool:
+        required_matches = [
+            ("target_time_s", schedule_time_s),
+            ("start_position_m", start_position),
+            ("target_position_m", target_position),
+        ]
+        for key, expected in required_matches:
+            if not cls._metric_matches(
+                metrics,
+                key,
+                expected,
+                tolerance=match_tolerance,
+                required=True,
+            ):
+                return False
+
+        optional_matches = [
+            ("start_speed_mps", start_speed),
+            ("target_speed_mps", target_speed),
+        ]
+        for key, expected in optional_matches:
+            if key in metrics and not cls._metric_matches(
+                metrics,
+                key,
+                expected,
+                tolerance=match_tolerance,
+                required=False,
+            ):
+                return False
+
+        return True
+
+    @classmethod
+    def _find_matching_dp_curve_artifact(
+        cls,
+        *,
+        dp_curve_dir: str | os.PathLike[str],
+        start_position: float,
+        start_speed: float,
+        target_position: float,
+        target_speed: float,
+        schedule_time_s: float,
+        match_tolerance: float,
+    ) -> tuple[Path, Path] | None:
+        search_root = Path(dp_curve_dir)
+        if not search_root.is_dir():
+            return None
+
+        matches: list[tuple[Path, Path]] = []
+        for curve_path in search_root.rglob("optimized_speed_curve.npz"):
+            if not curve_path.is_file():
+                continue
+
+            metrics_path = cls._dp_metrics_path_for_curve(curve_path)
+            if not metrics_path.is_file():
+                continue
+
+            try:
+                with open(metrics_path, encoding="utf-8") as f:
+                    metrics = json.load(f)
+            except OSError, json.JSONDecodeError:
+                continue
+
+            if not isinstance(metrics, dict):
+                continue
+
+            if cls._dp_metrics_match_task(
+                metrics,
+                start_position=start_position,
+                start_speed=start_speed,
+                target_position=target_position,
+                target_speed=target_speed,
+                schedule_time_s=schedule_time_s,
+                match_tolerance=match_tolerance,
+            ):
+                matches.append((curve_path, metrics_path))
+
+        if not matches:
+            return None
+
+        return sorted(
+            matches,
+            key=lambda item: (item[0].stat().st_mtime, str(item[0])),
+            reverse=True,
+        )[0]
+
+    @staticmethod
+    def _validate_reference_curve_arrays(
+        *,
+        pos_arr: Any,
+        speed_arr: Any,
+        cum_time_arr: Any,
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+        pos = np.asarray(pos_arr, dtype=np.float64)
+        speed = np.asarray(speed_arr, dtype=np.float64)
+        cum_time = np.asarray(cum_time_arr, dtype=np.float64)
+
+        if pos.ndim != 1 or speed.ndim != 1 or cum_time.ndim != 1:
+            raise ValueError("DP reference arrays must be 1-D arrays")
+        if not (pos.size == speed.size == cum_time.size):
+            raise ValueError(
+                "DP reference pos, speed, and cum_time arrays must have equal length"
+            )
+
+        return pos, speed, cum_time
 
     def _get_speed_limits_interval_index(
         self, pos: float, *, ascend: bool = True
@@ -712,6 +860,101 @@ class ORS:
             curve_pos_array,
             curve_speed_array,
         )
+
+    def load_or_build_ref_redundant_operation_time_from_dp(
+        self,
+        *,
+        start_position: float,
+        start_speed: float,
+        target_position: float,
+        schedule_time_s: float,
+        target_speed: float = 0.0,
+        dp_curve_dir: str | os.PathLike[str] | None = None,
+        compute_dp_curve: Callable[
+            ...,
+            tuple[
+                NDArray[np.floating],
+                NDArray[np.floating],
+                NDArray[np.floating],
+                dict[str, object],
+            ],
+        ]
+        | None = None,
+        force_recompute: bool = False,
+        match_tolerance: float = 1e-3,
+    ) -> tuple[
+        NDArray[np.float64],
+        NDArray[np.float64],
+        NDArray[np.float64],
+        NDArray[np.float64],
+    ]:
+        """Load or build a DP-based reference redundant operation-time manifold."""
+        curve_payload: (
+            tuple[
+                NDArray[np.floating],
+                NDArray[np.floating],
+                NDArray[np.floating],
+                dict[str, object],
+            ]
+            | None
+        ) = None
+        if dp_curve_dir is not None and not force_recompute:
+            artifact = self._find_matching_dp_curve_artifact(
+                dp_curve_dir=dp_curve_dir,
+                start_position=start_position,
+                start_speed=start_speed,
+                target_position=target_position,
+                target_speed=target_speed,
+                schedule_time_s=schedule_time_s,
+                match_tolerance=match_tolerance,
+            )
+            if artifact is not None:
+                curve_path, metrics_path = artifact
+                curve_payload = load_curve_with_cum_time_and_metrics(
+                    npz_path=str(curve_path),
+                    metrics_path=str(metrics_path),
+                    dtype=np.float64,
+                    use_metrics_cache=False,
+                )
+
+        if curve_payload is None:
+            if compute_dp_curve is None:
+                raise FileNotFoundError(
+                    "Could not find a matching DP trajectory artifact and "
+                    "compute_dp_curve was not provided."
+                )
+            curve_payload = compute_dp_curve(
+                start_position=start_position,
+                start_speed=start_speed,
+                target_position=target_position,
+                target_speed=target_speed,
+                schedule_time_s=schedule_time_s,
+            )
+
+        pos_arr, speed_arr, cum_time_arr, _metrics = curve_payload
+        pos, speed, cum_time = self._validate_reference_curve_arrays(
+            pos_arr=pos_arr,
+            speed_arr=speed_arr,
+            cum_time_arr=cum_time_arr,
+        )
+
+        min_remaining_arr = np.asarray(
+            [
+                self.calc_min_operation_time(
+                    begin_pos=float(pos_val),
+                    begin_speed=float(speed_val),
+                    end_pos=target_position,
+                    end_speed=target_speed,
+                )
+                for pos_val, speed_val in zip(pos, speed, strict=False)
+            ],
+            dtype=np.float64,
+        )
+        ref_redundant_operation_time = (
+            float(schedule_time_s) - cum_time - min_remaining_arr
+        )
+
+        return pos, speed, cum_time, ref_redundant_operation_time
 
     def calc_min_operation_time(
         self, begin_pos: float, begin_speed: float, end_pos: float, end_speed: float

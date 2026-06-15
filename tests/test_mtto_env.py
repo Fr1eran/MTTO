@@ -1,9 +1,13 @@
 import numpy as np
 import pytest
-from rl.mtto_env import MTTOEnv, RewardConfig
-from model.vehicle import VehicleInfo
+from gymnasium.utils.env_checker import check_env
+
+from model.common import ORS
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
+from model.vehicle import VehicleInfo
+from rl import env_factory
+from rl.mtto_env import MTTOEnv, RewardConfig
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_safeguard_curves,
@@ -12,7 +16,43 @@ from utils.data_loader import (
     load_stations_goal_positions,
 )
 
-from gymnasium.utils.env_checker import check_env
+
+def _fake_dp_reference_manifold(
+    self: ORS,
+    *,
+    start_position: float,
+    start_speed: float,
+    target_position: float,
+    schedule_time_s: float,
+    target_speed: float = 0.0,
+    **_kwargs,
+):
+    pos_arr = np.asarray(
+        [
+            start_position,
+            (start_position + target_position) / 2.0,
+            target_position,
+        ],
+        dtype=np.float64,
+    )
+    speed_arr = np.asarray([start_speed, 10.0, target_speed], dtype=np.float64)
+    cum_time_arr = np.asarray(
+        [0.0, schedule_time_s / 2.0, schedule_time_s], dtype=np.float64
+    )
+    ref_redundant_arr = np.asarray([20.0, 10.0, 0.0], dtype=np.float64)
+    return pos_arr, speed_arr, cum_time_arr, ref_redundant_arr
+
+
+@pytest.fixture(scope="module", autouse=True)
+def patch_dp_reference_manifold_for_env_tests():
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        ORS,
+        "load_or_build_ref_redundant_operation_time_from_dp",
+        _fake_dp_reference_manifold,
+    )
+    yield
+    monkeypatch.undo()
 
 
 @pytest.fixture(scope="module")
@@ -71,6 +111,37 @@ def mtto_env():
         reward_config=RewardConfig(),
     )
     return maglevttoenv
+
+
+def _clone_train_service(train_service: TrainService) -> TrainService:
+    return TrainService(
+        start_position=train_service.start_position,
+        start_speed=train_service.start_speed,
+        target_position=train_service.target_position,
+        schedule_time=train_service.schedule_time,
+        max_acc_change=train_service.max_acc_change,
+        max_arr_time_error_ratio=train_service.max_arr_time_error_ratio,
+        max_stop_error=train_service.max_stop_error,
+    )
+
+
+def _build_env_like(
+    source_env: MTTOEnv,
+    *,
+    train_service: TrainService | None = None,
+    reward_config: RewardConfig | None = None,
+    **kwargs,
+) -> MTTOEnv:
+    return MTTOEnv(
+        vehicle=source_env.vehicle,
+        track=source_env.track,
+        safeguard_utility=source_env.safeguard_utility,
+        train_service=train_service or _clone_train_service(source_env.train_service),
+        gamma=source_env.gamma,
+        max_step_distance=source_env.max_step_distance,
+        reward_config=reward_config if reward_config is not None else RewardConfig(),
+        **kwargs,
+    )
 
 
 def test_reset(mtto_env: MTTOEnv):
@@ -142,6 +213,189 @@ def test_reference_remaining_operation_time_matches_endpoints(mtto_env: MTTOEnv)
     assert target_remaining == pytest.approx(0.0, abs=0.5)
 
 
+def test_mtto_env_initializes_v18_dp_reference_with_task_params(
+    mtto_env: MTTOEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    called_kwargs = {}
+
+    def fake_load_dp_reference(self: ORS, **kwargs):
+        called_kwargs.update(kwargs)
+        return _fake_dp_reference_manifold(self, **kwargs)
+
+    monkeypatch.setattr(
+        ORS,
+        "load_or_build_ref_redundant_operation_time_from_dp",
+        fake_load_dp_reference,
+    )
+
+    train_service = _clone_train_service(mtto_env.train_service)
+    train_service.schedule_time = 440.0
+    env = _build_env_like(
+        mtto_env,
+        train_service=train_service,
+        punctuality_dp_curve_dir=tmp_path,
+        punctuality_reference_match_tolerance=0.25,
+    )
+
+    assert called_kwargs["start_position"] == pytest.approx(
+        train_service.start_position
+    )
+    assert called_kwargs["start_speed"] == pytest.approx(train_service.start_speed)
+    assert called_kwargs["target_position"] == pytest.approx(
+        train_service.target_position
+    )
+    assert called_kwargs["target_speed"] == pytest.approx(0.0)
+    assert called_kwargs["schedule_time_s"] == pytest.approx(440.0)
+    assert called_kwargs["dp_curve_dir"] == tmp_path
+    assert called_kwargs["force_recompute"] is False
+    assert called_kwargs["match_tolerance"] == pytest.approx(0.25)
+    assert env.ref_redundant_operation_time_func(
+        train_service.start_position
+    ) == pytest.approx(20.0)
+
+
+def test_potential_punctuality_v18_peaks_on_dp_reference(mtto_env: MTTOEnv) -> None:
+    midpoint = (
+        mtto_env.train_service.start_position + mtto_env.train_service.target_position
+    ) / 2.0
+    ref_value = mtto_env.ref_redundant_operation_time_func(midpoint)
+
+    peak = mtto_env._potential_punctuality_v18(
+        pos=midpoint,
+        redundant_operation_time=ref_value,
+    )
+    off_reference = mtto_env._potential_punctuality_v18(
+        pos=midpoint,
+        redundant_operation_time=ref_value + 10.0,
+    )
+
+    assert peak == pytest.approx(0.0)
+    assert off_reference < peak
+
+
+def test_punctuality_dense_reward_uses_v18_reference_manifold(
+    mtto_env: MTTOEnv,
+) -> None:
+    mtto_env.reset()
+    midpoint = (
+        mtto_env.train_service.start_position + mtto_env.train_service.target_position
+    ) / 2.0
+    prev_pos = mtto_env.train_service.start_position
+
+    mtto_env.current_position = midpoint
+    mtto_env.current_redundant_operation_time = 12.0
+    mtto_env.last_state["pos"] = prev_pos
+    mtto_env.last_state["redundant_operation_time"] = 18.0
+
+    expected = mtto_env._potential_punctuality_v18(
+        pos=midpoint,
+        redundant_operation_time=12.0,
+    ) - mtto_env._potential_punctuality_v18(
+        pos=prev_pos,
+        redundant_operation_time=18.0,
+    )
+
+    assert mtto_env._get_reward_punctuality_dense() == pytest.approx(expected)
+
+
+def test_mtto_env_raises_when_v18_dp_reference_is_missing(
+    mtto_env: MTTOEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    def raise_missing_reference(self: ORS, **_kwargs):
+        raise FileNotFoundError("missing matching DP trajectory")
+
+    monkeypatch.setattr(
+        ORS,
+        "load_or_build_ref_redundant_operation_time_from_dp",
+        raise_missing_reference,
+    )
+
+    with pytest.raises(FileNotFoundError, match="missing matching DP trajectory"):
+        _build_env_like(mtto_env, punctuality_dp_curve_dir=tmp_path)
+
+
+def test_change_schedule_time_reloads_v18_dp_reference(
+    mtto_env: MTTOEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schedules_seen: list[float] = []
+
+    def fake_load_dp_reference(self: ORS, **kwargs):
+        schedules_seen.append(float(kwargs["schedule_time_s"]))
+        return _fake_dp_reference_manifold(self, **kwargs)
+
+    monkeypatch.setattr(
+        ORS,
+        "load_or_build_ref_redundant_operation_time_from_dp",
+        fake_load_dp_reference,
+    )
+
+    env = _build_env_like(mtto_env)
+    env.change_schedule_time(445.0)
+
+    assert schedules_seen == pytest.approx([440.0, 445.0])
+    assert env.train_service.schedule_time == pytest.approx(445.0)
+
+
+def test_punctuality_disabled_skips_v18_dp_reference_loading(
+    mtto_env: MTTOEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_if_loads_dp_reference(self: ORS, **_kwargs):
+        raise AssertionError("DP reference should not be loaded")
+
+    monkeypatch.setattr(
+        ORS,
+        "load_or_build_ref_redundant_operation_time_from_dp",
+        fail_if_loads_dp_reference,
+    )
+
+    env = _build_env_like(
+        mtto_env,
+        reward_config=RewardConfig(enable_potential_punctuality=False),
+    )
+    env.change_schedule_time(445.0)
+
+    assert env.ref_redundant_operation_time_pos_arr.size == 0
+    assert env.ref_redundant_operation_time_arr.size == 0
+    assert env.train_service.schedule_time == pytest.approx(445.0)
+
+
+def test_make_env_passes_punctuality_reference_options(
+    mtto_env: MTTOEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    captured_kwargs = {}
+
+    def fake_env(**kwargs):
+        captured_kwargs.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(env_factory, "MTTOEnv", fake_env)
+
+    result = env_factory.make_env(
+        vehicle=mtto_env.vehicle,
+        track=mtto_env.track,
+        safeguard_utility=mtto_env.safeguard_utility,
+        train_service=_clone_train_service(mtto_env.train_service),
+        gamma=mtto_env.gamma,
+        max_step_distance=mtto_env.max_step_distance,
+        punctuality_dp_curve_dir=tmp_path,
+        punctuality_reference_match_tolerance=0.5,
+    )
+
+    assert result is not None
+    assert captured_kwargs["punctuality_dp_curve_dir"] == tmp_path
+    assert captured_kwargs["punctuality_reference_match_tolerance"] == pytest.approx(
+        0.5
+    )
+
+
 def test_punctuality_reward_depends_on_position_and_time_only(mtto_env: MTTOEnv):
     mtto_env.reset()
 
@@ -180,6 +434,7 @@ def test_step_without_diagnostics_keeps_tb_dicts_empty(mtto_env: MTTOEnv):
         expected_runtime_keys = {
             "energy_consumption",
             "operation_time",
+            "redundant_operation_time",
             "position",
             "stopping_point_index",
         }

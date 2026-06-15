@@ -8,13 +8,16 @@ from rl.experiment_utils import (
     RUN_METADATA_FILENAME,
     add_panel_label,
     build_rl_trajectory_comparison_key,
+    build_run_metadata,
     build_reward_config,
     load_run_metadata,
     resolve_output_dir,
+    resolve_reward_profile,
     resolve_tb_log_name,
     reward_profile_names,
     save_run_metadata,
 )
+from rl.mtto_env import DEFAULT_PUNCTUALITY_DP_CURVE_DIR
 
 
 def test_reward_profile_names_include_ablation_profiles() -> None:
@@ -86,6 +89,18 @@ def test_load_run_metadata_falls_back_to_parent_directory(tmp_path: Path) -> Non
     assert Path(metadata_path).name == RUN_METADATA_FILENAME
     assert load_run_metadata(run_dir) == expected_metadata
     assert load_run_metadata(final_dir) == expected_metadata
+
+
+def test_build_run_metadata_records_punctuality_v18_reference() -> None:
+    metadata = build_run_metadata(
+        reward_profile=resolve_reward_profile(DEFAULT_REWARD_PROFILE_NAME),
+        schedule_time_s=430.0,
+        max_step_distance=30.0,
+        reward_discount=0.995,
+    )
+
+    assert metadata["punctuality_potential_version"] == "v18"
+    assert metadata["punctuality_dp_curve_dir"] == DEFAULT_PUNCTUALITY_DP_CURVE_DIR
 
 
 def test_build_rl_trajectory_comparison_key_uses_selection_key() -> None:

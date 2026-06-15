@@ -1,5 +1,6 @@
 import argparse
 import os
+from collections.abc import Callable, Sequence
 from datetime import datetime
 
 import numpy as np
@@ -27,6 +28,140 @@ from rl.experiment_utils import (
 )
 from utils.io_utils import save_curve_and_metrics
 from utils.scenario import build_scenario
+
+
+def compute_punctuality_dense_reward_series(
+    position_seq: Sequence[float],
+    redundant_operation_time_seq: Sequence[float],
+    gamma: float,
+    potential_fn: Callable[[float, float], float],
+) -> np.ndarray:
+    """Compute gamma * phi(curr) - phi(prev) between adjacent v18-compatible samples."""
+    if len(position_seq) != len(redundant_operation_time_seq):
+        raise ValueError(
+            "position_seq and redundant_operation_time_seq must have the same length"
+        )
+
+    reward_seq: list[float] = []
+    for prev_idx, curr_idx in zip(
+        range(len(position_seq) - 1),
+        range(1, len(position_seq)),
+        strict=True,
+    ):
+        phi_prev = potential_fn(
+            float(position_seq[prev_idx]),
+            float(redundant_operation_time_seq[prev_idx]),
+        )
+        phi_curr = potential_fn(
+            float(position_seq[curr_idx]),
+            float(redundant_operation_time_seq[curr_idx]),
+        )
+        reward_seq.append(gamma * phi_curr - phi_prev)
+
+    return np.asarray(reward_seq, dtype=np.float32)
+
+
+def plot_punctuality_dense_reward_series(
+    reward_seq: Sequence[float],
+    gamma: float,
+) -> None:
+    if len(reward_seq) == 0:
+        print("No punctuality dense reward samples collected; skipped debug plot.")
+        return
+
+    import matplotlib.pyplot as plt
+
+    step_axis = np.arange(1, len(reward_seq) + 1, dtype=np.int32)
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+    ax.plot(
+        step_axis,
+        np.asarray(reward_seq, dtype=np.float32),
+        color="#2563eb",
+        linewidth=1.4,
+        label="Dense punctuality reward",
+    )
+    ax.axhline(0.0, color="black", linewidth=1.0, linestyle="--", alpha=0.6)
+    ax.set_title("_potential_punctuality_v18 dense reward")
+    ax.set_xlabel("Agent step")
+    ax.set_ylabel("punctuality reward")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_operation_time_series(
+    operation_time_seq: Sequence[float],
+    redundant_operation_time_seq: Sequence[float],
+    target_time_s: float,
+) -> None:
+    if len(operation_time_seq) != len(redundant_operation_time_seq):
+        raise ValueError(
+            "operation_time_seq and redundant_operation_time_seq must have the "
+            "same length"
+        )
+    if len(operation_time_seq) == 0:
+        print("No operation-time samples collected; skipped time-series plot.")
+        return
+
+    import matplotlib.pyplot as plt
+
+    step_axis = np.arange(1, len(operation_time_seq) + 1, dtype=np.int32)
+    operation_time_arr = np.asarray(operation_time_seq, dtype=np.float32)
+    redundant_operation_time_arr = np.asarray(
+        redundant_operation_time_seq,
+        dtype=np.float32,
+    )
+
+    fig, (ax_time, ax_redundant) = plt.subplots(
+        2,
+        1,
+        figsize=(10, 7),
+        sharex=True,
+    )
+    ax_time.plot(
+        step_axis,
+        operation_time_arr,
+        color="#2563eb",
+        linewidth=1.5,
+        label="Operation time",
+    )
+    ax_time.axhline(
+        target_time_s,
+        color="#dc2626",
+        linewidth=1.0,
+        linestyle="--",
+        alpha=0.8,
+        label="Schedule time",
+    )
+    ax_time.set_title("Operation time over evaluation rollout")
+    ax_time.set_ylabel("Operation time (s)")
+    ax_time.grid(True, alpha=0.3)
+    ax_time.legend()
+
+    ax_redundant.plot(
+        step_axis,
+        redundant_operation_time_arr,
+        color="#16a34a",
+        linewidth=1.5,
+        label="Redundant operation time",
+    )
+    ax_redundant.axhline(
+        0.0,
+        color="black",
+        linewidth=1.0,
+        linestyle="--",
+        alpha=0.6,
+        label="No redundancy",
+    )
+    ax_redundant.set_title("Redundant operation time over evaluation rollout")
+    ax_redundant.set_xlabel("Agent step")
+    ax_redundant.set_ylabel("Redundant operation time (s)")
+    ax_redundant.grid(True, alpha=0.3)
+    ax_redundant.legend()
+
+    fig.tight_layout()
+    plt.show()
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -119,6 +254,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="评估时收集诊断信息",
     )
     parser.add_argument(
+        "--plot-punctuality-dense-reward",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="评估后展示基于 _potential_punctuality_v18 的准点差分密集奖励曲线。",
+    )
+    parser.add_argument(
+        "--plot-operation-time-series",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="评估后展示运行时间和冗余运行时间随智能体步数变化的曲线。",
+    )
+    parser.add_argument(
         "--dry-run",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -169,6 +316,8 @@ def main() -> None:
         print(f"  deterministic:       {args.deterministic}")
         print(f"  record_video:        {args.record_video}")
         print(f"  save_trajectory:     {args.save_trajectory}")
+        print(f"  plot_punctuality_dense_reward: {args.plot_punctuality_dense_reward}")
+        print(f"  plot_operation_time_series: {args.plot_operation_time_series}")
         print(f"  model_zip_path:      {model_zip_path}")
         print(f"  model_exists:        {os.path.exists(model_zip_path)}")
         print(f"  vecnormalize_path:   {vecnormalize_pkl_path}")
@@ -222,6 +371,8 @@ def main() -> None:
     episode_steps = 0
     trajectory_position_seq: list[float] = [0.0]
     trajectory_speed_seq: list[float] = [0.0]
+    operation_time_seq: list[float] = []
+    redundant_operation_time_seq: list[float] = []
 
     obs = venv_eval.reset()
     episode_over = False
@@ -241,6 +392,10 @@ def main() -> None:
             if isinstance(basic, dict):
                 trajectory_position_seq.append(float(basic.get("position", 0.0)))
                 trajectory_speed_seq.append(float(basic.get("speed", 0.0)))
+                operation_time_seq.append(float(basic.get("operation_time", 0.0)))
+                redundant_operation_time_seq.append(
+                    float(basic.get("redundant_operation_time", 0.0))
+                )
 
     target_time_s = float(train_service.schedule_time)
     start_position_m = float(train_service.start_position)
@@ -322,6 +477,21 @@ def main() -> None:
             metrics=trajectory_metrics,
         )
 
+    punctuality_dense_reward_seq = np.asarray([], dtype=np.float32)
+    if args.plot_punctuality_dense_reward:
+        punctuality_dense_reward_seq = compute_punctuality_dense_reward_series(
+            position_seq=trajectory_position_seq[1:],
+            redundant_operation_time_seq=redundant_operation_time_seq,
+            gamma=reward_discount,
+            potential_fn=lambda pos, redundant_operation_time: float(
+                venv_eval.env_method(
+                    "_potential_punctuality_v18",
+                    pos=pos,
+                    redundant_operation_time=redundant_operation_time,
+                )[0]
+            ),
+        )
+
     venv_eval.close()
 
     print("========== Evaluation Results ==========")
@@ -347,6 +517,18 @@ def main() -> None:
     if saved_json_path:
         print(f"  trajectory_json:    {saved_json_path}")
     print("=========================================")
+
+    if args.plot_punctuality_dense_reward:
+        plot_punctuality_dense_reward_series(
+            punctuality_dense_reward_seq,
+            gamma=reward_discount,
+        )
+    if args.plot_operation_time_series:
+        plot_operation_time_series(
+            operation_time_seq,
+            redundant_operation_time_seq,
+            target_time_s=target_time_s,
+        )
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -9,7 +10,7 @@ from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
 from rl.env_factory import make_env
-from rl.mtto_env import MTTOEnv, RewardConfig
+from rl.mtto_env import DEFAULT_PUNCTUALITY_DP_CURVE_DIR, MTTOEnv, RewardConfig
 from utils.io_utils import save_curve_and_metrics
 
 BEST_TRAJECTORY_SELECTION_RULE = "success_strict_stop_strict_time_energy_else_reward"
@@ -111,6 +112,10 @@ def build_single_eval_env(
     enable_trajectory_tracking: bool = True,
     render_mode: str | None = None,
     reward_config: RewardConfig | None = None,
+    punctuality_dp_curve_dir: str | os.PathLike[str] | None = (
+        DEFAULT_PUNCTUALITY_DP_CURVE_DIR
+    ),
+    punctuality_reference_match_tolerance: float = 1e-3,
 ) -> gym.Env[Any, Any]:
     return make_env(
         vehicle=vehicle,
@@ -123,6 +128,8 @@ def build_single_eval_env(
         enable_trajectory_tracking=enable_trajectory_tracking,
         render_mode=render_mode,
         reward_config=reward_config,
+        punctuality_dp_curve_dir=punctuality_dp_curve_dir,
+        punctuality_reference_match_tolerance=punctuality_reference_match_tolerance,
     )
 
 
