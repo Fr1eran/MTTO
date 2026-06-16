@@ -33,10 +33,9 @@ from utils.scenario import build_scenario
 def compute_punctuality_dense_reward_series(
     position_seq: Sequence[float],
     redundant_operation_time_seq: Sequence[float],
-    gamma: float,
     potential_fn: Callable[[float, float], float],
 ) -> np.ndarray:
-    """Compute gamma * phi(curr) - phi(prev) between adjacent v18-compatible samples."""
+    """Compute phi(curr) - phi(prev) between adjacent v18-compatible samples."""
     if len(position_seq) != len(redundant_operation_time_seq):
         raise ValueError(
             "position_seq and redundant_operation_time_seq must have the same length"
@@ -56,7 +55,7 @@ def compute_punctuality_dense_reward_series(
             float(position_seq[curr_idx]),
             float(redundant_operation_time_seq[curr_idx]),
         )
-        reward_seq.append(gamma * phi_curr - phi_prev)
+        reward_seq.append(phi_curr - phi_prev)
 
     return np.asarray(reward_seq, dtype=np.float32)
 
@@ -482,7 +481,6 @@ def main() -> None:
         punctuality_dense_reward_seq = compute_punctuality_dense_reward_series(
             position_seq=trajectory_position_seq[1:],
             redundant_operation_time_seq=redundant_operation_time_seq,
-            gamma=reward_discount,
             potential_fn=lambda pos, redundant_operation_time: float(
                 venv_eval.env_method(
                     "_potential_punctuality_v18",

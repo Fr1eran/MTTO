@@ -391,13 +391,17 @@ def _potential_punctuality_v18(
     redundant_operation_time,
     ref_redundant_operation_time,
 ):
-    K_T = 10.0
-    T_scale = 50.0
+    K_T = 1.0
+    T_scale = 10.0
+    delta = 1.5
 
-    return (
-        -K_T
-        * ((redundant_operation_time - ref_redundant_operation_time) / T_scale) ** 2
-    )
+    bias = redundant_operation_time - ref_redundant_operation_time
+    ratio = bias / T_scale
+
+    # Pseudo-Huber
+    phi = -K_T * (delta**2 * (np.sqrt(1.0 + (ratio / delta) ** 2) - 1.0))
+
+    return phi
 
 
 # 二元函数
@@ -1134,7 +1138,9 @@ def plot_punctuality_potential_heatmap(
     unique_pos, unique_idx = np.unique(ref_pos_sorted, return_index=True)
     unique_ref_redundant = ref_redundant_sorted[unique_idx]
     if unique_pos.size < 2:
-        raise ValueError("Reference DP curve must contain at least two unique positions")
+        raise ValueError(
+            "Reference DP curve must contain at least two unique positions"
+        )
 
     position_array = np.linspace(
         float(unique_pos[0]),
@@ -1195,7 +1201,7 @@ def plot_punctuality_potential_heatmap(
         color="#111111",
         linestyle="--",
         linewidth=2.0,
-        label="DP reference redundancy",
+        label=r"$\rho ^*$",
     )
     ax.set_xlim(float(position_array[0]), float(position_array[-1]))
     ax.set_ylim(
@@ -1206,8 +1212,9 @@ def plot_punctuality_potential_heatmap(
     if minimal:
         _apply_minimal_axis_style(ax)
     else:
-        colorbar = fig.colorbar(heatmap, ax=ax)
-        colorbar.set_label("Punctuality Potential v18")
+        fig.colorbar(heatmap, ax=ax)
+        # colorbar = fig.colorbar(heatmap, ax=ax)
+        # colorbar.set_label("Punctuality potential")
         ax.set_xlabel("Position (m)")
         ax.set_ylabel("Redundant Operation Time (s)")
         ax.legend(loc="upper right", framealpha=0.9)

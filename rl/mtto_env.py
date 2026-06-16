@@ -13,7 +13,7 @@ from numpy.typing import NDArray
 from model.common import ECC, ORS
 from model.ocs import SPS, SafeGuardUtility, TrainService
 from model.track import TrackInfo, get_slope_scalar_numba, get_speed_limit_scalar_numba
-from model.vehicle import VehicleInfo
+from model.vehicle import VehicleInfo, calc_levi_deceleration_scalar_numba
 from utils.indexing_utils import get_interval_index
 from utils.plot_utils import set_chinese_font
 from utils.score_function import SigmoidVariant
@@ -346,6 +346,7 @@ class MTTOEnv(gym.Env):
                 0.0,  # remaining_distance
                 0.0,  # current_speed
                 -1.0,  # current_acc
+                -1.0,  # suggested_dec
                 -1.0,  # remaining_schedule_time
                 -1.0,  # time_redundancy
                 -1.0,  # current_slope
@@ -356,7 +357,6 @@ class MTTOEnv(gym.Env):
                 0.0,  # next_min_speed
                 -1.0,  # is_final_approach
                 -1.0,  # rel_dist_to_target
-                -1.0,  # required_dec
             ],
             dtype=np.float32,
         )
@@ -365,6 +365,7 @@ class MTTOEnv(gym.Env):
                 1.0,  # remaining_distance
                 1.0,  # current_speed
                 1.0,  # current_acc
+                1.0,  # suggested_dec
                 1.0,  # remaining_schedule_time
                 1.0,  # time_redundancy
                 1.0,  # current_slope
@@ -375,7 +376,6 @@ class MTTOEnv(gym.Env):
                 1.0,  # next_min_speed
                 1.0,  # is_final_approach
                 1.0,  # rel_dist_to_target
-                1.0,  # required_dec
             ],
             dtype=np.float32,
         )
@@ -469,19 +469,21 @@ class MTTOEnv(gym.Env):
 
         dist_to_target = self.train_service.target_position - self.current_position
         rel_dist_to_target = 0.0
-        required_dec_normalized = 0.0
+        suggested_dec = self._calc_coasting_acc()
         if self.is_final_approach:
             rel_dist_to_target = dist_to_target / 3000.0
             # 末段按匀减速停车估算所需减速度（物理符号为负）并映射到动作归一化区间
             dist_abs = max(abs(dist_to_target), 1e-6)
-            required_dec = -(self.current_speed**2) / (2.0 * dist_abs)
-            required_dec_normalized = self._normalize_acc_to_action(required_dec)
+            suggested_dec = -(self.current_speed**2) / (2.0 * dist_abs)
+
+        suggested_dec_normalized = self._normalize_acc_to_action(suggested_dec)
 
         return np.array(
             [
                 dist_to_target / self.whole_distance,
                 self.current_speed / self.vehicle.max_speed,
                 self._normalize_acc_to_action(self.current_acc),
+                suggested_dec_normalized,
                 (self.train_service.schedule_time - self.current_operation_time)
                 / self.train_service.schedule_time,
                 self.current_redundant_operation_time
@@ -494,10 +496,19 @@ class MTTOEnv(gym.Env):
                 self.next_min_speed / self.vehicle.max_speed,
                 1.0 if self.is_final_approach else 0.0,
                 rel_dist_to_target,
-                required_dec_normalized,
             ],
             dtype=np.float32,
         )
+
+    def _calc_coasting_acc(self) -> float:
+        """计算当前状态下惰行时带物理符号的加速度，单位 m/s^2。"""
+        coasting_dec = calc_levi_deceleration_scalar_numba(
+            self.current_speed,
+            self.current_slope,
+            self.vehicle.mass,
+            self.vehicle.numoftrainsets,
+        )
+        return -coasting_dec
 
     def _normalize_acc_to_action(self, acc: float | np.floating) -> float:
         """将物理加速度映射到动作归一化区间[-1, 1]，并做截断。"""
@@ -1496,10 +1507,10 @@ class MTTOEnv(gym.Env):
         #     redundant_operation_time=self.last_state["redundant_operation_time"],
         # )
 
-        return self.gamma * phi_curr - phi_prev
-        # return (
-        #     phi_curr - phi_prev
-        # )  # 轻微地偏离PBRS的最优性保证，但能换来更好的训练稳定性
+        # return self.gamma * phi_curr - phi_prev
+        return (
+            phi_curr - phi_prev
+        )  # 轻微地偏离PBRS的最优性保证，但能换来更好的训练稳定性
 
     def _potential_punctuality_v1(self, redundant_operation_time: float):
         return -4.0 * np.log1p(
@@ -1893,14 +1904,40 @@ class MTTOEnv(gym.Env):
         #         "DP v18 reference redundant operation-time manifold is not initialized."
         #     )
 
-        return (
-            -K_T
-            * (
-                (redundant_operation_time - self._get_ref_redundant_operation_time(pos))
-                / T_scale
-            )
-            ** 2
-        )
+        bias = redundant_operation_time - self._get_ref_redundant_operation_time(pos)
+        ratio = bias / T_scale
+
+        # dist_to_target = abs(self.train_service.target_position - pos)
+        # fade_factor = 1.0
+        # if dist_to_target < 600.0:
+        #     fade_factor = 1.0 - np.exp(-((dist_to_target / 300.0) ** 2))
+
+        # L2
+        # phi = -K_T * (ratio**2)
+
+        # L1
+        # phi = -K_T * abs(ratio)
+
+        # L1+L2
+        # beta = 0.5
+        # if ratio > 0.0:
+        #     # 正侧，说明策略倾向于早到，保持二次方惩罚
+        #     phi = -K_T * (ratio**2)
+        # else:
+        #     # 负侧，对大偏差惩罚更严厉，对小偏差依然保有梯度引导
+        #     phi = -K_T * (ratio**2 - beta * ratio)
+
+        # L2 + L4
+        # phi = -K_T * (ratio**2 + 0.01 * (ratio**4))
+
+        # Pseudo-Huber
+        # 当偏差归一化后小于delta时，表现为二次方吸引
+        # 当偏差大于delta时，自动拉平为线性，防止数值膨胀
+        delta = 1.5
+        phi = -K_T * (delta**2 * (np.sqrt(1.0 + (ratio / delta) ** 2) - 1.0))
+
+        # return phi * fade_factor
+        return phi
 
     def _potential_punctuality_v19(self, pos: float, redundant_operation_time: float):
         K_T = 5.0

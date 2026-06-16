@@ -5,7 +5,7 @@ from gymnasium.utils.env_checker import check_env
 from model.common import ORS
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
-from model.vehicle import VehicleInfo
+from model.vehicle import VehicleInfo, calc_levi_deceleration_scalar_numba
 from rl import env_factory
 from rl.mtto_env import MTTOEnv, RewardConfig
 from utils.data_loader import (
@@ -152,16 +152,63 @@ def test_reset(mtto_env: MTTOEnv):
     np.testing.assert_allclose(obs[0], 1.0)  # remaining_distance
     np.testing.assert_allclose(obs[1], 0.0)  # current_speed
     np.testing.assert_allclose(obs[2], 0.0)  # current_acc
-    np.testing.assert_allclose(obs[3], 1.0)  # remaining_schedule_time
-    np.testing.assert_allclose(obs[5], 0.0)  # current_slope
-    np.testing.assert_allclose(obs[6], 0.0)  # current_max_speed
-    np.testing.assert_allclose(obs[7], 0.0)  # current_min_speed
-    np.testing.assert_allclose(obs[8], 0.0)  # next_slope
     np.testing.assert_allclose(
-        obs[9], 0.032199375331401825, rtol=1e-4
+        obs[3], mtto_env._normalize_acc_to_action(mtto_env._calc_coasting_acc())
+    )  # suggested_dec_normalized
+    np.testing.assert_allclose(obs[4], 1.0)  # remaining_schedule_time
+    np.testing.assert_allclose(obs[6], 0.0)  # current_slope
+    np.testing.assert_allclose(obs[7], 0.0)  # current_max_speed
+    np.testing.assert_allclose(obs[8], 0.0)  # current_min_speed
+    np.testing.assert_allclose(obs[9], 0.0)  # next_slope
+    np.testing.assert_allclose(
+        obs[10], 0.032199375331401825, rtol=1e-4
     )  # next_max_speed
-    np.testing.assert_allclose(obs[10], 0.0)  # next_min_speed
+    np.testing.assert_allclose(obs[11], 0.0)  # next_min_speed
     assert info == {}
+
+
+def test_suggested_dec_uses_coasting_acc_outside_final_approach(mtto_env: MTTOEnv):
+    mtto_env.reset()
+    mtto_env.current_speed = 30.0
+    mtto_env.current_slope = 1.0
+    mtto_env.is_final_approach = False
+
+    obs = mtto_env._get_obs()
+
+    coasting_dec = calc_levi_deceleration_scalar_numba(
+        mtto_env.current_speed,
+        mtto_env.current_slope,
+        mtto_env.vehicle.mass,
+        mtto_env.vehicle.numoftrainsets,
+    )
+    expected_coasting_acc = float(
+        np.clip(
+            -coasting_dec,
+            mtto_env.vehicle.max_dec,
+            mtto_env.vehicle.max_acc,
+        )
+    )
+    np.testing.assert_allclose(
+        obs[3],
+        mtto_env._normalize_acc_to_action(expected_coasting_acc),
+    )
+
+
+def test_suggested_dec_uses_required_stop_dec_in_final_approach(mtto_env: MTTOEnv):
+    mtto_env.reset()
+    mtto_env.current_position = mtto_env.train_service.target_position - 1000.0
+    mtto_env.current_speed = 20.0
+    mtto_env.current_slope = 1.0
+    mtto_env.is_final_approach = True
+
+    obs = mtto_env._get_obs()
+
+    required_dec = -(mtto_env.current_speed**2) / (2.0 * 1000.0)
+    np.testing.assert_allclose(
+        obs[3],
+        mtto_env._normalize_acc_to_action(required_dec),
+    )
+    np.testing.assert_allclose(obs[13], 1000.0 / 3000.0)  # rel_dist_to_target
 
 
 def test_cal_energy_consumption(mtto_env: MTTOEnv):
