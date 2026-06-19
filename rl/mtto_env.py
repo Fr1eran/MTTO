@@ -1399,7 +1399,7 @@ class MTTOEnv(gym.Env):
         scale = 1.0 + 1.0 * np.exp(-0.001 * distance_to_target)
 
         # 最终势能为两侧惩罚之和
-        return scale * (phi_max + phi_min) * 4.0
+        return scale * (phi_max + phi_min) * 3.0
 
     def _potential_safety_position(
         self, pos: float, min_pos: float, max_pos: float, target_pos: float
@@ -1895,7 +1895,7 @@ class MTTOEnv(gym.Env):
 
     def _potential_punctuality_v18(self, pos: float, redundant_operation_time: float):
         K_T = 1.0
-        T_scale = 10.0
+        T_scale = 6.0
         # if (
         #     self.ref_redundant_operation_time_pos_arr.size == 0
         #     or self.ref_redundant_operation_time_arr.size == 0
@@ -1980,12 +1980,12 @@ class MTTOEnv(gym.Env):
         # )  # 轻微地偏离PBRS的最优性保证，但能换来更好的训练稳定性
 
     def _potential_stopping_v1(self, pos: float, speed: float):
-        K_weak = 10.0
+        K_weak = 5.0
         K_strong = 50.0
-        P_weak = 1500.0
+        P_weak = 3000.0
         P_strong = 300.0
-        V_weak = 0.75 * self.vehicle.max_speed
-        V_strong = 0.15 * self.vehicle.max_speed
+        V_weak = 0.7 * self.vehicle.max_speed
+        V_strong = 0.1 * self.vehicle.max_speed
 
         dist_error_abs = abs(pos - self.train_service.target_position)
 
@@ -2010,8 +2010,8 @@ class MTTOEnv(gym.Env):
     ) -> float:
         _stopping = self._calc_stopping_score()
         _punctuality = self._calc_punctuality_score()
-        reward_stopping = _stopping * 10.0
-        reward_punctuality = _stopping * _punctuality * 30.0
+        reward_stopping = _stopping * 20.0
+        reward_punctuality = _stopping * _punctuality * 60.0
 
         if self.enable_diagnostics and self._collect_step_diagnostics:
             self.rewards_info["stopping"] = reward_stopping

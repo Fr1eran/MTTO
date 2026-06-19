@@ -700,14 +700,14 @@ def plot_safety_potential_heatmap_speed(*, minimal: bool = False) -> Figure:
             speed_max_1d_masked * 3.6,
             color="red",
             linewidth=1,
-            label=r"upper speed curve",
+            label=r"max speed curve",
         )
         ax.plot(
             pos_array,
             speed_min_1d_masked * 3.6,
             color="blue",
             linewidth=1,
-            label=r"lower speed curve",
+            label=r"min speed curve",
         )
 
         # 添加色标
@@ -1091,9 +1091,9 @@ def plot_punctuality_potential_curve(
 def plot_punctuality_potential_heatmap(
     schedule_time: float = 430.0,
     dp_curve_dir: str = DP_DEFAULT_SEARCH_DIR,
-    position_points: int = 500,
-    relative_band_points: int = 240,
-    band_ratio: float = 0.1,
+    position_points: int = 2000,
+    relative_band_points: int = 2000,
+    band_ratio: float = 0.2,
     min_band_half_width: float = 1.0,
     *,
     minimal: bool = False,
@@ -1170,12 +1170,12 @@ def plot_punctuality_potential_heatmap(
     )
     HALF_WIDTH = np.broadcast_to(half_width, POSITION.shape)
     REDUNDANT_TIME = REF_REDUNDANT + RELATIVE_BAND * HALF_WIDTH
-    potential = _potential_punctuality_v18(
+    POTENTIAL = _potential_punctuality_v18(
         redundant_operation_time=REDUNDANT_TIME,
         ref_redundant_operation_time=REF_REDUNDANT,
     )
 
-    finite_potential = potential[np.isfinite(potential)]
+    finite_potential = POTENTIAL[np.isfinite(POTENTIAL)]
     if finite_potential.size == 0:
         raise ValueError("The configured ranges do not contain finite potential values")
 
@@ -1187,14 +1187,23 @@ def plot_punctuality_potential_heatmap(
         color_norm = None
 
     fig, ax = plt.subplots(figsize=(10, 6))
-    heatmap = ax.contourf(
+    cmap = plt.get_cmap("Spectral")
+    heatmap = ax.pcolormesh(
         POSITION,
         REDUNDANT_TIME,
-        potential,
-        levels=60,
-        cmap="coolwarm",
-        norm=color_norm,
+        POTENTIAL,
+        cmap=cmap,
+        vmin=-0.5,
+        vmax=0.0,
     )
+    # heatmap = ax.contourf(
+    #     POSITION,
+    #     REDUNDANT_TIME,
+    #     POTENTIAL,
+    #     levels=60,
+    #     cmap="coolwarm",
+    #     norm=color_norm,
+    # )
     ax.plot(
         position_array,
         ref_redundant_at_pos,
@@ -1212,7 +1221,7 @@ def plot_punctuality_potential_heatmap(
     if minimal:
         _apply_minimal_axis_style(ax)
     else:
-        fig.colorbar(heatmap, ax=ax)
+        fig.colorbar(heatmap, ax=ax, extend="min")
         # colorbar = fig.colorbar(heatmap, ax=ax)
         # colorbar.set_label("Punctuality potential")
         ax.set_xlabel("Position (m)")
@@ -1244,15 +1253,10 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         help="选择展示哪种势函数图。",
     )
     parser.add_argument(
-        "--save",
-        action="store_true",
-        help="启用图像保存。启用后必须传 --output-file。",
-    )
-    parser.add_argument(
         "--output-file",
-        type=str,
+        type=Path,
         default=None,
-        help="输出图像路径（如 output/potential.png）。",
+        help="输出紧凑版图像路径（如 output/potential.png）。不传时仅展示图像。",
     )
     parser.add_argument(
         "--minimal",
@@ -1260,14 +1264,17 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         default=False,
         help="极简图形模式：仅保留核心数据图元，移除文字与辅助标注。",
     )
+    parser.add_argument(
+        "--no-show",
+        action="store_true",
+        help="保存图像但不打开交互式展示窗口。",
+    )
     return parser
 
 
 def _validate_cli_args(cli_args: argparse.Namespace) -> None:
-    if cli_args.output_file is not None and not cli_args.output_file.strip():
+    if cli_args.output_file is not None and str(cli_args.output_file).strip() == "":
         raise ValueError("--output-file must not be empty")
-    if cli_args.save and cli_args.output_file is None:
-        raise ValueError("--output-file is required when --save is set")
 
 
 def _resolve_plotter(plot_type: str, *, minimal: bool) -> Callable[[], Figure]:
@@ -1292,7 +1299,7 @@ def _resolve_plotter(plot_type: str, *, minimal: bool) -> Callable[[], Figure]:
 def _apply_plot_style() -> None:
     set_global_plot_style(
         font_preset="sci",
-        preferred_font="Calibri",
+        preferred_font="Times New Roman",
         title_font_size=12.0,
         axis_label_font_size=12.0,
         tick_font_size=12.0,
@@ -1300,6 +1307,21 @@ def _apply_plot_style() -> None:
         figure_dpi=100.0,
         savefig_dpi=300.0,
     )
+
+
+def _save_compact_figure(figure: Figure, output_file: Path) -> Path:
+    if output_file.suffix == "":
+        output_file = output_file.with_suffix(".png")
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(
+        output_file,
+        transparent=True,
+        facecolor="none",
+        edgecolor="none",
+        bbox_inches="tight",
+        pad_inches=0.02,
+    )
+    return output_file
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1314,20 +1336,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     _apply_plot_style()
     figure = _resolve_plotter(cli_args.plot_type, minimal=cli_args.minimal)()
 
-    if cli_args.save:
-        output_path = Path(cli_args.output_file)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        figure.savefig(
-            output_path,
-            transparent=True,
-            facecolor="none",
-            edgecolor="none",
-            bbox_inches="tight",
-            pad_inches=0.02,
-        )
+    if cli_args.output_file is not None:
+        output_path = _save_compact_figure(figure, cli_args.output_file)
         print(f"图像已保存: {output_path}")
 
-    plt.show()
+    if not cli_args.no_show:
+        plt.show()
     return 0
 
 

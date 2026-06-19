@@ -1,3 +1,6 @@
+import argparse
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -53,7 +56,7 @@ def visualize_stopping_score_function():
     plt.xlim(0, 4.0)
 
     plt.tight_layout()
-    plt.show()
+    return plt.gcf()
 
 
 def visualize_punctuality_score_function():
@@ -110,7 +113,7 @@ def visualize_punctuality_score_function():
     plt.xlim(0, 140.0)
 
     plt.tight_layout()
-    plt.show()
+    return plt.gcf()
 
 
 def visualize_combined_score_functions():
@@ -129,7 +132,7 @@ def visualize_combined_score_functions():
     def add_panel_label(ax, label: str) -> None:
         ax.text(
             0.5,
-            -0.24,
+            -0.18,
             label,
             transform=ax.transAxes,
             ha="center",
@@ -168,7 +171,7 @@ def visualize_combined_score_functions():
     ax1.grid(True, alpha=0.3)
     ax1.set_xlim(0.0, 4.0)
     ax1.set_ylim(0.0, 1.5)
-    ax1.set_xlabel("∆x")
+    ax1.set_xlabel(r"$\Delta x$")
     ax1.set_ylabel("stopping score")
     add_panel_label(ax1, "(a)")
 
@@ -199,7 +202,7 @@ def visualize_combined_score_functions():
     ax2.grid(True, alpha=0.3)
     ax2.set_xlim(0, 60.0)
     ax2.set_ylim(0.0, 1.0)
-    ax2.set_xlabel("∆y")
+    ax2.set_xlabel(r"$\Delta t$")
     ax2.set_ylabel("punctuality score")
     add_panel_label(ax2, "(b)")
 
@@ -217,13 +220,67 @@ def visualize_combined_score_functions():
     )
 
     fig.subplots_adjust(top=0.88, bottom=0.28, wspace=0.28)
-    plt.show()
+    return fig
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Visualize score functions and optionally save a compact figure."
+    )
+    parser.add_argument(
+        "--plot",
+        choices=("combined", "stopping", "punctuality"),
+        default="combined",
+        help="Score function figure to display.",
+    )
+    parser.add_argument(
+        "--output-file",
+        type=Path,
+        help="Path for saving a compact paper-ready figure. If omitted, only display the figure.",
+    )
+    parser.add_argument(
+        "--dpi",
+        type=float,
+        default=300.0,
+        help="DPI used when saving the figure.",
+    )
+    parser.add_argument(
+        "--pad-inches",
+        type=float,
+        default=0.03,
+        help="Padding around the tight saved figure.",
+    )
+    parser.add_argument(
+        "--no-show",
+        action="store_true",
+        help="Save without opening the interactive display window.",
+    )
+    return parser.parse_args()
+
+
+def save_compact_figure(
+    fig,
+    output_file: Path,
+    dpi: float,
+    pad_inches: float,
+):
+    if output_file.suffix == "":
+        output_file = output_file.with_suffix(".png")
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(
+        output_file,
+        dpi=dpi,
+        bbox_inches="tight",
+        pad_inches=pad_inches,
+    )
+    return output_file
 
 
 if __name__ == "__main__":
+    args = parse_args()
     set_global_plot_style(
         font_preset="sci",
-        preferred_font="Calibri",
+        preferred_font="Times New Roman",
         title_font_size=12.0,
         axis_label_font_size=12.0,
         tick_font_size=10.0,
@@ -231,4 +288,21 @@ if __name__ == "__main__":
         figure_dpi=150.0,
         savefig_dpi=300.0,
     )
-    visualize_combined_score_functions()
+    visualizers = {
+        "combined": visualize_combined_score_functions,
+        "stopping": visualize_stopping_score_function,
+        "punctuality": visualize_punctuality_score_function,
+    }
+    fig = visualizers[args.plot]()
+
+    if args.output_file is not None:
+        output_file = save_compact_figure(
+            fig,
+            args.output_file,
+            args.dpi,
+            args.pad_inches,
+        )
+        print(f"Saved compact figure to {output_file}")
+
+    if not args.no_show:
+        plt.show()

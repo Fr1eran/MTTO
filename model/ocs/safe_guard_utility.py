@@ -926,7 +926,7 @@ class SafeGuardUtility:
                     where="post",
                     color="red",
                     linestyle="dashdot",
-                    label="speed limit",
+                    label="Track speed limit",
                     linewidth=1.5,
                 )
             elif layer == "danger_region":
@@ -934,7 +934,7 @@ class SafeGuardUtility:
                     ax=ax,
                     above_curves_list=self._min_curves_part_list_padded,
                     below_curves_list=self._max_curves_part_list_padded,
-                    label="dangerous speed region",
+                    label="Dangerous speed region",
                     color="red",
                     alpha=0.5,
                 )
@@ -944,7 +944,7 @@ class SafeGuardUtility:
                     pos=self._min_curves_parts_pos_con,
                     speed=self._min_curves_parts_speed_con,
                     speed_scale=speed_scale,
-                    label="minimum speed curve",
+                    label="Minimum speed curve",
                     color="blue",
                     linewidth=1.2,
                 )
@@ -954,7 +954,7 @@ class SafeGuardUtility:
                     pos=self._max_curves_parts_pos_con,
                     speed=self._max_curves_parts_speed_con,
                     speed_scale=speed_scale,
-                    label="maximum speed curve",
+                    label="Maximum speed curve",
                     color="red",
                     linewidth=1.2,
                 )
@@ -964,7 +964,7 @@ class SafeGuardUtility:
                     pos=self._levi_curves_pos_con,
                     speed=self._levi_curves_speed_con,
                     speed_scale=speed_scale,
-                    label="levitation safety curve",
+                    label="Safe levitation curve",
                     color="blue",
                     linestyle="dashed",
                     linewidth=1.2,
@@ -975,7 +975,7 @@ class SafeGuardUtility:
                     pos=self._brake_curves_pos_con,
                     speed=self._brake_curves_speed_con,
                     speed_scale=speed_scale,
-                    label="braking safety curve",
+                    label="Safe braking curve",
                     color="red",
                     linestyle="dashed",
                     linewidth=1.2,
@@ -986,7 +986,7 @@ class SafeGuardUtility:
                     pos=self._min_curves_pos_con,
                     speed=self._min_curves_speed_con,
                     speed_scale=speed_scale,
-                    label="minimum speed curve",
+                    label="Minimum speed curve",
                     color="blue",
                     linewidth=1.2,
                 )
@@ -996,7 +996,7 @@ class SafeGuardUtility:
                     pos=self._max_curves_pos_con,
                     speed=self._max_curves_speed_con,
                     speed_scale=speed_scale,
-                    label="maximum speed curve",
+                    label="Maximum speed curve",
                     color="red",
                     linewidth=1.2,
                 )
@@ -1005,6 +1005,6 @@ class SafeGuardUtility:
                     x=self._idp_points_x,
                     y=self._idp_points_y * speed_scale,
                     color="black",
-                    label="intersecting dangerous point",
+                    label="Intersecting dangerous point",
                     linewidths=0.2,
                 )
