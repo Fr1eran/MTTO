@@ -18,6 +18,7 @@ def test_ablation_cli_defaults() -> None:
     assert args.reward_profiles is None
     assert args.repeats == 1
     assert args.base_seed is None
+    assert args.safety_eval_margin_threshold_mps == 5.0
     assert args.dry_run is False
     assert not hasattr(args, "subproc_start_method")
 
@@ -93,6 +94,9 @@ def test_resolve_ablation_run_matrix_enforces_monitor_best_semantics() -> None:
     assert first_entry.training_run_spec.enable_tb is True
     assert first_entry.training_run_spec.enable_callback is False
     assert first_entry.training_run_spec.enable_best_eval is True
+    assert first_entry.training_run_spec.enable_safety_curve is True
+    assert first_entry.training_run_spec.safety_eval_margin_threshold_mps == 5.0
+    assert first_entry.training_run_spec.run_metadata["enable_safety_curve"] is True
     assert first_entry.training_run_spec.log_interval == 3
     assert first_entry.train_args.rollout_record_trigger_mode == "steps"
     assert (

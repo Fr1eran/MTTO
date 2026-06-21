@@ -48,6 +48,11 @@ class PolicyEvaluationResult:
     episode_steps: int
     trajectory_pos_m: NDArray[np.float32]
     trajectory_speed_mps: NDArray[np.float32]
+    dangerous_state_rate: float = 0.0
+    dangerous_state_count: int = 0
+    min_safety_margin_mps: float = 0.0
+    mean_safety_margin_mps: float = 0.0
+    danger_margin_threshold_mps: float = 5.0
 
     @property
     def strict_stop_requirement_met(self) -> bool:
@@ -81,6 +86,11 @@ class PolicyEvaluationResult:
             "comfort_rms": self.comfort_rms,
             "episode_steps": self.episode_steps,
             "success": self.success,
+            "dangerous_state_rate": self.dangerous_state_rate,
+            "dangerous_state_count": self.dangerous_state_count,
+            "min_safety_margin_mps": self.min_safety_margin_mps,
+            "mean_safety_margin_mps": self.mean_safety_margin_mps,
+            "danger_margin_threshold_mps": self.danger_margin_threshold_mps,
             "strict_stop_error_limit_m": self.strict_stop_error_limit_m,
             "strict_time_error_limit_s": self.strict_time_error_limit_s,
             "strict_stop_requirement_met": self.strict_stop_requirement_met,
@@ -172,12 +182,17 @@ def evaluate_policy_once(
     env: gym.Env[Any, Any],
     *,
     deterministic: bool = True,
+    danger_margin_threshold_mps: float = 5.0,
 ) -> PolicyEvaluationResult:
     obs, _ = env.reset()
+    mtto_env = unwrap_mtto_env(env)
     total_reward = 0.0
     episode_steps = 0
     terminated = False
     truncated = False
+    danger_threshold = float(danger_margin_threshold_mps)
+    safety_margins: list[float] = []
+    dangerous_state_count = 0
 
     while not (terminated or truncated):
         action, _ = model.predict(obs, deterministic=deterministic)
@@ -185,8 +200,27 @@ def evaluate_policy_once(
         total_reward += float(reward)
         episode_steps += 1
 
-    mtto_env = unwrap_mtto_env(env)
+        margin_to_vmax = float(mtto_env.current_max_speed) - float(
+            mtto_env.current_speed
+        )
+        margin_to_vmin = float(mtto_env.current_speed) - float(
+            mtto_env.current_min_speed
+        )
+        safety_margin = min(margin_to_vmax, margin_to_vmin)
+        safety_margins.append(safety_margin)
+        if safety_margin <= danger_threshold:
+            dangerous_state_count += 1
+
     basic_info = mtto_env.basic_info
+    if safety_margins:
+        safety_margin_arr = np.asarray(safety_margins, dtype=np.float64)
+        dangerous_state_rate = float(dangerous_state_count / len(safety_margins))
+        min_safety_margin_mps = float(np.min(safety_margin_arr))
+        mean_safety_margin_mps = float(np.mean(safety_margin_arr))
+    else:
+        dangerous_state_rate = 0.0
+        min_safety_margin_mps = 0.0
+        mean_safety_margin_mps = 0.0
 
     trajectory_pos = np.asarray(
         [] if mtto_env.trajectory_pos is None else mtto_env.trajectory_pos,
@@ -240,6 +274,11 @@ def evaluate_policy_once(
         episode_steps=episode_steps,
         trajectory_pos_m=trajectory_pos,
         trajectory_speed_mps=trajectory_speed,
+        dangerous_state_rate=dangerous_state_rate,
+        dangerous_state_count=int(dangerous_state_count),
+        min_safety_margin_mps=min_safety_margin_mps,
+        mean_safety_margin_mps=mean_safety_margin_mps,
+        danger_margin_threshold_mps=danger_threshold,
     )
 
 

@@ -4,7 +4,11 @@ from pathlib import Path
 import numpy as np
 
 from model.ocs import TrainService
-from rl.callbacks import BestTrajectoryEvalCallback
+from rl.callbacks import (
+    BestTrajectoryRecorder,
+    PeriodicEvalCallback,
+    SafetyCurveRecorder,
+)
 from rl.evaluation import (
     BEST_TRAJECTORY_SELECTION_RULE,
     PolicyEvaluationResult,
@@ -14,8 +18,14 @@ from rl.evaluation import (
 
 
 class DummyLogger:
-    def record(self, *_args, **_kwargs) -> None:
-        return
+    def __init__(self) -> None:
+        self.records: list[tuple[str, float]] = []
+
+    def record(self, key: str, value: float, *_args, **_kwargs) -> None:
+        self.records.append((key, value))
+
+    def values_for(self, key: str) -> list[float]:
+        return [value for record_key, value in self.records if record_key == key]
 
 
 class DummyModel:
@@ -59,6 +69,11 @@ def _build_result(
     total_energy_j: float = 12_345.0,
     stop_error_m: float | None = None,
     time_error_s: float | None = None,
+    dangerous_state_rate: float = 0.0,
+    dangerous_state_count: int = 0,
+    min_safety_margin_mps: float = 0.0,
+    mean_safety_margin_mps: float = 0.0,
+    danger_margin_threshold_mps: float = 5.0,
 ) -> PolicyEvaluationResult:
     resolved_stop_error = (
         float(stop_error_m) if stop_error_m is not None else (0.0 if success else 5.0)
@@ -89,6 +104,11 @@ def _build_result(
         episode_steps=10,
         trajectory_pos_m=np.asarray([0.0, 50.0, 100.0], dtype=np.float32),
         trajectory_speed_mps=np.asarray([0.0, 10.0, 0.0], dtype=np.float32),
+        dangerous_state_rate=dangerous_state_rate,
+        dangerous_state_count=dangerous_state_count,
+        min_safety_margin_mps=min_safety_margin_mps,
+        mean_safety_margin_mps=mean_safety_margin_mps,
+        danger_margin_threshold_mps=danger_margin_threshold_mps,
     )
 
 
@@ -98,10 +118,10 @@ def _prepare_callback(
     trigger_mode: str,
     trigger_interval: int,
     artifact_metadata: dict[str, object] | None = None,
-) -> BestTrajectoryEvalCallback:
+) -> PeriodicEvalCallback:
     training_env = DummyTrainingEnv()
     logger = DummyLogger()
-    callback = BestTrajectoryEvalCallback(
+    callback = PeriodicEvalCallback(
         eval_env=DummyEvalEnv(),
         output_dir=str(tmp_path),
         artifact_metadata=artifact_metadata,
@@ -114,7 +134,27 @@ def _prepare_callback(
     return callback
 
 
-def test_best_eval_callback_triggers_on_episode_interval(
+def _prepare_callback_with_recorders(
+    *,
+    trigger_mode: str,
+    trigger_interval: int,
+    recorders: list[object],
+) -> PeriodicEvalCallback:
+    training_env = DummyTrainingEnv()
+    logger = DummyLogger()
+    callback = PeriodicEvalCallback(
+        eval_env=DummyEvalEnv(),
+        recorders=recorders,
+        eval_trigger_mode=trigger_mode,
+        eval_trigger_interval=trigger_interval,
+        deterministic=True,
+    )
+    callback.init_callback(DummyModel(training_env=training_env, logger=logger))  # type: ignore
+    callback.locals = {}
+    return callback
+
+
+def test_periodic_eval_callback_triggers_on_episode_interval(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -149,7 +189,7 @@ def test_best_eval_callback_triggers_on_episode_interval(
     assert metrics["eval_trigger_interval"] == 3
 
 
-def test_best_eval_callback_prefers_success_over_reward(
+def test_periodic_eval_callback_prefers_success_over_reward(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -185,7 +225,7 @@ def test_best_eval_callback_prefers_success_over_reward(
     assert metrics["total_reward"] == 1.0
 
 
-def test_best_eval_callback_persists_artifact_metadata(
+def test_periodic_eval_callback_persists_artifact_metadata(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -214,7 +254,7 @@ def test_best_eval_callback_persists_artifact_metadata(
     assert metrics["trajectory_source"] == "best"
 
 
-def test_best_eval_callback_prefers_lower_energy_after_strict_requirements(
+def test_periodic_eval_callback_prefers_lower_energy_after_strict_requirements(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -245,6 +285,100 @@ def test_best_eval_callback_prefers_lower_energy_after_strict_requirements(
     )
     assert metrics["best_update_reason"] == "lower_energy_after_strict_requirements"
     assert metrics["success"] is True
+
+
+def test_periodic_eval_callback_evaluates_once_per_trigger(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    callback = _prepare_callback(
+        tmp_path,
+        trigger_mode="steps",
+        trigger_interval=1,
+    )
+    call_count = 0
+
+    def _fake_evaluate(*_args, **_kwargs):
+        nonlocal call_count
+        call_count += 1
+        return _build_result(success=True, total_reward=42.0)
+
+    monkeypatch.setattr("rl.callbacks.evaluate_policy_once", _fake_evaluate)
+
+    callback.num_timesteps = 1
+    assert callback._on_step() is True
+
+    assert call_count == 1
+    assert callback.best_result is not None
+
+
+def test_safety_curve_recorder_records_and_persists_curve(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    output_path = tmp_path / "dangerous_state_rate_curve.npz"
+    callback = _prepare_callback_with_recorders(
+        trigger_mode="steps",
+        trigger_interval=1,
+        recorders=[
+            BestTrajectoryRecorder(output_dir=str(tmp_path)),
+            SafetyCurveRecorder(output_path=str(output_path)),
+        ],
+    )
+    monkeypatch.setattr(
+        "rl.callbacks.evaluate_policy_once",
+        lambda *_args, **_kwargs: _build_result(
+            success=True,
+            total_reward=42.0,
+            dangerous_state_rate=0.25,
+            dangerous_state_count=3,
+            min_safety_margin_mps=1.5,
+            mean_safety_margin_mps=8.0,
+            danger_margin_threshold_mps=5.0,
+        ),
+    )
+
+    callback.num_timesteps = 1
+    assert callback._on_step() is True
+    assert callback.logger.values_for("safety_eval/last_dangerous_state_rate") == [
+        0.25
+    ]
+
+    callback._on_training_end()
+
+    assert output_path.exists()
+    with np.load(output_path) as data:
+        assert data["index"].tolist() == [1.0]
+        assert data["num_timesteps"].tolist() == [1.0]
+        assert data["dangerous_state_rate"].tolist() == [0.25]
+        assert data["dangerous_state_count"].tolist() == [3.0]
+        assert data["episode_steps"].tolist() == [10.0]
+        assert data["min_safety_margin_mps"].tolist() == [1.5]
+        assert data["mean_safety_margin_mps"].tolist() == [8.0]
+        assert data["success"].tolist() == [1.0]
+        assert data["truncated"].tolist() == [0.0]
+        assert data["danger_margin_threshold_mps"].tolist() == [5.0]
+
+
+def test_periodic_eval_default_recorder_does_not_write_safety_curve(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    callback = _prepare_callback(
+        tmp_path,
+        trigger_mode="steps",
+        trigger_interval=1,
+    )
+    monkeypatch.setattr(
+        "rl.callbacks.evaluate_policy_once",
+        lambda *_args, **_kwargs: _build_result(success=True, total_reward=42.0),
+    )
+
+    callback.num_timesteps = 1
+    assert callback._on_step() is True
+    callback._on_training_end()
+
+    assert not (tmp_path / "dangerous_state_rate_curve.npz").exists()
 
 
 def test_describe_best_update_reason_prefers_higher_reward_when_no_success() -> None:

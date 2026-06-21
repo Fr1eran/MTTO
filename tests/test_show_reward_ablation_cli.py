@@ -5,9 +5,12 @@ import numpy as np
 import pytest
 
 from scripts.show_reward_ablation import (
+    ABLATION_MANIFEST_FILENAME,
     EPISODE_METRICS_FILENAME,
+    SAFETY_CURVE_FILENAME,
     build_arg_parser,
     build_curve_aggregates,
+    build_safety_curve_aggregates,
     load_ablation_manifest,
     panel_label_for_index,
     select_representative_trajectory_candidates,
@@ -28,6 +31,22 @@ def _write_episode_metrics(
         index=np.asarray(steps, dtype=np.float64),
         ep_reward=np.asarray(rewards, dtype=np.float64),
         ep_len=np.asarray(lengths, dtype=np.float64),
+    )
+    return output_path
+
+
+def _write_safety_curve(
+    best_eval_output_dir: Path,
+    *,
+    steps: list[float],
+    dangerous_state_rate: list[float],
+) -> Path:
+    best_eval_output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = best_eval_output_dir / SAFETY_CURVE_FILENAME
+    np.savez(
+        output_path,
+        num_timesteps=np.asarray(steps, dtype=np.float64),
+        dangerous_state_rate=np.asarray(dangerous_state_rate, dtype=np.float64),
     )
     return output_path
 
@@ -70,6 +89,21 @@ def _build_manifest(tmp_path: Path) -> tuple[dict[str, object], Path]:
         steps=[0, 100, 200],
         rewards=[3.0, 4.0, 5.0],
         lengths=[8.0, 7.0, 6.0],
+    )
+    _write_safety_curve(
+        run_basic_r1 / "best_steps",
+        steps=[0, 100, 200],
+        dangerous_state_rate=[0.8, 0.5, 0.2],
+    )
+    _write_safety_curve(
+        run_basic_r2 / "best_steps",
+        steps=[0, 200],
+        dangerous_state_rate=[0.6, 0.0],
+    )
+    _write_safety_curve(
+        run_safety_r1 / "best_steps",
+        steps=[0, 100, 200],
+        dangerous_state_rate=[0.4, 0.2, 0.1],
     )
 
     _write_run_metadata(
@@ -132,6 +166,7 @@ def _build_manifest(tmp_path: Path) -> tuple[dict[str, object], Path]:
                 "seed": 10,
                 "output_dir": str(run_basic_r1),
                 "final_output_dir": str(run_basic_r1 / "final"),
+                "best_eval_output_dir": str(run_basic_r1 / "best_steps"),
                 "status": "completed",
             },
             {
@@ -140,6 +175,7 @@ def _build_manifest(tmp_path: Path) -> tuple[dict[str, object], Path]:
                 "seed": 11,
                 "output_dir": str(run_basic_r2),
                 "final_output_dir": str(run_basic_r2 / "final"),
+                "best_eval_output_dir": str(run_basic_r2 / "best_steps"),
                 "status": "completed",
             },
             {
@@ -148,11 +184,12 @@ def _build_manifest(tmp_path: Path) -> tuple[dict[str, object], Path]:
                 "seed": 12,
                 "output_dir": str(run_safety_r1),
                 "final_output_dir": str(run_safety_r1 / "final"),
+                "best_eval_output_dir": str(run_safety_r1 / "best_steps"),
                 "status": "completed",
             },
         ],
     }
-    manifest_path = ablation_root / "ablation_manifest.json"
+    manifest_path = ablation_root / ABLATION_MANIFEST_FILENAME
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     return manifest, manifest_path
@@ -165,6 +202,7 @@ def test_show_reward_ablation_cli_defaults() -> None:
     assert args.ablation_root == "output/optimal/rl/reward_ablation"
     assert args.trajectory_source == "best"
     assert args.trajectory_layout == "separate"
+    assert args.no_safety_curve is False
     assert args.dry_run is False
 
 
@@ -192,6 +230,57 @@ def test_build_curve_aggregates_aligns_repeats_by_steps(tmp_path: Path) -> None:
     np.testing.assert_allclose(basic_aggregate.reference_steps, [0.0, 100.0, 200.0])
     np.testing.assert_allclose(basic_aggregate.mean_reward, [1.5, 3.0, 4.5])
     np.testing.assert_allclose(basic_aggregate.mean_length, [11.0, 9.0, 7.0])
+
+
+def test_build_safety_curve_aggregates_aligns_repeats_by_steps(
+    tmp_path: Path,
+) -> None:
+    manifest, _ = _build_manifest(tmp_path)
+
+    aggregates, warnings = build_safety_curve_aggregates(manifest)
+
+    assert warnings == []
+    assert [aggregate.reward_profile_name for aggregate in aggregates] == [
+        "basic",
+        "basic_safety",
+    ]
+
+    basic_aggregate = aggregates[0]
+    assert basic_aggregate.valid_repeat_count == 2
+    np.testing.assert_allclose(basic_aggregate.reference_steps, [0.0, 100.0, 200.0])
+    np.testing.assert_allclose(
+        basic_aggregate.mean_dangerous_state_rate,
+        [0.7, 0.4, 0.1],
+    )
+
+
+def test_build_safety_curve_aggregates_warns_for_missing_curve(
+    tmp_path: Path,
+) -> None:
+    ablation_root = tmp_path / "ablation_missing_safety"
+    run_dir = ablation_root / "430p0_100p0__basic__r01"
+
+    manifest = {
+        "ablation_output_root": str(ablation_root),
+        "reward_profiles": ["basic"],
+        "runs": [
+            {
+                "reward_profile_name": "basic",
+                "repeat_index": 0,
+                "seed": 10,
+                "output_dir": str(run_dir),
+                "final_output_dir": str(run_dir / "final"),
+                "best_eval_output_dir": str(run_dir / "best_steps"),
+                "status": "completed",
+            }
+        ],
+    }
+
+    aggregates, warnings = build_safety_curve_aggregates(manifest)
+
+    assert aggregates == []
+    assert any("safety curve is missing" in warning for warning in warnings)
+    assert any("No valid safety curves" in warning for warning in warnings)
 
 
 def test_select_representative_trajectory_candidates_uses_existing_comparison_key(

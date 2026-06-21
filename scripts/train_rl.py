@@ -3,6 +3,7 @@ import argparse
 from rl.experiment_utils import (
     DEFAULT_REWARD_DISCOUNT,
     DEFAULT_REWARD_PROFILE_NAME,
+    DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
     TrainingRunSpec,
     resolve_training_run_spec,
     reward_profile_names,
@@ -150,7 +151,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--rollout-steps-per-update",
         type=int,
-        default=2048,
+        default=DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
         help="PPO rollout 步数。",
     )
     parser.add_argument(
@@ -230,6 +231,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="在运行最佳评估回放时，使用确定性策略。",
     )
     parser.add_argument(
+        "--enable-safety-curve",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="是否在周期评估中记录 Dangerous State Rate 曲线。",
+    )
+    parser.add_argument(
+        "--safety-eval-margin-threshold-mps",
+        type=float,
+        default=5.0,
+        help="危险状态率评估使用的速度安全裕度阈值(m/s)。",
+    )
+    parser.add_argument(
         "--rollout-record-trigger-mode",
         type=str,
         choices=["steps", "episodes"],
@@ -300,6 +313,8 @@ def print_training_run_spec(spec: TrainingRunSpec) -> None:
     print(f"- best_eval_trigger_interval={spec.best_eval_trigger_interval}")
     print(f"- best_eval_output_dir={spec.best_eval_output_dir}")
     print(f"- best_eval_deterministic={spec.best_eval_deterministic}")
+    print(f"- enable_safety_curve={spec.enable_safety_curve}")
+    print(f"- safety_eval_margin_threshold_mps={spec.safety_eval_margin_threshold_mps}")
     print(f"- rollout_record_trigger_mode={spec.rollout_record_trigger_mode}")
     print(f"- device={spec.device}")
     print(f"- seed={spec.seed}")

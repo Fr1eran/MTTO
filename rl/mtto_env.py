@@ -1896,13 +1896,6 @@ class MTTOEnv(gym.Env):
     def _potential_punctuality_v18(self, pos: float, redundant_operation_time: float):
         K_T = 1.0
         T_scale = 6.0
-        # if (
-        #     self.ref_redundant_operation_time_pos_arr.size == 0
-        #     or self.ref_redundant_operation_time_arr.size == 0
-        # ):
-        #     raise RuntimeError(
-        #         "DP v18 reference redundant operation-time manifold is not initialized."
-        #     )
 
         bias = redundant_operation_time - self._get_ref_redundant_operation_time(pos)
         ratio = bias / T_scale
@@ -1934,7 +1927,7 @@ class MTTOEnv(gym.Env):
         # 当偏差归一化后小于delta时，表现为二次方吸引
         # 当偏差大于delta时，自动拉平为线性，防止数值膨胀
         delta = 1.5
-        phi = -K_T * (delta**2 * (np.sqrt(1.0 + (ratio / delta) ** 2) - 1.0))
+        phi = -K_T * (delta**2 * (math.sqrt(1.0 + (ratio / delta) ** 2) - 1.0))
 
         # return phi * fade_factor
         return phi

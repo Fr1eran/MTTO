@@ -347,16 +347,207 @@ class TensorboardCallback(BaseCallback):
         self._finish_async_writer()
 
 
-class BestTrajectoryEvalCallback(BaseCallback):
+class BestTrajectoryRecorder:
+    def __init__(
+        self,
+        *,
+        output_dir: str,
+        artifact_metadata: dict[str, Any] | None = None,
+    ):
+        self.output_dir = output_dir
+        self.artifact_metadata = dict(artifact_metadata or {})
+        self.best_result: PolicyEvaluationResult | None = None
+        self.best_trigger_interval: int | None = None
+
+    def init_callback(self, callback: BaseCallback) -> None:
+        os.makedirs(self.output_dir, exist_ok=True)
+
+    def _save_best_artifacts(
+        self,
+        callback: BaseCallback,
+        result: PolicyEvaluationResult,
+        *,
+        eval_trigger_interval: int,
+        best_update_reason: str,
+    ) -> None:
+        model_path = os.path.join(self.output_dir, "best_model")
+        vecnormalize_path = os.path.join(self.output_dir, "best_vecnormalize.pkl")
+        trajectory_path = os.path.join(self.output_dir, "best_trajectory.npz")
+
+        callback.model.save(model_path)
+
+        training_env = callback.training_env
+        save_training_env = getattr(training_env, "save", None)
+        if not callable(save_training_env):
+            raise TypeError(
+                "Training environment does not support saving VecNormalize stats"
+            )
+        save_training_env(vecnormalize_path)
+
+        extra_metrics = result.to_metrics(
+            num_timesteps=int(callback.num_timesteps),
+            eval_trigger_mode=getattr(callback, "eval_trigger_mode", None),
+            eval_trigger_interval=eval_trigger_interval,
+        )
+        extra_metrics.update(self.artifact_metadata)
+        extra_metrics["trajectory_source"] = "best"
+        extra_metrics["best_update_reason"] = best_update_reason
+        save_policy_evaluation_curve(
+            result,
+            trajectory_path,
+            extra_metrics=extra_metrics,
+        )
+
+    def on_evaluation(
+        self,
+        callback: BaseCallback,
+        result: PolicyEvaluationResult,
+        *,
+        eval_trigger_interval: int,
+    ) -> None:
+        callback.logger.record("best_eval/last_success", float(result.success))
+        callback.logger.record("best_eval/last_total_reward", result.total_reward)
+        callback.logger.record("best_eval/last_stop_error_m", result.stop_error_m)
+        callback.logger.record("best_eval/last_time_error_s", result.time_error_s)
+        callback.logger.record("best_eval/last_total_energy_j", result.total_energy_j)
+
+        best_update_reason = describe_best_update_reason(result, self.best_result)
+        if best_update_reason is None:
+            return
+
+        self._save_best_artifacts(
+            callback,
+            result,
+            eval_trigger_interval=eval_trigger_interval,
+            best_update_reason=best_update_reason,
+        )
+        self.best_result = result
+        self.best_trigger_interval = eval_trigger_interval
+
+        callback.logger.record("best_eval/best_success", float(result.success))
+        callback.logger.record("best_eval/best_total_reward", result.total_reward)
+        callback.logger.record("best_eval/best_stop_error_m", result.stop_error_m)
+        callback.logger.record("best_eval/best_time_error_s", result.time_error_s)
+        callback.logger.record("best_eval/best_total_energy_j", result.total_energy_j)
+
+        if callback.verbose > 0:
+            print(
+                "New best trajectory saved: "
+                f"mode={getattr(callback, 'eval_trigger_mode', None)}, "
+                f"trigger_interval={eval_trigger_interval}, "
+                f"success={result.success}, "
+                f"total_reward={result.total_reward:.6f}"
+            )
+
+
+class SafetyCurveRecorder:
+    def __init__(
+        self,
+        *,
+        output_path: str,
+        danger_margin_threshold_mps: float = 5.0,
+    ):
+        self.output_path = output_path
+        self.danger_margin_threshold_mps = float(danger_margin_threshold_mps)
+        self._indices: list[float] = []
+        self._num_timesteps: list[float] = []
+        self._dangerous_state_rates: list[float] = []
+        self._dangerous_state_counts: list[float] = []
+        self._episode_steps: list[float] = []
+        self._min_safety_margins: list[float] = []
+        self._mean_safety_margins: list[float] = []
+        self._successes: list[float] = []
+        self._truncated: list[float] = []
+        self._thresholds: list[float] = []
+
+    def init_callback(self, callback: BaseCallback) -> None:
+        output_dir = os.path.dirname(self.output_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+
+    def on_evaluation(
+        self,
+        callback: BaseCallback,
+        result: PolicyEvaluationResult,
+        *,
+        eval_trigger_interval: int,
+    ) -> None:
+        callback.logger.record(
+            "safety_eval/last_dangerous_state_rate",
+            result.dangerous_state_rate,
+        )
+        callback.logger.record(
+            "safety_eval/last_dangerous_state_count",
+            float(result.dangerous_state_count),
+        )
+        callback.logger.record(
+            "safety_eval/last_min_safety_margin_mps",
+            result.min_safety_margin_mps,
+        )
+        callback.logger.record(
+            "safety_eval/last_mean_safety_margin_mps",
+            result.mean_safety_margin_mps,
+        )
+        callback.logger.record("safety_eval/last_success", float(result.success))
+        callback.logger.record("safety_eval/last_truncated", float(result.truncated))
+
+        self._indices.append(float(eval_trigger_interval))
+        self._num_timesteps.append(float(callback.num_timesteps))
+        self._dangerous_state_rates.append(float(result.dangerous_state_rate))
+        self._dangerous_state_counts.append(float(result.dangerous_state_count))
+        self._episode_steps.append(float(result.episode_steps))
+        self._min_safety_margins.append(float(result.min_safety_margin_mps))
+        self._mean_safety_margins.append(float(result.mean_safety_margin_mps))
+        self._successes.append(float(result.success))
+        self._truncated.append(float(result.truncated))
+        self._thresholds.append(float(result.danger_margin_threshold_mps))
+
+    def on_training_end(self, callback: BaseCallback) -> None:
+        if not self._indices:
+            return
+
+        np.savez(
+            self.output_path,
+            index=np.asarray(self._indices, dtype=np.float64),
+            num_timesteps=np.asarray(self._num_timesteps, dtype=np.float64),
+            dangerous_state_rate=np.asarray(
+                self._dangerous_state_rates,
+                dtype=np.float64,
+            ),
+            dangerous_state_count=np.asarray(
+                self._dangerous_state_counts,
+                dtype=np.float64,
+            ),
+            episode_steps=np.asarray(self._episode_steps, dtype=np.float64),
+            min_safety_margin_mps=np.asarray(
+                self._min_safety_margins,
+                dtype=np.float64,
+            ),
+            mean_safety_margin_mps=np.asarray(
+                self._mean_safety_margins,
+                dtype=np.float64,
+            ),
+            success=np.asarray(self._successes, dtype=np.float64),
+            truncated=np.asarray(self._truncated, dtype=np.float64),
+            danger_margin_threshold_mps=np.asarray(
+                self._thresholds,
+                dtype=np.float64,
+            ),
+        )
+
+
+class PeriodicEvalCallback(BaseCallback):
     def __init__(
         self,
         *,
         eval_env: Any,
-        output_dir: str,
+        output_dir: str | None = None,
         artifact_metadata: dict[str, Any] | None = None,
+        recorders: list[Any] | tuple[Any, ...] | None = None,
         eval_trigger_mode: str = "steps",
         eval_trigger_interval: int = 10_000,
         deterministic: bool = True,
+        danger_margin_threshold_mps: float = 5.0,
         verbose: int = 0,
     ):
         super().__init__(verbose)
@@ -366,18 +557,48 @@ class BestTrajectoryEvalCallback(BaseCallback):
             raise ValueError("trigger_interval must be positive")
 
         self.eval_env = eval_env
-        self.output_dir = output_dir
-        self.artifact_metadata = dict(artifact_metadata or {})
         self.eval_trigger_mode = eval_trigger_mode
         self.trigger_interval = int(eval_trigger_interval)
         self.deterministic = deterministic
-        self.best_result: PolicyEvaluationResult | None = None
-        self.best_trigger_interval: int | None = None
+        self.danger_margin_threshold_mps = float(danger_margin_threshold_mps)
+        if recorders is None:
+            if output_dir is None:
+                raise ValueError(
+                    "output_dir is required when recorders are not provided"
+                )
+            self.recorders = [
+                BestTrajectoryRecorder(
+                    output_dir=output_dir,
+                    artifact_metadata=artifact_metadata,
+                )
+            ]
+        else:
+            self.recorders = list(recorders)
         self._episodes_seen = 0
         self._next_trigger_value = self.trigger_interval
 
+    @property
+    def best_recorder(self) -> BestTrajectoryRecorder | None:
+        for recorder in self.recorders:
+            if isinstance(recorder, BestTrajectoryRecorder):
+                return recorder
+        return None
+
+    @property
+    def best_result(self) -> PolicyEvaluationResult | None:
+        recorder = self.best_recorder
+        return None if recorder is None else recorder.best_result
+
+    @property
+    def best_trigger_interval(self) -> int | None:
+        recorder = self.best_recorder
+        return None if recorder is None else recorder.best_trigger_interval
+
     def _init_callback(self) -> None:
-        os.makedirs(self.output_dir, exist_ok=True)
+        for recorder in self.recorders:
+            init_fn = getattr(recorder, "init_callback", None)
+            if callable(init_fn):
+                init_fn(self)
 
     def _count_completed_episodes(self) -> int:
         dones_raw = self.locals.get("dones")
@@ -393,80 +614,22 @@ class BestTrajectoryEvalCallback(BaseCallback):
         while self._next_trigger_value <= current_value:
             self._next_trigger_value += self.trigger_interval
 
-    def _save_best_artifacts(
-        self,
-        result: PolicyEvaluationResult,
-        *,
-        eval_trigger_interval: int,
-        best_update_reason: str,
-    ) -> None:
-        model_path = os.path.join(self.output_dir, "best_model")
-        vecnormalize_path = os.path.join(self.output_dir, "best_vecnormalize.pkl")
-        trajectory_path = os.path.join(self.output_dir, "best_trajectory.npz")
-
-        self.model.save(model_path)
-
-        training_env = self.training_env
-        save_training_env = getattr(training_env, "save", None)
-        if not callable(save_training_env):
-            raise TypeError(
-                "Training environment does not support saving VecNormalize stats"
-            )
-        save_training_env(vecnormalize_path)
-
-        extra_metrics = result.to_metrics(
-            num_timesteps=int(self.num_timesteps),
-            eval_trigger_mode=self.eval_trigger_mode,
-            eval_trigger_interval=eval_trigger_interval,
-        )
-        extra_metrics.update(self.artifact_metadata)
-        extra_metrics["trajectory_source"] = "best"
-        extra_metrics["best_update_reason"] = best_update_reason
-        save_policy_evaluation_curve(
-            result,
-            trajectory_path,
-            extra_metrics=extra_metrics,
-        )
-
     def _run_evaluation(self, *, eval_trigger_interval: int) -> None:
         result = evaluate_policy_once(
             self.model,
             self.eval_env,
             deterministic=self.deterministic,
+            danger_margin_threshold_mps=self.danger_margin_threshold_mps,
         )
 
-        self.logger.record("best_eval/last_success", float(result.success))
-        self.logger.record("best_eval/last_total_reward", result.total_reward)
-        self.logger.record("best_eval/last_stop_error_m", result.stop_error_m)
-        self.logger.record("best_eval/last_time_error_s", result.time_error_s)
-        self.logger.record("best_eval/last_total_energy_j", result.total_energy_j)
-
-        best_update_reason = describe_best_update_reason(result, self.best_result)
-        if best_update_reason is None:
-            return
-
-        self._save_best_artifacts(
-            result,
-            eval_trigger_interval=eval_trigger_interval,
-            best_update_reason=best_update_reason,
-        )
-        self.best_result = result
-        self.best_trigger_interval = eval_trigger_interval
-
-        self.logger.record("best_eval/best_success", float(result.success))
-        self.logger.record("best_eval/best_total_reward", result.total_reward)
-        self.logger.record("best_eval/best_stop_error_m", result.stop_error_m)
-        self.logger.record("best_eval/best_time_error_s", result.time_error_s)
-        self.logger.record("best_eval/best_total_energy_j", result.total_energy_j)
-
-        if self.verbose > 0:
-            print(
-                "New best trajectory saved: "
-                f"mode={self.eval_trigger_mode}, "
-                f"trigger_interval={eval_trigger_interval}, "
-                f"success={result.success}, "
-                f"total_reward={result.total_reward:.6f}"
-            )
+        for recorder in self.recorders:
+            on_evaluation = getattr(recorder, "on_evaluation", None)
+            if callable(on_evaluation):
+                on_evaluation(
+                    self,
+                    result,
+                    eval_trigger_interval=eval_trigger_interval,
+                )
 
     def _on_step(self) -> bool:
         if self.eval_trigger_mode == "episodes":
@@ -483,6 +646,11 @@ class BestTrajectoryEvalCallback(BaseCallback):
         return True
 
     def _on_training_end(self) -> None:
+        for recorder in self.recorders:
+            on_training_end = getattr(recorder, "on_training_end", None)
+            if callable(on_training_end):
+                on_training_end(self)
+
         close_fn = getattr(self.eval_env, "close", None)
         if callable(close_fn):
             close_fn()

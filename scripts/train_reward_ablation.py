@@ -163,6 +163,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="在运行最佳评估回放时, 使用确定性策略。",
     )
     parser.add_argument(
+        "--safety-eval-margin-threshold-mps",
+        type=float,
+        default=5.0,
+        help="危险状态率评估使用的速度安全裕度阈值(m/s)。",
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default="cpu",
@@ -250,6 +256,7 @@ def _apply_ablation_overrides(
         "best_eval_trigger_mode",
         "best_eval_trigger_interval",
         "best_eval_deterministic",
+        "safety_eval_margin_threshold_mps",
         "device",
     ):
         setattr(train_args, field_name, getattr(args, field_name))
@@ -268,6 +275,7 @@ def _apply_ablation_overrides(
     train_args.enable_env_diagnostics = None
     train_args.enable_auto_analysis = None
     train_args.enable_best_eval = None
+    train_args.enable_safety_curve = True
     train_args.tb_log_name = None
     train_args.rollout_record_trigger_mode = "steps"
     train_args.seed = seed

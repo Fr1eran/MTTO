@@ -25,8 +25,10 @@ from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
 from rl.callbacks import (
-    BestTrajectoryEvalCallback,
+    BestTrajectoryRecorder,
     EpisodeMetricsCollector,
+    PeriodicEvalCallback,
+    SafetyCurveRecorder,
     TensorboardCallback,
 )
 from rl.env_factory import make_env
@@ -107,6 +109,7 @@ _RL_TRAJECTORY_METRICS_SUFFIX = "_metrics.json"
 
 DEFAULT_SCHEDULE_TIME_S = 430.0
 DEFAULT_REWARD_DISCOUNT = 0.995
+DEFAULT_ROLLOUT_STEPS_PER_UPDATE = 8192
 DEFAULT_MAX_STEP_DISTANCE = 100.0
 DEFAULT_REWARD_PROFILE_NAME = "full_shaping"
 
@@ -195,6 +198,8 @@ class TrainingRunSpec:
     best_eval_trigger_mode: str
     best_eval_trigger_interval: int
     best_eval_deterministic: bool
+    enable_safety_curve: bool
+    safety_eval_margin_threshold_mps: float
     rollout_record_trigger_mode: str
     total_timesteps: int
     device: str
@@ -433,6 +438,8 @@ def build_run_metadata(
     enable_env_diagnostics: bool | None = None,
     enable_auto_analysis: bool | None = None,
     enable_best_eval: bool | None = None,
+    enable_safety_curve: bool | None = None,
+    safety_eval_margin_threshold_mps: float | None = None,
     num_envs: int | None = None,
     vec_env_type: str | None = None,
     subproc_start_method: str | None = None,
@@ -510,6 +517,12 @@ def build_run_metadata(
         metadata["enable_auto_analysis"] = bool(enable_auto_analysis)
     if enable_best_eval is not None:
         metadata["enable_best_eval"] = bool(enable_best_eval)
+    if enable_safety_curve is not None:
+        metadata["enable_safety_curve"] = bool(enable_safety_curve)
+    if safety_eval_margin_threshold_mps is not None:
+        metadata["safety_eval_margin_threshold_mps"] = float(
+            safety_eval_margin_threshold_mps
+        )
 
     if num_envs is not None:
         metadata["num_envs"] = int(num_envs)
@@ -629,6 +642,8 @@ def build_default_training_args() -> argparse.Namespace:
         best_eval_trigger_mode="steps",
         best_eval_trigger_interval=100_000,
         best_eval_deterministic=True,
+        enable_safety_curve=False,
+        safety_eval_margin_threshold_mps=5.0,
         rollout_record_trigger_mode="steps",
         seed=None,
         device="cpu",
@@ -840,6 +855,10 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
         args.force_dump_interval_steps
     )
     tb_batch_dump_records = _normalize_optional_positive_int(args.tb_batch_dump_records)
+    enable_safety_curve = bool(getattr(args, "enable_safety_curve", False))
+    safety_eval_margin_threshold_mps = float(
+        getattr(args, "safety_eval_margin_threshold_mps", 5.0)
+    )
     num_envs = max(1, int(args.num_envs))
     n_steps_per_env = _resolve_n_steps_per_env(args, num_envs)
     rollout_steps_per_update = n_steps_per_env * num_envs
@@ -862,6 +881,8 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
         enable_env_diagnostics=bool(enable_env_diagnostics),
         enable_auto_analysis=bool(enable_auto_analysis),
         enable_best_eval=bool(enable_best_eval),
+        enable_safety_curve=bool(enable_safety_curve),
+        safety_eval_margin_threshold_mps=safety_eval_margin_threshold_mps,
         num_envs=int(num_envs),
         vec_env_type=resolved_vec_env_type,
         subproc_start_method=subproc_start_method,
@@ -912,6 +933,8 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
         best_eval_trigger_mode=args.best_eval_trigger_mode,
         best_eval_trigger_interval=max(1, int(args.best_eval_trigger_interval)),
         best_eval_deterministic=bool(args.best_eval_deterministic),
+        enable_safety_curve=bool(enable_safety_curve),
+        safety_eval_margin_threshold_mps=safety_eval_margin_threshold_mps,
         rollout_record_trigger_mode=args.rollout_record_trigger_mode,
         total_timesteps=int(args.total_timesteps),
         device=args.device,
@@ -1036,11 +1059,12 @@ def train_single_experiment(
         # learning_rate=_linear_schedule(3e-4),
         learning_rate=3e-4,
         n_steps=resolved_spec.n_steps_per_env,
-        batch_size=256,
+        batch_size=1024,
         n_epochs=15,
         gamma=resolved_spec.reward_discount,
         gae_lambda=0.95,
         clip_range=0.2,
+        # clip_range_vf=0.2,
         ent_coef=0.01,
         vf_coef=0.5,
         max_grad_norm=0.5,
@@ -1072,8 +1096,26 @@ def train_single_experiment(
         )
 
     if resolved_spec.enable_best_eval:
+        eval_recorders: list[Any] = [
+            BestTrajectoryRecorder(
+                output_dir=resolved_spec.best_eval_output_dir,
+                artifact_metadata=resolved_spec.run_metadata,
+            )
+        ]
+        if resolved_spec.enable_safety_curve:
+            eval_recorders.append(
+                SafetyCurveRecorder(
+                    output_path=os.path.join(
+                        resolved_spec.best_eval_output_dir,
+                        "dangerous_state_rate_curve.npz",
+                    ),
+                    danger_margin_threshold_mps=(
+                        resolved_spec.safety_eval_margin_threshold_mps
+                    ),
+                )
+            )
         callbacks.append(
-            BestTrajectoryEvalCallback(
+            PeriodicEvalCallback(
                 eval_env=build_single_eval_env(
                     vehicle=vehicle,
                     track=track,
@@ -1085,11 +1127,13 @@ def train_single_experiment(
                     enable_trajectory_tracking=True,
                     reward_config=resolved_spec.reward_config,
                 ),
-                output_dir=resolved_spec.best_eval_output_dir,
-                artifact_metadata=resolved_spec.run_metadata,
+                recorders=eval_recorders,
                 eval_trigger_mode=resolved_spec.best_eval_trigger_mode,
                 eval_trigger_interval=resolved_spec.best_eval_trigger_interval,
                 deterministic=resolved_spec.best_eval_deterministic,
+                danger_margin_threshold_mps=(
+                    resolved_spec.safety_eval_margin_threshold_mps
+                ),
             )
         )
 

@@ -28,6 +28,7 @@ from utils.scenario import build_safeguard_utility
 
 ABLATION_MANIFEST_FILENAME = "reward_ablation_manifest.json"
 EPISODE_METRICS_FILENAME = "episode_metrics.npz"
+SAFETY_CURVE_FILENAME = "dangerous_state_rate_curve.npz"
 TRAJECTORY_LAYOUT_CHOICES = ("separate",)
 DEFAULT_ABLATION_ROOT = "output/optimal/rl/reward_ablation"
 PROFILE_COLORS: dict[str, str] = {
@@ -60,6 +61,26 @@ class CurveAggregateResult:
     std_length: np.ndarray
     valid_repeat_count: int
     episode_metrics_paths: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SafetyCurveRunArtifact:
+    reward_profile_name: str
+    repeat_index: int
+    seed: int | None
+    safety_curve_path: str
+    index: np.ndarray
+    dangerous_state_rate: np.ndarray
+
+
+@dataclass(frozen=True)
+class SafetyCurveAggregateResult:
+    reward_profile_name: str
+    reference_steps: np.ndarray
+    mean_dangerous_state_rate: np.ndarray
+    std_dangerous_state_rate: np.ndarray
+    valid_repeat_count: int
+    safety_curve_paths: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -115,6 +136,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="仅解析 manifest、episode_metrics 路径和代表轨迹, 不加载数组或弹图窗。",
+    )
+    parser.add_argument(
+        "--no-safety-curve",
+        action="store_true",
+        help="不加载或绘制 Dangerous State Rate 曲线。",
     )
     return parser
 
@@ -203,6 +229,28 @@ def _load_episode_metrics_npz(
         "index": index,
         "ep_reward": ep_reward,
         "ep_len": ep_len,
+    }
+
+
+def _load_safety_curve_npz(
+    safety_curve_path: Path,
+) -> dict[str, Any]:
+    with np.load(safety_curve_path) as data:
+        index_key = "num_timesteps" if "num_timesteps" in data.files else "index"
+        index = np.asarray(data[index_key], dtype=np.float64)
+        dangerous_state_rate = np.asarray(
+            data["dangerous_state_rate"],
+            dtype=np.float64,
+        )
+
+    if index.size == 0 or dangerous_state_rate.size == 0:
+        raise ValueError(f"Empty safety curve arrays in: {safety_curve_path}")
+    if index.size != dangerous_state_rate.size:
+        raise ValueError(f"Mismatched safety curve arrays in: {safety_curve_path}")
+
+    return {
+        "index": index,
+        "dangerous_state_rate": dangerous_state_rate,
     }
 
 
@@ -331,6 +379,107 @@ def build_curve_aggregates(
     return aggregates, warnings
 
 
+def build_safety_curve_aggregates(
+    manifest: dict[str, Any],
+    reward_profiles: list[str] | None = None,
+) -> tuple[list[SafetyCurveAggregateResult], list[str]]:
+    warnings: list[str] = []
+    aggregates: list[SafetyCurveAggregateResult] = []
+    for reward_profile_name in _resolve_selected_reward_profiles(
+        manifest, reward_profiles
+    ):
+        profile_runs, profile_warnings = _iter_completed_profile_runs(
+            manifest, reward_profile_name
+        )
+        warnings.extend(profile_warnings)
+
+        safety_runs: list[SafetyCurveRunArtifact] = []
+        for run_entry in profile_runs:
+            best_eval_output_dir = run_entry.get("best_eval_output_dir")
+            repeat_index = int(run_entry.get("repeat_index", 0))
+            if not isinstance(best_eval_output_dir, str) or not best_eval_output_dir:
+                warnings.append(
+                    f"Skipped safety curve run for profile={reward_profile_name}, "
+                    f"repeat={run_entry.get('repeat_index')} "
+                    "because best_eval_output_dir is missing."
+                )
+                continue
+
+            safety_curve_path = Path(best_eval_output_dir) / SAFETY_CURVE_FILENAME
+            if not safety_curve_path.is_file():
+                warnings.append(
+                    f"Skipped safety curve run for profile={reward_profile_name}, "
+                    f"repeat={run_entry.get('repeat_index')} "
+                    f"because safety curve is missing: {safety_curve_path}"
+                )
+                continue
+
+            try:
+                loaded = _load_safety_curve_npz(safety_curve_path)
+            except (KeyError, ValueError) as exc:
+                warnings.append(str(exc))
+                continue
+
+            index_arr: np.ndarray = loaded["index"]  # type: ignore[assignment]
+            dangerous_state_rate_arr: np.ndarray = loaded[
+                "dangerous_state_rate"
+            ]  # type: ignore[assignment]
+
+            safety_runs.append(
+                SafetyCurveRunArtifact(
+                    reward_profile_name=reward_profile_name,
+                    repeat_index=repeat_index,
+                    seed=(
+                        int(run_entry["seed"])
+                        if isinstance(run_entry.get("seed"), int)
+                        else None
+                    ),
+                    safety_curve_path=str(safety_curve_path),
+                    index=index_arr,
+                    dangerous_state_rate=dangerous_state_rate_arr,
+                )
+            )
+
+        if not safety_runs:
+            warnings.append(
+                f"No valid safety curves found for reward profile: {reward_profile_name}"
+            )
+            continue
+
+        reference_x = np.unique(np.concatenate([run.index for run in safety_runs]))
+        aligned_danger_rates = np.vstack([
+            np.interp(
+                reference_x,
+                run.index,
+                run.dangerous_state_rate,
+                left=np.nan,
+                right=np.nan,
+            )
+            for run in safety_runs
+        ])
+
+        aggregates.append(
+            SafetyCurveAggregateResult(
+                reward_profile_name=reward_profile_name,
+                reference_steps=reference_x,
+                mean_dangerous_state_rate=np.nanmean(
+                    aligned_danger_rates,
+                    axis=0,
+                ),
+                std_dangerous_state_rate=np.nanstd(
+                    aligned_danger_rates,
+                    axis=0,
+                ),
+                valid_repeat_count=len(safety_runs),
+                safety_curve_paths=tuple(
+                    safety_run.safety_curve_path for safety_run in safety_runs
+                ),
+            )
+        )
+
+    return aggregates, warnings
+
+
 def select_representative_trajectory_candidates(
     manifest: dict[str, Any],
     *,
@@ -422,15 +571,25 @@ def _build_profile_legend_handles(reward_profiles: list[str]) -> list[Line2D]:
 
 def _plot_curve_aggregates(
     aggregates: list[CurveAggregateResult],
+    safety_aggregates: list[SafetyCurveAggregateResult] | None = None,
 ) -> None:
-    if not aggregates:
+    safety_aggregates = safety_aggregates or []
+    if not aggregates and not safety_aggregates:
         print("No curve aggregates available; skipped curve figure.")
         return
 
     apply_rl_curve_plot_style()
-    fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(12, 4.8), squeeze=False)
+    ncols = 3 if safety_aggregates else 2
+    fig_width = 16 if safety_aggregates else 12
+    fig, axes = plt.subplots(
+        nrows=1,
+        ncols=ncols,
+        figsize=(fig_width, 4.8),
+        squeeze=False,
+    )
     ax_reward = axes[0][0]
     ax_length = axes[0][1]
+    ax_safety = axes[0][2] if safety_aggregates else None
     for aggregate in aggregates:
         color = _resolve_profile_color(aggregate.reward_profile_name)
         profile_label = resolve_reward_profile(aggregate.reward_profile_name).label
@@ -467,12 +626,42 @@ def _plot_curve_aggregates(
     ax_length.set_xlabel("Training steps")
     ax_length.set_ylabel("Mean episode length")
     ax_length.grid(True, alpha=0.3)
+    if ax_safety is not None:
+        for aggregate in safety_aggregates:
+            color = _resolve_profile_color(aggregate.reward_profile_name)
+            profile_label = resolve_reward_profile(aggregate.reward_profile_name).label
+            ax_safety.plot(
+                aggregate.reference_steps,
+                aggregate.mean_dangerous_state_rate,
+                color=color,
+                label=profile_label,
+            )
+            ax_safety.fill_between(
+                aggregate.reference_steps,
+                aggregate.mean_dangerous_state_rate
+                - aggregate.std_dangerous_state_rate,
+                aggregate.mean_dangerous_state_rate
+                + aggregate.std_dangerous_state_rate,
+                color=color,
+                alpha=0.18,
+            )
+        ax_safety.set_xlabel("Training steps")
+        ax_safety.set_ylabel("Dangerous state rate")
+        ax_safety.set_ylim(0.0, 1.0)
+        ax_safety.grid(True, alpha=0.3)
+
+    legend_profile_order: list[str] = []
+    for reward_profile_name in [
+        *(aggregate.reward_profile_name for aggregate in aggregates),
+        *(aggregate.reward_profile_name for aggregate in safety_aggregates),
+    ]:
+        if reward_profile_name not in legend_profile_order:
+            legend_profile_order.append(reward_profile_name)
+
     fig.legend(
-        handles=_build_profile_legend_handles([
-            aggregate.reward_profile_name for aggregate in aggregates
-        ]),
+        handles=_build_profile_legend_handles(legend_profile_order),
         loc="upper center",
-        ncol=min(4, len(aggregates)),
+        ncol=min(4, len(legend_profile_order)),
     )
     plt.tight_layout(rect=(0.0, 0.0, 1.0, 0.92))
     plt.show()
@@ -553,6 +742,28 @@ def _print_curve_summary(aggregates: list[CurveAggregateResult]) -> None:
         )
 
 
+def _print_safety_curve_summary(
+    safety_aggregates: list[SafetyCurveAggregateResult],
+) -> None:
+    if not safety_aggregates:
+        print("Safety curve summary: no valid reward profiles available.")
+        return
+    print("Safety curve summary:")
+    for aggregate in safety_aggregates:
+        final_mean = (
+            float(aggregate.mean_dangerous_state_rate[-1])
+            if aggregate.mean_dangerous_state_rate.size
+            else float("nan")
+        )
+        print(
+            "  - "
+            f"profile={aggregate.reward_profile_name} "
+            f"valid_repeats={aggregate.valid_repeat_count} "
+            f"steps={aggregate.reference_steps.size} "
+            f"final_dangerous_state_rate={final_mean:.6g}"
+        )
+
+
 def _print_trajectory_summary(
     selected_candidates: list[SelectedTrajectoryCandidate],
 ) -> None:
@@ -592,6 +803,14 @@ def main() -> None:
         manifest,
         args.reward_profiles,
     )
+    if args.no_safety_curve:
+        safety_aggregates: list[SafetyCurveAggregateResult] = []
+        safety_warnings: list[str] = []
+    else:
+        safety_aggregates, safety_warnings = build_safety_curve_aggregates(
+            manifest,
+            args.reward_profiles,
+        )
     selected_candidates, trajectory_warnings = (
         select_representative_trajectory_candidates(
             manifest,
@@ -600,8 +819,10 @@ def main() -> None:
         )
     )
 
-    _print_warning_block(curve_warnings + trajectory_warnings)
+    _print_warning_block(curve_warnings + safety_warnings + trajectory_warnings)
     _print_curve_summary(curve_aggregates)
+    if not args.no_safety_curve:
+        _print_safety_curve_summary(safety_aggregates)
     _print_trajectory_summary(selected_candidates)
 
     if args.dry_run:
@@ -610,11 +831,11 @@ def main() -> None:
         )
         return
 
-    if not curve_aggregates and not selected_candidates:
+    if not curve_aggregates and not safety_aggregates and not selected_candidates:
         parser.error("No valid ablation artifacts available for plotting.")
         return
 
-    _plot_curve_aggregates(curve_aggregates)
+    _plot_curve_aggregates(curve_aggregates, safety_aggregates)
     _plot_selected_trajectories(
         selected_candidates,
         no_safeguard=args.no_safeguard,
