@@ -177,23 +177,25 @@ def _compute_objective_correlation(
     series_values_by_tag: dict[str, np.ndarray],
     ordered_tags: list[str],
 ) -> dict[str, Any]:
-    if len(ordered_tags) < 2:
+    variable_tags: list[str] = []
+    for tag in ordered_tags:
+        values = np.asarray(series_values_by_tag[tag], dtype=np.float64)
+        if values.size >= 2 and float(np.std(values)) >= 1e-12:
+            variable_tags.append(tag)
+
+    if len(variable_tags) < 2:
         return {"matrix": {}, "strong_negative_pairs": []}
 
-    first = series_values_by_tag[ordered_tags[0]]
-    if np.asarray(first).size < 2:
-        return {"matrix": {}, "strong_negative_pairs": []}
-
-    matrix_values = np.column_stack([series_values_by_tag[tag] for tag in ordered_tags])
+    matrix_values = np.column_stack([series_values_by_tag[tag] for tag in variable_tags])
     corr_matrix = np.corrcoef(matrix_values, rowvar=False)
     corr_matrix = np.nan_to_num(corr_matrix, nan=0.0)
 
     corr_map: dict[str, dict[str, float]] = {}
     strong_negative_pairs: list[dict[str, Any]] = []
 
-    for i, row_tag in enumerate(ordered_tags):
+    for i, row_tag in enumerate(variable_tags):
         row_data: dict[str, float] = {}
-        for j, col_tag in enumerate(ordered_tags):
+        for j, col_tag in enumerate(variable_tags):
             corr = float(corr_matrix[i, j])
             row_data[col_tag] = corr
             if i < j and corr <= -0.4:

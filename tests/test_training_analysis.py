@@ -96,6 +96,27 @@ def test_reward_component_impact_basic():
     assert "rewards/energy" in correlation["rewards/safety"]
 
 
+def test_reward_component_correlation_skips_zero_std_components_without_warning():
+    series_map = {
+        "rewards/safety": _make_series("rewards/safety", [0.0, 0.0, 0.0, 0.0]),
+        "rewards/energy": _make_series("rewards/energy", [-0.1, -0.2, -0.4, -0.8]),
+        "rewards/comfort": _make_series("rewards/comfort", [-0.3, -0.2, -0.1, -0.05]),
+        "rewards/punctuality": _make_series(
+            "rewards/punctuality",
+            [0.0, 0.0, 0.0, 0.0],
+        ),
+    }
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        impact = compute_reward_component_impact(series_map)
+
+    assert captured == []
+    correlation = impact["objective_correlation"]["matrix"]
+    assert set(correlation) == {"rewards/energy", "rewards/comfort"}
+    assert set(correlation["rewards/energy"]) == {"rewards/energy", "rewards/comfort"}
+
+
 def test_best_eval_metrics_basic():
     series_map = {
         "best_eval/best_total_reward": _make_series(
@@ -700,12 +721,12 @@ def test_sampling_gate_strict_mode(monkeypatch, tmp_path):
     config = AnalysisConfig(
         output_root=str(tmp_path),
         sampling_quality_mode="strict_fail",
-        min_points_per_10k_steps=100.0,
-        min_unique_episodes=100,
-        max_mean_step_gap=100.0,
+        min_points_per_10k_steps=1.0,
+        min_unique_episodes=3,
+        rollout_steps_per_update=100,
     )
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="rollout_steps_per_update"):
         run_training_analysis(log_root="unused", run_name="unused", config=config)
 
 
@@ -727,9 +748,9 @@ def test_sampling_gate_warn_mode_outputs_data_quality(monkeypatch, tmp_path):
     config = AnalysisConfig(
         output_root=str(tmp_path),
         sampling_quality_mode="warn_only",
-        min_points_per_10k_steps=100.0,
-        min_unique_episodes=100,
-        max_mean_step_gap=100.0,
+        min_points_per_10k_steps=1.0,
+        min_unique_episodes=3,
+        rollout_steps_per_update=100,
     )
 
     with warnings.catch_warnings(record=True) as captured:
@@ -744,6 +765,43 @@ def test_sampling_gate_warn_mode_outputs_data_quality(monkeypatch, tmp_path):
     )
     assert "data_quality" in result
     assert result["data_quality"]["sampling_gate"]["is_adequate"] is False
+    assert (
+        result["data_quality"]["sampling_gate"]["metrics"]["rollout_steps_per_update"]
+        == 100.0
+    )
+
+
+def test_sampling_gate_accepts_rollout_sized_mean_gap(monkeypatch, tmp_path):
+    import rl.training_analysis.pipeline as pipeline_module
+
+    sparse_map = _build_sparse_series_map()
+    monkeypatch.setattr(
+        pipeline_module,
+        "resolve_run_directory",
+        lambda log_root, run_name=None: Path("fake_run"),
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_scalar_series_from_run",
+        lambda run_dir: sparse_map,
+    )
+
+    config = AnalysisConfig(
+        output_root=str(tmp_path),
+        sampling_quality_mode="warn_only",
+        min_points_per_10k_steps=1.0,
+        min_unique_episodes=3,
+        rollout_steps_per_update=10240,
+    )
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        result = run_training_analysis(
+            log_root="unused", run_name="unused", config=config
+        )
+
+    assert captured == []
+    assert result["data_quality"]["sampling_gate"]["is_adequate"] is True
 
 
 def test_analyze_cli_sampling_quality_args():
@@ -753,16 +811,23 @@ def test_analyze_cli_sampling_quality_args():
         "6.5",
         "--min-unique-episodes",
         "80",
-        "--max-mean-step-gap",
-        "1500",
+        "--rollout-steps-per-update",
+        "8192",
         "--sampling-quality-mode",
         "strict_fail",
     ])
 
     assert args.min_points_per_10k_steps == 6.5
     assert args.min_unique_episodes == 80
-    assert args.max_mean_step_gap == 1500.0
+    assert args.rollout_steps_per_update == 8192
     assert args.sampling_quality_mode == "strict_fail"
+
+
+def test_analyze_cli_rejects_removed_max_mean_step_gap() -> None:
+    parser = build_analyze_arg_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--max-mean-step-gap", "1500"])
 
 
 def test_analyze_cli_accepts_dry_run() -> None:

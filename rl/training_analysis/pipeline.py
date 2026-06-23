@@ -39,7 +39,7 @@ class AnalysisConfig:
     training_log_interval: int | None = None
     min_points_per_10k_steps: float = 5.0
     min_unique_episodes: int = 100
-    max_mean_step_gap: float = 2048.0
+    rollout_steps_per_update: int = 2048
     sampling_quality_mode: str = "warn_only"
     output_root: str = "mtto_train_reports"
     sampling_health_tags: list[str] | None = None
@@ -54,6 +54,11 @@ class AnalysisConfig:
         if self.step_window_size < 1:
             raise ValueError(
                 f"step_window_size must be >= 1, got {self.step_window_size}"
+            )
+        if self.rollout_steps_per_update < 1:
+            raise ValueError(
+                "rollout_steps_per_update must be >= 1, "
+                f"got {self.rollout_steps_per_update}"
             )
         if self.sampling_quality_mode not in ("warn_only", "strict_fail"):
             raise ValueError(
@@ -110,12 +115,13 @@ def _evaluate_sampling_quality(
     summary = sampling_health.get("summary", {}) if sampling_health else {}
     points_per_10k = float(summary.get("mean_samples_per_10k_steps", 0.0))
     mean_step_gap = float(summary.get("max_mean_step_gap", float("inf")))
+    max_allowed_mean_step_gap = float(config.rollout_steps_per_update)
     unique_episode_count = _count_unique_episodes(series_map)
 
     checks = {
         "points_per_10k_ok": points_per_10k >= float(config.min_points_per_10k_steps),
         "unique_episodes_ok": unique_episode_count >= int(config.min_unique_episodes),
-        "mean_step_gap_ok": mean_step_gap <= float(config.max_mean_step_gap),
+        "mean_step_gap_ok": mean_step_gap <= max_allowed_mean_step_gap,
     }
     is_adequate = all(checks.values())
 
@@ -132,7 +138,8 @@ def _evaluate_sampling_quality(
     if not checks["mean_step_gap_ok"]:
         reasons.append(
             "max_mean_step_gap "
-            f"{mean_step_gap:.3f} > {float(config.max_mean_step_gap):.3f}"
+            f"{mean_step_gap:.3f} > rollout_steps_per_update "
+            f"{max_allowed_mean_step_gap:.3f}"
         )
 
     return {
@@ -143,6 +150,7 @@ def _evaluate_sampling_quality(
             "mean_samples_per_10k_steps": points_per_10k,
             "unique_episode_count": float(unique_episode_count),
             "max_mean_step_gap": mean_step_gap,
+            "rollout_steps_per_update": max_allowed_mean_step_gap,
         },
         "mode": _resolve_sampling_quality_mode(config.sampling_quality_mode),
     }

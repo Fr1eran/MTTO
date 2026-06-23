@@ -106,10 +106,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Minimum acceptable unique episodes for sampling quality.",
     )
     parser.add_argument(
-        "--max-mean-step-gap",
-        type=float,
-        default=2048.0,
-        help="Maximum acceptable mean step gap for sampling quality.",
+        "--rollout-steps-per-update",
+        type=int,
+        default=2048,
+        help="PPO rollout steps per update used as the maximum acceptable mean step gap.",
     )
     parser.add_argument(
         "--sampling-quality-mode",
@@ -158,7 +158,7 @@ def main() -> None:
         training_log_interval=args.training_log_interval,
         min_points_per_10k_steps=args.min_points_per_10k_steps,
         min_unique_episodes=args.min_unique_episodes,
-        max_mean_step_gap=args.max_mean_step_gap,
+        rollout_steps_per_update=args.rollout_steps_per_update,
         sampling_quality_mode=args.sampling_quality_mode,
         export_csv=args.export_csv,
         include_snapshots=args.include_snapshots,

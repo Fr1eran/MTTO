@@ -117,12 +117,6 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="最低可接受唯一回合数。仅在启用日志记录功能时生效。",
     )
     parser.add_argument(
-        "--analysis-max-mean-step-gap",
-        type=float,
-        default=2048.0,
-        help="最大平均训练步间隔。仅在启用日志记录功能时生效。",
-    )
-    parser.add_argument(
         "--analysis-sampling-quality-mode",
         type=str,
         choices=["warn_only", "strict_fail"],

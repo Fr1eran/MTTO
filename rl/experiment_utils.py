@@ -624,7 +624,6 @@ def build_default_training_args() -> argparse.Namespace:
         analysis_output_root="mtto_train_reports",
         analysis_min_points_per_10k_steps=5.0,
         analysis_min_unique_episodes=100,
-        analysis_max_mean_step_gap=2048.0,
         analysis_sampling_quality_mode="warn_only",
         reward_discount=DEFAULT_REWARD_DISCOUNT,
         num_envs=1,
@@ -1059,7 +1058,7 @@ def train_single_experiment(
         # learning_rate=_linear_schedule(3e-4),
         learning_rate=3e-4,
         n_steps=resolved_spec.n_steps_per_env,
-        batch_size=1024,
+        batch_size=512,
         n_epochs=15,
         gamma=resolved_spec.reward_discount,
         gae_lambda=0.95,
@@ -1172,7 +1171,7 @@ def train_single_experiment(
                 ),
                 min_points_per_10k_steps=args.analysis_min_points_per_10k_steps,
                 min_unique_episodes=args.analysis_min_unique_episodes,
-                max_mean_step_gap=args.analysis_max_mean_step_gap,
+                rollout_steps_per_update=resolved_spec.rollout_steps_per_update,
                 sampling_quality_mode=args.analysis_sampling_quality_mode,
             )
             analysis_result = run_training_analysis(

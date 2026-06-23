@@ -1487,15 +1487,15 @@ class MTTOEnv(gym.Env):
         #     redundant_operation_time=self.last_state["redundant_operation_time"],
         # )
 
-        phi_curr = self._potential_punctuality_v18(
-            pos=self.current_position,
-            redundant_operation_time=self.current_redundant_operation_time,
-        )
+        # phi_curr = self._potential_punctuality_v18(
+        #     pos=self.current_position,
+        #     redundant_operation_time=self.current_redundant_operation_time,
+        # )
 
-        phi_prev = self._potential_punctuality_v18(
-            pos=self.last_state["pos"],
-            redundant_operation_time=self.last_state["redundant_operation_time"],
-        )
+        # phi_prev = self._potential_punctuality_v18(
+        #     pos=self.last_state["pos"],
+        #     redundant_operation_time=self.last_state["redundant_operation_time"],
+        # )
 
         # phi_curr = self._potential_punctuality_v19(
         #     pos=self.current_position,
@@ -1506,6 +1506,16 @@ class MTTOEnv(gym.Env):
         #     pos=self.last_state["pos"],
         #     redundant_operation_time=self.last_state["redundant_operation_time"],
         # )
+
+        phi_curr = self._potential_punctuality_v20(
+            pos=self.current_position,
+            redundant_operation_time=self.current_redundant_operation_time,
+        )
+
+        phi_prev = self._potential_punctuality_v20(
+            pos=self.last_state["pos"],
+            redundant_operation_time=self.last_state["redundant_operation_time"],
+        )
 
         # return self.gamma * phi_curr - phi_prev
         return (
@@ -1948,6 +1958,22 @@ class MTTOEnv(gym.Env):
                 ** 2
             )
         )
+
+    def _potential_punctuality_v20(self, pos: float, redundant_operation_time: float):
+        K_T = 0.8
+        T_scale = 8.0
+
+        bias = redundant_operation_time - self._get_ref_redundant_operation_time(pos)
+        ratio = bias / T_scale
+
+        # ln(cosh(x))
+        abs_ratio = abs(ratio)
+        phi = -K_T * (
+            abs_ratio + math.log1p(math.exp(-2.0 * abs_ratio)) - math.log(2.0)
+        )
+
+        # return phi * fade_factor
+        return phi
 
     def _get_reward_stopping_dense(self):
 
