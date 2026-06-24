@@ -1,3 +1,4 @@
+import math
 import os
 from dataclasses import dataclass
 from typing import Any
@@ -13,20 +14,24 @@ from rl.env_factory import make_env
 from rl.mtto_env import DEFAULT_PUNCTUALITY_DP_CURVE_DIR, MTTOEnv, RewardConfig
 from utils.io_utils import save_curve_and_metrics
 
-BEST_TRAJECTORY_SELECTION_RULE = "success_strict_stop_strict_time_energy_else_reward"
+ARRIVAL_STOP_SPEED_ABS_TOL_MPS = 0.01
+
+BEST_TRAJECTORY_SELECTION_RULE = "arrival_precise_punctual_energy_else_reward"
 BEST_TRAJECTORY_SELECTION_RULE_DESCRIPTION = (
-    "Any successful evaluation outranks any non-successful evaluation. "
-    "Among non-successful evaluations, higher total_reward wins. "
-    "Among successful evaluations, strict stop accuracy wins first; if neither "
-    "trajectory meets it, lower stop_error_m wins. Strict arrival time wins next; "
-    "if neither trajectory meets it, lower abs(time_error_s) wins. Lower "
-    "total_energy_j wins only after those strict requirements."
+    "Any successful arrival outranks any non-arrival evaluation. "
+    "Among non-arrivals, higher total_reward wins. Among successful arrivals, "
+    "precise arrival wins first; if neither trajectory is precise, lower "
+    "stop_error_m wins. Punctual arrival wins next; if neither trajectory is "
+    "punctual, lower abs(time_error_s) wins. Lower total_energy_j wins only "
+    "after those task-completion levels."
 )
 
 
 @dataclass(frozen=True)
 class PolicyEvaluationResult:
     success: bool
+    precise_arrival: bool
+    punctual_arrival: bool
     total_reward: float
     total_time_s: float
     target_time_s: float
@@ -54,14 +59,6 @@ class PolicyEvaluationResult:
     mean_safety_margin_mps: float = 0.0
     danger_margin_threshold_mps: float = 5.0
 
-    @property
-    def strict_stop_requirement_met(self) -> bool:
-        return float(self.stop_error_m) <= float(self.strict_stop_error_limit_m)
-
-    @property
-    def strict_time_requirement_met(self) -> bool:
-        return abs(float(self.time_error_s)) <= float(self.strict_time_error_limit_s)
-
     def to_metrics(
         self,
         *,
@@ -86,6 +83,8 @@ class PolicyEvaluationResult:
             "comfort_rms": self.comfort_rms,
             "episode_steps": self.episode_steps,
             "success": self.success,
+            "precise_arrival": self.precise_arrival,
+            "punctual_arrival": self.punctual_arrival,
             "dangerous_state_rate": self.dangerous_state_rate,
             "dangerous_state_count": self.dangerous_state_count,
             "min_safety_margin_mps": self.min_safety_margin_mps,
@@ -93,8 +92,6 @@ class PolicyEvaluationResult:
             "danger_margin_threshold_mps": self.danger_margin_threshold_mps,
             "strict_stop_error_limit_m": self.strict_stop_error_limit_m,
             "strict_time_error_limit_s": self.strict_time_error_limit_s,
-            "strict_stop_requirement_met": self.strict_stop_requirement_met,
-            "strict_time_requirement_met": self.strict_time_requirement_met,
             "selection_comparison_key": list(
                 build_policy_evaluation_comparison_key(self)
             ),
@@ -150,21 +147,69 @@ def unwrap_mtto_env(env: gym.Env[Any, Any]) -> MTTOEnv:
     return mtto_env
 
 
-def is_success_within_train_service_limits(
+def is_successful_arrival(
     *,
     stop_error_m: float,
+    final_speed_mps: float,
+    train_service: TrainService,
+) -> bool:
+    is_stopped = math.isclose(
+        float(final_speed_mps),
+        0.0,
+        abs_tol=ARRIVAL_STOP_SPEED_ABS_TOL_MPS,
+    )
+    return bool(
+        is_stopped
+        and float(stop_error_m) <= float(train_service.max_stop_error) * 10.0
+    )
+
+
+def is_precise_arrival(
+    *,
+    success: bool,
+    stop_error_m: float,
+    train_service: TrainService,
+) -> bool:
+    return bool(success and float(stop_error_m) <= float(train_service.max_stop_error))
+
+
+def is_punctual_arrival(
+    *,
+    precise_arrival: bool,
     time_error_s: float,
     train_service: TrainService,
 ) -> bool:
     schedule_time_s = float(train_service.schedule_time)
-    if schedule_time_s <= 0.0:
+    if not precise_arrival or schedule_time_s <= 0.0:
         return False
 
     time_error_ratio = abs(float(time_error_s)) / schedule_time_s
-    return (
-        float(stop_error_m) <= float(train_service.max_stop_error)
-        and time_error_ratio <= float(train_service.max_arr_time_error_ratio)
+    return bool(time_error_ratio <= float(train_service.max_arr_time_error_ratio))
+
+
+def classify_arrival_status(
+    *,
+    stop_error_m: float,
+    time_error_s: float,
+    final_speed_mps: float,
+    train_service: TrainService,
+) -> tuple[bool, bool, bool]:
+    success = is_successful_arrival(
+        stop_error_m=stop_error_m,
+        final_speed_mps=final_speed_mps,
+        train_service=train_service,
     )
+    precise_arrival = is_precise_arrival(
+        success=success,
+        stop_error_m=stop_error_m,
+        train_service=train_service,
+    )
+    punctual_arrival = is_punctual_arrival(
+        precise_arrival=precise_arrival,
+        time_error_s=time_error_s,
+        train_service=train_service,
+    )
+    return success, precise_arrival, punctual_arrival
 
 
 def get_strict_stop_error_limit_m(train_service: TrainService) -> float:
@@ -241,14 +286,18 @@ def evaluate_policy_once(
     )
     stop_error_m = abs(float(mtto_env.train_service.target_position) - final_position)
     time_error_s = total_time_s - target_time_s
-    success = is_success_within_train_service_limits(
+    final_speed_mps = float(basic_info.get("speed", mtto_env.current_speed))
+    success, precise_arrival, punctual_arrival = classify_arrival_status(
         stop_error_m=stop_error_m,
         time_error_s=time_error_s,
+        final_speed_mps=final_speed_mps,
         train_service=mtto_env.train_service,
     )
 
     return PolicyEvaluationResult(
         success=success,
+        precise_arrival=precise_arrival,
+        punctual_arrival=punctual_arrival,
         total_reward=float(total_reward),
         total_time_s=total_time_s,
         target_time_s=target_time_s,
@@ -257,7 +306,7 @@ def evaluate_policy_once(
         start_position_m=float(mtto_env.train_service.start_position),
         target_position_m=float(mtto_env.train_service.target_position),
         final_position_m=final_position,
-        final_speed_mps=float(basic_info.get("speed", mtto_env.current_speed)),
+        final_speed_mps=final_speed_mps,
         stop_error_m=stop_error_m,
         time_error_s=time_error_s,
         strict_stop_error_limit_m=get_strict_stop_error_limit_m(
@@ -306,16 +355,16 @@ def build_policy_evaluation_comparison_key(
     if not result.success:
         return (0.0, float(result.total_reward))
 
-    strict_stop_met = result.strict_stop_requirement_met
-    strict_time_met = result.strict_time_requirement_met
-    stop_component = 0.0 if strict_stop_met else -float(result.stop_error_m)
-    time_component = 0.0 if strict_time_met else -abs(float(result.time_error_s))
+    precise_arrival = bool(result.precise_arrival)
+    punctual_arrival = bool(result.punctual_arrival)
+    stop_component = 0.0 if precise_arrival else -float(result.stop_error_m)
+    time_component = 0.0 if punctual_arrival else -abs(float(result.time_error_s))
 
     return (
         1.0,
-        1.0 if strict_stop_met else 0.0,
+        1.0 if precise_arrival else 0.0,
         stop_component,
-        1.0 if strict_time_met else 0.0,
+        1.0 if punctual_arrival else 0.0,
         time_component,
         -float(result.total_energy_j),
     )
@@ -326,31 +375,31 @@ def _best_update_reason_for_successes(
     previous: PolicyEvaluationResult,
 ) -> str | None:
     if (
-        candidate.strict_stop_requirement_met
-        and not previous.strict_stop_requirement_met
+        candidate.precise_arrival
+        and not previous.precise_arrival
     ):
-        return "strict_stop_requirement_reached"
+        return "precise_arrival_reached"
     if (
-        not candidate.strict_stop_requirement_met
-        and not previous.strict_stop_requirement_met
+        not candidate.precise_arrival
+        and not previous.precise_arrival
         and float(candidate.stop_error_m) < float(previous.stop_error_m)
     ):
-        return "lower_stop_error_before_strict_stop"
+        return "lower_stop_error_before_precise_arrival"
 
     if (
-        candidate.strict_time_requirement_met
-        and not previous.strict_time_requirement_met
+        candidate.punctual_arrival
+        and not previous.punctual_arrival
     ):
-        return "strict_time_requirement_reached"
+        return "punctual_arrival_reached"
     if (
-        not candidate.strict_time_requirement_met
-        and not previous.strict_time_requirement_met
+        not candidate.punctual_arrival
+        and not previous.punctual_arrival
         and abs(float(candidate.time_error_s)) < abs(float(previous.time_error_s))
     ):
-        return "lower_time_error_before_strict_time"
+        return "lower_time_error_before_punctual_arrival"
 
     if float(candidate.total_energy_j) < float(previous.total_energy_j):
-        return "lower_energy_after_strict_requirements"
+        return "lower_energy_after_arrival_requirements"
 
     return None
 

@@ -1058,13 +1058,13 @@ def train_single_experiment(
         # learning_rate=_linear_schedule(3e-4),
         learning_rate=3e-4,
         n_steps=resolved_spec.n_steps_per_env,
-        batch_size=512,
-        n_epochs=15,
+        batch_size=1024,
+        n_epochs=8,
         gamma=resolved_spec.reward_discount,
         gae_lambda=0.95,
         clip_range=0.2,
         # clip_range_vf=0.2,
-        ent_coef=0.01,
+        ent_coef=0.02,
         vf_coef=0.5,
         max_grad_norm=0.5,
         tensorboard_log=(
@@ -1370,8 +1370,8 @@ def build_rl_trajectory_comparison_key(
 ) -> tuple[float, ...]:
     """构建用于多轨迹排序对比的键。
 
-    排序优先级：success > 高总奖励(仅非success) > 严格停车 > 小停站误差
-    > 严格到时 > 小时间误差 > 低能耗。
+    排序优先级：success > 高总奖励(仅非success) > 精确到站 > 小停站误差
+    > 准点到站 > 小时间误差 > 低能耗。
 
     Args:
         metrics: 轨迹指标字典。
@@ -1429,14 +1429,25 @@ def build_rl_trajectory_comparison_key(
     if not success:
         return (0.0, float(total_reward))
 
-    strict_stop_met = float(stop_error_m) <= float(strict_stop_error_limit_m)
-    strict_time_met = abs(float(time_error_s)) <= float(strict_time_error_limit_s)
+    precise_arrival_value = metrics.get("precise_arrival")
+    punctual_arrival_value = metrics.get("punctual_arrival")
+    precise_arrival = (
+        bool(precise_arrival_value)
+        if isinstance(precise_arrival_value, bool)
+        else float(stop_error_m) <= float(strict_stop_error_limit_m)
+    )
+    punctual_arrival = (
+        bool(punctual_arrival_value)
+        if isinstance(punctual_arrival_value, bool)
+        else precise_arrival
+        and abs(float(time_error_s)) <= float(strict_time_error_limit_s)
+    )
     return (
         1.0,
-        1.0 if strict_stop_met else 0.0,
-        0.0 if strict_stop_met else -float(stop_error_m),
-        1.0 if strict_time_met else 0.0,
-        0.0 if strict_time_met else -abs(float(time_error_s)),
+        1.0 if precise_arrival else 0.0,
+        0.0 if precise_arrival else -float(stop_error_m),
+        1.0 if punctual_arrival else 0.0,
+        0.0 if punctual_arrival else -abs(float(time_error_s)),
         -float(total_energy_j),
     )
 

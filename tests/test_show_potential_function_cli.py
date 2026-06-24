@@ -344,6 +344,30 @@ def test_plot_safety_speed_minimal_keeps_upper_and_lower_bounds(
     show_potential_function.plt.close(fig)
 
 
+def test_safety_speed_asymmetric_v3_is_position_decoupled() -> None:
+    speed = np.asarray([8.0, 15.0, 24.0], dtype=np.float64)
+    min_speed = np.asarray([5.0, 5.0, 5.0], dtype=np.float64)
+    max_speed = np.asarray([25.0, 25.0, 25.0], dtype=np.float64)
+
+    near_target = show_potential_function._potential_safety_speed_asymmetric_v3(
+        np.asarray([990.0, 995.0, 1000.0], dtype=np.float64),
+        speed,
+        min_speed,
+        max_speed,
+        1000.0,
+    )
+    far_target = show_potential_function._potential_safety_speed_asymmetric_v3(
+        np.asarray([0.0, 100.0, 200.0], dtype=np.float64),
+        speed,
+        min_speed,
+        max_speed,
+        30000.0,
+    )
+
+    np.testing.assert_allclose(near_target, far_target)
+    assert np.all(near_target <= 0.0)
+
+
 def test_plot_safety_position_minimal_keeps_upper_and_lower_bounds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

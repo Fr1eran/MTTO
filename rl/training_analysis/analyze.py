@@ -301,11 +301,15 @@ def compute_regular_training_metrics(
 
 BEST_EVAL_TAGS = [
     "best_eval/last_success",
+    "best_eval/last_precise_arrival",
+    "best_eval/last_punctual_arrival",
     "best_eval/last_total_reward",
     "best_eval/last_stop_error_m",
     "best_eval/last_time_error_s",
     "best_eval/last_total_energy_j",
     "best_eval/best_success",
+    "best_eval/best_precise_arrival",
+    "best_eval/best_punctual_arrival",
     "best_eval/best_total_reward",
     "best_eval/best_stop_error_m",
     "best_eval/best_time_error_s",

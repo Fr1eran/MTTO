@@ -17,9 +17,9 @@ from model.ocs import SafeGuardUtility
 from rl.env_factory import make_env
 from rl.evaluation import (
     PolicyEvaluationResult,
+    classify_arrival_status,
     get_strict_stop_error_limit_m,
     get_strict_time_error_limit_s,
-    is_success_within_train_service_limits,
 )
 from rl.experiment_utils import (
     DEFAULT_MAX_STEP_DISTANCE,
@@ -58,6 +58,8 @@ class ScheduleChangeCase:
 class ScheduleChangeRunResult:
     case: ScheduleChangeCase
     success: bool
+    precise_arrival: bool
+    punctual_arrival: bool
     total_reward: float
     initial_schedule_time_s: float
     final_schedule_time_s: float
@@ -443,9 +445,10 @@ def _run_one_case(
     total_energy_j = total_energy_kj * 1000.0
     stop_error_m = abs(target_position_m - final_position_m)
     time_error_s = total_time_s - target_time_s
-    success = is_success_within_train_service_limits(
+    success, precise_arrival, punctual_arrival = classify_arrival_status(
         stop_error_m=stop_error_m,
         time_error_s=time_error_s,
+        final_speed_mps=final_speed_mps,
         train_service=train_service,
     )
 
@@ -455,6 +458,8 @@ def _run_one_case(
 
     evaluation_result = PolicyEvaluationResult(
         success=success,
+        precise_arrival=precise_arrival,
+        punctual_arrival=punctual_arrival,
         total_reward=float(total_reward),
         total_time_s=total_time_s,
         target_time_s=target_time_s,
@@ -510,6 +515,8 @@ def _run_one_case(
     return ScheduleChangeRunResult(
         case=case,
         success=success,
+        precise_arrival=precise_arrival,
+        punctual_arrival=punctual_arrival,
         total_reward=float(total_reward),
         initial_schedule_time_s=float(schedule_time_s),
         final_schedule_time_s=target_time_s,
@@ -660,6 +667,8 @@ def run_evaluate(args: argparse.Namespace) -> None:
         print(
             f"  {result.case.label:<10} "
             f"success={result.success} "
+            f"precise={result.precise_arrival} "
+            f"punctual={result.punctual_arrival} "
             f"target={result.final_schedule_time_s:.2f}s "
             f"actual={result.total_time_s:.2f}s "
             f"error={result.time_error_s:.2f}s "

@@ -10,10 +10,14 @@ from rl.callbacks import (
     SafetyCurveRecorder,
 )
 from rl.evaluation import (
+    ARRIVAL_STOP_SPEED_ABS_TOL_MPS,
     BEST_TRAJECTORY_SELECTION_RULE,
     PolicyEvaluationResult,
+    classify_arrival_status,
     describe_best_update_reason,
-    is_success_within_train_service_limits,
+    is_precise_arrival,
+    is_punctual_arrival,
+    is_successful_arrival,
 )
 
 
@@ -69,6 +73,7 @@ def _build_result(
     total_energy_j: float = 12_345.0,
     stop_error_m: float | None = None,
     time_error_s: float | None = None,
+    final_speed_mps: float | None = None,
     dangerous_state_rate: float = 0.0,
     dangerous_state_count: int = 0,
     min_safety_margin_mps: float = 0.0,
@@ -81,8 +86,22 @@ def _build_result(
     resolved_time_error_s = (
         float(time_error_s) if time_error_s is not None else (0.0 if success else 20.0)
     )
+    resolved_final_speed_mps = (
+        float(final_speed_mps)
+        if final_speed_mps is not None
+        else (0.0 if success else 3.0)
+    )
+    train_service = _build_train_service()
+    success, precise_arrival, punctual_arrival = classify_arrival_status(
+        stop_error_m=resolved_stop_error,
+        time_error_s=resolved_time_error_s,
+        final_speed_mps=resolved_final_speed_mps,
+        train_service=train_service,
+    )
     return PolicyEvaluationResult(
         success=success,
+        precise_arrival=precise_arrival,
+        punctual_arrival=punctual_arrival,
         total_reward=total_reward,
         total_time_s=440.0 + resolved_time_error_s,
         target_time_s=440.0,
@@ -91,7 +110,7 @@ def _build_result(
         start_position_m=0.0,
         target_position_m=100.0,
         final_position_m=100.0 - resolved_stop_error,
-        final_speed_mps=0.0 if success else 3.0,
+        final_speed_mps=resolved_final_speed_mps,
         stop_error_m=resolved_stop_error,
         time_error_s=resolved_time_error_s,
         strict_stop_error_limit_m=0.3,
@@ -254,7 +273,7 @@ def test_periodic_eval_callback_persists_artifact_metadata(
     assert metrics["trajectory_source"] == "best"
 
 
-def test_periodic_eval_callback_prefers_lower_energy_after_strict_requirements(
+def test_periodic_eval_callback_prefers_lower_energy_after_arrival_requirements(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -283,7 +302,7 @@ def test_periodic_eval_callback_prefers_lower_energy_after_strict_requirements(
     metrics = json.loads(
         (tmp_path / "best_trajectory_metrics.json").read_text(encoding="utf-8")
     )
-    assert metrics["best_update_reason"] == "lower_energy_after_strict_requirements"
+    assert metrics["best_update_reason"] == "lower_energy_after_arrival_requirements"
     assert metrics["success"] is True
 
 
@@ -410,10 +429,13 @@ def test_to_metrics_includes_selection_rule() -> None:
     metrics = result.to_metrics()
 
     assert metrics["selection_rule"] == BEST_TRAJECTORY_SELECTION_RULE
+    assert metrics["success"] is True
+    assert metrics["precise_arrival"] is True
+    assert metrics["punctual_arrival"] is True
     assert metrics["strict_stop_error_limit_m"] == 0.3
     assert metrics["strict_time_error_limit_s"] == 22.0
-    assert metrics["strict_stop_requirement_met"] is True
-    assert metrics["strict_time_requirement_met"] is True
+    assert "strict_stop_requirement_met" not in metrics
+    assert "strict_time_requirement_met" not in metrics
     assert metrics["selection_comparison_key"] == [
         1.0,
         1.0,
@@ -434,7 +456,7 @@ def test_describe_best_update_reason_reports_success_upgrade() -> None:
     )
 
 
-def test_describe_best_update_reason_prefers_strict_stop_requirement() -> None:
+def test_describe_best_update_reason_prefers_precise_arrival() -> None:
     candidate = _build_result(
         success=True,
         total_reward=1.0,
@@ -452,11 +474,11 @@ def test_describe_best_update_reason_prefers_strict_stop_requirement() -> None:
 
     assert (
         describe_best_update_reason(candidate, previous)
-        == "strict_stop_requirement_reached"
+        == "precise_arrival_reached"
     )
 
 
-def test_describe_best_update_reason_prefers_lower_stop_error_before_strict_stop() -> (
+def test_describe_best_update_reason_prefers_lower_stop_error_before_precise_arrival() -> (
     None
 ):
     candidate = _build_result(
@@ -476,11 +498,11 @@ def test_describe_best_update_reason_prefers_lower_stop_error_before_strict_stop
 
     assert (
         describe_best_update_reason(candidate, previous)
-        == "lower_stop_error_before_strict_stop"
+        == "lower_stop_error_before_precise_arrival"
     )
 
 
-def test_describe_best_update_reason_prefers_strict_time_requirement() -> None:
+def test_describe_best_update_reason_prefers_punctual_arrival() -> None:
     candidate = _build_result(
         success=True,
         total_reward=1.0,
@@ -498,11 +520,11 @@ def test_describe_best_update_reason_prefers_strict_time_requirement() -> None:
 
     assert (
         describe_best_update_reason(candidate, previous)
-        == "strict_time_requirement_reached"
+        == "punctual_arrival_reached"
     )
 
 
-def test_describe_best_update_reason_prefers_lower_time_error_before_strict_time() -> (
+def test_describe_best_update_reason_prefers_lower_time_error_before_punctual_arrival() -> (
     None
 ):
     candidate = _build_result(
@@ -522,78 +544,62 @@ def test_describe_best_update_reason_prefers_lower_time_error_before_strict_time
 
     assert (
         describe_best_update_reason(candidate, previous)
-        == "lower_time_error_before_strict_time"
+        == "lower_time_error_before_punctual_arrival"
     )
 
 
-def test_success_within_train_service_limits_allows_threshold_boundary() -> None:
+def test_successful_arrival_matches_env_terminated_boundary() -> None:
     train_service = _build_train_service()
-    assert (
-        is_success_within_train_service_limits(
-            stop_error_m=0.3,
-            time_error_s=22.0,
-            train_service=train_service,
-        )
-        is True
+    assert is_successful_arrival(
+        stop_error_m=3.0,
+        final_speed_mps=ARRIVAL_STOP_SPEED_ABS_TOL_MPS,
+        train_service=train_service,
+    )
+    assert not is_successful_arrival(
+        stop_error_m=3.0001,
+        final_speed_mps=0.0,
+        train_service=train_service,
+    )
+    assert not is_successful_arrival(
+        stop_error_m=0.0,
+        final_speed_mps=ARRIVAL_STOP_SPEED_ABS_TOL_MPS + 0.001,
+        train_service=train_service,
     )
 
 
-def test_success_within_train_service_limits_rejects_stop_error_outside_limit() -> None:
-    train_service = _build_train_service()
-    assert (
-        is_success_within_train_service_limits(
-            stop_error_m=0.3001,
-            time_error_s=0.0,
-            train_service=train_service,
-        )
-        is False
-    )
-
-
-def test_success_within_train_service_limits_rejects_time_error_outside_limit() -> None:
-    train_service = _build_train_service()
-    assert (
-        is_success_within_train_service_limits(
-            stop_error_m=0.0,
-            time_error_s=22.0001,
-            train_service=train_service,
-        )
-        is False
-    )
-
-
-def test_success_within_train_service_limits_uses_fractional_ratio_not_percent() -> (
-    None
-):
+def test_arrival_status_layers_require_previous_layer() -> None:
     train_service = _build_train_service(schedule_time=100.0)
-
-    assert (
-        is_success_within_train_service_limits(
-            stop_error_m=0.1,
-            time_error_s=5.0,
-            train_service=train_service,
-        )
-        is True
+    assert is_precise_arrival(
+        success=True,
+        stop_error_m=0.3,
+        train_service=train_service,
     )
-    assert (
-        is_success_within_train_service_limits(
-            stop_error_m=0.1,
-            time_error_s=5.0001,
-            train_service=train_service,
-        )
-        is False
+    assert not is_precise_arrival(
+        success=False,
+        stop_error_m=0.0,
+        train_service=train_service,
+    )
+    assert is_punctual_arrival(
+        precise_arrival=True,
+        time_error_s=5.0,
+        train_service=train_service,
+    )
+    assert not is_punctual_arrival(
+        precise_arrival=False,
+        time_error_s=0.0,
+        train_service=train_service,
+    )
+    assert not is_punctual_arrival(
+        precise_arrival=True,
+        time_error_s=5.0001,
+        train_service=train_service,
     )
 
 
-def test_success_within_train_service_limits_returns_false_when_schedule_time_invalid() -> (
-    None
-):
+def test_arrival_status_returns_false_when_schedule_time_invalid() -> None:
     train_service = _build_train_service(schedule_time=0.0)
-    assert (
-        is_success_within_train_service_limits(
-            stop_error_m=0.0,
-            time_error_s=0.0,
-            train_service=train_service,
-        )
-        is False
+    assert not is_punctual_arrival(
+        precise_arrival=True,
+        time_error_s=0.0,
+        train_service=train_service,
     )

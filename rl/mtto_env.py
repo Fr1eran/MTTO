@@ -1154,15 +1154,15 @@ class MTTOEnv(gym.Env):
     ) -> float:
         if not truncated:
             # 基本生存奖励
-            small_bonus = 100.0 / self.max_episode_steps
+            basic_survival_reward = 100.0 / self.max_episode_steps
             if terminated:
-                reward_total = self._get_reward_goal() + 10.0
+                reward_total = self._get_reward_goal()
             else:
                 reward_total = self._get_reward_dense()
 
-            reward_total += small_bonus
+            reward_total += basic_survival_reward
         else:
-            reward_total = -10.0
+            reward_total = -1.0
 
         if self.enable_diagnostics and self._collect_step_diagnostics:
             self.rewards_info["total"] = reward_total
@@ -1234,16 +1234,22 @@ class MTTOEnv(gym.Env):
         #     else self.train_service.target_position,
         # )
 
-        phi_curr = self._potential_safety_speed_asymmetric_v2(
-            pos=self.current_position,
+        # phi_curr = self._potential_safety_speed_asymmetric_v2(
+        #     pos=self.current_position,
+        #     speed=self.current_speed,
+        #     min_speed=self.current_min_speed,
+        #     max_speed=self.current_max_speed,
+        #     target_pos=self.sps.get_auxiliary_stopping_area_target_position(
+        #         sp=self.current_stopping_point_index
+        #     )
+        #     if self.current_stopping_point_index >= 0
+        #     else self.train_service.target_position,
+        # )
+
+        phi_curr = self._potential_safety_speed_asymmetric_v3(
             speed=self.current_speed,
             min_speed=self.current_min_speed,
             max_speed=self.current_max_speed,
-            target_pos=self.sps.get_auxiliary_stopping_area_target_position(
-                sp=self.current_stopping_point_index
-            )
-            if self.current_stopping_point_index >= 0
-            else self.train_service.target_position,
         )
 
         # 计算上个状态势能
@@ -1264,21 +1270,27 @@ class MTTOEnv(gym.Env):
         #     else self.train_service.target_position,
         # )
 
-        phi_prev = self._potential_safety_speed_asymmetric_v2(
-            pos=self.last_state["pos"],
+        # phi_prev = self._potential_safety_speed_asymmetric_v2(
+        #     pos=self.last_state["pos"],
+        #     speed=self.last_state["speed"],
+        #     min_speed=self.last_state["min_speed"],
+        #     max_speed=self.last_state["max_speed"],
+        #     # target_pos=self.sps.get_auxiliary_stopping_area_target_position(
+        #     #     sp=self.last_state["stopping_point_index"]
+        #     # )
+        #     # if self.last_state["stopping_point_index"] >= 0
+        #     # else self.task.target_position,
+        #     target_pos=self.sps.get_auxiliary_stopping_area_target_position(
+        #         sp=self.current_stopping_point_index
+        #     )
+        #     if self.current_stopping_point_index >= 0
+        #     else self.train_service.target_position,
+        # )
+
+        phi_prev = self._potential_safety_speed_asymmetric_v3(
             speed=self.last_state["speed"],
             min_speed=self.last_state["min_speed"],
             max_speed=self.last_state["max_speed"],
-            # target_pos=self.sps.get_auxiliary_stopping_area_target_position(
-            #     sp=self.last_state["stopping_point_index"]
-            # )
-            # if self.last_state["stopping_point_index"] >= 0
-            # else self.task.target_position,
-            target_pos=self.sps.get_auxiliary_stopping_area_target_position(
-                sp=self.current_stopping_point_index
-            )
-            if self.current_stopping_point_index >= 0
-            else self.train_service.target_position,
         )
 
         return self.gamma * phi_curr - phi_prev
@@ -1399,7 +1411,34 @@ class MTTOEnv(gym.Env):
         scale = 1.0 + 1.0 * np.exp(-0.001 * distance_to_target)
 
         # 最终势能为两侧惩罚之和
-        return scale * (phi_max + phi_min) * 3.0
+        return scale * (phi_max + phi_min)
+
+    def _potential_safety_speed_asymmetric_v3(
+        self,
+        speed: float,
+        min_speed: float,
+        max_speed: float,
+    ) -> float:
+        K_Safety = 0.5
+        speed_band = max_speed - min_speed + 0.1
+        upper_bound = max(speed_band * 0.2, 2.0)
+        lower_bound = speed_band * 0.2
+        alpha = 3.0
+
+        margin_upper = max_speed - speed
+        x_upper = 1.0 - margin_upper / upper_bound
+        z_upper = math.log1p(math.exp(alpha * x_upper)) / alpha
+        phi_upper = -(z_upper**2)
+
+        if min_speed > 0.0:
+            margin_lower = speed - min_speed
+            x_lower = 1.0 - margin_lower / lower_bound
+            z_lower = math.log1p(math.exp(alpha * x_lower)) / alpha
+            phi_lower = -(z_lower**2)
+        else:
+            phi_lower = 0.0
+
+        return K_Safety * (phi_upper + phi_lower)
 
     def _potential_safety_position(
         self, pos: float, min_pos: float, max_pos: float, target_pos: float
@@ -1421,7 +1460,7 @@ class MTTOEnv(gym.Env):
     def _get_reward_energy_dense(self) -> float:
 
         val = (
-            -25.0
+            -15.0
             * (self.current_energy_consumption - self.last_state["energy_consumption"])
             / self.max_energy_consumption
         )
@@ -1432,7 +1471,7 @@ class MTTOEnv(gym.Env):
         delta_acc = abs(self.last_state["acc"] - self.current_acc)
         norm_jerk = delta_acc / (self.train_service.max_acc_change)
 
-        val = -50.0 / self.max_episode_steps * norm_jerk**2
+        val = -20.0 / self.max_episode_steps * norm_jerk**2
 
         return val
 
@@ -1960,8 +1999,8 @@ class MTTOEnv(gym.Env):
         )
 
     def _potential_punctuality_v20(self, pos: float, redundant_operation_time: float):
-        K_T = 0.8
-        T_scale = 8.0
+        K_T = 0.1
+        T_scale = 10.0
 
         bias = redundant_operation_time - self._get_ref_redundant_operation_time(pos)
         ratio = bias / T_scale
@@ -1972,18 +2011,23 @@ class MTTOEnv(gym.Env):
             abs_ratio + math.log1p(math.exp(-2.0 * abs_ratio)) - math.log(2.0)
         )
 
+        progress = (
+            1.0 - abs(self.train_service.target_position - pos) / self.whole_distance
+        )
+        alpha = 0.5
+
         # return phi * fade_factor
-        return phi
+        return phi * (1.0 + alpha * progress)
 
     def _get_reward_stopping_dense(self):
 
-        phi_curr = self._potential_stopping_v1(
-            pos=self.current_position, speed=self.current_speed
-        )
+        # phi_curr = self._potential_stopping_v1(
+        #     pos=self.current_position, speed=self.current_speed
+        # )
 
-        phi_prev = self._potential_stopping_v1(
-            pos=self.last_state["pos"], speed=self.last_state["speed"]
-        )
+        # phi_prev = self._potential_stopping_v1(
+        #     pos=self.last_state["pos"], speed=self.last_state["speed"]
+        # )
 
         # phi_curr = self._potential_stopping_v2(
         #     pos=self.current_pos, speed=self.current_speed
@@ -1992,6 +2036,14 @@ class MTTOEnv(gym.Env):
         # phi_prev = self._potential_stopping_v2(
         #     pos=self.last_state["pos"], speed=self.last_state["speed"]
         # )
+
+        phi_curr = self._potential_stopping_v3(
+            pos=self.current_position, speed=self.current_speed
+        )
+
+        phi_prev = self._potential_stopping_v3(
+            pos=self.last_state["pos"], speed=self.last_state["speed"]
+        )
 
         return self.gamma * phi_curr - phi_prev
         # return (
@@ -2008,29 +2060,45 @@ class MTTOEnv(gym.Env):
 
         dist_error_abs = abs(pos - self.train_service.target_position)
 
-        phi_weak = K_weak * np.exp(-dist_error_abs / P_weak - speed / V_weak)
-        phi_strong = K_strong * np.exp(-dist_error_abs / P_strong - speed / V_strong)
+        phi_weak = K_weak * math.exp(-dist_error_abs / P_weak - speed / V_weak)
+        phi_strong = K_strong * math.exp(-dist_error_abs / P_strong - speed / V_strong)
 
         return phi_weak + phi_strong
 
     def _potential_stopping_v2(self, pos: float, speed: float):
         dist_error_abs = abs(self.train_service.target_position - pos)
 
-        x_hat = dist_error_abs / self.target_attraction_domain_radius
+        d_hat = dist_error_abs / self.target_attraction_domain_radius
         v_hat = speed / self.vehicle.max_speed
 
-        phi_pos = np.exp(-(x_hat**2) / (2 * 0.1**2))
-        phi_speed = np.exp(-(v_hat**2) / (2 * 0.1**2))
+        phi_pos = math.exp(-(d_hat**2) / (2 * 0.1**2))
+        phi_speed = math.exp(-(v_hat**2) / (2 * 0.1**2))
 
         return 20.0 * phi_pos * phi_speed
+
+    def _potential_stopping_v3(self, pos: float, speed: float) -> float:
+        K_Stopping = 2.0
+        sigma_d = 300.0
+        sigma_v = 0.2 * self.vehicle.max_speed
+
+        dist_error = pos - self.train_service.target_position
+
+        if abs(dist_error) > self.target_attraction_domain_radius:
+            return 0.0
+        else:
+            gaussian_exp = (
+                -((dist_error / sigma_d) ** 2) / 2.0 - ((speed / sigma_v) ** 2) / 2.0
+            )
+
+            return K_Stopping * math.exp(gaussian_exp)
 
     def _get_reward_goal(
         self,
     ) -> float:
         _stopping = self._calc_stopping_score()
         _punctuality = self._calc_punctuality_score()
-        reward_stopping = _stopping * 20.0
-        reward_punctuality = _stopping * _punctuality * 60.0
+        reward_stopping = _stopping * 40.0
+        reward_punctuality = _stopping * _punctuality * 20.0
 
         if self.enable_diagnostics and self._collect_step_diagnostics:
             self.rewards_info["stopping"] = reward_stopping

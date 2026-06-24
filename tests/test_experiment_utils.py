@@ -136,7 +136,36 @@ def test_build_rl_trajectory_comparison_key_requires_new_metrics() -> None:
 
 
 def test_build_rl_trajectory_comparison_key_rebuilds_from_strict_limits() -> None:
-    strict_time = {
+    punctual_arrival = {
+        "success": True,
+        "total_energy_j": 8_000.0,
+        "stop_error_m": 0.2,
+        "time_error_s": 1.0,
+        "total_reward": 10.0,
+        "precise_arrival": True,
+        "punctual_arrival": True,
+        "strict_stop_error_limit_m": 0.3,
+        "strict_time_error_limit_s": 5.0,
+    }
+    precise_arrival = {
+        "success": True,
+        "total_energy_j": 1_000.0,
+        "stop_error_m": 0.2,
+        "time_error_s": 8.0,
+        "total_reward": 100.0,
+        "precise_arrival": True,
+        "punctual_arrival": False,
+        "strict_stop_error_limit_m": 0.3,
+        "strict_time_error_limit_s": 5.0,
+    }
+
+    assert build_rl_trajectory_comparison_key(
+        punctual_arrival
+    ) > build_rl_trajectory_comparison_key(precise_arrival)
+
+
+def test_build_rl_trajectory_comparison_key_rebuilds_legacy_arrival_fields() -> None:
+    punctual_arrival = {
         "success": True,
         "total_energy_j": 8_000.0,
         "stop_error_m": 0.2,
@@ -145,19 +174,19 @@ def test_build_rl_trajectory_comparison_key_rebuilds_from_strict_limits() -> Non
         "strict_stop_error_limit_m": 0.3,
         "strict_time_error_limit_s": 5.0,
     }
-    loose_time = {
+    imprecise_arrival = {
         "success": True,
         "total_energy_j": 1_000.0,
-        "stop_error_m": 0.2,
-        "time_error_s": 8.0,
+        "stop_error_m": 0.5,
+        "time_error_s": 1.0,
         "total_reward": 100.0,
         "strict_stop_error_limit_m": 0.3,
         "strict_time_error_limit_s": 5.0,
     }
 
     assert build_rl_trajectory_comparison_key(
-        strict_time
-    ) > build_rl_trajectory_comparison_key(loose_time)
+        punctual_arrival
+    ) > build_rl_trajectory_comparison_key(imprecise_arrival)
 
 
 def test_add_panel_label_places_text_on_axes() -> None:

@@ -151,6 +151,47 @@ def _potential_safety_speed_asymmetric_v2(
     return scale * (phi_max + phi_min) * 4.0
 
 
+def _smooth_softplus_risk(z, alpha):
+    x = alpha * z
+    return np.where(
+        x > 20.0,
+        z,
+        np.log1p(np.exp(np.minimum(x, 20.0))) / alpha,
+    )
+
+
+def _potential_safety_speed_asymmetric_v3(
+    pos,
+    speed,
+    min_speed,
+    max_speed,
+    target_pos,
+) -> float:
+    del pos, target_pos
+
+    K_Safety = 0.25
+    speed_band = max_speed - min_speed + 0.1
+    upper_bound = np.clip(speed_band * 0.15, 2.0, 8.0)
+    lower_bound = np.clip(speed_band * 0.15, 2.0, 5.0)
+    alpha = 3.0
+
+    margin_max = max_speed - speed
+    z_max = 1.0 - margin_max / upper_bound
+    smooth_z_max = _smooth_softplus_risk(z_max, alpha)
+    phi_max = -(smooth_z_max**2)
+
+    margin_min = speed - min_speed
+    z_min = 1.0 - margin_min / lower_bound
+    smooth_z_min = _smooth_softplus_risk(z_min, alpha)
+    phi_min = np.where(
+        min_speed > 0.0,
+        -(smooth_z_min**2),
+        0.0,
+    )
+
+    return K_Safety * (phi_max + phi_min)
+
+
 def _potential_stopping_v1(
     pos,
     speed,
@@ -159,12 +200,12 @@ def _potential_stopping_v1(
     """
     向量化停站势函数
     """
-    K_weak = 10.0
+    K_weak = 5.0
     K_strong = 50.0
-    P_weak = 1500.0
+    P_weak = 3000.0
     P_strong = 300.0
-    V_weak = 0.75 * 500.0 / 3.6
-    V_strong = 0.15 * 500.0 / 3.6
+    V_weak = 0.7 * 500.0 / 3.6
+    V_strong = 0.1 * 500.0 / 3.6
 
     dist_error_abs = np.abs(pos - target_pos)
     speed_abs = np.abs(speed)
@@ -192,6 +233,18 @@ def _potential_stopping_v2(
     phi_near = 20.0 * np.exp(-x_hat / 0.01 - v_hat / 0.01)
 
     return phi_far + phi_mid + phi_near
+
+
+def _potential_stopping_v3(pos, speed, target_pos) -> float:
+    K_S = 1.0
+    sigma_d = 300.0
+    sigma_v = 0.2 * 500.0 / 3.6
+
+    dist_error = pos - target_pos
+
+    gaussian_exp = -((dist_error / sigma_d) ** 2) / 2.0 - ((speed / sigma_v) ** 2) / 2.0
+
+    return K_S * np.exp(gaussian_exp)
 
 
 # 一元函数
@@ -400,6 +453,20 @@ def _potential_punctuality_v18(
 
     # Pseudo-Huber
     phi = -K_T * (delta**2 * (np.sqrt(1.0 + (ratio / delta) ** 2) - 1.0))
+
+    return phi
+
+
+def _potential_punctuality_v19(redundant_operation_time, ref_redundant_operation_time):
+    K_T = 0.8
+    T_tol = 6.0
+
+    bias = redundant_operation_time - ref_redundant_operation_time
+    ratio = bias / T_tol
+
+    # ln(cosh(x)) 的数值稳定版本
+    abs_ratio = abs(ratio)
+    phi = -K_T * (abs_ratio + np.log1p(np.exp(-2.0 * abs_ratio)) - np.log(2.0))
 
     return phi
 
@@ -655,8 +722,8 @@ def plot_safety_potential_heatmap_speed(*, minimal: bool = False) -> Figure:
     #     POS, SPEED, SPEED_MIN, SPEED_MAX, target_pos
     # )
 
-    # 非对称解耦势能场 v2
-    POTENTIAL = _potential_safety_speed_asymmetric_v2(
+    # 非对称解耦平滑自适应势能场 v3
+    POTENTIAL = _potential_safety_speed_asymmetric_v3(
         POS, SPEED, SPEED_MIN, SPEED_MAX, target_pos
     )
 
@@ -673,7 +740,7 @@ def plot_safety_potential_heatmap_speed(*, minimal: bool = False) -> Figure:
         SPEED * 3.6,
         POTENTIAL_MASKED,
         cmap=cmap,
-        vmin=-4.0,
+        vmin=-0.3,
         vmax=0.0,
     )
 
@@ -700,14 +767,14 @@ def plot_safety_potential_heatmap_speed(*, minimal: bool = False) -> Figure:
             speed_max_1d_masked * 3.6,
             color="red",
             linewidth=1,
-            label=r"max speed curve",
+            label=r"maximum speed curve",
         )
         ax.plot(
             pos_array,
             speed_min_1d_masked * 3.6,
             color="blue",
             linewidth=1,
-            label=r"min speed curve",
+            label=r"minimum speed curve",
         )
 
         # 添加色标
@@ -805,14 +872,14 @@ def plot_safety_potential_heatmap_position(*, minimal: bool = False) -> Figure:
             speed_array_ms * 3.6,
             color="red",
             linewidth=1,
-            label="upper speed curve",
+            label="maximum speed curve",
         )
         ax.plot(
             pos_from_min_curve,
             speed_array_ms * 3.6,
             color="blue",
             linewidth=1,
-            label="lower speed curve",
+            label="minimum speed curve",
         )
         ax.plot(
             safe_center_pos_array,
@@ -849,20 +916,20 @@ def plot_stopping_potential_heatmap(
 
     target_pos = 10000.0
 
-    K_total = 60.0
+    K_S = 1.0
 
     # 扩大位置与速度展示范围
-    pos_array = np.linspace(target_pos - 3000.0, target_pos + 3000.0, 1200)
+    pos_array = np.linspace(target_pos - 1000.0, target_pos + 1000.0, 1200)
     speed_array_ms = np.linspace(-500.0 / 3.6, 500.0 / 3.6, 1000)
 
     POS, SPEED = np.meshgrid(pos_array, speed_array_ms)
 
     # version 1
-    POTENTIAL = _potential_stopping_v1(
-        pos=POS,
-        speed=SPEED,
-        target_pos=target_pos,
-    )
+    # POTENTIAL = _potential_stopping_v1(
+    #     pos=POS,
+    #     speed=SPEED,
+    #     target_pos=target_pos,
+    # )
 
     # version 2
     # POTENTIAL = _potential_stopping_v2(
@@ -870,6 +937,13 @@ def plot_stopping_potential_heatmap(
     #     speed=SPEED,
     #     target_pos=target_pos,
     # )
+
+    # version 3
+    POTENTIAL = _potential_stopping_v3(
+        pos=POS,
+        speed=SPEED,
+        target_pos=target_pos,
+    )
 
     mode = str(view_mode).lower().strip()
     speed_array_kmh = speed_array_ms * 3.6
@@ -886,7 +960,7 @@ def plot_stopping_potential_heatmap(
             cmap=cmap,
             shading="auto",
             vmin=0.0,
-            vmax=K_total,
+            vmax=K_S,
         )
 
         ax.set_xlim(pos_array[0], pos_array[-1])
@@ -919,12 +993,12 @@ def plot_stopping_potential_heatmap(
             linewidth=0,
             antialiased=False,
             vmin=0.0,
-            vmax=K_total,
+            vmax=K_S,
         )
 
         ax.set_xlim(pos_array[0], pos_array[-1])
         ax.set_ylim(speed_array_kmh[0], speed_array_kmh[-1])
-        ax.set_zlim(0, K_total * 1.02)
+        ax.set_zlim(0, K_S * 1.02)
         ax.view_init(elev=28, azim=-130)
 
         if minimal:
@@ -1170,7 +1244,7 @@ def plot_punctuality_potential_heatmap(
     )
     HALF_WIDTH = np.broadcast_to(half_width, POSITION.shape)
     REDUNDANT_TIME = REF_REDUNDANT + RELATIVE_BAND * HALF_WIDTH
-    POTENTIAL = _potential_punctuality_v18(
+    POTENTIAL = _potential_punctuality_v19(
         redundant_operation_time=REDUNDANT_TIME,
         ref_redundant_operation_time=REF_REDUNDANT,
     )

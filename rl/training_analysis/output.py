@@ -146,6 +146,32 @@ def _format_percent(value: Any, default: str = "N/A") -> str:
         return default
 
 
+BEST_EVAL_DISPLAY_METRICS = [
+    "success",
+    "precise_arrival",
+    "punctual_arrival",
+    "stop_error_m",
+    "time_error_s",
+    "total_reward",
+    "total_energy_j",
+]
+
+
+def _best_eval_metric_final(best_eval: dict[str, Any], key: str) -> Any:
+    entry = best_eval.get(key, {})
+    if not isinstance(entry, dict):
+        return None
+    return entry.get("final")
+
+
+def _ordered_best_eval_keys(best_eval: dict[str, Any], prefix: str) -> list[str]:
+    return [
+        f"{prefix}_{metric}"
+        for metric in BEST_EVAL_DISPLAY_METRICS
+        if isinstance(best_eval.get(f"{prefix}_{metric}"), dict)
+    ]
+
+
 def _ascii_bar(value: Any, width: int = 24) -> str:
     try:
         ratio = float(value)
@@ -267,21 +293,23 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
 
     best_eval = payload.get("best_eval_metrics", {})
     if isinstance(best_eval, dict) and best_eval.get("available", False):
-        best_success = best_eval.get("best_success", {})
-        best_reward = best_eval.get("best_total_reward", {})
         lines.append(
             "- best_eval: "
-            f"success_rate={
+            f"arrival_success_rate={
+                _format_percent(_best_eval_metric_final(best_eval, 'best_success'))
+            }, "
+            f"precise_arrival_rate={
                 _format_percent(
-                    best_success.get('final')
-                    if isinstance(best_success, dict)
-                    else None
+                    _best_eval_metric_final(best_eval, 'best_precise_arrival')
+                )
+            }, "
+            f"punctual_arrival_rate={
+                _format_percent(
+                    _best_eval_metric_final(best_eval, 'best_punctual_arrival')
                 )
             }, "
             f"best_reward={
-                _format_number(
-                    best_reward.get('final') if isinstance(best_reward, dict) else None
-                )
+                _format_number(_best_eval_metric_final(best_eval, 'best_total_reward'))
             }"
         )
 
@@ -357,8 +385,8 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
         lines.append("")
         lines.append("## Best Evaluation Performance")
         lines.append("")
-        last_keys = [k for k in sorted(best_eval.keys()) if k.startswith("last_")]
-        best_keys = [k for k in sorted(best_eval.keys()) if k.startswith("best_")]
+        best_keys = _ordered_best_eval_keys(best_eval, "best")
+        last_keys = _ordered_best_eval_keys(best_eval, "last")
         if best_keys:
             lines.append("- final_best_values:")
             for key in best_keys:

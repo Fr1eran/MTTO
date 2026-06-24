@@ -406,6 +406,12 @@ class BestTrajectoryRecorder:
         eval_trigger_interval: int,
     ) -> None:
         callback.logger.record("best_eval/last_success", float(result.success))
+        callback.logger.record(
+            "best_eval/last_precise_arrival", float(result.precise_arrival)
+        )
+        callback.logger.record(
+            "best_eval/last_punctual_arrival", float(result.punctual_arrival)
+        )
         callback.logger.record("best_eval/last_total_reward", result.total_reward)
         callback.logger.record("best_eval/last_stop_error_m", result.stop_error_m)
         callback.logger.record("best_eval/last_time_error_s", result.time_error_s)
@@ -425,6 +431,12 @@ class BestTrajectoryRecorder:
         self.best_trigger_interval = eval_trigger_interval
 
         callback.logger.record("best_eval/best_success", float(result.success))
+        callback.logger.record(
+            "best_eval/best_precise_arrival", float(result.precise_arrival)
+        )
+        callback.logger.record(
+            "best_eval/best_punctual_arrival", float(result.punctual_arrival)
+        )
         callback.logger.record("best_eval/best_total_reward", result.total_reward)
         callback.logger.record("best_eval/best_stop_error_m", result.stop_error_m)
         callback.logger.record("best_eval/best_time_error_s", result.time_error_s)

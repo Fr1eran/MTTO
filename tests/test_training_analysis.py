@@ -125,11 +125,23 @@ def test_best_eval_metrics_basic():
         "best_eval/best_success": _make_series(
             "best_eval/best_success", [0.0, 1.0, 1.0, 1.0]
         ),
+        "best_eval/best_precise_arrival": _make_series(
+            "best_eval/best_precise_arrival", [0.0, 0.0, 1.0, 1.0]
+        ),
+        "best_eval/best_punctual_arrival": _make_series(
+            "best_eval/best_punctual_arrival", [0.0, 0.0, 0.0, 1.0]
+        ),
         "best_eval/last_total_reward": _make_series(
             "best_eval/last_total_reward", [-12.0, -8.0, -4.0, -3.0]
         ),
         "best_eval/last_success": _make_series(
             "best_eval/last_success", [0.0, 0.0, 1.0, 1.0]
+        ),
+        "best_eval/last_precise_arrival": _make_series(
+            "best_eval/last_precise_arrival", [0.0, 0.0, 0.0, 1.0]
+        ),
+        "best_eval/last_punctual_arrival": _make_series(
+            "best_eval/last_punctual_arrival", [0.0, 0.0, 0.0, 0.0]
         ),
     }
 
@@ -139,8 +151,12 @@ def test_best_eval_metrics_basic():
     assert metrics["best_total_reward"]["final"] == -2.0
     assert metrics["best_total_reward"]["max"] == -2.0
     assert metrics["best_success"]["final"] == 1.0
+    assert metrics["best_precise_arrival"]["final"] == 1.0
+    assert metrics["best_punctual_arrival"]["mean"] == 0.25
     assert metrics["last_total_reward"]["final"] == -3.0
     assert metrics["last_success"]["final"] == 1.0
+    assert metrics["last_precise_arrival"]["max"] == 1.0
+    assert metrics["last_punctual_arrival"]["final"] == 0.0
 
 
 def test_best_eval_metrics_empty():
@@ -422,6 +438,75 @@ def test_write_outputs_default_no_csv(tmp_path):
     assert (output_dir / "analysis_snapshot.json").exists()
     assert (output_dir / "report.md").exists()
     assert list(output_dir.glob("*.csv")) == []
+
+
+def test_markdown_best_eval_uses_arrival_layers(tmp_path):
+    payload = build_analysis_payload(
+        run_name="layered_best_eval",
+        run_directory="dummy",
+        available_tags=[],
+        regular_metrics={},
+        best_eval_metrics={
+            "available": True,
+            "best_success": {"final": 1.0, "max": 1.0, "mean": 0.75},
+            "best_precise_arrival": {"final": 1.0, "max": 1.0, "mean": 0.5},
+            "best_punctual_arrival": {"final": 0.0, "max": 1.0, "mean": 0.25},
+            "best_total_reward": {"final": 12.5, "max": 12.5, "mean": 8.0},
+            "best_stop_error_m": {"final": 0.2, "max": 0.4, "mean": 0.3},
+            "best_time_error_s": {"final": 8.0, "max": 20.0, "mean": 10.0},
+            "best_total_energy_j": {"final": 1000.0, "max": 1200.0, "mean": 1100.0},
+            "last_success": {"final": 1.0, "max": 1.0, "mean": 0.5},
+            "last_precise_arrival": {"final": 0.0, "max": 1.0, "mean": 0.25},
+            "last_punctual_arrival": {"final": 0.0, "max": 0.0, "mean": 0.0},
+            "last_total_reward": {"final": 10.0, "max": 11.0, "mean": 7.0},
+            "last_stop_error_m": {"final": 0.35, "max": 0.5, "mean": 0.4},
+            "last_time_error_s": {"final": 12.0, "max": 30.0, "mean": 15.0},
+            "last_total_energy_j": {"final": 1100.0, "max": 1300.0, "mean": 1150.0},
+        },
+        reward_component_impact={"available": False},
+        constraint_diagnostic={"available": False},
+        evolution_metrics={"available": False},
+        step_snapshots=[],
+        episode_snapshots=[],
+        config={"export_csv": False, "include_snapshots": False},
+    )
+
+    output_paths = write_analysis_outputs(
+        payload,
+        output_root=tmp_path,
+        run_name="layered_best_eval",
+    )
+    report_text = Path(output_paths["markdown_report"]).read_text(encoding="utf-8")
+
+    assert "arrival_success_rate=100.00%" in report_text
+    assert "precise_arrival_rate=100.00%" in report_text
+    assert "punctual_arrival_rate=0.00%" in report_text
+    assert "- best_eval: success_rate=" not in report_text
+
+    best_order = [
+        "best_success",
+        "best_precise_arrival",
+        "best_punctual_arrival",
+        "best_stop_error_m",
+        "best_time_error_s",
+        "best_total_reward",
+        "best_total_energy_j",
+    ]
+    last_order = [
+        "last_success",
+        "last_precise_arrival",
+        "last_punctual_arrival",
+        "last_stop_error_m",
+        "last_time_error_s",
+        "last_total_reward",
+        "last_total_energy_j",
+    ]
+    assert [report_text.index(key) for key in best_order] == sorted(
+        report_text.index(key) for key in best_order
+    )
+    assert [report_text.index(key) for key in last_order] == sorted(
+        report_text.index(key) for key in last_order
+    )
 
 
 class _FakeEnv:

@@ -10,9 +10,9 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize, VecVideo
 from rl.env_factory import make_env
 from rl.evaluation import (
     PolicyEvaluationResult,
+    classify_arrival_status,
     get_strict_stop_error_limit_m,
     get_strict_time_error_limit_s,
-    is_success_within_train_service_limits,
 )
 from rl.experiment_utils import (
     DEFAULT_MAX_STEP_DISTANCE,
@@ -417,9 +417,10 @@ def main() -> None:
     comfort_er_pct = float(basic_snapshot.get("comfort_er_pct", 0.0))
     comfort_rms = float(basic_snapshot.get("comfort_rms", 0.0))
 
-    success = is_success_within_train_service_limits(
+    success, precise_arrival, punctual_arrival = classify_arrival_status(
         stop_error_m=stop_error_m,
         time_error_s=time_error_s,
+        final_speed_mps=final_speed_mps,
         train_service=train_service,
     )
 
@@ -445,6 +446,8 @@ def main() -> None:
         trajectory_metadata["deterministic"] = bool(args.deterministic)
         evaluation_result = PolicyEvaluationResult(
             success=success,
+            precise_arrival=precise_arrival,
+            punctual_arrival=punctual_arrival,
             total_reward=float(total_reward),
             total_time_s=total_time_s,
             target_time_s=target_time_s,
@@ -495,6 +498,8 @@ def main() -> None:
     print("========== Evaluation Results ==========")
     print(f"  total_reward:       {total_reward:.6f}")
     print(f"  success:            {success}")
+    print(f"  precise_arrival:    {precise_arrival}")
+    print(f"  punctual_arrival:   {punctual_arrival}")
     print(f"  reward_profile:     {reward_profile.name}")
     print(f"  target_time_s:      {target_time_s:.2f}")
     print(f"  total_time_s:       {total_time_s:.2f}")

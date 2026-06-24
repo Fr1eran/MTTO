@@ -15,9 +15,9 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from rl.evaluation import (
     PolicyEvaluationResult,
     build_single_eval_env,
+    classify_arrival_status,
     get_strict_stop_error_limit_m,
     get_strict_time_error_limit_s,
-    is_success_within_train_service_limits,
     save_policy_evaluation_curve,
 )
 from rl.experiment_utils import (
@@ -574,14 +574,17 @@ def _evaluate_and_save_final_metrics(
         comfort_er_pct = float(basic_snapshot.get("comfort_er_pct", 0.0))
         comfort_rms = float(basic_snapshot.get("comfort_rms", 0.0))
 
-        success = is_success_within_train_service_limits(
+        success, precise_arrival, punctual_arrival = classify_arrival_status(
             stop_error_m=stop_error_m,
             time_error_s=time_error_s,
+            final_speed_mps=final_speed_mps,
             train_service=train_service,
         )
 
         evaluation_result = PolicyEvaluationResult(
             success=success,
+            precise_arrival=precise_arrival,
+            punctual_arrival=punctual_arrival,
             total_reward=float(total_reward),
             total_time_s=total_time_s,
             target_time_s=target_time_s,
