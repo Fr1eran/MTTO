@@ -1,14 +1,18 @@
 import argparse
+from collections.abc import Callable
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 
 from dp.experiment_utils import (
     DP_DEFAULT_SEARCH_DIR,
     load_dp_curve_artifact,
     render_dp_curve_on_axes,
 )
+from model.common import ORS
 from utils.plot_utils import set_global_plot_style
+from utils.scenario import build_scenario
 from utils.trajectory import OptimizedCurveArtifact
 
 
@@ -61,6 +65,117 @@ def _print_metrics(metrics: dict) -> None:
             print(f"  {key}: {metrics[key]}")
 
 
+def _metric_as_float(metrics: dict, key: str) -> float | None:
+    value = metrics.get(key)
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return float(value)
+    return None
+
+
+def _require_metric_float(metrics: dict, key: str) -> float:
+    value = _metric_as_float(metrics, key)
+    if value is None:
+        raise ValueError(f"DP metrics must contain numeric '{key}'")
+    return value
+
+
+def _calc_redundant_operation_time_arr(
+    *,
+    pos_arr,
+    speed_arr,
+    cum_time_arr,
+    schedule_time_s: float,
+    target_position: float,
+    target_speed: float,
+    min_remaining_time_fn: Callable[[float, float, float, float], float],
+) -> np.ndarray:
+    pos = np.asarray(pos_arr, dtype=np.float64)
+    speed = np.asarray(speed_arr, dtype=np.float64)
+    cum_time = np.asarray(cum_time_arr, dtype=np.float64)
+
+    if pos.ndim != 1 or speed.ndim != 1 or cum_time.ndim != 1:
+        raise ValueError("pos_arr, speed_arr, and cum_time_arr must be 1-D arrays")
+    if not (pos.size == speed.size == cum_time.size):
+        raise ValueError(
+            "pos_arr, speed_arr, and cum_time_arr must have the same length"
+        )
+    if pos.size == 0:
+        raise ValueError("DP curve must contain at least one point")
+
+    min_remaining_arr = np.asarray(
+        [
+            min_remaining_time_fn(
+                float(pos_val),
+                float(speed_val),
+                float(target_position),
+                float(target_speed),
+            )
+            for pos_val, speed_val in zip(pos, speed, strict=False)
+        ],
+        dtype=np.float64,
+    )
+    return float(schedule_time_s) - cum_time - min_remaining_arr
+
+
+def _build_dp_redundant_operation_time_arr(
+    *,
+    pos_arr,
+    speed_arr,
+    cum_time_arr,
+    metrics: dict,
+) -> np.ndarray:
+    schedule_time_s = _require_metric_float(metrics, "target_time_s")
+    vehicle, track, safeguard_utility, train_service = build_scenario(
+        schedule_time_s=schedule_time_s
+    )
+    ors = ORS(vehicle=vehicle, track=track, factor=safeguard_utility.gamma)
+
+    target_position = _metric_as_float(metrics, "target_position_m")
+    if target_position is None:
+        target_position = train_service.target_position
+    target_speed = _metric_as_float(metrics, "target_speed_mps")
+    if target_speed is None:
+        target_speed = 0.0
+
+    return _calc_redundant_operation_time_arr(
+        pos_arr=pos_arr,
+        speed_arr=speed_arr,
+        cum_time_arr=cum_time_arr,
+        schedule_time_s=schedule_time_s,
+        target_position=target_position,
+        target_speed=target_speed,
+        min_remaining_time_fn=ors.calc_min_operation_time,
+    )
+
+
+def _render_redundant_operation_time_on_axes(
+    *,
+    ax,
+    pos_arr,
+    redundant_operation_time_arr,
+) -> None:
+    ax.plot(
+        pos_arr,
+        redundant_operation_time_arr,
+        color="#16a34a",
+        linewidth=1.5,
+        label="DP redundant operation time",
+    )
+    ax.axhline(
+        0.0,
+        color="black",
+        linewidth=1.0,
+        linestyle="--",
+        alpha=0.6,
+        label="No redundancy",
+    )
+    ax.set_title("DP redundant operation time over position")
+    ax.set_xlabel("Position (m)")
+    ax.set_ylabel("Redundant operation time (s)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best")
+
+
 def _build_cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Load and display saved DP optimized speed curve."
@@ -101,9 +216,18 @@ def main() -> None:
     print(f"Using curve file: {artifact.npz_path}")
     print(f"Using metrics file: {artifact.metrics_path}")
 
-    pos_arr, speed_arr, _cum_time_arr, metrics = load_dp_curve_artifact(artifact)
+    pos_arr, speed_arr, cum_time_arr, metrics = load_dp_curve_artifact(artifact)
 
     _print_metrics(metrics)
+    try:
+        redundant_operation_time_arr = _build_dp_redundant_operation_time_arr(
+            pos_arr=pos_arr,
+            speed_arr=speed_arr,
+            cum_time_arr=cum_time_arr,
+            metrics=metrics,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     set_global_plot_style(
         font_preset="sci",
@@ -116,10 +240,16 @@ def main() -> None:
         savefig_dpi=300.0,
     )
 
-    fig, ax = plt.subplots(figsize=(12, 7))
+    fig, (ax_speed, ax_redundant) = plt.subplots(
+        2,
+        1,
+        figsize=(12, 9),
+        sharex=True,
+        gridspec_kw={"height_ratios": [2.0, 1.0]},
+    )
 
     render_dp_curve_on_axes(
-        ax=ax,
+        ax=ax_speed,
         pos_arr=pos_arr,
         speed_arr=speed_arr,
         metrics=metrics,
@@ -128,7 +258,12 @@ def main() -> None:
         curve_color="blue",
     )
 
-    ax.legend(loc="upper right")
+    ax_speed.legend(loc="upper right")
+    _render_redundant_operation_time_on_axes(
+        ax=ax_redundant,
+        pos_arr=pos_arr,
+        redundant_operation_time_arr=redundant_operation_time_arr,
+    )
 
     plt.tight_layout()
     plt.show()

@@ -3,7 +3,13 @@ from pathlib import Path
 
 import pytest
 
-from scripts.show_dp_result import _build_cli_parser, _resolve_curve_and_metrics_paths
+import numpy as np
+
+from scripts.show_dp_result import (
+    _build_cli_parser,
+    _calc_redundant_operation_time_arr,
+    _resolve_curve_and_metrics_paths,
+)
 
 
 def test_show_dp_result_cli_defaults() -> None:
@@ -82,3 +88,27 @@ def test_resolve_curve_and_metrics_paths_raises_when_same_dir_metrics_missing(
         _resolve_curve_and_metrics_paths(
             curve_dir=str(curve_root),
         )
+
+
+def test_calc_redundant_operation_time_arr_uses_schedule_elapsed_and_min_remaining() -> None:
+    def fake_min_remaining(
+        begin_pos: float,
+        begin_speed: float,
+        end_pos: float,
+        end_speed: float,
+    ) -> float:
+        assert end_pos == pytest.approx(20.0)
+        assert end_speed == pytest.approx(0.0)
+        return 0.1 * begin_pos + 0.5 * begin_speed
+
+    redundant = _calc_redundant_operation_time_arr(
+        pos_arr=np.asarray([0.0, 10.0, 20.0]),
+        speed_arr=np.asarray([0.0, 2.0, 0.0]),
+        cum_time_arr=np.asarray([0.0, 2.0, 5.0]),
+        schedule_time_s=10.0,
+        target_position=20.0,
+        target_speed=0.0,
+        min_remaining_time_fn=fake_min_remaining,
+    )
+
+    np.testing.assert_allclose(redundant, np.asarray([10.0, 6.0, 3.0]))

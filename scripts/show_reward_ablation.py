@@ -28,8 +28,10 @@ from utils.scenario import build_safeguard_utility
 
 ABLATION_MANIFEST_FILENAME = "reward_ablation_manifest.json"
 EPISODE_METRICS_FILENAME = "episode_metrics.npz"
-SAFETY_CURVE_FILENAME = "dangerous_state_rate_curve.npz"
+SAFETY_VIOLATION_BINS_FILENAME = "safety_violation_position_bins.npz"
 TRAJECTORY_LAYOUT_CHOICES = ("separate",)
+VIOLATION_RATE_METRIC_CHOICES = ("episode", "sample")
+SAFETY_VIOLATION_DISPLAY_BIN_SIZE_M = 5000.0
 DEFAULT_ABLATION_ROOT = "output/optimal/rl/reward_ablation"
 PROFILE_COLORS: dict[str, str] = {
     "basic": "#1f77b4",
@@ -64,23 +66,34 @@ class CurveAggregateResult:
 
 
 @dataclass(frozen=True)
-class SafetyCurveRunArtifact:
+class SafetyViolationBinRunArtifact:
     reward_profile_name: str
     repeat_index: int
     seed: int | None
-    safety_curve_path: str
-    index: np.ndarray
-    dangerous_state_rate: np.ndarray
+    bins_path: str
+    bin_start_m: np.ndarray
+    bin_end_m: np.ndarray
+    sample_exposure_count: np.ndarray | None
+    sample_violation_count: np.ndarray | None
+    sample_violation_rate: np.ndarray
+    episode_exposure_count: np.ndarray | None
+    episode_violation_count: np.ndarray | None
+    episode_violation_rate: np.ndarray
 
 
 @dataclass(frozen=True)
-class SafetyCurveAggregateResult:
+class SafetyViolationBinAggregateResult:
     reward_profile_name: str
-    reference_steps: np.ndarray
-    mean_dangerous_state_rate: np.ndarray
-    std_dangerous_state_rate: np.ndarray
+    bin_start_m: np.ndarray
+    bin_end_m: np.ndarray
+    violation_rate_matrix: np.ndarray
+    mean_violation_rate: np.ndarray
+    std_violation_rate: np.ndarray
+    var_violation_rate: np.ndarray
     valid_repeat_count: int
-    safety_curve_paths: tuple[str, ...]
+    bins_paths: tuple[str, ...]
+    rate_metric: str
+    display_bin_size_m: float
 
 
 @dataclass(frozen=True)
@@ -138,9 +151,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="仅解析 manifest、episode_metrics 路径和代表轨迹, 不加载数组或弹图窗。",
     )
     parser.add_argument(
-        "--no-safety-curve",
+        "--violation-rate-metric",
+        choices=VIOLATION_RATE_METRIC_CHOICES,
+        default="episode",
+        help="安全违规位置箱型图使用的违规率口径。",
+    )
+    parser.add_argument(
+        "--no-safety-violation-boxplot",
         action="store_true",
-        help="不加载或绘制 Dangerous State Rate 曲线。",
+        help="不加载或绘制安全违规位置箱型图。",
     )
     return parser
 
@@ -232,26 +251,123 @@ def _load_episode_metrics_npz(
     }
 
 
-def _load_safety_curve_npz(
-    safety_curve_path: Path,
+def _load_safety_violation_bins_npz(
+    bins_path: Path,
 ) -> dict[str, Any]:
-    with np.load(safety_curve_path) as data:
-        index_key = "num_timesteps" if "num_timesteps" in data.files else "index"
-        index = np.asarray(data[index_key], dtype=np.float64)
-        dangerous_state_rate = np.asarray(
-            data["dangerous_state_rate"],
-            dtype=np.float64,
+    with np.load(bins_path) as data:
+        bin_start = np.asarray(data["bin_start_m"], dtype=np.float64)
+        bin_end = np.asarray(data["bin_end_m"], dtype=np.float64)
+        sample_exposure = (
+            np.asarray(data["sample_exposure_count"], dtype=np.float64)
+            if "sample_exposure_count" in data.files
+            else None
         )
+        sample_violation = (
+            np.asarray(data["sample_violation_count"], dtype=np.float64)
+            if "sample_violation_count" in data.files
+            else None
+        )
+        sample_rate = np.asarray(data["sample_violation_rate"], dtype=np.float64)
+        episode_exposure = (
+            np.asarray(data["episode_exposure_count"], dtype=np.float64)
+            if "episode_exposure_count" in data.files
+            else None
+        )
+        episode_violation = (
+            np.asarray(data["episode_violation_count"], dtype=np.float64)
+            if "episode_violation_count" in data.files
+            else None
+        )
+        episode_rate = np.asarray(data["episode_violation_rate"], dtype=np.float64)
 
-    if index.size == 0 or dangerous_state_rate.size == 0:
-        raise ValueError(f"Empty safety curve arrays in: {safety_curve_path}")
-    if index.size != dangerous_state_rate.size:
-        raise ValueError(f"Mismatched safety curve arrays in: {safety_curve_path}")
+    if (
+        bin_start.size == 0
+        or bin_end.size == 0
+        or sample_rate.size == 0
+        or episode_rate.size == 0
+    ):
+        raise ValueError(f"Empty safety violation bin arrays in: {bins_path}")
+    if not (
+        bin_start.size == bin_end.size == sample_rate.size == episode_rate.size
+    ):
+        raise ValueError(f"Mismatched safety violation bin arrays in: {bins_path}")
+    if (sample_exposure is None) != (sample_violation is None):
+        raise ValueError(
+            f"Incomplete sample safety violation count arrays in: {bins_path}"
+        )
+    if (episode_exposure is None) != (episode_violation is None):
+        raise ValueError(
+            f"Incomplete episode safety violation count arrays in: {bins_path}"
+        )
+    for optional_array in (
+        sample_exposure,
+        sample_violation,
+        episode_exposure,
+        episode_violation,
+    ):
+        if optional_array is not None and optional_array.size != bin_start.size:
+            raise ValueError(f"Mismatched safety violation bin arrays in: {bins_path}")
 
     return {
-        "index": index,
-        "dangerous_state_rate": dangerous_state_rate,
+        "bin_start_m": bin_start,
+        "bin_end_m": bin_end,
+        "sample_exposure_count": sample_exposure,
+        "sample_violation_count": sample_violation,
+        "sample_violation_rate": sample_rate,
+        "episode_exposure_count": episode_exposure,
+        "episode_violation_count": episode_violation,
+        "episode_violation_rate": episode_rate,
     }
+
+
+def _merge_run_safety_violation_bins(
+    run: SafetyViolationBinRunArtifact,
+    *,
+    rate_metric: str,
+    display_bin_size_m: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    rate_arr = getattr(run, f"{rate_metric}_violation_rate")
+    exposure_arr = getattr(run, f"{rate_metric}_exposure_count")
+    violation_arr = getattr(run, f"{rate_metric}_violation_count")
+    if display_bin_size_m <= 0.0:
+        raise ValueError("display_bin_size_m must be positive")
+
+    finite_bin_mask = np.isfinite(run.bin_start_m)
+    display_bin_start = (
+        np.floor(run.bin_start_m[finite_bin_mask] / display_bin_size_m)
+        * display_bin_size_m
+    )
+    if display_bin_start.size == 0:
+        return (
+            np.asarray([], dtype=np.float64),
+            np.asarray([], dtype=np.float64),
+            np.asarray([], dtype=np.float64),
+        )
+
+    reference_bins = np.unique(display_bin_start)
+    merged_rates = np.full(reference_bins.shape, np.nan, dtype=np.float64)
+    for index, bin_start in enumerate(reference_bins):
+        original_mask = finite_bin_mask.copy()
+        original_mask[finite_bin_mask] = display_bin_start == bin_start
+
+        if exposure_arr is not None and violation_arr is not None:
+            exposure_values = exposure_arr[original_mask]
+            violation_values = violation_arr[original_mask]
+            valid_count_mask = np.isfinite(exposure_values) & np.isfinite(
+                violation_values
+            )
+            exposure_total = float(np.sum(exposure_values[valid_count_mask]))
+            violation_total = float(np.sum(violation_values[valid_count_mask]))
+            if exposure_total > 0.0:
+                merged_rates[index] = violation_total / exposure_total
+            continue
+
+        rate_values = rate_arr[original_mask]
+        finite_rate_values = rate_values[np.isfinite(rate_values)]
+        if finite_rate_values.size:
+            merged_rates[index] = float(np.mean(finite_rate_values))
+
+    return reference_bins, reference_bins + display_bin_size_m, merged_rates
 
 
 def build_curve_aggregates(
@@ -379,12 +495,23 @@ def build_curve_aggregates(
     return aggregates, warnings
 
 
-def build_safety_curve_aggregates(
+def build_safety_violation_bin_aggregates(
     manifest: dict[str, Any],
     reward_profiles: list[str] | None = None,
-) -> tuple[list[SafetyCurveAggregateResult], list[str]]:
+    *,
+    rate_metric: str = "episode",
+    display_bin_size_m: float = SAFETY_VIOLATION_DISPLAY_BIN_SIZE_M,
+) -> tuple[list[SafetyViolationBinAggregateResult], list[str]]:
+    if rate_metric not in VIOLATION_RATE_METRIC_CHOICES:
+        raise ValueError(
+            f"rate_metric must be one of {VIOLATION_RATE_METRIC_CHOICES}, "
+            f"got {rate_metric!r}"
+        )
+    if display_bin_size_m <= 0.0:
+        raise ValueError("display_bin_size_m must be positive")
+
     warnings: list[str] = []
-    aggregates: list[SafetyCurveAggregateResult] = []
+    aggregates: list[SafetyViolationBinAggregateResult] = []
     for reward_profile_name in _resolve_selected_reward_profiles(
         manifest, reward_profiles
     ):
@@ -393,40 +520,56 @@ def build_safety_curve_aggregates(
         )
         warnings.extend(profile_warnings)
 
-        safety_runs: list[SafetyCurveRunArtifact] = []
+        safety_runs: list[SafetyViolationBinRunArtifact] = []
         for run_entry in profile_runs:
-            best_eval_output_dir = run_entry.get("best_eval_output_dir")
+            final_output_dir = run_entry.get("final_output_dir")
             repeat_index = int(run_entry.get("repeat_index", 0))
-            if not isinstance(best_eval_output_dir, str) or not best_eval_output_dir:
+            if not isinstance(final_output_dir, str) or not final_output_dir:
                 warnings.append(
-                    f"Skipped safety curve run for profile={reward_profile_name}, "
+                    f"Skipped safety violation bins run for profile={reward_profile_name}, "
                     f"repeat={run_entry.get('repeat_index')} "
-                    "because best_eval_output_dir is missing."
+                    "because final_output_dir is missing."
                 )
                 continue
 
-            safety_curve_path = Path(best_eval_output_dir) / SAFETY_CURVE_FILENAME
-            if not safety_curve_path.is_file():
+            bins_path = Path(final_output_dir) / SAFETY_VIOLATION_BINS_FILENAME
+            if not bins_path.is_file():
                 warnings.append(
-                    f"Skipped safety curve run for profile={reward_profile_name}, "
+                    f"Skipped safety violation bins run for profile={reward_profile_name}, "
                     f"repeat={run_entry.get('repeat_index')} "
-                    f"because safety curve is missing: {safety_curve_path}"
+                    f"because artifact is missing: {bins_path}"
                 )
                 continue
 
             try:
-                loaded = _load_safety_curve_npz(safety_curve_path)
+                loaded = _load_safety_violation_bins_npz(bins_path)
             except (KeyError, ValueError) as exc:
                 warnings.append(str(exc))
                 continue
 
-            index_arr: np.ndarray = loaded["index"]  # type: ignore[assignment]
-            dangerous_state_rate_arr: np.ndarray = loaded[
-                "dangerous_state_rate"
+            bin_start_arr: np.ndarray = loaded["bin_start_m"]  # type: ignore[assignment]
+            bin_end_arr: np.ndarray = loaded["bin_end_m"]  # type: ignore[assignment]
+            sample_exposure_arr: np.ndarray | None = loaded[
+                "sample_exposure_count"
+            ]  # type: ignore[assignment]
+            sample_violation_arr: np.ndarray | None = loaded[
+                "sample_violation_count"
+            ]  # type: ignore[assignment]
+            sample_rate_arr: np.ndarray = loaded[
+                "sample_violation_rate"
+            ]  # type: ignore[assignment]
+            episode_exposure_arr: np.ndarray | None = loaded[
+                "episode_exposure_count"
+            ]  # type: ignore[assignment]
+            episode_violation_arr: np.ndarray | None = loaded[
+                "episode_violation_count"
+            ]  # type: ignore[assignment]
+            episode_rate_arr: np.ndarray = loaded[
+                "episode_violation_rate"
             ]  # type: ignore[assignment]
 
             safety_runs.append(
-                SafetyCurveRunArtifact(
+                SafetyViolationBinRunArtifact(
                     reward_profile_name=reward_profile_name,
                     repeat_index=repeat_index,
                     seed=(
@@ -434,46 +577,86 @@ def build_safety_curve_aggregates(
                         if isinstance(run_entry.get("seed"), int)
                         else None
                     ),
-                    safety_curve_path=str(safety_curve_path),
-                    index=index_arr,
-                    dangerous_state_rate=dangerous_state_rate_arr,
+                    bins_path=str(bins_path),
+                    bin_start_m=bin_start_arr,
+                    bin_end_m=bin_end_arr,
+                    sample_exposure_count=sample_exposure_arr,
+                    sample_violation_count=sample_violation_arr,
+                    sample_violation_rate=sample_rate_arr,
+                    episode_exposure_count=episode_exposure_arr,
+                    episode_violation_count=episode_violation_arr,
+                    episode_violation_rate=episode_rate_arr,
                 )
             )
 
         if not safety_runs:
             warnings.append(
-                f"No valid safety curves found for reward profile: {reward_profile_name}"
+                f"No valid safety violation bin artifacts found for reward profile: {reward_profile_name}"
             )
             continue
 
-        reference_x = np.unique(np.concatenate([run.index for run in safety_runs]))
-        aligned_danger_rates = np.vstack([
-            np.interp(
-                reference_x,
-                run.index,
-                run.dangerous_state_rate,
-                left=np.nan,
-                right=np.nan,
+        merged_runs = [
+            _merge_run_safety_violation_bins(
+                run,
+                rate_metric=rate_metric,
+                display_bin_size_m=display_bin_size_m,
             )
             for run in safety_runs
-        ])
+        ]
+        nonempty_merged_bins = [
+            merged[0] for merged in merged_runs if merged[0].size
+        ]
+        if not nonempty_merged_bins:
+            warnings.append(
+                f"No non-empty safety violation display bins found for reward profile: {reward_profile_name}"
+            )
+            continue
+        reference_bins = np.unique(np.concatenate(nonempty_merged_bins))
+        reference_ends = reference_bins + display_bin_size_m
+        aligned_rates: list[np.ndarray] = []
+        for merged_bin_start, _, merged_rate in merged_runs:
+            lookup = {
+                float(bin_start): float(rate)
+                for bin_start, rate in zip(
+                    merged_bin_start,
+                    merged_rate,
+                    strict=False,
+                )
+            }
+            aligned = np.full(reference_bins.shape, np.nan, dtype=np.float64)
+            for index, bin_start in enumerate(reference_bins):
+                rate = lookup.get(float(bin_start))
+                if rate is None:
+                    continue
+                aligned[index] = rate
+            aligned_rates.append(aligned)
+
+        violation_rate_matrix = np.vstack(aligned_rates)
+        finite_column_mask = np.any(np.isfinite(violation_rate_matrix), axis=0)
+        if not np.any(finite_column_mask):
+            warnings.append(
+                f"No finite safety violation rates found for reward profile: {reward_profile_name}"
+            )
+            continue
+        reference_bins = reference_bins[finite_column_mask]
+        reference_ends = reference_ends[finite_column_mask]
+        violation_rate_matrix = violation_rate_matrix[:, finite_column_mask]
 
         aggregates.append(
-            SafetyCurveAggregateResult(
+            SafetyViolationBinAggregateResult(
                 reward_profile_name=reward_profile_name,
-                reference_steps=reference_x,
-                mean_dangerous_state_rate=np.nanmean(
-                    aligned_danger_rates,
-                    axis=0,
-                ),
-                std_dangerous_state_rate=np.nanstd(
-                    aligned_danger_rates,
-                    axis=0,
-                ),
+                bin_start_m=reference_bins,
+                bin_end_m=reference_ends,
+                violation_rate_matrix=violation_rate_matrix,
+                mean_violation_rate=np.nanmean(violation_rate_matrix, axis=0),
+                std_violation_rate=np.nanstd(violation_rate_matrix, axis=0),
+                var_violation_rate=np.nanvar(violation_rate_matrix, axis=0),
                 valid_repeat_count=len(safety_runs),
-                safety_curve_paths=tuple(
-                    safety_run.safety_curve_path for safety_run in safety_runs
+                bins_paths=tuple(
+                    safety_run.bins_path for safety_run in safety_runs
                 ),
+                rate_metric=rate_metric,
+                display_bin_size_m=display_bin_size_m,
             )
         )
 
@@ -571,25 +754,20 @@ def _build_profile_legend_handles(reward_profiles: list[str]) -> list[Line2D]:
 
 def _plot_curve_aggregates(
     aggregates: list[CurveAggregateResult],
-    safety_aggregates: list[SafetyCurveAggregateResult] | None = None,
 ) -> None:
-    safety_aggregates = safety_aggregates or []
-    if not aggregates and not safety_aggregates:
+    if not aggregates:
         print("No curve aggregates available; skipped curve figure.")
         return
 
     apply_rl_curve_plot_style()
-    ncols = 3 if safety_aggregates else 2
-    fig_width = 16 if safety_aggregates else 12
     fig, axes = plt.subplots(
         nrows=1,
-        ncols=ncols,
-        figsize=(fig_width, 4.8),
+        ncols=2,
+        figsize=(12, 4.8),
         squeeze=False,
     )
     ax_reward = axes[0][0]
     ax_length = axes[0][1]
-    ax_safety = axes[0][2] if safety_aggregates else None
     for aggregate in aggregates:
         color = _resolve_profile_color(aggregate.reward_profile_name)
         profile_label = resolve_reward_profile(aggregate.reward_profile_name).label
@@ -626,35 +804,9 @@ def _plot_curve_aggregates(
     ax_length.set_xlabel("Training steps")
     ax_length.set_ylabel("Mean episode length")
     ax_length.grid(True, alpha=0.3)
-    if ax_safety is not None:
-        for aggregate in safety_aggregates:
-            color = _resolve_profile_color(aggregate.reward_profile_name)
-            profile_label = resolve_reward_profile(aggregate.reward_profile_name).label
-            ax_safety.plot(
-                aggregate.reference_steps,
-                aggregate.mean_dangerous_state_rate,
-                color=color,
-                label=profile_label,
-            )
-            ax_safety.fill_between(
-                aggregate.reference_steps,
-                aggregate.mean_dangerous_state_rate
-                - aggregate.std_dangerous_state_rate,
-                aggregate.mean_dangerous_state_rate
-                + aggregate.std_dangerous_state_rate,
-                color=color,
-                alpha=0.18,
-            )
-        ax_safety.set_xlabel("Training steps")
-        ax_safety.set_ylabel("Dangerous state rate")
-        ax_safety.set_ylim(0.0, 1.0)
-        ax_safety.grid(True, alpha=0.3)
 
     legend_profile_order: list[str] = []
-    for reward_profile_name in [
-        *(aggregate.reward_profile_name for aggregate in aggregates),
-        *(aggregate.reward_profile_name for aggregate in safety_aggregates),
-    ]:
+    for reward_profile_name in [aggregate.reward_profile_name for aggregate in aggregates]:
         if reward_profile_name not in legend_profile_order:
             legend_profile_order.append(reward_profile_name)
 
@@ -664,6 +816,128 @@ def _plot_curve_aggregates(
         ncol=min(4, len(legend_profile_order)),
     )
     plt.tight_layout(rect=(0.0, 0.0, 1.0, 0.92))
+    plt.show()
+
+
+def _format_bin_label(bin_start: float, bin_end: float) -> str:
+    return f"{bin_start / 1000.0:.1f}-{bin_end / 1000.0:.1f}"
+
+
+def _plot_safety_violation_boxplots(
+    aggregates: list[SafetyViolationBinAggregateResult],
+) -> None:
+    if not aggregates:
+        print("No safety violation bin aggregates available; skipped safety boxplot.")
+        return
+
+    apply_rl_curve_plot_style()
+    global_bin_start = np.unique(
+        np.concatenate([aggregate.bin_start_m for aggregate in aggregates])
+    )
+    if global_bin_start.size == 0:
+        print("No safety violation display bins available; skipped safety boxplot.")
+        return
+
+    display_bin_size_m = float(aggregates[0].display_bin_size_m)
+    global_bin_end = global_bin_start + display_bin_size_m
+    fig, ax = plt.subplots(figsize=(13, 5.6))
+    profile_count = len(aggregates)
+    group_width = 0.82
+    slot_width = group_width / max(profile_count, 1)
+    box_width = min(0.18, slot_width * 0.72)
+    plotted_profile_order: list[str] = []
+
+    for profile_index, aggregate in enumerate(aggregates):
+        offset = (profile_index - (profile_count - 1) / 2.0) * slot_width
+        bin_index_by_start = {
+            float(bin_start): index
+            for index, bin_start in enumerate(aggregate.bin_start_m)
+        }
+        positions: list[float] = []
+        box_values: list[np.ndarray] = []
+        mean_values: list[float] = []
+        std_values: list[float] = []
+        for global_index, bin_start in enumerate(global_bin_start):
+            aggregate_bin_index = bin_index_by_start.get(float(bin_start))
+            if aggregate_bin_index is None:
+                continue
+            values = aggregate.violation_rate_matrix[
+                np.isfinite(
+                    aggregate.violation_rate_matrix[:, aggregate_bin_index]
+                ),
+                aggregate_bin_index,
+            ]
+            if not values.size:
+                continue
+            positions.append(float(global_index) + offset)
+            box_values.append(values)
+            mean_values.append(float(aggregate.mean_violation_rate[aggregate_bin_index]))
+            std_values.append(float(aggregate.std_violation_rate[aggregate_bin_index]))
+
+        if not box_values:
+            continue
+
+        profile_color = _resolve_profile_color(aggregate.reward_profile_name)
+        ax.boxplot(
+            box_values,
+            positions=np.asarray(positions, dtype=np.float64),
+            widths=box_width,
+            showfliers=False,
+            patch_artist=True,
+            boxprops={
+                "facecolor": profile_color,
+                "alpha": 0.18,
+                "edgecolor": profile_color,
+            },
+            medianprops={"color": "#1f1f1f", "linewidth": 1.2},
+            whiskerprops={"color": profile_color},
+            capprops={"color": profile_color},
+        )
+        ax.errorbar(
+            np.asarray(positions, dtype=np.float64),
+            np.asarray(mean_values, dtype=np.float64),
+            yerr=np.asarray(std_values, dtype=np.float64),
+            fmt="o",
+            color=profile_color,
+            ecolor=profile_color,
+            elinewidth=1.1,
+            capsize=3,
+            markersize=4,
+        )
+        plotted_profile_order.append(aggregate.reward_profile_name)
+
+    if not plotted_profile_order:
+        plt.close(fig)
+        print("No finite safety violation rates available; skipped safety boxplot.")
+        return
+
+    label_stride = max(1, int(np.ceil(global_bin_start.size / 12)))
+    tick_indices = np.arange(0, global_bin_start.size, label_stride)
+    ax.set_xticks(tick_indices)
+    ax.set_xticklabels(
+        [
+            _format_bin_label(
+                global_bin_start[tick_index],
+                global_bin_end[tick_index],
+            )
+            for tick_index in tick_indices
+        ],
+        rotation=35,
+        ha="right",
+    )
+    ax.set_xlim(-0.6, global_bin_start.size - 0.4)
+    ax.set_title("Safety violation rate by position bin")
+    ax.set_xlabel("Position bin (km)")
+    ax.set_ylabel(f"{aggregates[0].rate_metric} violation rate")
+    ax.set_ylim(bottom=0.0)
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.legend(
+        handles=_build_profile_legend_handles(plotted_profile_order),
+        loc="upper right",
+    )
+    add_panel_label(ax=ax, label=panel_label_for_index(0))
+
+    plt.tight_layout()
     plt.show()
 
 
@@ -742,25 +1016,27 @@ def _print_curve_summary(aggregates: list[CurveAggregateResult]) -> None:
         )
 
 
-def _print_safety_curve_summary(
-    safety_aggregates: list[SafetyCurveAggregateResult],
+def _print_safety_violation_summary(
+    safety_aggregates: list[SafetyViolationBinAggregateResult],
 ) -> None:
     if not safety_aggregates:
-        print("Safety curve summary: no valid reward profiles available.")
+        print("Safety violation summary: no valid reward profiles available.")
         return
-    print("Safety curve summary:")
+    print("Safety violation summary:")
     for aggregate in safety_aggregates:
-        final_mean = (
-            float(aggregate.mean_dangerous_state_rate[-1])
-            if aggregate.mean_dangerous_state_rate.size
-            else float("nan")
-        )
+        max_mean = float(np.nanmax(aggregate.mean_violation_rate))
+        max_var = float(np.nanmax(aggregate.var_violation_rate))
+        mean_rate = float(np.nanmean(aggregate.mean_violation_rate))
         print(
             "  - "
             f"profile={aggregate.reward_profile_name} "
             f"valid_repeats={aggregate.valid_repeat_count} "
-            f"steps={aggregate.reference_steps.size} "
-            f"final_dangerous_state_rate={final_mean:.6g}"
+            f"bins={aggregate.bin_start_m.size} "
+            f"bin_size_m={aggregate.display_bin_size_m:.6g} "
+            f"metric={aggregate.rate_metric} "
+            f"mean_violation_rate={mean_rate:.6g} "
+            f"max_bin_mean={max_mean:.6g} "
+            f"max_bin_var={max_var:.6g}"
         )
 
 
@@ -803,13 +1079,14 @@ def main() -> None:
         manifest,
         args.reward_profiles,
     )
-    if args.no_safety_curve:
-        safety_aggregates: list[SafetyCurveAggregateResult] = []
+    if args.no_safety_violation_boxplot:
+        safety_aggregates: list[SafetyViolationBinAggregateResult] = []
         safety_warnings: list[str] = []
     else:
-        safety_aggregates, safety_warnings = build_safety_curve_aggregates(
+        safety_aggregates, safety_warnings = build_safety_violation_bin_aggregates(
             manifest,
             args.reward_profiles,
+            rate_metric=args.violation_rate_metric,
         )
     selected_candidates, trajectory_warnings = (
         select_representative_trajectory_candidates(
@@ -821,8 +1098,8 @@ def main() -> None:
 
     _print_warning_block(curve_warnings + safety_warnings + trajectory_warnings)
     _print_curve_summary(curve_aggregates)
-    if not args.no_safety_curve:
-        _print_safety_curve_summary(safety_aggregates)
+    if not args.no_safety_violation_boxplot:
+        _print_safety_violation_summary(safety_aggregates)
     _print_trajectory_summary(selected_candidates)
 
     if args.dry_run:
@@ -835,7 +1112,9 @@ def main() -> None:
         parser.error("No valid ablation artifacts available for plotting.")
         return
 
-    _plot_curve_aggregates(curve_aggregates, safety_aggregates)
+    _plot_curve_aggregates(curve_aggregates)
+    if not args.no_safety_violation_boxplot:
+        _plot_safety_violation_boxplots(safety_aggregates)
     _plot_selected_trajectories(
         selected_candidates,
         no_safeguard=args.no_safeguard,

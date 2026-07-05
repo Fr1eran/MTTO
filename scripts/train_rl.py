@@ -225,16 +225,16 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="在运行最佳评估回放时，使用确定性策略。",
     )
     parser.add_argument(
-        "--enable-safety-curve",
+        "--enable-safety-violation-bins",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="是否在周期评估中记录 Dangerous State Rate 曲线。",
+        help="是否在训练过程中按位置区段记录安全约束违规率。",
     )
     parser.add_argument(
-        "--safety-eval-margin-threshold-mps",
+        "--safety-position-bin-size-m",
         type=float,
-        default=5.0,
-        help="危险状态率评估使用的速度安全裕度阈值(m/s)。",
+        default=5000.0,
+        help="安全违规位置统计使用的位置分桶长度(m)。",
     )
     parser.add_argument(
         "--rollout-record-trigger-mode",
@@ -307,8 +307,8 @@ def print_training_run_spec(spec: TrainingRunSpec) -> None:
     print(f"- best_eval_trigger_interval={spec.best_eval_trigger_interval}")
     print(f"- best_eval_output_dir={spec.best_eval_output_dir}")
     print(f"- best_eval_deterministic={spec.best_eval_deterministic}")
-    print(f"- enable_safety_curve={spec.enable_safety_curve}")
-    print(f"- safety_eval_margin_threshold_mps={spec.safety_eval_margin_threshold_mps}")
+    print(f"- enable_safety_violation_bins={spec.enable_safety_violation_bins}")
+    print(f"- safety_position_bin_size_m={spec.safety_position_bin_size_m}")
     print(f"- rollout_record_trigger_mode={spec.rollout_record_trigger_mode}")
     print(f"- device={spec.device}")
     print(f"- seed={spec.seed}")

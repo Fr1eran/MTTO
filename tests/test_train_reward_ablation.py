@@ -18,7 +18,7 @@ def test_ablation_cli_defaults() -> None:
     assert args.reward_profiles is None
     assert args.repeats == 1
     assert args.base_seed is None
-    assert args.safety_eval_margin_threshold_mps == 5.0
+    assert args.safety_position_bin_size_m == 5000.0
     assert args.dry_run is False
     assert not hasattr(args, "subproc_start_method")
 
@@ -45,6 +45,16 @@ def test_ablation_cli_rejects_removed_rollout_record_trigger_mode_option() -> No
 
     with pytest.raises(SystemExit):
         parser.parse_args(["--rollout-record-trigger-mode", "episodes"])
+
+
+def test_ablation_cli_rejects_removed_safety_eval_options() -> None:
+    parser = build_arg_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--enable-safety-curve"])
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--safety-eval-margin-threshold-mps", "5.0"])
 
 
 def test_resolve_ablation_seeds_prefers_seed_list() -> None:
@@ -94,9 +104,15 @@ def test_resolve_ablation_run_matrix_enforces_monitor_best_semantics() -> None:
     assert first_entry.training_run_spec.enable_tb is True
     assert first_entry.training_run_spec.enable_callback is False
     assert first_entry.training_run_spec.enable_best_eval is True
-    assert first_entry.training_run_spec.enable_safety_curve is True
-    assert first_entry.training_run_spec.safety_eval_margin_threshold_mps == 5.0
-    assert first_entry.training_run_spec.run_metadata["enable_safety_curve"] is True
+    assert first_entry.training_run_spec.enable_env_diagnostics is True
+    assert first_entry.training_run_spec.env_diagnostics_interval_steps == 1
+    assert first_entry.training_run_spec.enable_safety_violation_bins is True
+    assert first_entry.training_run_spec.safety_position_bin_size_m == 5000.0
+    assert (
+        first_entry.training_run_spec.run_metadata["enable_safety_violation_bins"]
+        is True
+    )
+    assert first_entry.training_run_spec.run_metadata["safety_position_bin_size_m"] == 5000.0
     assert first_entry.training_run_spec.log_interval == 3
     assert first_entry.train_args.rollout_record_trigger_mode == "steps"
     assert (

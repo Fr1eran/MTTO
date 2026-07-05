@@ -148,7 +148,7 @@ def test_reset(mtto_env: MTTOEnv):
     obs, info = mtto_env.reset()
     assert isinstance(obs, np.ndarray)
     assert obs.dtype == np.float32
-    assert obs.shape == (14,)
+    assert obs.shape == (12,)
     np.testing.assert_allclose(obs[0], 1.0)  # remaining_distance
     np.testing.assert_allclose(obs[1], 0.0)  # current_speed
     np.testing.assert_allclose(obs[2], 0.0)  # current_acc
@@ -156,14 +156,29 @@ def test_reset(mtto_env: MTTOEnv):
         obs[3], mtto_env._normalize_acc_to_action(mtto_env._calc_coasting_acc())
     )  # suggested_dec_normalized
     np.testing.assert_allclose(obs[4], 1.0)  # remaining_schedule_time
-    np.testing.assert_allclose(obs[6], 0.0)  # current_slope
-    np.testing.assert_allclose(obs[7], 0.0)  # current_max_speed
-    np.testing.assert_allclose(obs[8], 0.0)  # current_min_speed
-    np.testing.assert_allclose(obs[9], 0.0)  # next_slope
     np.testing.assert_allclose(
-        obs[10], 0.032199375331401825, rtol=1e-4
-    )  # next_max_speed
-    np.testing.assert_allclose(obs[11], 0.0)  # next_min_speed
+        obs[5],
+        mtto_env.current_redundant_operation_time
+        / mtto_env.train_service.schedule_time,
+    )  # time_redundancy
+    np.testing.assert_allclose(
+        obs[6],
+        mtto_env.current_max_speed / mtto_env.vehicle.max_speed,
+    )  # current_max_speed
+    np.testing.assert_allclose(
+        obs[7],
+        mtto_env.current_min_speed / mtto_env.vehicle.max_speed,
+    )  # current_min_speed
+    np.testing.assert_allclose(obs[8], 0.0)  # current_slope
+    np.testing.assert_allclose(
+        obs[9],
+        mtto_env._calc_lookahead_avg_slope() / mtto_env.vehicle.max_slope_capacity,
+    )  # lookahead_avg_slope
+    np.testing.assert_allclose(
+        obs[10],
+        mtto_env._calc_lookahead_avg_upper_speed() / mtto_env.vehicle.max_speed,
+    )  # lookahead_avg_upper_speed
+    np.testing.assert_allclose(obs[11], 0.0)  # approach_progress
     assert info == {}
 
 
@@ -171,7 +186,6 @@ def test_suggested_dec_uses_coasting_acc_outside_final_approach(mtto_env: MTTOEn
     mtto_env.reset()
     mtto_env.current_speed = 30.0
     mtto_env.current_slope = 1.0
-    mtto_env.is_final_approach = False
 
     obs = mtto_env._get_obs()
 
@@ -199,7 +213,6 @@ def test_suggested_dec_uses_required_stop_dec_in_final_approach(mtto_env: MTTOEn
     mtto_env.current_position = mtto_env.train_service.target_position - 1000.0
     mtto_env.current_speed = 20.0
     mtto_env.current_slope = 1.0
-    mtto_env.is_final_approach = True
 
     obs = mtto_env._get_obs()
 
@@ -208,7 +221,68 @@ def test_suggested_dec_uses_required_stop_dec_in_final_approach(mtto_env: MTTOEn
         obs[3],
         mtto_env._normalize_acc_to_action(required_dec),
     )
-    np.testing.assert_allclose(obs[13], 1000.0 / 3000.0)  # rel_dist_to_target
+    np.testing.assert_allclose(
+        obs[11],
+        mtto_env._calc_approach_progress(1000.0),
+    )  # approach_progress
+
+
+def test_get_upper_speed_or_zero_returns_zero_outside_lut(
+    mtto_env: MTTOEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mtto_env.reset()
+    monkeypatch.setattr(mtto_env, "_upper_speed_lut_pos_min", 100.0)
+    monkeypatch.setattr(mtto_env, "_upper_speed_lut_step", 10.0)
+    monkeypatch.setattr(
+        mtto_env,
+        "_upper_speed_lut_speed_arr",
+        np.asarray([0.0, 10.0, 20.0], dtype=np.float32),
+    )
+
+    assert mtto_env._get_upper_speed_or_zero(99.0) == pytest.approx(0.0)
+    assert mtto_env._get_upper_speed_or_zero(110.0) == pytest.approx(10.0)
+    assert mtto_env._get_upper_speed_or_zero(121.0) == pytest.approx(0.0)
+
+
+def test_lookahead_avg_upper_speed_uses_window_average(
+    mtto_env: MTTOEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mtto_env.reset()
+    mtto_env.current_position = 0.0
+    mtto_env.current_speed = 5.0
+    monkeypatch.setattr(mtto_env, "_upper_speed_lut_pos_min", 0.0)
+    monkeypatch.setattr(mtto_env, "_upper_speed_lut_step", 10.0)
+    monkeypatch.setattr(
+        mtto_env,
+        "_upper_speed_lut_speed_arr",
+        np.asarray([20.0, 20.0, 20.0, 20.0, 20.0, 20.0], dtype=np.float32),
+    )
+
+    avg_upper_speed = mtto_env._calc_lookahead_avg_upper_speed(
+        lookahead_distance=100.0,
+        num_samples=2,
+    )
+
+    np.testing.assert_allclose(avg_upper_speed, 10.0)
+
+
+def test_lookahead_avg_slope_uses_window_average(
+    mtto_env: MTTOEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mtto_env.reset()
+    mtto_env.current_position = 0.0
+    monkeypatch.setattr(mtto_env.track, "slopes", np.asarray([0.0, 4.0]))
+    monkeypatch.setattr(mtto_env.track, "slope_intervals", np.asarray([0.0, 50.0]))
+
+    avg_slope = mtto_env._calc_lookahead_avg_slope(
+        lookahead_distance=100.0,
+        num_samples=2,
+    )
+
+    np.testing.assert_allclose(avg_slope, 2.0)
 
 
 def test_cal_energy_consumption(mtto_env: MTTOEnv):

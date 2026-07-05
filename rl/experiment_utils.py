@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import multiprocessing as mp
 import os
 import re
@@ -28,7 +29,7 @@ from rl.callbacks import (
     BestTrajectoryRecorder,
     EpisodeMetricsCollector,
     PeriodicEvalCallback,
-    SafetyCurveRecorder,
+    SafetyViolationPositionRecorder,
     TensorboardCallback,
 )
 from rl.env_factory import make_env
@@ -110,7 +111,7 @@ _RL_TRAJECTORY_METRICS_SUFFIX = "_metrics.json"
 DEFAULT_SCHEDULE_TIME_S = 430.0
 DEFAULT_REWARD_DISCOUNT = 0.995
 DEFAULT_ROLLOUT_STEPS_PER_UPDATE = 8192
-DEFAULT_MAX_STEP_DISTANCE = 100.0
+DEFAULT_MAX_STEP_DISTANCE = 30.0
 DEFAULT_REWARD_PROFILE_NAME = "full_shaping"
 
 # =============================================================================
@@ -198,8 +199,8 @@ class TrainingRunSpec:
     best_eval_trigger_mode: str
     best_eval_trigger_interval: int
     best_eval_deterministic: bool
-    enable_safety_curve: bool
-    safety_eval_margin_threshold_mps: float
+    enable_safety_violation_bins: bool
+    safety_position_bin_size_m: float
     rollout_record_trigger_mode: str
     total_timesteps: int
     device: str
@@ -438,8 +439,8 @@ def build_run_metadata(
     enable_env_diagnostics: bool | None = None,
     enable_auto_analysis: bool | None = None,
     enable_best_eval: bool | None = None,
-    enable_safety_curve: bool | None = None,
-    safety_eval_margin_threshold_mps: float | None = None,
+    enable_safety_violation_bins: bool | None = None,
+    safety_position_bin_size_m: float | None = None,
     num_envs: int | None = None,
     vec_env_type: str | None = None,
     subproc_start_method: str | None = None,
@@ -517,12 +518,10 @@ def build_run_metadata(
         metadata["enable_auto_analysis"] = bool(enable_auto_analysis)
     if enable_best_eval is not None:
         metadata["enable_best_eval"] = bool(enable_best_eval)
-    if enable_safety_curve is not None:
-        metadata["enable_safety_curve"] = bool(enable_safety_curve)
-    if safety_eval_margin_threshold_mps is not None:
-        metadata["safety_eval_margin_threshold_mps"] = float(
-            safety_eval_margin_threshold_mps
-        )
+    if enable_safety_violation_bins is not None:
+        metadata["enable_safety_violation_bins"] = bool(enable_safety_violation_bins)
+    if safety_position_bin_size_m is not None:
+        metadata["safety_position_bin_size_m"] = float(safety_position_bin_size_m)
 
     if num_envs is not None:
         metadata["num_envs"] = int(num_envs)
@@ -641,8 +640,8 @@ def build_default_training_args() -> argparse.Namespace:
         best_eval_trigger_mode="steps",
         best_eval_trigger_interval=100_000,
         best_eval_deterministic=True,
-        enable_safety_curve=False,
-        safety_eval_margin_threshold_mps=5.0,
+        enable_safety_violation_bins=False,
+        safety_position_bin_size_m=5000.0,
         rollout_record_trigger_mode="steps",
         seed=None,
         device="cpu",
@@ -854,10 +853,16 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
         args.force_dump_interval_steps
     )
     tb_batch_dump_records = _normalize_optional_positive_int(args.tb_batch_dump_records)
-    enable_safety_curve = bool(getattr(args, "enable_safety_curve", False))
-    safety_eval_margin_threshold_mps = float(
-        getattr(args, "safety_eval_margin_threshold_mps", 5.0)
+    enable_safety_violation_bins = bool(
+        getattr(args, "enable_safety_violation_bins", False)
     )
+    safety_position_bin_size_m = max(
+        1.0,
+        float(getattr(args, "safety_position_bin_size_m", 5000.0)),
+    )
+    if enable_safety_violation_bins:
+        enable_env_diagnostics = True
+
     num_envs = max(1, int(args.num_envs))
     n_steps_per_env = _resolve_n_steps_per_env(args, num_envs)
     rollout_steps_per_update = n_steps_per_env * num_envs
@@ -880,8 +885,8 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
         enable_env_diagnostics=bool(enable_env_diagnostics),
         enable_auto_analysis=bool(enable_auto_analysis),
         enable_best_eval=bool(enable_best_eval),
-        enable_safety_curve=bool(enable_safety_curve),
-        safety_eval_margin_threshold_mps=safety_eval_margin_threshold_mps,
+        enable_safety_violation_bins=bool(enable_safety_violation_bins),
+        safety_position_bin_size_m=safety_position_bin_size_m,
         num_envs=int(num_envs),
         vec_env_type=resolved_vec_env_type,
         subproc_start_method=subproc_start_method,
@@ -932,8 +937,8 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
         best_eval_trigger_mode=args.best_eval_trigger_mode,
         best_eval_trigger_interval=max(1, int(args.best_eval_trigger_interval)),
         best_eval_deterministic=bool(args.best_eval_deterministic),
-        enable_safety_curve=bool(enable_safety_curve),
-        safety_eval_margin_threshold_mps=safety_eval_margin_threshold_mps,
+        enable_safety_violation_bins=bool(enable_safety_violation_bins),
+        safety_position_bin_size_m=safety_position_bin_size_m,
         rollout_record_trigger_mode=args.rollout_record_trigger_mode,
         total_timesteps=int(args.total_timesteps),
         device=args.device,
@@ -947,9 +952,22 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
 # =============================================================================
 
 
-def _linear_schedule(initial_value: float):
+def _linear_schedule(initial_value: float) -> Callable[[float], float]:
     def func(progress_remaining: float) -> float:
-        return progress_remaining * initial_value
+        return (0.1 + 0.9 * progress_remaining) * initial_value
+
+    return func
+
+
+def _cosine_annealing_schedule(
+    initial_value: float, final_value: float = 1e-5
+) -> Callable[[float], float]:
+    def func(progress_remaining: float) -> float:
+        progress = 1.0 - progress_remaining
+        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+        lr = final_value + (initial_value - final_value) * cosine_decay
+
+        return lr
 
     return func
 
@@ -1055,23 +1073,22 @@ def train_single_experiment(
         venv_train,
         device=resolved_spec.device,
         verbose=0,
-        # learning_rate=_linear_schedule(3e-4),
-        learning_rate=3e-4,
+        learning_rate=_cosine_annealing_schedule(3e-4),
+        # learning_rate=3e-4,
         n_steps=resolved_spec.n_steps_per_env,
-        batch_size=1024,
-        n_epochs=8,
+        batch_size=256,
+        n_epochs=10,
         gamma=resolved_spec.reward_discount,
         gae_lambda=0.95,
         clip_range=0.2,
-        # clip_range_vf=0.2,
-        ent_coef=0.02,
+        ent_coef=0.01,
         vf_coef=0.5,
         max_grad_norm=0.5,
         tensorboard_log=(
             resolved_spec.tensorboard_log_dir if resolved_spec.enable_tb else None
         ),
         policy_kwargs=dict(
-            net_arch=dict(pi=[256, 256], vf=[256, 256]),
+            net_arch=dict(pi=[64, 64], vf=[64, 64]),
         ),
     )
 
@@ -1085,6 +1102,16 @@ def train_single_experiment(
             record_trigger_mode=resolved_spec.rollout_record_trigger_mode,
         )
     )
+    if resolved_spec.enable_safety_violation_bins:
+        callbacks.append(
+            SafetyViolationPositionRecorder(
+                output_path=os.path.join(
+                    resolved_spec.final_output_dir,
+                    "safety_violation_position_bins.npz",
+                ),
+                position_bin_size_m=resolved_spec.safety_position_bin_size_m,
+            )
+        )
     if resolved_spec.enable_callback:
         callbacks.append(
             TensorboardCallback(
@@ -1101,18 +1128,6 @@ def train_single_experiment(
                 artifact_metadata=resolved_spec.run_metadata,
             )
         ]
-        if resolved_spec.enable_safety_curve:
-            eval_recorders.append(
-                SafetyCurveRecorder(
-                    output_path=os.path.join(
-                        resolved_spec.best_eval_output_dir,
-                        "dangerous_state_rate_curve.npz",
-                    ),
-                    danger_margin_threshold_mps=(
-                        resolved_spec.safety_eval_margin_threshold_mps
-                    ),
-                )
-            )
         callbacks.append(
             PeriodicEvalCallback(
                 eval_env=build_single_eval_env(
@@ -1130,9 +1145,6 @@ def train_single_experiment(
                 eval_trigger_mode=resolved_spec.best_eval_trigger_mode,
                 eval_trigger_interval=resolved_spec.best_eval_trigger_interval,
                 deterministic=resolved_spec.best_eval_deterministic,
-                danger_margin_threshold_mps=(
-                    resolved_spec.safety_eval_margin_threshold_mps
-                ),
             )
         )
 
@@ -1461,7 +1473,7 @@ def apply_rl_curve_plot_style() -> None:
     """设置 RL 轨迹曲线绘图的全局 matplotlib 样式。"""
     set_global_plot_style(
         font_preset="sci",
-        preferred_font="Calibri",
+        preferred_font="Times New Roman",
         title_font_size=8.0,
         axis_label_font_size=8.0,
         tick_font_size=8.0,

@@ -118,12 +118,14 @@ def visualize_punctuality_score_function():
 
 def visualize_combined_score_functions():
     """在同一画幅中上下布局展示停站分数和准时分数的函数图像和导函数图像"""
-    stopping_score_func = SigmoidVariant(x1=0.3, x2=3.0, c=5.0)
-    schedule_time = 430.0
-    max_arr_time_ratio = 0.01
+    x1_stopping = 0.3
+    x2_stopping = 9.0
+    x1_punctuality = 10.0
+    x2_punctuality = 60.0
+    stopping_score_func = SigmoidVariant(x1=x1_stopping, x2=x2_stopping, c=8.0)
     punctuality_score_func = SigmoidVariant(
-        x1=schedule_time * max_arr_time_ratio,
-        x2=schedule_time * max_arr_time_ratio * 10.0,
+        x1=x1_punctuality,
+        x2=x2_punctuality,
         c=6.0,
     )
 
@@ -142,7 +144,7 @@ def visualize_combined_score_functions():
         )
 
     # ---- 上子图：停站分数 ----
-    x_stop = np.linspace(0, 4.0, 1000)
+    x_stop = np.linspace(0, x2_stopping + 1.0, 1000)
     rewards_stop = stopping_score_func(x_stop)
     gradients_stop = stopping_score_func.gradient(x_stop)
 
@@ -169,14 +171,14 @@ def visualize_combined_score_functions():
     )
     ax1.axhline(y=0, color="black", linewidth=1)
     ax1.grid(True, alpha=0.3)
-    ax1.set_xlim(0.0, 4.0)
-    ax1.set_ylim(0.0, 1.5)
+    ax1.set_xlim(0.0, x2_stopping + 1.0)
+    ax1.set_ylim(0.0, 1.0)
     ax1.set_xlabel(r"$\Delta x$")
     ax1.set_ylabel("stopping score")
     add_panel_label(ax1, "(a)")
 
     # ---- 下子图：准时分 ----
-    x_punct = np.linspace(0, 60.0, 1000)
+    x_punct = np.linspace(0, x2_punctuality + 1.0, 1000)
     rewards_punct = punctuality_score_func(x_punct)
     gradients_punct = punctuality_score_func.gradient(x_punct)
 
@@ -200,7 +202,7 @@ def visualize_combined_score_functions():
     )
     ax2.axhline(y=0, color="black", linewidth=1)
     ax2.grid(True, alpha=0.3)
-    ax2.set_xlim(0, 60.0)
+    ax2.set_xlim(0, x2_punctuality + 1.0)
     ax2.set_ylim(0.0, 1.0)
     ax2.set_xlabel(r"$\Delta t$")
     ax2.set_ylabel("punctuality score")

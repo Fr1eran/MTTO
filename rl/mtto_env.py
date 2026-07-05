@@ -173,18 +173,15 @@ class MTTOEnv(gym.Env):
         # 精确停站任务计分函数
         self._stopping_score_func = SigmoidVariant(
             x1=self.train_service.max_stop_error,
-            x2=self.train_service.max_stop_error * 10.0,
-            c=5.0,
+            x2=10.0,
+            c=8.0,
         )
 
         # 准点到站任务计分函数
         self._punctuality_score_func = SigmoidVariant(
-            x1=self.train_service.schedule_time
-            * self.train_service.max_arr_time_error_ratio,
-            x2=self.train_service.schedule_time
-            * self.train_service.max_arr_time_error_ratio
-            * 10.0,
-            c=6.0,
+            x1=10.0,
+            x2=60.0,
+            c=8.0,
         )
 
         # 定义常量
@@ -256,6 +253,11 @@ class MTTOEnv(gym.Env):
         )
         self.max_energy_consumption = mec + lec
 
+        # 初始（最大）冗余时间
+        self.max_redundant_operation_time = (
+            self.train_service.schedule_time - self.min_operation_time
+        )
+
         # 计算参考曲线上每个位置对应的最短累计耗时
         self.ref_curve_cum_time = self._calc_ref_cum_time()
         self.ref_total_operation_time = self._get_reference_cum_time(
@@ -274,15 +276,9 @@ class MTTOEnv(gym.Env):
         # - 当前列车运行总时间
         # - 当前列车消耗总能量, 单位: J
         # - 列车质量（对智能体决策似乎不起作用）, 单位: t
-        # - 当前位置对应的坡度, 百分比制
+        # - 当前位置对应的坡度, 千分位
         # - 当前位置对应的最大运行速度大小, 单位: m/s
         # - 当前位置对应的最小运行速度大小, 单位: m/s
-        # - 下步状态转移后可能位置对应的坡度, 百分比制
-        # - 下步状态转移后可能位置对应的最大运行速度大小, 单位: m/s
-        # - 下步状态转移后可能位置对应的最小运行速度大小, 单位: m/s
-        # - 当前状态所对应的最迟牵引干预位置, 单位: m/s
-        # - 当前状态所对应的最迟制动干预位置, 单位: m/s
-        # - 是否进入到精准停车阶段
         self.current_position: float = self.train_service.start_position
         self.current_speed: float = self.train_service.start_speed
         self.current_acc: float = 0.0
@@ -310,31 +306,12 @@ class MTTOEnv(gym.Env):
             self._get_upper_speed(self.current_position),
             self.current_max_speed,
         )
-        self.next_slope: float = get_slope_scalar_numba(
-            self.current_position + self.max_step_distance * self.direction,
-            self.track.slopes,
-            self.track.slope_intervals,
-        )
-        self.next_min_speed, self.next_max_speed = (
-            self.safeguard_utility.get_min_and_max_speed(
-                current_pos=self.current_position
-                + self.max_step_distance * self.direction,
-                current_sp=self.current_stopping_point_index,
-            )
-        )
-        self.next_max_speed: float = min(
-            self._get_upper_speed(
-                self.current_position + self.max_step_distance * self.direction
-            ),
-            self.next_max_speed,
-        )
         # (
         #     self.current_latest_traction_intervention_point,
         #     self.current_latest_braking_intervention_point,
         # ) = self.safeguard_utility.get_latest_traction_and_braking_intervention_points(  # noqa: E501
         #     current_speed=self.current_speed, current_sp=self.current_sp
         # )
-        self.is_final_approach: bool = False
 
         self.stop_error: float = abs(
             self.train_service.target_position - self.current_position
@@ -349,14 +326,12 @@ class MTTOEnv(gym.Env):
                 -1.0,  # suggested_dec
                 -1.0,  # remaining_schedule_time
                 -1.0,  # time_redundancy
-                -1.0,  # current_slope
                 0.0,  # current_max_speed
                 0.0,  # current_min_speed
-                -1.0,  # next_slope
-                0.0,  # next_max_speed
-                0.0,  # next_min_speed
-                -1.0,  # is_final_approach
-                -1.0,  # rel_dist_to_target
+                -1.0,  # current_slope
+                -1.0,  # lookahead_avg_slope
+                0.0,  # lookahead_avg_upper_speed
+                0.0,  # approach_progress
             ],
             dtype=np.float32,
         )
@@ -368,14 +343,12 @@ class MTTOEnv(gym.Env):
                 1.0,  # suggested_dec
                 1.0,  # remaining_schedule_time
                 1.0,  # time_redundancy
-                1.0,  # current_slope
                 1.0,  # current_max_speed
                 1.0,  # current_min_speed
-                1.0,  # next_slope
-                1.0,  # next_max_speed
-                1.0,  # next_min_speed
-                1.0,  # is_final_approach
-                1.0,  # rel_dist_to_target
+                1.0,  # current_slope
+                1.0,  # lookahead_avg_slope
+                1.0,  # lookahead_avg_upper_speed
+                1.0,  # approach_progress
             ],
             dtype=np.float32,
         )
@@ -464,21 +437,19 @@ class MTTOEnv(gym.Env):
         可观测状态全部由np.ndarray组成
 
         Returns:
-            np.ndarray: shape=(14,), dtype=np.float32 的扁平化观测向量
+            np.ndarray: shape=(12,), dtype=np.float32 的扁平化观测向量
         """
 
         dist_to_target = self.train_service.target_position - self.current_position
-        rel_dist_to_target = 0.0
         suggested_dec = self._calc_coasting_acc()
-        if self.is_final_approach:
-            rel_dist_to_target = dist_to_target / 3000.0
+        if abs(dist_to_target) <= self.target_attraction_domain_radius:
             # 末段按匀减速停车估算所需减速度（物理符号为负）并映射到动作归一化区间
             dist_abs = max(abs(dist_to_target), 1e-6)
             suggested_dec = -(self.current_speed**2) / (2.0 * dist_abs)
 
         suggested_dec_normalized = self._normalize_acc_to_action(suggested_dec)
 
-        return np.array(
+        obs = np.array(
             [
                 dist_to_target / self.whole_distance,
                 self.current_speed / self.vehicle.max_speed,
@@ -488,17 +459,79 @@ class MTTOEnv(gym.Env):
                 / self.train_service.schedule_time,
                 self.current_redundant_operation_time
                 / self.train_service.schedule_time,
-                self.current_slope / self.vehicle.max_slope_capacity,
                 self.current_max_speed / self.vehicle.max_speed,
                 self.current_min_speed / self.vehicle.max_speed,
-                self.next_slope / self.vehicle.max_slope_capacity,
-                self.next_max_speed / self.vehicle.max_speed,
-                self.next_min_speed / self.vehicle.max_speed,
-                1.0 if self.is_final_approach else 0.0,
-                rel_dist_to_target,
+                self.current_slope / self.vehicle.max_slope_capacity,
+                self._calc_lookahead_avg_slope() / self.vehicle.max_slope_capacity,
+                self._calc_lookahead_avg_upper_speed() / self.vehicle.max_speed,
+                self._calc_approach_progress(dist_to_target),
             ],
             dtype=np.float32,
         )
+        return np.clip(obs, -1.0, 1.0).astype(np.float32)
+
+    def _clip_observation_value(self, value: float | np.floating) -> float:
+        """将归一化观测值裁剪到 observation_space 声明范围内。"""
+        return float(np.clip(float(value), -1.0, 1.0))
+
+    def _calc_approach_progress(self, dist_to_target: float | np.floating) -> float:
+        progress = (
+            1.0 - abs(float(dist_to_target)) / self.target_attraction_domain_radius
+        )
+        return float(np.clip(progress, 0.0, 1.0))
+
+    def _calc_lookahead_avg_slope(
+        self,
+        lookahead_distance: float = 1000.0,
+        num_samples: int = 10,
+    ) -> float:
+        offsets = np.linspace(
+            self.max_step_distance,
+            lookahead_distance,
+            max(1, int(num_samples)),
+            dtype=np.float64,
+        )
+        slope_sum = 0.0
+        for offset in offsets:
+            pos = self.current_position + self.direction * float(offset)
+            slope_sum += get_slope_scalar_numba(
+                pos,
+                self.track.slopes,
+                self.track.slope_intervals,
+            )
+        return slope_sum / float(offsets.size)
+
+    def _get_upper_speed_or_zero(self, pos: float | np.floating) -> float:
+        if self._upper_speed_lut_speed_arr.size == 0:
+            return 0.0
+
+        pos_value = float(pos)
+        pos_min = self._upper_speed_lut_pos_min
+        pos_max = pos_min + self._upper_speed_lut_step * (
+            self._upper_speed_lut_speed_arr.size - 1
+        )
+        if pos_value < pos_min or pos_value > pos_max:
+            return 0.0
+
+        return self._get_upper_speed(pos_value)
+
+    def _calc_lookahead_avg_upper_speed(
+        self,
+        lookahead_distance: float = 1000.0,
+        num_samples: int = 10,
+    ) -> float:
+        offsets = np.linspace(
+            self.max_step_distance,
+            lookahead_distance,
+            max(1, int(num_samples)),
+            dtype=np.float64,
+        )
+        upper_speed_sum = 0.0
+        for offset in offsets:
+            pos = self.current_position + self.direction * float(offset)
+            upper_speed_sum += self._get_upper_speed_or_zero(pos)
+
+        return upper_speed_sum / float(offsets.size)
 
     def _calc_coasting_acc(self) -> float:
         """计算当前状态下惰行时带物理符号的加速度，单位 m/s^2。"""
@@ -739,29 +772,12 @@ class MTTOEnv(gym.Env):
             self._get_upper_speed(self.current_position),
             self.current_max_speed,
         )
-        self.next_slope = get_slope_scalar_numba(
-            self.current_position + self.max_step_distance,
-            self.track.slopes,
-            self.track.slope_intervals,
-        )
-        (
-            self.next_min_speed,
-            self.next_max_speed,
-        ) = self.safeguard_utility.get_min_and_max_speed(
-            current_pos=self.current_position + self.max_step_distance,
-            current_sp=self.current_stopping_point_index,
-        )
-        self.next_max_speed = min(
-            self._get_upper_speed(self.current_position + self.max_step_distance),
-            self.next_max_speed,
-        )
         # (
         #     self.current_latest_traction_intervention_point,
         #     self.current_latest_braking_intervention_point,
         # ) = self.safeguard_utility.get_latest_traction_and_braking_intervention_points(  # noqa: E501
         #     current_speed=self.current_speed, current_sp=self.current_sp
         # )
-        self.is_final_approach = False
 
         self.stop_error = abs(
             self.train_service.target_position - self.current_position
@@ -861,24 +877,6 @@ class MTTOEnv(gym.Env):
             self._get_upper_speed(self.current_position),
             self.current_max_speed,
         )
-        self.next_slope = get_slope_scalar_numba(
-            self.current_position + self.max_step_distance * self.direction,
-            self.track.slopes,
-            self.track.slope_intervals,
-        )
-        self.next_min_speed, self.next_max_speed = (
-            self.safeguard_utility.get_min_and_max_speed(
-                current_pos=self.current_position
-                + self.max_step_distance * self.direction,
-                current_sp=self.current_stopping_point_index,
-            )
-        )
-        self.next_max_speed = min(
-            self._get_upper_speed(
-                self.current_position + self.max_step_distance * self.direction
-            ),
-            self.next_max_speed,
-        )
         # (
         #     self.current_latest_traction_intervention_point,
         #     self.current_latest_braking_intervention_point,
@@ -889,19 +887,12 @@ class MTTOEnv(gym.Env):
         #     )
         # )
 
-        self.is_final_approach = (
-            True
-            if abs(self.train_service.target_position - self.current_position)
-            <= self.target_attraction_domain_radius
-            else False
-        )
-
         self.stop_error = abs(
             self.train_service.target_position - self.current_position
         )
         is_stopped = math.isclose(self.current_speed, 0.0, abs_tol=0.01)
         success = (
-            is_stopped and self.stop_error <= self.train_service.max_stop_error * 10.0
+            is_stopped and self.stop_error <= self.train_service.max_stop_error * 30.0
         )
         is_speed_low_violation = self.current_speed < self.current_min_speed
         is_speed_high_violation = self.current_speed > self.current_max_speed
@@ -1156,13 +1147,17 @@ class MTTOEnv(gym.Env):
             # 基本生存奖励
             basic_survival_reward = 100.0 / self.max_episode_steps
             if terminated:
-                reward_total = self._get_reward_goal()
+                reward_total = self._get_reward_dense() + self._get_reward_goal()
             else:
                 reward_total = self._get_reward_dense()
 
             reward_total += basic_survival_reward
         else:
-            reward_total = -1.0
+            progress = (
+                abs(self.current_position - self.train_service.target_position)
+                / self.whole_distance
+            )
+            reward_total = -1.0 - 1.0 * (progress**2)
 
         if self.enable_diagnostics and self._collect_step_diagnostics:
             self.rewards_info["total"] = reward_total
@@ -1419,7 +1414,7 @@ class MTTOEnv(gym.Env):
         min_speed: float,
         max_speed: float,
     ) -> float:
-        K_Safety = 0.5
+        K_Safety = 1.0
         speed_band = max_speed - min_speed + 0.1
         upper_bound = max(speed_band * 0.2, 2.0)
         lower_bound = speed_band * 0.2
@@ -1477,6 +1472,13 @@ class MTTOEnv(gym.Env):
 
     def _get_reward_punctuality_dense(self) -> float:
 
+        # phi_curr = self._potential_punctuality_v1(
+        #     redundant_operation_time=self.current_redundant_operation_time
+        # )
+        # phi_prev = self._potential_punctuality_v1(
+        #     redundant_operation_time=self.last_state["redundant_operation_time"]
+        # )
+
         # phi_curr = self._potential_punctuality_v8(
         #     operation_time=self.current_operation_time,
         #     redundant_operation_time=self.current_redundant_operation_time,
@@ -1526,6 +1528,16 @@ class MTTOEnv(gym.Env):
         #     redundant_operation_time=self.last_state["redundant_operation_time"],
         # )
 
+        # phi_curr = self._potential_punctuality_v16(
+        #     pos=self.current_position,
+        #     redundant_operation_time=self.current_redundant_operation_time,
+        # )
+
+        # phi_prev = self._potential_punctuality_v16(
+        #     pos=self.last_state["pos"],
+        #     redundant_operation_time=self.last_state["redundant_operation_time"],
+        # )
+
         # phi_curr = self._potential_punctuality_v18(
         #     pos=self.current_position,
         #     redundant_operation_time=self.current_redundant_operation_time,
@@ -1546,12 +1558,150 @@ class MTTOEnv(gym.Env):
         #     redundant_operation_time=self.last_state["redundant_operation_time"],
         # )
 
-        phi_curr = self._potential_punctuality_v20(
+        # phi_curr = self._potential_punctuality_v20(
+        #     pos=self.current_position,
+        #     redundant_operation_time=self.current_redundant_operation_time,
+        # )
+
+        # phi_prev = self._potential_punctuality_v20(
+        #     pos=self.last_state["pos"],
+        #     redundant_operation_time=self.last_state["redundant_operation_time"],
+        # )
+
+        # phi_curr = self._potential_punctuality_v22(
+        #     pos=self.current_position,
+        #     redundant_operation_time=self.current_redundant_operation_time,
+        # )
+
+        # phi_prev = self._potential_punctuality_v22(
+        #     pos=self.last_state["pos"],
+        #     redundant_operation_time=self.last_state["redundant_operation_time"],
+        # )
+
+        # phi_curr = self._potential_punctuality_v23(
+        #     operation_time=self.current_operation_time,
+        #     redundant_operation_time=self.current_redundant_operation_time,
+        # )
+
+        # phi_prev = self._potential_punctuality_v23(
+        #     operation_time=self.last_state["operation_time"],
+        #     redundant_operation_time=self.last_state["redundant_operation_time"],
+        # )
+
+        # phi_curr = self._potential_punctuality_v24(
+        #     operation_time=self.current_operation_time,
+        #     redundant_operation_time=self.current_redundant_operation_time,
+        # )
+
+        # phi_prev = self._potential_punctuality_v24(
+        #     operation_time=self.last_state["operation_time"],
+        #     redundant_operation_time=self.last_state["redundant_operation_time"],
+        # )
+
+        # phi_curr = self._potential_punctuality_v25(
+        #     operation_time=self.current_operation_time,
+        #     redundant_operation_time=self.current_redundant_operation_time,
+        # )
+
+        # phi_prev = self._potential_punctuality_v25(
+        #     operation_time=self.last_state["operation_time"],
+        #     redundant_operation_time=self.last_state["redundant_operation_time"],
+        # )
+
+        # phi_curr = self._potential_punctuality_v26(
+        #     speed=self.current_speed,
+        #     redundant_operation_time=self.current_redundant_operation_time,
+        # )
+
+        # phi_prev = self._potential_punctuality_v26(
+        #     speed=self.last_state["speed"],
+        #     redundant_operation_time=self.last_state["redundant_operation_time"],
+        # )
+
+        # phi_curr = self._potential_punctuality_v27(
+        #     pos=self.current_position,
+        #     redundant_operation_time=self.current_redundant_operation_time,
+        # )
+
+        # phi_prev = self._potential_punctuality_v27(
+        #     pos=self.last_state["pos"],
+        #     redundant_operation_time=self.last_state["redundant_operation_time"],
+        # )
+
+        # phi_curr = self._potential_punctuality_v28(
+        #     pos=self.current_position,
+        #     redundant_operation_time=self.current_redundant_operation_time,
+        # )
+
+        # phi_prev = self._potential_punctuality_v28(
+        #     pos=self.last_state["pos"],
+        #     redundant_operation_time=self.last_state["redundant_operation_time"],
+        # )
+
+        # phi_curr = self._potential_punctuality_v29(
+        #     pos=self.current_position,
+        #     speed=self.current_speed,
+        #     redundant_operation_time=self.current_redundant_operation_time,
+        # )
+
+        # phi_prev = self._potential_punctuality_v29(
+        #     pos=self.last_state["pos"],
+        #     speed=self.last_state["speed"],
+        #     redundant_operation_time=self.last_state["redundant_operation_time"],
+        # )
+
+        # phi_curr = self._potential_punctuality_v30(
+        #     pos=self.current_position,
+        #     speed=self.current_speed,
+        #     redundant_operation_time=self.current_redundant_operation_time,
+        # )
+
+        # phi_prev = self._potential_punctuality_v30(
+        #     pos=self.last_state["pos"],
+        #     speed=self.last_state["speed"],
+        #     redundant_operation_time=self.last_state["redundant_operation_time"],
+        # )
+
+        # phi_curr = self._potential_punctuality_v31(
+        #     pos=self.current_position,
+        #     speed=self.current_speed,
+        #     redundant_operation_time=self.current_redundant_operation_time,
+        # )
+
+        # phi_prev = self._potential_punctuality_v31(
+        #     pos=self.last_state["pos"],
+        #     speed=self.last_state["speed"],
+        #     redundant_operation_time=self.last_state["redundant_operation_time"],
+        # )
+
+        # phi_curr = self._potential_punctuality_v32(
+        #     pos=self.current_position,
+        #     speed=self.current_speed,
+        #     operation_time=self.current_operation_time,
+        # )
+
+        # phi_prev = self._potential_punctuality_v32(
+        #     pos=self.last_state["pos"],
+        #     speed=self.last_state["speed"],
+        #     operation_time=self.last_state["operation_time"],
+        # )
+
+        # phi_curr = self._potential_punctuality_v33(
+        #     pos=self.current_position,
+        #     redundant_operation_time=self.current_redundant_operation_time,
+        # )
+
+        # phi_prev = self._potential_punctuality_v33(
+        #     pos=self.last_state["pos"],
+        #     redundant_operation_time=self.last_state["redundant_operation_time"],
+        # )
+
+        phi_curr = self._potential_punctuality_v34(
             pos=self.current_position,
             redundant_operation_time=self.current_redundant_operation_time,
         )
 
-        phi_prev = self._potential_punctuality_v20(
+        phi_prev = self._potential_punctuality_v34(
             pos=self.last_state["pos"],
             redundant_operation_time=self.last_state["redundant_operation_time"],
         )
@@ -1562,9 +1712,7 @@ class MTTOEnv(gym.Env):
         )  # 轻微地偏离PBRS的最优性保证，但能换来更好的训练稳定性
 
     def _potential_punctuality_v1(self, redundant_operation_time: float):
-        return -4.0 * np.log1p(
-            np.exp(-1.0 * redundant_operation_time / self.train_service.schedule_time)
-        )
+        return -1.0 * np.log1p(np.exp(-1.0 * redundant_operation_time / 100.0))
 
     def _potential_punctuality_v2(self, redundant_operation_time: float):
         K_base = 0.5
@@ -1823,7 +1971,7 @@ class MTTOEnv(gym.Env):
         e_ETA < 0 时，说明按照当前速度开下去，到终点会早到
         e_ETA = 0 时，说明按照当前速度是完美的“准点巡航速度”
         """
-        K_T = 2.0
+        K_T = 1.0
         epsilon = 0.5
         sigma_early = 20.0
         sigma_late = 10.0
@@ -1889,39 +2037,35 @@ class MTTOEnv(gym.Env):
         return K_T * e_redundancy
 
     def _potential_punctuality_v16(
-        self, redundant_operation_time: float, operation_time: float
+        self,
+        pos: float,
+        redundant_operation_time: float,
     ):
-        omega_pos = 15.0
-        omega_neg = 20.0
-        T_ref_pos = 100.0
-        T_ref_neg = 50.0
+        omega_pos = 0.05
+        omega_neg = 0.1
+        T_scale_pos = 10.0
+        T_scale_neg = 5.0
         margin = 0.0
 
-        # progress = operation_time / self.train_service.schedule_time
+        # 控制Log-Cosh从原点过渡到线性区的速度
+        # 越小过渡越平缓
+        alpha = 1.0
+
+        # dist_to_target = abs(self.train_service.target_position - position)
+        # fade_factor = 1.0 - math.exp(-((dist_to_target / 600.0) ** 2))
+
         if redundant_operation_time - margin > 0.0:
-            # e_redundancy = omega_pos * (ratio**2) * (1.0 - progress)
-            ratio = (redundant_operation_time - margin) / T_ref_pos
+            ratio = (redundant_operation_time - margin) / T_scale_pos
             phi = omega_pos * (ratio**2)
         else:
-            # ratio_clipped = max(ratio, -2.0)
-            # rational_linear_flow = (ratio**2) / (1.0 + 0.8 * abs(ratio))
-            dist_to_target = abs(
-                self.train_service.target_position - self.current_position
+            ratio = (redundant_operation_time - margin) / T_scale_neg
+            abs_ratio = -alpha * ratio
+            phi = -(omega_neg / alpha) * (
+                abs_ratio + math.log1p(math.exp(-2.0 * abs_ratio)) - math.log(2.0)
             )
-            if dist_to_target < 3000.0:
-                fade_factor = max(dist_to_target / 3000.0, 0.1)
-            else:
-                fade_factor = 1.0
-            ratio = (redundant_operation_time - margin) / T_ref_neg
-            phi = (
-                # -omega_neg * abs(ratio_clipped) * np.exp(0.5 * progress)
-                # -omega_neg * rational_linear_flow * (1.0 + 0.5 * progress)
-                # -omega_neg * rational_linear_flow * np.exp(2.0 * progress)
-                # -omega_neg * np.log1p(1.2 * ratio**2) * (1.0 + 2.0 * progress)
-                # -omega_neg * np.log1p(1.2 * ratio**2) * (2.0 - progress)
-                -omega_neg * np.log1p(-ratio) * fade_factor
-            )
+            # phi = -omega_neg * np.log1p(-ratio)
 
+        # return phi * fade_factor
         return phi
 
     def _potential_punctuality_v17(
@@ -1943,16 +2087,11 @@ class MTTOEnv(gym.Env):
         return phi
 
     def _potential_punctuality_v18(self, pos: float, redundant_operation_time: float):
-        K_T = 1.0
-        T_scale = 6.0
+        K_T = 0.1
+        T_scale = 2.0
 
         bias = redundant_operation_time - self._get_ref_redundant_operation_time(pos)
         ratio = bias / T_scale
-
-        # dist_to_target = abs(self.train_service.target_position - pos)
-        # fade_factor = 1.0
-        # if dist_to_target < 600.0:
-        #     fade_factor = 1.0 - np.exp(-((dist_to_target / 300.0) ** 2))
 
         # L2
         # phi = -K_T * (ratio**2)
@@ -1978,46 +2117,334 @@ class MTTOEnv(gym.Env):
         delta = 1.5
         phi = -K_T * (delta**2 * (math.sqrt(1.0 + (ratio / delta) ** 2) - 1.0))
 
-        # return phi * fade_factor
         return phi
 
     def _potential_punctuality_v19(self, pos: float, redundant_operation_time: float):
-        K_T = 5.0
-        T_scale = 10.0
+        K_T = 1.0
+        T_scale = 5.0
 
-        return K_T * np.exp(
-            -(
-                (
-                    (
-                        redundant_operation_time
-                        - self._get_ref_redundant_operation_time(pos)
-                    )
-                    / T_scale
-                )
-                ** 2
-            )
+        bias = redundant_operation_time - self._get_ref_redundant_operation_time(pos)
+        ratio = bias / T_scale
+
+        phi = K_T * math.exp(-(ratio**2))
+        progress = (
+            1.0 - abs(self.train_service.target_position - pos) / self.whole_distance
         )
+        alpha = 0.5
+
+        return phi * (1.0 + alpha * progress)
 
     def _potential_punctuality_v20(self, pos: float, redundant_operation_time: float):
         K_T = 0.1
-        T_scale = 10.0
+        progress = (
+            1.0 - abs(self.train_service.target_position - pos) / self.whole_distance
+        )
+
+        T_scale = 10.0 + (2.0 - 10.0) * progress
+
+        # T_scale_acc = 6.0
+        # T_scale_cruise = 4.0
+        # T_scale_brake = 12.0
+        # T_scale = (
+        #     T_scale_cruise
+        #     + (T_scale_acc - T_scale_cruise) * ((1 - progress) ** 4)
+        #     + (T_scale_brake - T_scale_cruise) * (progress**4)
+        # )
 
         bias = redundant_operation_time - self._get_ref_redundant_operation_time(pos)
         ratio = bias / T_scale
 
         # ln(cosh(x))
         abs_ratio = abs(ratio)
+
         phi = -K_T * (
             abs_ratio + math.log1p(math.exp(-2.0 * abs_ratio)) - math.log(2.0)
         )
 
-        progress = (
-            1.0 - abs(self.train_service.target_position - pos) / self.whole_distance
-        )
-        alpha = 0.5
+        return phi
 
-        # return phi * fade_factor
-        return phi * (1.0 + alpha * progress)
+    def _potential_punctuality_v21(self, pos: float, redundant_operation_time: float):
+        K_T = 1.0
+        T_scale = 5.0
+
+        bias = redundant_operation_time - self._get_ref_redundant_operation_time(pos)
+        ratio = bias / T_scale
+        ratio_sq = ratio**2
+
+        phi = -K_T * math.tanh(ratio_sq)
+
+        return phi
+
+    def _smoothstep(self, edge0: float, edge1: float, x: float) -> float:
+        t = max(0.0, min(1.0, (x - edge0) / (edge1 - edge0)))
+        return t * t * (3.0 - 2.0 * t)
+
+    def _potential_punctuality_v22(self, pos: float, redundant_operation_time: float):
+        K_T = 0.02
+
+        dist_to_target = abs(self.train_service.target_position - pos)
+        fade_factor = 1.0 - math.exp(-((dist_to_target / 300.0) ** 2))
+
+        # d_start = pos - self.train_service.start_position
+        # d_target = self.train_service.target_position - pos
+        # d_buffer = 5000.0
+
+        # factor_start = self._smoothstep(0.0, d_buffer, d_start)
+        # factor_target = self._smoothstep(0.0, d_buffer, d_target)
+
+        # K_T = K_T_max * factor_start * factor_target
+
+        if redundant_operation_time >= 0.0:
+            return K_T * redundant_operation_time * fade_factor
+        else:
+            return (
+                K_T
+                * (redundant_operation_time - 0.05 * (redundant_operation_time**2))
+                * fade_factor
+            )
+
+    def _potential_punctuality_v23(
+        self, operation_time: float, redundant_operation_time: float
+    ) -> float:
+        # K_T = 0.2
+        # T_scale = 10.0
+
+        # alpha = 0.4
+        # beta = 1.0
+
+        # r = redundant_operation_time / T_scale
+        # tau = operation_time / self.train_service.schedule_time
+
+        # if r > 0.0:
+        #     g_t_r = ((1.0 + tau) ** 2) * (r / (1 + alpha * r))
+        # else:
+        #     g_t_r = ((1.0 + tau) ** 2) * (r / (1 - beta * r))
+
+        # return K_T * g_t_r
+
+        K_T = 2.0
+        T_scale = 10.0
+        r = redundant_operation_time / T_scale
+        tau = operation_time / self.train_service.schedule_time
+        g_t_r = math.tanh(r) * tau
+
+        return K_T * g_t_r
+
+    def _potential_punctuality_v24(
+        self, operation_time: float, redundant_operation_time: float
+    ) -> float:
+        phi_mid = 2.0
+        K_T = 1.0
+        T_scale = 10.0
+        r_max = self.train_service.schedule_time - self.min_operation_time
+
+        tau = operation_time / self.train_service.schedule_time
+
+        r_ref = r_max * (1.0 - tau)
+
+        r_error = redundant_operation_time - r_ref
+        phi = phi_mid + K_T * math.tanh(r_error / T_scale)
+
+        return phi
+
+    def _potential_punctuality_v25(
+        self, operation_time: float, redundant_operation_time: float
+    ) -> float:
+        K_T = 1.0
+        T_scale = 10.0
+
+        alpha = 0.14
+        beta = 0.005
+
+        r = redundant_operation_time / T_scale
+        tau = operation_time / self.train_service.schedule_time
+
+        if r > 0.0:
+            phi = K_T * math.exp(-alpha * (r**2))
+        else:
+            time_scaler = (1.0 + tau) ** 2
+            penalty = 0.5 * (r**2) + r + 1.0 - math.exp(r)
+            phi = K_T - beta * penalty * time_scaler
+
+        return phi
+
+    def _potential_punctuality_v26(
+        self, speed: float, redundant_operation_time: float
+    ) -> float:
+        K_T = 1.0
+        T_scale = 10.0
+        alpha = 0.14
+        lambda_leak = 0.015
+        V_base = 10.0
+
+        r = redundant_operation_time / T_scale
+
+        if r > 0.0:
+            phi = K_T * math.exp(-alpha * (r**2))
+        else:
+            v_gate = math.tanh(speed / V_base)
+            phi = K_T * (1.0 + math.tanh(r)) + (lambda_leak * r * v_gate)
+
+        return phi
+
+    def _potential_punctuality_v27(
+        self, pos: float, redundant_operation_time: float
+    ) -> float:
+        K_T = 1.0
+        T_scale = 10.0
+
+        f_x = pos / self.train_service.target_position
+
+        g_r = math.asinh(redundant_operation_time / T_scale)
+
+        return K_T * f_x * g_r
+
+    def _potential_punctuality_v28(
+        self, pos: float, redundant_operation_time: float
+    ) -> float:
+        K_reward = 0.5
+        T_scale = 5.0
+
+        K_penalty_early = 0.1
+        K_penalty_late = 0.2
+
+        eps_floor = 0.05
+
+        bias = redundant_operation_time - self._get_ref_redundant_operation_time(pos)
+        ratio = bias / T_scale
+
+        phi_pos = K_reward * math.exp(-(ratio**2))
+
+        penalty = math.log(math.cosh(ratio))
+        K_penalty = K_penalty_early if ratio > 0.0 else K_penalty_late
+        phi_neg = -K_penalty * penalty
+
+        phi_core = phi_pos + phi_neg
+
+        dist_to_target = abs(self.train_service.target_position - pos)
+
+        t_space = max(0.0, min(1.0, dist_to_target / 1000.0))
+        smooth_decay = t_space * t_space * (3.0 - 2.0 * t_space)
+
+        K_x = eps_floor + (1.0 - eps_floor) * smooth_decay
+
+        return phi_core * K_x
+
+    def _potential_punctuality_v29(
+        self, pos: float, speed: float, redundant_operation_time: float
+    ) -> float:
+        K_T = 1.0
+        T_scale = 10.0
+
+        bias = redundant_operation_time - self._get_ref_redundant_operation_time(
+            pos=pos
+        )
+        ratio = bias / T_scale
+
+        phi = K_T * math.log1p(math.exp(-abs(ratio) * (speed / self.vehicle.max_speed)))
+
+        return phi
+
+    def _potential_punctuality_v30(
+        self, pos: float, speed: float, redundant_operation_time: float
+    ) -> float:
+        K_T = 1.0
+
+        d = abs(self.train_service.target_position - pos) / self.whole_distance
+
+        progress = 1.0 - d
+
+        r = redundant_operation_time / self.max_redundant_operation_time
+        v = speed / self.vehicle.max_speed
+
+        if r > 0.0:
+            g_r_v_x = r * v
+        else:
+            g_r_v_x = r * (1.0 - v)
+
+        return K_T * g_r_v_x / (1.2 - progress)
+
+    def _potential_punctuality_v31(
+        self, pos: float, speed: float, redundant_operation_time: float
+    ) -> float:
+        K_track = 0.5
+        K_late_cliff = 2.0
+        T_scale = 5.0
+        V_scale = 20.0
+
+        bias = redundant_operation_time - self._get_ref_redundant_operation_time(pos)
+        ratio = bias / T_scale
+
+        if ratio > 0.0:
+            phi_core = K_track * (math.exp(-(ratio**2)) - 1.0)
+        else:
+            phi_core = -K_late_cliff * math.log1p(abs(ratio))
+
+        sigma_speed = math.tanh(speed / V_scale)
+
+        return phi_core * sigma_speed
+
+    def _potential_punctuality_v32(
+        self, pos: float, speed: float, operation_time: float
+    ) -> float:
+        K_T = 0.01
+
+        delta_s = abs(self.train_service.target_position - pos)
+        delta_t = max(0.0, self.train_service.schedule_time - operation_time)
+
+        delta_t_reg = delta_t + 1.5
+
+        v_req = delta_s / delta_t_reg
+        # v_req = min(self.vehicle.max_speed, delta_s / delta_t_reg)
+
+        v_norm = speed / self.vehicle.max_speed
+        v_req_norm = v_req / self.vehicle.max_speed
+
+        # J_star_norm = (4.0 / delta_t_reg) * (
+        #     v_norm**2 - 3.0 * v_norm * v_req_norm + 3.0 * (v_req_norm**2)
+        # )
+
+        J_star_norm = 1.0 * (
+            v_norm**2 - 3.0 * v_norm * v_req_norm + 3.0 * (v_req_norm**2)
+        )
+
+        return -K_T * J_star_norm
+
+    def _potential_punctuality_v33(
+        self, pos: float, redundant_operation_time: float
+    ) -> float:
+        omega_pos = 0.1
+        omega_neg = -0.001
+
+        dist_to_target = self.train_service.target_position - pos
+
+        progress = min(1.0, 1.0 - dist_to_target / self.whole_distance)
+
+        r_exp = self.max_redundant_operation_time * (1.0 - progress)
+        e_r = redundant_operation_time - r_exp
+
+        if e_r > 0.0:
+            phi = omega_pos * math.log1p(e_r)
+        else:
+            phi = omega_neg * (e_r**2)
+
+        return phi
+
+    def _potential_punctuality_v34(
+        self, pos: float, redundant_operation_time: float
+    ) -> float:
+        K_T = 0.10
+
+        dist_to_target = self.train_service.target_position - pos
+
+        progress = min(1.0, 1.0 - dist_to_target / self.whole_distance)
+
+        r_exp = self.max_redundant_operation_time * (1.0 - progress)
+        e_r = redundant_operation_time - r_exp
+
+        phi = K_T * e_r
+
+        return phi
 
     def _get_reward_stopping_dense(self):
 
@@ -2077,7 +2504,7 @@ class MTTOEnv(gym.Env):
         return 20.0 * phi_pos * phi_speed
 
     def _potential_stopping_v3(self, pos: float, speed: float) -> float:
-        K_Stopping = 2.0
+        K_Stopping = 10.0
         sigma_d = 300.0
         sigma_v = 0.2 * self.vehicle.max_speed
 
@@ -2097,7 +2524,7 @@ class MTTOEnv(gym.Env):
     ) -> float:
         _stopping = self._calc_stopping_score()
         _punctuality = self._calc_punctuality_score()
-        reward_stopping = _stopping * 40.0
+        reward_stopping = _stopping * 30.0
         reward_punctuality = _stopping * _punctuality * 20.0
 
         if self.enable_diagnostics and self._collect_step_diagnostics:

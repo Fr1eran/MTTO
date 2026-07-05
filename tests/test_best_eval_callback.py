@@ -7,7 +7,7 @@ from model.ocs import TrainService
 from rl.callbacks import (
     BestTrajectoryRecorder,
     PeriodicEvalCallback,
-    SafetyCurveRecorder,
+    SafetyViolationPositionRecorder,
 )
 from rl.evaluation import (
     ARRIVAL_STOP_SPEED_ABS_TOL_MPS,
@@ -74,11 +74,8 @@ def _build_result(
     stop_error_m: float | None = None,
     time_error_s: float | None = None,
     final_speed_mps: float | None = None,
-    dangerous_state_rate: float = 0.0,
-    dangerous_state_count: int = 0,
     min_safety_margin_mps: float = 0.0,
     mean_safety_margin_mps: float = 0.0,
-    danger_margin_threshold_mps: float = 5.0,
 ) -> PolicyEvaluationResult:
     resolved_stop_error = (
         float(stop_error_m) if stop_error_m is not None else (0.0 if success else 5.0)
@@ -123,11 +120,8 @@ def _build_result(
         episode_steps=10,
         trajectory_pos_m=np.asarray([0.0, 50.0, 100.0], dtype=np.float32),
         trajectory_speed_mps=np.asarray([0.0, 10.0, 0.0], dtype=np.float32),
-        dangerous_state_rate=dangerous_state_rate,
-        dangerous_state_count=dangerous_state_count,
         min_safety_margin_mps=min_safety_margin_mps,
         mean_safety_margin_mps=mean_safety_margin_mps,
-        danger_margin_threshold_mps=danger_margin_threshold_mps,
     )
 
 
@@ -331,55 +325,109 @@ def test_periodic_eval_callback_evaluates_once_per_trigger(
     assert callback.best_result is not None
 
 
-def test_safety_curve_recorder_records_and_persists_curve(
+def test_safety_violation_position_recorder_records_bins(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
-    output_path = tmp_path / "dangerous_state_rate_curve.npz"
-    callback = _prepare_callback_with_recorders(
-        trigger_mode="steps",
-        trigger_interval=1,
-        recorders=[
-            BestTrajectoryRecorder(output_dir=str(tmp_path)),
-            SafetyCurveRecorder(output_path=str(output_path)),
+    output_path = tmp_path / "safety_violation_position_bins.npz"
+    recorder = SafetyViolationPositionRecorder(
+        output_path=str(output_path),
+        position_bin_size_m=500.0,
+    )
+    recorder.init_callback(
+        DummyModel(training_env=DummyTrainingEnv(), logger=DummyLogger())  # type: ignore[arg-type]
+    )
+
+    recorder.locals = {
+        "infos": [
+            {
+                "state": {"position": 100.0},
+                "constraint": {
+                    "margin_to_vmax_mps": 2.0,
+                    "margin_to_vmin_mps": 2.0,
+                    "violation_code": 0,
+                    "is_truncated": False,
+                },
+            },
+            {
+                "state": {"position": 600.0},
+                "constraint": {
+                    "margin_to_vmax_mps": -0.5,
+                    "margin_to_vmin_mps": 1.0,
+                    "violation_code": 3,
+                    "is_truncated": False,
+                },
+            },
         ],
-    )
-    monkeypatch.setattr(
-        "rl.callbacks.evaluate_policy_once",
-        lambda *_args, **_kwargs: _build_result(
-            success=True,
-            total_reward=42.0,
-            dangerous_state_rate=0.25,
-            dangerous_state_count=3,
-            min_safety_margin_mps=1.5,
-            mean_safety_margin_mps=8.0,
-            danger_margin_threshold_mps=5.0,
-        ),
-    )
+        "dones": np.asarray([False, False], dtype=bool),
+    }
+    assert recorder._on_step() is True
 
-    callback.num_timesteps = 1
-    assert callback._on_step() is True
-    assert callback.logger.values_for("safety_eval/last_dangerous_state_rate") == [
-        0.25
-    ]
+    recorder.locals = {
+        "infos": [
+            {
+                "state": {"position": 650.0},
+                "constraint": {
+                    "margin_to_vmax_mps": 1.0,
+                    "margin_to_vmin_mps": -0.2,
+                    "violation_code": 2,
+                    "is_truncated": True,
+                },
+            },
+            {
+                "state": {"position": 1100.0},
+                "constraint": {
+                    "margin_to_vmax_mps": 3.0,
+                    "margin_to_vmin_mps": 2.5,
+                    "violation_code": 1,
+                    "is_truncated": True,
+                },
+            },
+        ],
+        "dones": np.asarray([True, True], dtype=bool),
+    }
+    assert recorder._on_step() is True
 
-    callback._on_training_end()
+    recorder.locals = {
+        "infos": [
+            {
+                "state": {"position": 1500.0},
+                "constraint": {
+                    "margin_to_vmax_mps": 4.0,
+                    "margin_to_vmin_mps": 4.0,
+                    "violation_code": 0,
+                    "is_truncated": False,
+                },
+            }
+        ],
+        "dones": np.asarray([False], dtype=bool),
+    }
+    assert recorder._on_step() is True
+
+    recorder._on_training_end()
 
     assert output_path.exists()
     with np.load(output_path) as data:
-        assert data["index"].tolist() == [1.0]
-        assert data["num_timesteps"].tolist() == [1.0]
-        assert data["dangerous_state_rate"].tolist() == [0.25]
-        assert data["dangerous_state_count"].tolist() == [3.0]
-        assert data["episode_steps"].tolist() == [10.0]
-        assert data["min_safety_margin_mps"].tolist() == [1.5]
-        assert data["mean_safety_margin_mps"].tolist() == [8.0]
-        assert data["success"].tolist() == [1.0]
-        assert data["truncated"].tolist() == [0.0]
-        assert data["danger_margin_threshold_mps"].tolist() == [5.0]
+        np.testing.assert_allclose(
+            data["bin_start_m"],
+            [0.0, 500.0, 1000.0, 1500.0],
+        )
+        np.testing.assert_allclose(data["sample_exposure_count"], [1.0, 2.0, 1.0, 1.0])
+        np.testing.assert_allclose(data["sample_violation_count"], [0.0, 2.0, 0.0, 0.0])
+        np.testing.assert_allclose(
+            data["sample_violation_rate"],
+            [0.0, 1.0, 0.0, 0.0],
+        )
+        np.testing.assert_allclose(data["episode_exposure_count"], [1.0, 2.0, 1.0, 1.0])
+        np.testing.assert_allclose(data["episode_violation_count"], [0.0, 2.0, 0.0, 0.0])
+        np.testing.assert_allclose(
+            data["episode_violation_rate"],
+            [0.0, 1.0, 0.0, 0.0],
+        )
+        np.testing.assert_allclose(data["safety_truncation_count"], [0.0, 1.0, 0.0, 0.0])
+        np.testing.assert_allclose(data["position_bin_size_m"], [500.0])
 
 
-def test_periodic_eval_default_recorder_does_not_write_safety_curve(
+def test_periodic_eval_default_recorder_does_not_write_safety_violation_bins(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -397,7 +445,7 @@ def test_periodic_eval_default_recorder_does_not_write_safety_curve(
     assert callback._on_step() is True
     callback._on_training_end()
 
-    assert not (tmp_path / "dangerous_state_rate_curve.npz").exists()
+    assert not (tmp_path / "safety_violation_position_bins.npz").exists()
 
 
 def test_describe_best_update_reason_prefers_higher_reward_when_no_success() -> None:

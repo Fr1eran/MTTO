@@ -452,99 +452,198 @@ class BestTrajectoryRecorder:
             )
 
 
-class SafetyCurveRecorder:
+class SafetyViolationPositionRecorder(BaseCallback):
+    SPEED_LOW_VIOLATION_CODE = 2
+    SPEED_HIGH_VIOLATION_CODE = 3
+
     def __init__(
         self,
         *,
         output_path: str,
-        danger_margin_threshold_mps: float = 5.0,
+        position_bin_size_m: float = 5000.0,
+        verbose: int = 0,
     ):
-        self.output_path = output_path
-        self.danger_margin_threshold_mps = float(danger_margin_threshold_mps)
-        self._indices: list[float] = []
-        self._num_timesteps: list[float] = []
-        self._dangerous_state_rates: list[float] = []
-        self._dangerous_state_counts: list[float] = []
-        self._episode_steps: list[float] = []
-        self._min_safety_margins: list[float] = []
-        self._mean_safety_margins: list[float] = []
-        self._successes: list[float] = []
-        self._truncated: list[float] = []
-        self._thresholds: list[float] = []
+        super().__init__(verbose)
+        self.output_path = str(output_path)
+        self.position_bin_size_m = max(1.0, float(position_bin_size_m))
+        self._sample_exposure_by_bin: dict[int, int] = {}
+        self._sample_violation_by_bin: dict[int, int] = {}
+        self._episode_exposure_by_bin: dict[int, int] = {}
+        self._episode_violation_by_bin: dict[int, int] = {}
+        self._safety_truncation_by_bin: dict[int, int] = {}
+        self._episode_bins_by_env: list[set[int]] = []
+        self._episode_violation_bins_by_env: list[set[int]] = []
 
-    def init_callback(self, callback: BaseCallback) -> None:
+    def _init_callback(self) -> None:
         output_dir = os.path.dirname(self.output_path)
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
 
-    def on_evaluation(
-        self,
-        callback: BaseCallback,
-        result: PolicyEvaluationResult,
-        *,
-        eval_trigger_interval: int,
-    ) -> None:
-        callback.logger.record(
-            "safety_eval/last_dangerous_state_rate",
-            result.dangerous_state_rate,
-        )
-        callback.logger.record(
-            "safety_eval/last_dangerous_state_count",
-            float(result.dangerous_state_count),
-        )
-        callback.logger.record(
-            "safety_eval/last_min_safety_margin_mps",
-            result.min_safety_margin_mps,
-        )
-        callback.logger.record(
-            "safety_eval/last_mean_safety_margin_mps",
-            result.mean_safety_margin_mps,
-        )
-        callback.logger.record("safety_eval/last_success", float(result.success))
-        callback.logger.record("safety_eval/last_truncated", float(result.truncated))
-
-        self._indices.append(float(eval_trigger_interval))
-        self._num_timesteps.append(float(callback.num_timesteps))
-        self._dangerous_state_rates.append(float(result.dangerous_state_rate))
-        self._dangerous_state_counts.append(float(result.dangerous_state_count))
-        self._episode_steps.append(float(result.episode_steps))
-        self._min_safety_margins.append(float(result.min_safety_margin_mps))
-        self._mean_safety_margins.append(float(result.mean_safety_margin_mps))
-        self._successes.append(float(result.success))
-        self._truncated.append(float(result.truncated))
-        self._thresholds.append(float(result.danger_margin_threshold_mps))
-
-    def on_training_end(self, callback: BaseCallback) -> None:
-        if not self._indices:
+    def _sync_episode_trackers(self, num_envs: int) -> None:
+        if num_envs < 0:
             return
+        while len(self._episode_bins_by_env) < num_envs:
+            self._episode_bins_by_env.append(set())
+            self._episode_violation_bins_by_env.append(set())
+        if len(self._episode_bins_by_env) > num_envs:
+            self._episode_bins_by_env = self._episode_bins_by_env[:num_envs]
+            self._episode_violation_bins_by_env = (
+                self._episode_violation_bins_by_env[:num_envs]
+            )
+
+    def _bin_index_for_position(self, position: float) -> int:
+        return int(np.floor(float(position) / self.position_bin_size_m))
+
+    @staticmethod
+    def _increment(counter: dict[int, int], bin_index: int, value: int = 1) -> None:
+        counter[bin_index] = counter.get(bin_index, 0) + int(value)
+
+    @classmethod
+    def _is_safety_violation(cls, constraint: dict[str, Any]) -> bool:
+        violation_code = int(round(float(constraint.get("violation_code", 0.0))))
+        if violation_code in {
+            cls.SPEED_LOW_VIOLATION_CODE,
+            cls.SPEED_HIGH_VIOLATION_CODE,
+        }:
+            return True
+
+        margin_to_vmax = constraint.get("margin_to_vmax_mps")
+        margin_to_vmin = constraint.get("margin_to_vmin_mps")
+        try:
+            margin_high = float(margin_to_vmax)
+            margin_low = float(margin_to_vmin)
+        except (TypeError, ValueError):
+            return False
+        return bool(margin_high < 0.0 or margin_low < 0.0)
+
+    def _extract_position(self, info: dict[str, Any]) -> float | None:
+        state = info.get("state")
+        if isinstance(state, dict) and "position" in state:
+            return float(state["position"])
+        if "position" in info:
+            return float(info["position"])
+        return None
+
+    def _flush_episode(self, env_idx: int) -> None:
+        if env_idx >= len(self._episode_bins_by_env):
+            return
+        for bin_index in self._episode_bins_by_env[env_idx]:
+            self._increment(self._episode_exposure_by_bin, bin_index)
+        for bin_index in self._episode_violation_bins_by_env[env_idx]:
+            self._increment(self._episode_violation_by_bin, bin_index)
+        self._episode_bins_by_env[env_idx] = set()
+        self._episode_violation_bins_by_env[env_idx] = set()
+
+    def _on_step(self) -> bool:
+        infos = self.locals.get("infos", [])
+        if not isinstance(infos, (list, tuple)):
+            return True
+
+        self._sync_episode_trackers(len(infos))
+        dones_raw = self.locals.get("dones", [])
+        try:
+            dones = list(dones_raw)
+        except TypeError:
+            dones = [bool(dones_raw)]
+
+        for env_idx, info in enumerate(infos):
+            if not isinstance(info, dict):
+                continue
+            constraint = info.get("constraint")
+            if not isinstance(constraint, dict):
+                continue
+            try:
+                position = self._extract_position(info)
+            except (TypeError, ValueError):
+                continue
+            if position is None:
+                continue
+
+            bin_index = self._bin_index_for_position(position)
+            is_violation = self._is_safety_violation(constraint)
+            is_truncated = bool(constraint.get("is_truncated", False))
+
+            self._increment(self._sample_exposure_by_bin, bin_index)
+            self._episode_bins_by_env[env_idx].add(bin_index)
+            if is_violation:
+                self._increment(self._sample_violation_by_bin, bin_index)
+                self._episode_violation_bins_by_env[env_idx].add(bin_index)
+                if is_truncated:
+                    self._increment(self._safety_truncation_by_bin, bin_index)
+
+            if env_idx < len(dones) and bool(dones[env_idx]):
+                self._flush_episode(env_idx)
+
+        return True
+
+    def _on_training_end(self) -> None:
+        for env_idx in range(len(self._episode_bins_by_env)):
+            self._flush_episode(env_idx)
+
+        all_bins = sorted(
+            set(self._sample_exposure_by_bin)
+            | set(self._sample_violation_by_bin)
+            | set(self._episode_exposure_by_bin)
+            | set(self._episode_violation_by_bin)
+            | set(self._safety_truncation_by_bin)
+        )
+        if not all_bins:
+            return
+
+        bin_start = np.asarray(
+            [bin_index * self.position_bin_size_m for bin_index in all_bins],
+            dtype=np.float64,
+        )
+        bin_end = bin_start + self.position_bin_size_m
+        sample_exposure = np.asarray(
+            [self._sample_exposure_by_bin.get(bin_index, 0) for bin_index in all_bins],
+            dtype=np.float64,
+        )
+        sample_violation = np.asarray(
+            [self._sample_violation_by_bin.get(bin_index, 0) for bin_index in all_bins],
+            dtype=np.float64,
+        )
+        episode_exposure = np.asarray(
+            [self._episode_exposure_by_bin.get(bin_index, 0) for bin_index in all_bins],
+            dtype=np.float64,
+        )
+        episode_violation = np.asarray(
+            [
+                self._episode_violation_by_bin.get(bin_index, 0)
+                for bin_index in all_bins
+            ],
+            dtype=np.float64,
+        )
+        safety_truncation = np.asarray(
+            [
+                self._safety_truncation_by_bin.get(bin_index, 0)
+                for bin_index in all_bins
+            ],
+            dtype=np.float64,
+        )
 
         np.savez(
             self.output_path,
-            index=np.asarray(self._indices, dtype=np.float64),
-            num_timesteps=np.asarray(self._num_timesteps, dtype=np.float64),
-            dangerous_state_rate=np.asarray(
-                self._dangerous_state_rates,
-                dtype=np.float64,
+            bin_start_m=bin_start,
+            bin_end_m=bin_end,
+            sample_exposure_count=sample_exposure,
+            sample_violation_count=sample_violation,
+            sample_violation_rate=np.divide(
+                sample_violation,
+                sample_exposure,
+                out=np.zeros_like(sample_violation, dtype=np.float64),
+                where=sample_exposure > 0.0,
             ),
-            dangerous_state_count=np.asarray(
-                self._dangerous_state_counts,
-                dtype=np.float64,
+            episode_exposure_count=episode_exposure,
+            episode_violation_count=episode_violation,
+            episode_violation_rate=np.divide(
+                episode_violation,
+                episode_exposure,
+                out=np.zeros_like(episode_violation, dtype=np.float64),
+                where=episode_exposure > 0.0,
             ),
-            episode_steps=np.asarray(self._episode_steps, dtype=np.float64),
-            min_safety_margin_mps=np.asarray(
-                self._min_safety_margins,
-                dtype=np.float64,
-            ),
-            mean_safety_margin_mps=np.asarray(
-                self._mean_safety_margins,
-                dtype=np.float64,
-            ),
-            success=np.asarray(self._successes, dtype=np.float64),
-            truncated=np.asarray(self._truncated, dtype=np.float64),
-            danger_margin_threshold_mps=np.asarray(
-                self._thresholds,
-                dtype=np.float64,
-            ),
+            safety_truncation_count=safety_truncation,
+            position_bin_size_m=np.asarray([self.position_bin_size_m], dtype=np.float64),
         )
 
 
@@ -559,7 +658,6 @@ class PeriodicEvalCallback(BaseCallback):
         eval_trigger_mode: str = "steps",
         eval_trigger_interval: int = 10_000,
         deterministic: bool = True,
-        danger_margin_threshold_mps: float = 5.0,
         verbose: int = 0,
     ):
         super().__init__(verbose)
@@ -572,7 +670,6 @@ class PeriodicEvalCallback(BaseCallback):
         self.eval_trigger_mode = eval_trigger_mode
         self.trigger_interval = int(eval_trigger_interval)
         self.deterministic = deterministic
-        self.danger_margin_threshold_mps = float(danger_margin_threshold_mps)
         if recorders is None:
             if output_dir is None:
                 raise ValueError(
@@ -631,7 +728,6 @@ class PeriodicEvalCallback(BaseCallback):
             self.model,
             self.eval_env,
             deterministic=self.deterministic,
-            danger_margin_threshold_mps=self.danger_margin_threshold_mps,
         )
 
         for recorder in self.recorders:
