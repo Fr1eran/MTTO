@@ -173,8 +173,8 @@ class MTTOEnv(gym.Env):
         # 精确停站任务计分函数
         self._stopping_score_func = SigmoidVariant(
             x1=self.train_service.max_stop_error,
-            x2=10.0,
-            c=8.0,
+            x2=9.0,
+            c=10.0,
         )
 
         # 准点到站任务计分函数
@@ -1472,236 +1472,22 @@ class MTTOEnv(gym.Env):
 
     def _get_reward_punctuality_dense(self) -> float:
 
-        # phi_curr = self._potential_punctuality_v1(
-        #     redundant_operation_time=self.current_redundant_operation_time
-        # )
-        # phi_prev = self._potential_punctuality_v1(
-        #     redundant_operation_time=self.last_state["redundant_operation_time"]
-        # )
-
-        # phi_curr = self._potential_punctuality_v8(
-        #     operation_time=self.current_operation_time,
-        #     redundant_operation_time=self.current_redundant_operation_time,
-        # )
-
-        # phi_prev = self._potential_punctuality_v8(
-        #     operation_time=self.last_state["operation_time"],
-        #     redundant_operation_time=self.last_state["redundant_operation_time"],
-        # )
-
-        # phi_curr = self._potential_punctuality_v9(
-        #     redundant_operation_time=self.current_redundant_operation_time
-        # )
-        # phi_prev = self._potential_punctuality_v9(
-        #     redundant_operation_time=self.last_state["redundant_operation_time"]
-        # )
-
-        # phi_curr = self._potential_punctuality_v12(
-        #     operation_time=self.current_operation_time,
-        #     redundant_operation_time=self.current_redundant_operation_time,
-        # )
-
-        # phi_prev = self._potential_punctuality_v12(
-        #     operation_time=self.last_state["operation_time"],
-        #     redundant_operation_time=self.last_state["redundant_operation_time"],
-        # )
-
-        # phi_curr = self._potential_punctuality_v13(
-        #     pos=self.current_position,
-        #     speed=self.current_speed,
-        #     operation_time=self.current_operation_time,
-        # )
-
-        # phi_prev = self._potential_punctuality_v13(
-        #     pos=self.last_state["pos"],
-        #     speed=self.last_state["speed"],
-        #     operation_time=self.last_state["operation_time"],
-        # )
-
-        # phi_curr = self._potential_punctuality_v14(
-        #     operation_time=self.current_operation_time,
-        #     redundant_operation_time=self.current_redundant_operation_time,
-        # )
-
-        # phi_prev = self._potential_punctuality_v14(
-        #     operation_time=self.last_state["operation_time"],
-        #     redundant_operation_time=self.last_state["redundant_operation_time"],
-        # )
-
-        # phi_curr = self._potential_punctuality_v16(
+        # phi_curr = self._potential_punctuality_v34(
         #     pos=self.current_position,
         #     redundant_operation_time=self.current_redundant_operation_time,
         # )
 
-        # phi_prev = self._potential_punctuality_v16(
+        # phi_prev = self._potential_punctuality_v34(
         #     pos=self.last_state["pos"],
         #     redundant_operation_time=self.last_state["redundant_operation_time"],
         # )
 
-        # phi_curr = self._potential_punctuality_v18(
-        #     pos=self.current_position,
-        #     redundant_operation_time=self.current_redundant_operation_time,
-        # )
-
-        # phi_prev = self._potential_punctuality_v18(
-        #     pos=self.last_state["pos"],
-        #     redundant_operation_time=self.last_state["redundant_operation_time"],
-        # )
-
-        # phi_curr = self._potential_punctuality_v19(
-        #     pos=self.current_position,
-        #     redundant_operation_time=self.current_redundant_operation_time,
-        # )
-
-        # phi_prev = self._potential_punctuality_v19(
-        #     pos=self.last_state["pos"],
-        #     redundant_operation_time=self.last_state["redundant_operation_time"],
-        # )
-
-        # phi_curr = self._potential_punctuality_v20(
-        #     pos=self.current_position,
-        #     redundant_operation_time=self.current_redundant_operation_time,
-        # )
-
-        # phi_prev = self._potential_punctuality_v20(
-        #     pos=self.last_state["pos"],
-        #     redundant_operation_time=self.last_state["redundant_operation_time"],
-        # )
-
-        # phi_curr = self._potential_punctuality_v22(
-        #     pos=self.current_position,
-        #     redundant_operation_time=self.current_redundant_operation_time,
-        # )
-
-        # phi_prev = self._potential_punctuality_v22(
-        #     pos=self.last_state["pos"],
-        #     redundant_operation_time=self.last_state["redundant_operation_time"],
-        # )
-
-        # phi_curr = self._potential_punctuality_v23(
-        #     operation_time=self.current_operation_time,
-        #     redundant_operation_time=self.current_redundant_operation_time,
-        # )
-
-        # phi_prev = self._potential_punctuality_v23(
-        #     operation_time=self.last_state["operation_time"],
-        #     redundant_operation_time=self.last_state["redundant_operation_time"],
-        # )
-
-        # phi_curr = self._potential_punctuality_v24(
-        #     operation_time=self.current_operation_time,
-        #     redundant_operation_time=self.current_redundant_operation_time,
-        # )
-
-        # phi_prev = self._potential_punctuality_v24(
-        #     operation_time=self.last_state["operation_time"],
-        #     redundant_operation_time=self.last_state["redundant_operation_time"],
-        # )
-
-        # phi_curr = self._potential_punctuality_v25(
-        #     operation_time=self.current_operation_time,
-        #     redundant_operation_time=self.current_redundant_operation_time,
-        # )
-
-        # phi_prev = self._potential_punctuality_v25(
-        #     operation_time=self.last_state["operation_time"],
-        #     redundant_operation_time=self.last_state["redundant_operation_time"],
-        # )
-
-        # phi_curr = self._potential_punctuality_v26(
-        #     speed=self.current_speed,
-        #     redundant_operation_time=self.current_redundant_operation_time,
-        # )
-
-        # phi_prev = self._potential_punctuality_v26(
-        #     speed=self.last_state["speed"],
-        #     redundant_operation_time=self.last_state["redundant_operation_time"],
-        # )
-
-        # phi_curr = self._potential_punctuality_v27(
-        #     pos=self.current_position,
-        #     redundant_operation_time=self.current_redundant_operation_time,
-        # )
-
-        # phi_prev = self._potential_punctuality_v27(
-        #     pos=self.last_state["pos"],
-        #     redundant_operation_time=self.last_state["redundant_operation_time"],
-        # )
-
-        # phi_curr = self._potential_punctuality_v28(
-        #     pos=self.current_position,
-        #     redundant_operation_time=self.current_redundant_operation_time,
-        # )
-
-        # phi_prev = self._potential_punctuality_v28(
-        #     pos=self.last_state["pos"],
-        #     redundant_operation_time=self.last_state["redundant_operation_time"],
-        # )
-
-        # phi_curr = self._potential_punctuality_v29(
-        #     pos=self.current_position,
-        #     speed=self.current_speed,
-        #     redundant_operation_time=self.current_redundant_operation_time,
-        # )
-
-        # phi_prev = self._potential_punctuality_v29(
-        #     pos=self.last_state["pos"],
-        #     speed=self.last_state["speed"],
-        #     redundant_operation_time=self.last_state["redundant_operation_time"],
-        # )
-
-        # phi_curr = self._potential_punctuality_v30(
-        #     pos=self.current_position,
-        #     speed=self.current_speed,
-        #     redundant_operation_time=self.current_redundant_operation_time,
-        # )
-
-        # phi_prev = self._potential_punctuality_v30(
-        #     pos=self.last_state["pos"],
-        #     speed=self.last_state["speed"],
-        #     redundant_operation_time=self.last_state["redundant_operation_time"],
-        # )
-
-        # phi_curr = self._potential_punctuality_v31(
-        #     pos=self.current_position,
-        #     speed=self.current_speed,
-        #     redundant_operation_time=self.current_redundant_operation_time,
-        # )
-
-        # phi_prev = self._potential_punctuality_v31(
-        #     pos=self.last_state["pos"],
-        #     speed=self.last_state["speed"],
-        #     redundant_operation_time=self.last_state["redundant_operation_time"],
-        # )
-
-        # phi_curr = self._potential_punctuality_v32(
-        #     pos=self.current_position,
-        #     speed=self.current_speed,
-        #     operation_time=self.current_operation_time,
-        # )
-
-        # phi_prev = self._potential_punctuality_v32(
-        #     pos=self.last_state["pos"],
-        #     speed=self.last_state["speed"],
-        #     operation_time=self.last_state["operation_time"],
-        # )
-
-        # phi_curr = self._potential_punctuality_v33(
-        #     pos=self.current_position,
-        #     redundant_operation_time=self.current_redundant_operation_time,
-        # )
-
-        # phi_prev = self._potential_punctuality_v33(
-        #     pos=self.last_state["pos"],
-        #     redundant_operation_time=self.last_state["redundant_operation_time"],
-        # )
-
-        phi_curr = self._potential_punctuality_v34(
+        phi_curr = self._potential_punctuality_v35(
             pos=self.current_position,
             redundant_operation_time=self.current_redundant_operation_time,
         )
 
-        phi_prev = self._potential_punctuality_v34(
+        phi_prev = self._potential_punctuality_v35(
             pos=self.last_state["pos"],
             redundant_operation_time=self.last_state["redundant_operation_time"],
         )
@@ -2446,6 +2232,26 @@ class MTTOEnv(gym.Env):
 
         return phi
 
+    def _potential_punctuality_v35(
+        self, pos: float, redundant_operation_time: float
+    ) -> float:
+        omega_pos = 0.05
+        omega_neg = -0.01
+
+        dist_to_target = self.train_service.target_position - pos
+
+        progress = min(1.0, 1.0 - dist_to_target / self.whole_distance)
+
+        r_exp = self.max_redundant_operation_time * (1.0 - progress)
+        e_r = redundant_operation_time - r_exp
+
+        if e_r > 0.0:
+            phi = omega_pos * e_r
+        else:
+            phi = omega_neg * (abs(e_r) ** 1.5)
+
+        return phi
+
     def _get_reward_stopping_dense(self):
 
         # phi_curr = self._potential_stopping_v1(
@@ -2524,8 +2330,8 @@ class MTTOEnv(gym.Env):
     ) -> float:
         _stopping = self._calc_stopping_score()
         _punctuality = self._calc_punctuality_score()
-        reward_stopping = _stopping * 30.0
-        reward_punctuality = _stopping * _punctuality * 20.0
+        reward_stopping = _stopping * 15.0
+        reward_punctuality = _punctuality * 5.0 + (_stopping**2) * _punctuality * 20.0
 
         if self.enable_diagnostics and self._collect_step_diagnostics:
             self.rewards_info["stopping"] = reward_stopping
@@ -2534,12 +2340,19 @@ class MTTOEnv(gym.Env):
         return reward_stopping + reward_punctuality
 
     def _calc_stopping_score(self) -> float:
-        return self._stopping_score_func(self.stop_error)
+        # return self._stopping_score_func(self.stop_error)
+        delta = max(0.0, abs(self.stop_error) - self.train_service.max_stop_error)
+        return 1.0 / (1.0 + (delta) ** 2)
 
     def _calc_punctuality_score(self) -> float:
-        return self._punctuality_score_func(
-            abs(self.train_service.schedule_time - self.current_operation_time)
-        )
+        # return self._punctuality_score_func(
+        #     abs(self.train_service.schedule_time - self.current_operation_time)
+        # )
+        time_error = abs(self.train_service.schedule_time - self.current_operation_time)
+
+        score = math.exp(-time_error / 60.0)
+
+        return score
 
     def _gaussian_kernel(self, A: float, B: float, k: float, x: float) -> float:
         return A * np.exp(-k * x) + B

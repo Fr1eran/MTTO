@@ -122,7 +122,7 @@ def visualize_combined_score_functions():
     x2_stopping = 9.0
     x1_punctuality = 10.0
     x2_punctuality = 60.0
-    stopping_score_func = SigmoidVariant(x1=x1_stopping, x2=x2_stopping, c=8.0)
+    stopping_score_func = SigmoidVariant(x1=x1_stopping, x2=x2_stopping, c=12.0)
     punctuality_score_func = SigmoidVariant(
         x1=x1_punctuality,
         x2=x2_punctuality,
