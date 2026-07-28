@@ -10,7 +10,6 @@ from rl.callbacks import (
     SafetyViolationPositionRecorder,
 )
 from rl.evaluation import (
-    ARRIVAL_STOP_SPEED_ABS_TOL_MPS,
     BEST_TRAJECTORY_SELECTION_RULE,
     PolicyEvaluationResult,
     classify_arrival_status,
@@ -78,7 +77,9 @@ def _build_result(
     mean_safety_margin_mps: float = 0.0,
 ) -> PolicyEvaluationResult:
     resolved_stop_error = (
-        float(stop_error_m) if stop_error_m is not None else (0.0 if success else 5.0)
+        float(stop_error_m)
+        if stop_error_m is not None
+        else (0.0 if success else 12.0)
     )
     resolved_time_error_s = (
         float(time_error_s) if time_error_s is not None else (0.0 if success else 20.0)
@@ -111,7 +112,7 @@ def _build_result(
         stop_error_m=resolved_stop_error,
         time_error_s=resolved_time_error_s,
         strict_stop_error_limit_m=0.3,
-        strict_time_error_limit_s=22.0,
+        strict_time_error_limit_s=10.0,
         comfort_tav=1.0,
         comfort_er_pct=2.0,
         comfort_rms=3.0,
@@ -453,14 +454,14 @@ def test_describe_best_update_reason_prefers_higher_reward_when_no_success() -> 
         success=False,
         total_reward=12.0,
         total_energy_j=20_000.0,
-        stop_error_m=8.0,
+        stop_error_m=12.0,
         time_error_s=30.0,
     )
     lower_reward = _build_result(
         success=False,
         total_reward=11.0,
         total_energy_j=1_000.0,
-        stop_error_m=0.5,
+        stop_error_m=12.5,
         time_error_s=1.0,
     )
 
@@ -481,7 +482,7 @@ def test_to_metrics_includes_selection_rule() -> None:
     assert metrics["precise_arrival"] is True
     assert metrics["punctual_arrival"] is True
     assert metrics["strict_stop_error_limit_m"] == 0.3
-    assert metrics["strict_time_error_limit_s"] == 22.0
+    assert metrics["strict_time_error_limit_s"] == 10.0
     assert "strict_stop_requirement_met" not in metrics
     assert "strict_time_requirement_met" not in metrics
     assert metrics["selection_comparison_key"] == [
@@ -556,7 +557,7 @@ def test_describe_best_update_reason_prefers_punctual_arrival() -> None:
         total_reward=1.0,
         total_energy_j=20_000.0,
         stop_error_m=0.2,
-        time_error_s=10.0,
+        time_error_s=9.0,
     )
     previous = _build_result(
         success=True,
@@ -596,21 +597,21 @@ def test_describe_best_update_reason_prefers_lower_time_error_before_punctual_ar
     )
 
 
-def test_successful_arrival_matches_env_terminated_boundary() -> None:
+def test_successful_arrival_uses_fixed_stop_error_boundary() -> None:
     train_service = _build_train_service()
     assert is_successful_arrival(
-        stop_error_m=3.0,
-        final_speed_mps=ARRIVAL_STOP_SPEED_ABS_TOL_MPS,
+        stop_error_m=8.9999,
+        final_speed_mps=3.0,
         train_service=train_service,
     )
     assert not is_successful_arrival(
-        stop_error_m=3.0001,
+        stop_error_m=9.0,
         final_speed_mps=0.0,
         train_service=train_service,
     )
     assert not is_successful_arrival(
-        stop_error_m=0.0,
-        final_speed_mps=ARRIVAL_STOP_SPEED_ABS_TOL_MPS + 0.001,
+        stop_error_m=9.0001,
+        final_speed_mps=0.0,
         train_service=train_service,
     )
 
@@ -629,7 +630,7 @@ def test_arrival_status_layers_require_previous_layer() -> None:
     )
     assert is_punctual_arrival(
         precise_arrival=True,
-        time_error_s=5.0,
+        time_error_s=9.9999,
         train_service=train_service,
     )
     assert not is_punctual_arrival(
@@ -639,15 +640,20 @@ def test_arrival_status_layers_require_previous_layer() -> None:
     )
     assert not is_punctual_arrival(
         precise_arrival=True,
-        time_error_s=5.0001,
+        time_error_s=10.0,
         train_service=train_service,
     )
 
 
-def test_arrival_status_returns_false_when_schedule_time_invalid() -> None:
+def test_punctual_arrival_uses_fixed_time_error_limit() -> None:
     train_service = _build_train_service(schedule_time=0.0)
+    assert is_punctual_arrival(
+        precise_arrival=True,
+        time_error_s=-9.9999,
+        train_service=train_service,
+    )
     assert not is_punctual_arrival(
         precise_arrival=True,
-        time_error_s=0.0,
+        time_error_s=-10.0,
         train_service=train_service,
     )

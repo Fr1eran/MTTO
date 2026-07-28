@@ -1,4 +1,3 @@
-import math
 import os
 from dataclasses import dataclass
 from typing import Any
@@ -14,16 +13,19 @@ from rl.env_factory import make_env
 from rl.mtto_env import DEFAULT_PUNCTUALITY_DP_CURVE_DIR, MTTOEnv, RewardConfig
 from utils.io_utils import save_curve_and_metrics
 
-ARRIVAL_STOP_SPEED_ABS_TOL_MPS = 0.01
+SUCCESS_STOP_ERROR_LIMIT_M = 9.0
+PUNCTUAL_ARRIVAL_TIME_ERROR_LIMIT_S = 10.0
 
 BEST_TRAJECTORY_SELECTION_RULE = "arrival_precise_punctual_energy_else_reward"
 BEST_TRAJECTORY_SELECTION_RULE_DESCRIPTION = (
-    "Any successful arrival outranks any non-arrival evaluation. "
+    "Any successful arrival (stop_error_m < 9.0) outranks any non-arrival "
+    "evaluation. "
     "Among non-arrivals, higher total_reward wins. Among successful arrivals, "
     "precise arrival wins first; if neither trajectory is precise, lower "
     "stop_error_m wins. Punctual arrival wins next; if neither trajectory is "
-    "punctual, lower abs(time_error_s) wins. Lower total_energy_j wins only "
-    "after those task-completion levels."
+    "punctual, lower abs(time_error_s) wins. Punctual arrival requires "
+    "abs(time_error_s) < 10.0. Lower total_energy_j wins only after those "
+    "task-completion levels."
 )
 
 
@@ -147,15 +149,7 @@ def is_successful_arrival(
     final_speed_mps: float,
     train_service: TrainService,
 ) -> bool:
-    is_stopped = math.isclose(
-        float(final_speed_mps),
-        0.0,
-        abs_tol=ARRIVAL_STOP_SPEED_ABS_TOL_MPS,
-    )
-    return bool(
-        is_stopped
-        and float(stop_error_m) <= float(train_service.max_stop_error) * 10.0
-    )
+    return bool(abs(float(stop_error_m)) < SUCCESS_STOP_ERROR_LIMIT_M)
 
 
 def is_precise_arrival(
@@ -173,12 +167,10 @@ def is_punctual_arrival(
     time_error_s: float,
     train_service: TrainService,
 ) -> bool:
-    schedule_time_s = float(train_service.schedule_time)
-    if not precise_arrival or schedule_time_s <= 0.0:
-        return False
-
-    time_error_ratio = abs(float(time_error_s)) / schedule_time_s
-    return bool(time_error_ratio <= float(train_service.max_arr_time_error_ratio))
+    return bool(
+        precise_arrival
+        and abs(float(time_error_s)) < PUNCTUAL_ARRIVAL_TIME_ERROR_LIMIT_S
+    )
 
 
 def classify_arrival_status(
@@ -211,9 +203,7 @@ def get_strict_stop_error_limit_m(train_service: TrainService) -> float:
 
 
 def get_strict_time_error_limit_s(train_service: TrainService) -> float:
-    return float(train_service.schedule_time) * float(
-        train_service.max_arr_time_error_ratio
-    )
+    return PUNCTUAL_ARRIVAL_TIME_ERROR_LIMIT_S
 
 
 def evaluate_policy_once(

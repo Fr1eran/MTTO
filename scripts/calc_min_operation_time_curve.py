@@ -59,9 +59,9 @@ train_service = TrainService(
     start_position=longyang_start_position,
     start_speed=0.0,
     target_position=putong_end_position,
-    schedule_time=440.0,
+    schedule_time=430.0,
     max_acc_change=0.75,
-    max_arr_time_error_ratio=120.0,
+    max_arr_time_error_ratio=0.01,
     max_stop_error=0.3,
 )
 ors = ORS(vehicle=vehicle, track=track, factor=factor)

@@ -5,129 +5,89 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from utils.plot_utils import set_global_plot_style
-from utils.score_function import SigmoidVariant
+
+MAX_STOP_ERROR_M = 0.3
+MAX_TIME_ERROR_S = 10.0
+PUNCTUALITY_DECAY_TIME_S = 30.0
+STOPPING_ERROR_MAX_M = 10.0
+PUNCTUALITY_ERROR_MAX_S = 140.0
+
+
+def current_stopping_score(abs_stop_error_m):
+    """Mirror MTTOEnv._calc_stopping_score for positive absolute stop error."""
+    abs_stop_error_m = np.asarray(abs_stop_error_m, dtype=np.float64)
+    beta = 0.8
+    delta = np.maximum(0.0, abs_stop_error_m - MAX_STOP_ERROR_M)
+    return 1.0 / (1.0 + (delta / beta) ** 2)
+
+
+def current_punctuality_score(abs_time_error_s):
+    """Mirror MTTOEnv._calc_punctuality_score for positive absolute time error."""
+    abs_time_error_s = np.asarray(abs_time_error_s, dtype=np.float64)
+    return np.exp(-abs_time_error_s / PUNCTUALITY_DECAY_TIME_S)
 
 
 def visualize_stopping_score_function():
-    stopping_score_func = SigmoidVariant(x1=0.3, x2=3.0, c=10.0)
+    x_values = np.linspace(0, STOPPING_ERROR_MAX_M, 1000)
+    rewards = current_stopping_score(x_values)
 
-    x_values = np.linspace(0, 4.0, 1000)
+    fig, ax_score = plt.subplots(figsize=(10, 6))
 
-    rewards = stopping_score_func(x_values)
-    gradients = stopping_score_func.gradient(x_values)
-
-    plt.figure(figsize=(10, 6))
-
-    plt.plot(x_values, rewards, label=r"$f(x)$", color="blue", linewidth=2.5)
-
-    gradient_magnitude = np.abs(gradients)
-    plt.plot(
+    ax_score.plot(
         x_values,
-        gradient_magnitude * 3,
-        label=r"$f'(x)$",
-        color="red",
-        linestyle="--",
-        linewidth=2,
+        rewards,
+        label=r"$f_s(x)=\frac{1}{1+\max(0,x-x_1)^2}$",
+        color="blue",
+        linewidth=2.5,
     )
 
-    # 标记关键点和参考线
-    plt.axvline(
-        x=stopping_score_func.x1,
+    ax_score.axvline(
+        x=MAX_STOP_ERROR_M,
         color="green",
         linestyle=":",
-        label=f"$x_1 = {stopping_score_func.x1}$",
+        label=rf"$x_1 = {MAX_STOP_ERROR_M}\,\mathrm{{m}}$",
     )
-    plt.axvline(
-        x=stopping_score_func.x2,
-        color="purple",
-        linestyle=":",
-        label=f"$x_2 = {stopping_score_func.x2}$",
-    )
-    plt.axhline(y=0, color="black", linewidth=1)
+    ax_score.axhline(y=0, color="black", linewidth=1)
+    ax_score.set_ylabel("stopping score", fontsize=12)
+    ax_score.set_ylim(0.0, 1.05)
+    ax_score.grid(True, alpha=0.3)
+    ax_score.legend(loc="upper right", fontsize=11)
 
-    # 图表设置
-    plt.xlabel(r"$x$", fontsize=12)
-    plt.ylabel(r"$y$", fontsize=12)
-    plt.grid(True, alpha=0.3)
-    plt.legend(loc="upper right", fontsize=11)
+    ax_score.set_xlabel(r"$|\Delta x|$ / m", fontsize=12)
+    ax_score.set_xlim(0, STOPPING_ERROR_MAX_M)
 
-    # 限制 y 轴范围便于观察
-    # plt.ylim(-0.1, 1.2)
-    plt.xlim(0, 4.0)
-
-    plt.tight_layout()
-    return plt.gcf()
+    fig.tight_layout()
+    return fig
 
 
 def visualize_punctuality_score_function():
-    schedule_time = 430.0
-    max_arr_time_ratio = 0.01
-    punctuality_score_func = SigmoidVariant(
-        x1=schedule_time * max_arr_time_ratio,
-        x2=schedule_time * max_arr_time_ratio * 10.0,
-        c=8.0,
-    )
+    x_values = np.linspace(0, PUNCTUALITY_ERROR_MAX_S, 1000)
+    rewards = current_punctuality_score(x_values)
 
-    x_values = np.linspace(0, 140.0, 1000)
+    fig, ax_score = plt.subplots(figsize=(10, 6))
 
-    rewards = punctuality_score_func(x_values)
-    gradients = punctuality_score_func.gradient(x_values)
-
-    plt.figure(figsize=(10, 6))
-
-    plt.plot(x_values, rewards, label=r"$f(x)$", color="blue", linewidth=2.5)
-
-    gradient_magnitude = np.abs(gradients)
-    plt.plot(
+    ax_score.plot(
         x_values,
-        gradient_magnitude * 3,
-        label=r"$f^{\prime}\left( x \right)$",
-        color="red",
-        linestyle="--",
-        linewidth=2,
+        rewards,
+        label=r"$f_t(x)=\exp\left(-x/60\right)$",
+        color="blue",
+        linewidth=2.5,
     )
+    ax_score.axhline(y=0, color="black", linewidth=1)
+    ax_score.set_ylabel("punctuality score", fontsize=12)
+    ax_score.set_ylim(0.0, 1.05)
+    ax_score.set_xlim(0, PUNCTUALITY_ERROR_MAX_S)
+    ax_score.grid(True, alpha=0.3)
+    ax_score.legend(loc="upper right", fontsize=11)
 
-    # 标记关键点和参考线
-    plt.axvline(
-        x=punctuality_score_func.x1,
-        color="green",
-        linestyle=":",
-        label=f"$x_1 = {punctuality_score_func.x1}$",
-    )
-    plt.axvline(
-        x=punctuality_score_func.x2,
-        color="purple",
-        linestyle=":",
-        label=f"$x_2 = {punctuality_score_func.x2}$",
-    )
-    plt.axhline(y=0, color="black", linewidth=1)
+    ax_score.set_xlabel(r"$|\Delta t|$ / s", fontsize=12)
 
-    # 图表设置
-    plt.xlabel(r"$x$", fontsize=12)
-    plt.ylabel(r"$y$", fontsize=12)
-    plt.grid(True, alpha=0.3)
-    plt.legend(loc="upper right", fontsize=11)
-
-    # 限制 y 轴范围便于观察
-    plt.ylim(-0.1, 1.2)
-    plt.xlim(0, 140.0)
-
-    plt.tight_layout()
-    return plt.gcf()
+    fig.tight_layout()
+    return fig
 
 
 def visualize_combined_score_functions():
-    """在同一画幅中上下布局展示停站分数和准时分数的函数图像和导函数图像"""
-    x1_stopping = 0.3
-    x2_stopping = 9.0
-    x1_punctuality = 10.0
-    x2_punctuality = 60.0
-    stopping_score_func = SigmoidVariant(x1=x1_stopping, x2=x2_stopping, c=12.0)
-    punctuality_score_func = SigmoidVariant(
-        x1=x1_punctuality,
-        x2=x2_punctuality,
-        c=6.0,
-    )
+    """在同一画幅中展示当前训练环境使用的停站和准点评分函数。"""
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
 
@@ -143,83 +103,53 @@ def visualize_combined_score_functions():
             clip_on=False,
         )
 
-    # ---- 上子图：停站分数 ----
-    x_stop = np.linspace(0, x2_stopping + 1.0, 1000)
-    rewards_stop = stopping_score_func(x_stop)
-    gradients_stop = stopping_score_func.gradient(x_stop)
+    # ---- 左子图：停站分数 ----
+    x_stop = np.linspace(0, STOPPING_ERROR_MAX_M, 1000)
 
-    ax1.plot(x_stop, rewards_stop, label=r"$f(x)$", color="blue", linewidth=2)
     ax1.plot(
         x_stop,
-        np.abs(gradients_stop) * 3,
-        label=r"$f'(x)$",
-        color="red",
-        linestyle="--",
+        current_stopping_score(x_stop),
+        label=r"$f_{\mathrm{S}}\left( x \right)$",
+        color="blue",
         linewidth=2,
     )
     ax1.axvline(
-        x=stopping_score_func.x1,
-        color="green",
+        x=MAX_STOP_ERROR_M,
+        color="magenta",
         linestyle=":",
-        label=r"$x_1$",
+        label=f"{MAX_STOP_ERROR_M}m",
     )
-    ax1.axvline(
-        x=stopping_score_func.x2,
-        color="purple",
-        linestyle=":",
-        label=r"$x_2$",
-    )
-    ax1.axhline(y=0, color="black", linewidth=1)
     ax1.grid(True, alpha=0.3)
-    ax1.set_xlim(0.0, x2_stopping + 1.0)
-    ax1.set_ylim(0.0, 1.0)
-    ax1.set_xlabel(r"$\Delta x$")
+    ax1.set_xlim(0.0, STOPPING_ERROR_MAX_M)
+    ax1.set_ylim(0.0, 1.05)
+    ax1.set_xlabel(r"$|\Delta x|$")
     ax1.set_ylabel("stopping score")
+    ax1.legend()
     add_panel_label(ax1, "(a)")
 
-    # ---- 下子图：准时分 ----
-    x_punct = np.linspace(0, x2_punctuality + 1.0, 1000)
-    rewards_punct = punctuality_score_func(x_punct)
-    gradients_punct = punctuality_score_func.gradient(x_punct)
+    # ---- 右子图：准时分 ----
+    x_punct = np.linspace(0, PUNCTUALITY_ERROR_MAX_S, 1000)
 
-    ax2.plot(x_punct, rewards_punct, label=r"$f(x)$", color="blue", linewidth=2)
     ax2.plot(
         x_punct,
-        np.abs(gradients_punct) * 3,
-        color="red",
-        linestyle="--",
+        current_punctuality_score(x_punct),
+        label=r"$f_{\mathrm{T}}\left( x \right)$",
+        color="blue",
         linewidth=2,
     )
     ax2.axvline(
-        x=punctuality_score_func.x1,
-        color="green",
+        x=MAX_TIME_ERROR_S,
+        color="magenta",
         linestyle=":",
+        label=f"{MAX_TIME_ERROR_S}s",
     )
-    ax2.axvline(
-        x=punctuality_score_func.x2,
-        color="purple",
-        linestyle=":",
-    )
-    ax2.axhline(y=0, color="black", linewidth=1)
     ax2.grid(True, alpha=0.3)
-    ax2.set_xlim(0, x2_punctuality + 1.0)
-    ax2.set_ylim(0.0, 1.0)
-    ax2.set_xlabel(r"$\Delta t$")
+    ax2.set_xlim(0, PUNCTUALITY_ERROR_MAX_S)
+    ax2.set_ylim(0.0, 1.05)
+    ax2.set_xlabel(r"$|\Delta t|$")
     ax2.set_ylabel("punctuality score")
+    ax2.legend()
     add_panel_label(ax2, "(b)")
-
-    # 共用图例，置于整张画布正上方
-    handles, labels = ax1.get_legend_handles_labels()
-    fig.legend(
-        handles,
-        labels,
-        loc="upper center",
-        bbox_to_anchor=(0.5, 0.995),
-        bbox_transform=fig.transFigure,
-        ncol=len(handles),
-        fontsize=12,
-        frameon=True,
-    )
 
     fig.subplots_adjust(top=0.88, bottom=0.28, wspace=0.28)
     return fig

@@ -52,7 +52,7 @@ def build_scenario(
         brake_curves_list=brake_curves_list,
         min_curves_list=min_curves_list,
         max_curves_list=max_curves_list,
-        factor=0.95,
+        factor=0.99,
     )
     track = TrackInfo(
         slopes=slopes,
@@ -76,11 +76,11 @@ def build_scenario(
     return vehicle, track, safeguard_utility, train_service
 
 
-def build_safeguard_utility(factor: float = 0.95) -> SafeGuardUtility:
+def build_safeguard_utility(factor: float = 0.99) -> SafeGuardUtility:
     """构建用于轨迹可视化时渲染安全防护边界的 SafeGuardUtility 实例。
 
     Args:
-        factor: 安全系数，默认 0.95。
+        factor: 安全系数，默认 0.99。
 
     Returns:
         SafeGuardUtility 实例。

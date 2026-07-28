@@ -36,7 +36,7 @@ def compute_punctuality_dense_reward_series(
     gamma: float,
     potential_fn: Callable[[float, float], float],
 ) -> np.ndarray:
-    """Compute gamma * phi(curr) - phi(prev) between adjacent v34 samples."""
+    """Compute gamma * phi(curr) - phi(prev) between adjacent v36 samples."""
     if len(position_seq) != len(redundant_operation_time_seq):
         raise ValueError(
             "position_seq and redundant_operation_time_seq must have the same length"
@@ -56,7 +56,7 @@ def compute_punctuality_dense_reward_series(
             float(position_seq[curr_idx]),
             float(redundant_operation_time_seq[curr_idx]),
         )
-        reward_seq.append(float(gamma) * phi_curr - phi_prev)
+        reward_seq.append(phi_curr - phi_prev)
 
     return np.asarray(reward_seq, dtype=np.float32)
 
@@ -68,7 +68,7 @@ def compute_punctuality_error_series(
     whole_distance_m: float,
     max_redundant_operation_time_s: float,
 ) -> np.ndarray:
-    """Compute v34 e_r samples: actual redundancy minus expected redundancy."""
+    """Compute v36 e_r samples: actual redundancy minus expected redundancy."""
     if len(position_seq) != len(redundant_operation_time_seq):
         raise ValueError(
             "position_seq and redundant_operation_time_seq must have the same length"
@@ -86,9 +86,9 @@ def compute_punctuality_error_series(
         1.0,
         1.0 - dist_to_target_arr / float(whole_distance_m),
     )
-    expected_redundant_operation_time_arr = float(
-        max_redundant_operation_time_s
-    ) * (1.0 - progress_arr)
+    expected_redundant_operation_time_arr = float(max_redundant_operation_time_s) * (
+        1.0 - progress_arr
+    )
 
     return (
         redundant_operation_time_arr - expected_redundant_operation_time_arr
@@ -115,7 +115,7 @@ def plot_punctuality_dense_reward_series(
         label="Dense punctuality reward",
     )
     ax.axhline(0.0, color="black", linewidth=1.0, linestyle="--", alpha=0.6)
-    ax.set_title(f"_potential_punctuality_v34 dense reward (gamma={gamma:.4g})")
+    ax.set_title("_potential_punctuality_v36 dense reward")
     ax.set_xlabel("Agent step")
     ax.set_ylabel("punctuality reward")
     ax.grid(True, alpha=0.3)
@@ -340,7 +340,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--plot-punctuality-dense-reward",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="评估后展示基于 _potential_punctuality_v34 的准点差分密集奖励曲线。",
+        help="评估后展示基于 _potential_punctuality_v36 的准点差分密集奖励曲线。",
     )
     parser.add_argument(
         "--plot-operation-time-series",
@@ -578,7 +578,7 @@ def main() -> None:
             gamma=reward_discount,
             potential_fn=lambda pos, redundant_operation_time: float(
                 venv_eval.env_method(
-                    "_potential_punctuality_v34",
+                    "_potential_punctuality_v36",
                     pos=pos,
                     redundant_operation_time=redundant_operation_time,
                 )[0]

@@ -320,10 +320,10 @@ def test_cal_energy_consumption(mtto_env: MTTOEnv):
 def test_reference_remaining_operation_time_matches_endpoints(mtto_env: MTTOEnv):
     mtto_env.reset()
 
-    start_remaining = mtto_env._get_reference_remaining_operation_time(
+    start_remaining = mtto_env._get_ref_remaining_operation_time(
         mtto_env.train_service.start_position
     )
-    target_remaining = mtto_env._get_reference_remaining_operation_time(
+    target_remaining = mtto_env._get_ref_remaining_operation_time(
         mtto_env.train_service.target_position
     )
 
@@ -396,7 +396,7 @@ def test_potential_punctuality_v18_peaks_on_dp_reference(mtto_env: MTTOEnv) -> N
     assert off_reference < peak
 
 
-def test_punctuality_dense_reward_uses_v18_reference_manifold(
+def test_punctuality_dense_reward_uses_dp_speed_reference(
     mtto_env: MTTOEnv,
 ) -> None:
     mtto_env.reset()
@@ -406,16 +406,70 @@ def test_punctuality_dense_reward_uses_v18_reference_manifold(
     prev_pos = mtto_env.train_service.start_position
 
     mtto_env.current_position = midpoint
-    mtto_env.current_redundant_operation_time = 12.0
+    mtto_env.current_speed = 15.0
     mtto_env.last_state["pos"] = prev_pos
-    mtto_env.last_state["redundant_operation_time"] = 18.0
+    mtto_env.last_state["speed"] = mtto_env.train_service.start_speed
 
-    expected = mtto_env._potential_punctuality_v18(
+    expected = mtto_env._potential_punctuality_v39(
         pos=midpoint,
-        redundant_operation_time=12.0,
-    ) - mtto_env._potential_punctuality_v18(
+        speed=15.0,
+    ) - mtto_env._potential_punctuality_v39(
         pos=prev_pos,
-        redundant_operation_time=18.0,
+        speed=mtto_env.train_service.start_speed,
+    )
+
+    assert mtto_env._get_reward_punctuality_dense() == pytest.approx(expected)
+
+
+def test_dp_speed_reference_is_loaded_and_interpolated(mtto_env: MTTOEnv) -> None:
+    midpoint = (
+        mtto_env.train_service.start_position + mtto_env.train_service.target_position
+    ) / 2.0
+
+    assert mtto_env.ref_dp_speed_pos_arr.size == 3
+    assert mtto_env.ref_dp_speed_arr.size == 3
+    assert mtto_env._get_ref_dp_speed(mtto_env.train_service.start_position) == pytest.approx(
+        mtto_env.train_service.start_speed
+    )
+    assert mtto_env._get_ref_dp_speed(midpoint) == pytest.approx(10.0)
+    assert mtto_env._get_ref_dp_speed(mtto_env.train_service.target_position) == pytest.approx(
+        0.0
+    )
+
+
+def test_potential_punctuality_v39_peaks_on_dp_speed_curve(
+    mtto_env: MTTOEnv,
+) -> None:
+    midpoint = (
+        mtto_env.train_service.start_position + mtto_env.train_service.target_position
+    ) / 2.0
+
+    peak = mtto_env._potential_punctuality_v39(pos=midpoint, speed=10.0)
+    off_reference = mtto_env._potential_punctuality_v39(pos=midpoint, speed=15.0)
+
+    assert peak == pytest.approx(0.0)
+    assert off_reference < peak
+
+
+def test_punctuality_dense_reward_tracks_dp_speed_error(
+    mtto_env: MTTOEnv,
+) -> None:
+    mtto_env.reset()
+    midpoint = (
+        mtto_env.train_service.start_position + mtto_env.train_service.target_position
+    ) / 2.0
+
+    mtto_env.current_position = midpoint
+    mtto_env.current_speed = 15.0
+    mtto_env.last_state["pos"] = mtto_env.train_service.start_position
+    mtto_env.last_state["speed"] = mtto_env.train_service.start_speed
+
+    expected = mtto_env._potential_punctuality_v39(
+        pos=midpoint,
+        speed=15.0,
+    ) - mtto_env._potential_punctuality_v39(
+        pos=mtto_env.train_service.start_position,
+        speed=mtto_env.train_service.start_speed,
     )
 
     assert mtto_env._get_reward_punctuality_dense() == pytest.approx(expected)
@@ -517,7 +571,7 @@ def test_make_env_passes_punctuality_reference_options(
     )
 
 
-def test_punctuality_reward_depends_on_position_and_time_only(mtto_env: MTTOEnv):
+def test_punctuality_reward_depends_on_dp_speed_error(mtto_env: MTTOEnv):
     mtto_env.reset()
 
     mtto_env.current_position = mtto_env.train_service.start_position + 5000.0
@@ -533,7 +587,7 @@ def test_punctuality_reward_depends_on_position_and_time_only(mtto_env: MTTOEnv)
     mtto_env.last_state["speed"] = 30.0
     reward_high_speed = mtto_env._get_reward_punctuality_dense()
 
-    np.testing.assert_allclose(reward_low_speed, reward_high_speed)
+    assert reward_low_speed != pytest.approx(reward_high_speed)
 
 
 def test_whole_env(mtto_env: MTTOEnv):

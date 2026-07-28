@@ -109,7 +109,7 @@ _RL_TRAJECTORY_METRICS_SUFFIX = "_metrics.json"
 # =============================================================================
 
 DEFAULT_SCHEDULE_TIME_S = 430.0
-DEFAULT_REWARD_DISCOUNT = 0.995
+DEFAULT_REWARD_DISCOUNT = 0.998
 DEFAULT_ROLLOUT_STEPS_PER_UPDATE = 8192
 DEFAULT_MAX_STEP_DISTANCE = 30.0
 DEFAULT_REWARD_PROFILE_NAME = "full_shaping"
@@ -1452,7 +1452,7 @@ def build_rl_trajectory_comparison_key(
         bool(punctual_arrival_value)
         if isinstance(punctual_arrival_value, bool)
         else precise_arrival
-        and abs(float(time_error_s)) <= float(strict_time_error_limit_s)
+        and abs(float(time_error_s)) < float(strict_time_error_limit_s)
     )
     return (
         1.0,

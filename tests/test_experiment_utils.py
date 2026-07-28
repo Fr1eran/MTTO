@@ -189,6 +189,31 @@ def test_build_rl_trajectory_comparison_key_rebuilds_legacy_arrival_fields() -> 
     ) > build_rl_trajectory_comparison_key(imprecise_arrival)
 
 
+def test_build_rl_trajectory_comparison_key_treats_time_limit_as_exclusive() -> None:
+    within_limit = {
+        "success": True,
+        "total_energy_j": 8_000.0,
+        "stop_error_m": 0.2,
+        "time_error_s": 4.9999,
+        "total_reward": 10.0,
+        "strict_stop_error_limit_m": 0.3,
+        "strict_time_error_limit_s": 5.0,
+    }
+    exact_limit = {
+        "success": True,
+        "total_energy_j": 1_000.0,
+        "stop_error_m": 0.2,
+        "time_error_s": 5.0,
+        "total_reward": 100.0,
+        "strict_stop_error_limit_m": 0.3,
+        "strict_time_error_limit_s": 5.0,
+    }
+
+    assert build_rl_trajectory_comparison_key(
+        within_limit
+    ) > build_rl_trajectory_comparison_key(exact_limit)
+
+
 def test_add_panel_label_places_text_on_axes() -> None:
     fig, ax = plt.subplots()
     text = add_panel_label(ax=ax, label="(a)")
