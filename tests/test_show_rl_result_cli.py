@@ -48,7 +48,7 @@ def test_resolve_rl_curve_artifact_prefers_latest_best_across_trigger_modes(
     tmp_path: Path,
 ) -> None:
     curve_root = tmp_path / "runs"
-    best_steps_dir = curve_root / "430p0_100p0__full_shaping" / "best_steps"
+    best_steps_dir = curve_root / "430p0_100p0__basic_safety_stopping" / "best_steps"
     best_episodes_dir = curve_root / "430p0_100p0__basic" / "best_episodes"
     best_steps_dir.mkdir(parents=True)
     best_episodes_dir.mkdir(parents=True)

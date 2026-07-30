@@ -1,6 +1,6 @@
 import argparse
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from datetime import datetime
 
 import numpy as np
@@ -30,105 +30,11 @@ from utils.io_utils import save_curve_and_metrics
 from utils.scenario import build_scenario
 
 
-def compute_punctuality_dense_reward_series(
-    position_seq: Sequence[float],
-    redundant_operation_time_seq: Sequence[float],
-    gamma: float,
-    potential_fn: Callable[[float, float], float],
-) -> np.ndarray:
-    """Compute gamma * phi(curr) - phi(prev) between adjacent v36 samples."""
-    if len(position_seq) != len(redundant_operation_time_seq):
-        raise ValueError(
-            "position_seq and redundant_operation_time_seq must have the same length"
-        )
-
-    reward_seq: list[float] = []
-    for prev_idx, curr_idx in zip(
-        range(len(position_seq) - 1),
-        range(1, len(position_seq)),
-        strict=True,
-    ):
-        phi_prev = potential_fn(
-            float(position_seq[prev_idx]),
-            float(redundant_operation_time_seq[prev_idx]),
-        )
-        phi_curr = potential_fn(
-            float(position_seq[curr_idx]),
-            float(redundant_operation_time_seq[curr_idx]),
-        )
-        reward_seq.append(phi_curr - phi_prev)
-
-    return np.asarray(reward_seq, dtype=np.float32)
-
-
-def compute_punctuality_error_series(
-    position_seq: Sequence[float],
-    redundant_operation_time_seq: Sequence[float],
-    target_position_m: float,
-    whole_distance_m: float,
-    max_redundant_operation_time_s: float,
-) -> np.ndarray:
-    """Compute v36 e_r samples: actual redundancy minus expected redundancy."""
-    if len(position_seq) != len(redundant_operation_time_seq):
-        raise ValueError(
-            "position_seq and redundant_operation_time_seq must have the same length"
-        )
-    if whole_distance_m <= 0.0:
-        raise ValueError("whole_distance_m must be positive")
-
-    position_arr = np.asarray(position_seq, dtype=np.float64)
-    redundant_operation_time_arr = np.asarray(
-        redundant_operation_time_seq,
-        dtype=np.float64,
-    )
-    dist_to_target_arr = float(target_position_m) - position_arr
-    progress_arr = np.minimum(
-        1.0,
-        1.0 - dist_to_target_arr / float(whole_distance_m),
-    )
-    expected_redundant_operation_time_arr = float(max_redundant_operation_time_s) * (
-        1.0 - progress_arr
-    )
-
-    return (
-        redundant_operation_time_arr - expected_redundant_operation_time_arr
-    ).astype(np.float32)
-
-
-def plot_punctuality_dense_reward_series(
-    reward_seq: Sequence[float],
-    gamma: float,
-) -> None:
-    if len(reward_seq) == 0:
-        print("No punctuality dense reward samples collected; skipped debug plot.")
-        return
-
-    import matplotlib.pyplot as plt
-
-    step_axis = np.arange(1, len(reward_seq) + 1, dtype=np.int32)
-    fig, ax = plt.subplots(figsize=(10, 4.5))
-    ax.plot(
-        step_axis,
-        np.asarray(reward_seq, dtype=np.float32),
-        color="#2563eb",
-        linewidth=1.4,
-        label="Dense punctuality reward",
-    )
-    ax.axhline(0.0, color="black", linewidth=1.0, linestyle="--", alpha=0.6)
-    ax.set_title("_potential_punctuality_v36 dense reward")
-    ax.set_xlabel("Agent step")
-    ax.set_ylabel("punctuality reward")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    fig.tight_layout()
-    plt.show()
-
-
-def _get_env_attr_float(venv, attr_name: str) -> float:
-    values = venv.get_attr(attr_name)
+def _get_initial_state(venv):
+    values = venv.get_attr("state")
     if not values:
-        raise RuntimeError(f"Could not read environment attribute: {attr_name}")
-    return float(values[0])
+        raise RuntimeError("Could not read environment state")
+    return values[0]
 
 
 def build_initial_rollout_series(
@@ -139,28 +45,23 @@ def build_initial_rollout_series(
     list[float],
     list[float],
 ]:
+    state = _get_initial_state(venv)
     return (
-        [_get_env_attr_float(venv, "current_position")],
-        [_get_env_attr_float(venv, "current_speed")],
-        [_get_env_attr_float(venv, "current_operation_time")],
-        [_get_env_attr_float(venv, "current_redundant_operation_time")],
+        [float(state.position_m)],
+        [float(state.speed_mps)],
+        [float(state.operation_time_s)],
+        [float(state.redundant_operation_time_s)],
     )
 
 
 def plot_operation_time_series(
     operation_time_seq: Sequence[float],
     redundant_operation_time_seq: Sequence[float],
-    punctuality_error_seq: Sequence[float],
     target_time_s: float,
 ) -> None:
-    if not (
-        len(operation_time_seq)
-        == len(redundant_operation_time_seq)
-        == len(punctuality_error_seq)
-    ):
+    if len(operation_time_seq) != len(redundant_operation_time_seq):
         raise ValueError(
-            "operation_time_seq, redundant_operation_time_seq, and "
-            "punctuality_error_seq must have the same length"
+            "operation_time_seq and redundant_operation_time_seq must have the same length"
         )
     if len(operation_time_seq) == 0:
         print("No operation-time samples collected; skipped time-series plot.")
@@ -174,12 +75,11 @@ def plot_operation_time_series(
         redundant_operation_time_seq,
         dtype=np.float32,
     )
-    punctuality_error_arr = np.asarray(punctuality_error_seq, dtype=np.float32)
 
-    fig, (ax_time, ax_redundant, ax_error) = plt.subplots(
-        3,
+    fig, (ax_time, ax_redundant) = plt.subplots(
+        2,
         1,
-        figsize=(10, 9.5),
+        figsize=(10, 6.5),
         sharex=True,
     )
     ax_time.plot(
@@ -222,26 +122,7 @@ def plot_operation_time_series(
     ax_redundant.grid(True, alpha=0.3)
     ax_redundant.legend()
 
-    ax_error.plot(
-        step_axis,
-        punctuality_error_arr,
-        color="#9333ea",
-        linewidth=1.5,
-        label="$e_r$",
-    )
-    ax_error.axhline(
-        0.0,
-        color="black",
-        linewidth=1.0,
-        linestyle="--",
-        alpha=0.6,
-        label="Expected redundancy",
-    )
-    ax_error.set_title("Redundant-time error over evaluation rollout")
-    ax_error.set_xlabel("Agent step")
-    ax_error.set_ylabel("$e_r$ (s)")
-    ax_error.grid(True, alpha=0.3)
-    ax_error.legend()
+    ax_redundant.set_xlabel("Agent step")
 
     fig.tight_layout()
     plt.show()
@@ -337,12 +218,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="评估时收集诊断信息",
     )
     parser.add_argument(
-        "--plot-punctuality-dense-reward",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="评估后展示基于 _potential_punctuality_v36 的准点差分密集奖励曲线。",
-    )
-    parser.add_argument(
         "--plot-operation-time-series",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -399,7 +274,6 @@ def main() -> None:
         print(f"  deterministic:       {args.deterministic}")
         print(f"  record_video:        {args.record_video}")
         print(f"  save_trajectory:     {args.save_trajectory}")
-        print(f"  plot_punctuality_dense_reward: {args.plot_punctuality_dense_reward}")
         print(f"  plot_operation_time_series: {args.plot_operation_time_series}")
         print(f"  model_zip_path:      {model_zip_path}")
         print(f"  model_exists:        {os.path.exists(model_zip_path)}")
@@ -485,12 +359,6 @@ def main() -> None:
     target_time_s = float(train_service.schedule_time)
     start_position_m = float(train_service.start_position)
     target_position_m = float(train_service.target_position)
-    whole_distance_m = _get_env_attr_float(venv_eval, "whole_distance")
-    max_redundant_operation_time_s = _get_env_attr_float(
-        venv_eval,
-        "max_redundant_operation_time",
-    )
-
     # VecEnv 在 done 后会自动 reset；终态指标优先从最后一步 info 快照读取。
     basic_info = last_info.get("basic") if isinstance(last_info, dict) else None
     basic_snapshot = basic_info if isinstance(basic_info, dict) else {}
@@ -507,12 +375,27 @@ def main() -> None:
     comfort_tav = float(basic_snapshot.get("comfort_tav", 0.0))
     comfort_er_pct = float(basic_snapshot.get("comfort_er_pct", 0.0))
     comfort_rms = float(basic_snapshot.get("comfort_rms", 0.0))
+    outcome_info = last_info.get("outcome") if isinstance(last_info, dict) else None
+    outcome_snapshot = outcome_info if isinstance(outcome_info, dict) else {}
+    truncated = bool(
+        outcome_snapshot.get(
+            "truncated",
+            last_info.get("TimeLimit.truncated", False)
+            if isinstance(last_info, dict)
+            else False,
+        )
+    )
+    terminated = bool(
+        outcome_snapshot.get("terminated", episode_over and not truncated)
+    )
 
     success, precise_arrival, punctual_arrival = classify_arrival_status(
         stop_error_m=stop_error_m,
         time_error_s=time_error_s,
         final_speed_mps=final_speed_mps,
         train_service=train_service,
+        terminated=terminated,
+        truncated=truncated,
     )
 
     saved_npz_path = ""
@@ -555,8 +438,8 @@ def main() -> None:
             comfort_tav=comfort_tav,
             comfort_er_pct=comfort_er_pct,
             comfort_rms=comfort_rms,
-            terminated=bool(success),
-            truncated=not bool(success),
+            terminated=terminated,
+            truncated=truncated,
             episode_steps=episode_steps,
             trajectory_pos_m=np.asarray(trajectory_position_seq, dtype=np.float32),
             trajectory_speed_mps=np.asarray(trajectory_speed_seq, dtype=np.float32),
@@ -568,30 +451,6 @@ def main() -> None:
             speed_arr=trajectory_speed_seq,
             output_path=npz_path,
             metrics=trajectory_metrics,
-        )
-
-    punctuality_dense_reward_seq = np.asarray([], dtype=np.float32)
-    if args.plot_punctuality_dense_reward:
-        punctuality_dense_reward_seq = compute_punctuality_dense_reward_series(
-            position_seq=trajectory_position_seq,
-            redundant_operation_time_seq=redundant_operation_time_seq,
-            gamma=reward_discount,
-            potential_fn=lambda pos, redundant_operation_time: float(
-                venv_eval.env_method(
-                    "_potential_punctuality_v36",
-                    pos=pos,
-                    redundant_operation_time=redundant_operation_time,
-                )[0]
-            ),
-        )
-    punctuality_error_seq = np.asarray([], dtype=np.float32)
-    if args.plot_operation_time_series:
-        punctuality_error_seq = compute_punctuality_error_series(
-            position_seq=trajectory_position_seq,
-            redundant_operation_time_seq=redundant_operation_time_seq,
-            target_position_m=target_position_m,
-            whole_distance_m=whole_distance_m,
-            max_redundant_operation_time_s=max_redundant_operation_time_s,
         )
 
     venv_eval.close()
@@ -622,16 +481,10 @@ def main() -> None:
         print(f"  trajectory_json:    {saved_json_path}")
     print("=========================================")
 
-    if args.plot_punctuality_dense_reward:
-        plot_punctuality_dense_reward_series(
-            punctuality_dense_reward_seq,
-            gamma=reward_discount,
-        )
     if args.plot_operation_time_series:
         plot_operation_time_series(
             operation_time_seq,
             redundant_operation_time_seq,
-            punctuality_error_seq,
             target_time_s=target_time_s,
         )
 

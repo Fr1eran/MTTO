@@ -388,7 +388,8 @@ def replay_sps_compliance(
         T_s=step_delay_s,
     )
 
-    current_sp = -1
+    sps_state = sps.initial_state()
+    current_sp = sps_state.target_stopping_point_index
     request_open = False
     request_target_sp: int | None = None
     request_timeout_deadline = float("inf")
@@ -481,24 +482,23 @@ def replay_sps_compliance(
             else:
                 pre_timeout_max_violation_count += 1
 
-        prev_done = bool(sps.IsPrevSPSReqDone)
-        prev_sp = current_sp
-        next_sp = int(
-            sps.step_to_next_stopping_point(
-                current_pos=x,
-                current_speed=v,
-                current_time=t,
-                current_sp=current_sp,
-            )
+        prev_done = not sps_state.request_pending
+        prev_sp = sps_state.target_stopping_point_index
+        sps_state = sps.advance(
+            sps_state,
+            current_pos=x,
+            current_speed=v,
+            current_time=t,
         )
-        now_done = bool(sps.IsPrevSPSReqDone)
+        next_sp = sps_state.target_stopping_point_index
+        now_done = not sps_state.request_pending
 
         if prev_done and (not now_done) and next_sp == prev_sp:
             request_count += 1
             request_open = True
             request_target_sp = prev_sp + 1
             request_timeout_deadline = (
-                float(sps.SPSReqTimeStamp) + step_delay_s + delay_tolerance_s
+                float(sps_state.request_timestamp_s) + step_delay_s + delay_tolerance_s
             )
             timeout_active = False
             timeout_start_time = None

@@ -127,7 +127,11 @@ def build_episode_snapshots(
     selected_tags: list[str],
     episode_window_size: int,
 ) -> list[dict[str, Any]]:
-    episode_tag = "state/episode_id"
+    episode_tag = "basic/episode_id"
+    if episode_tag not in series_map:
+        # Compatibility with TensorBoard runs written before basic_info
+        # replaced the state namespace.
+        episode_tag = "state/episode_id"
     if episode_tag not in series_map:
         return []
 

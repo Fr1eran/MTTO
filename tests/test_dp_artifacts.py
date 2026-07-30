@@ -115,7 +115,7 @@ def test_compute_dp_reference_curve_saves_and_returns_cumulative_time(
 ) -> None:
     class FakeOptimizer:
         def __init__(self, **kwargs):
-            del kwargs
+            self.kwargs = kwargs
 
         def optimize(self, *, max_speed: float, delta_speed: float, max_iters: int):
             del max_speed, delta_speed, max_iters
@@ -163,5 +163,7 @@ def test_compute_dp_reference_curve_saves_and_returns_cumulative_time(
     np.testing.assert_allclose(cum_time_arr, np.asarray([0.0, 9.0]))
     assert metrics["start_speed_mps"] == pytest.approx(1.5)
     assert metrics["target_speed_mps"] == pytest.approx(0.0)
+    assert metrics["max_step_distance_m"] == pytest.approx(30.0)
+    assert metrics["stage_division"] == "uniform"
     with np.load(tmp_path / "optimized_speed_curve.npz", allow_pickle=False) as data:
         np.testing.assert_allclose(data["cum_time_s"], np.asarray([0.0, 9.0]))

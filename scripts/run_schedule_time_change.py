@@ -445,11 +445,26 @@ def _run_one_case(
     total_energy_j = total_energy_kj * 1000.0
     stop_error_m = abs(target_position_m - final_position_m)
     time_error_s = total_time_s - target_time_s
+    outcome_info = last_info.get("outcome") if isinstance(last_info, dict) else None
+    outcome_snapshot = outcome_info if isinstance(outcome_info, dict) else {}
+    truncated = bool(
+        outcome_snapshot.get(
+            "truncated",
+            last_info.get("TimeLimit.truncated", False)
+            if isinstance(last_info, dict)
+            else False,
+        )
+    )
+    terminated = bool(
+        outcome_snapshot.get("terminated", episode_over and not truncated)
+    )
     success, precise_arrival, punctual_arrival = classify_arrival_status(
         stop_error_m=stop_error_m,
         time_error_s=time_error_s,
         final_speed_mps=final_speed_mps,
         train_service=train_service,
+        terminated=terminated,
+        truncated=truncated,
     )
 
     comfort_tav = float(basic_snapshot.get("comfort_tav", 0.0))
@@ -476,8 +491,8 @@ def _run_one_case(
         comfort_tav=comfort_tav,
         comfort_er_pct=comfort_er_pct,
         comfort_rms=comfort_rms,
-        terminated=bool(success),
-        truncated=not bool(success),
+        terminated=terminated,
+        truncated=truncated,
         episode_steps=episode_steps,
         trajectory_pos_m=np.asarray(trajectory_position_seq, dtype=np.float32),
         trajectory_speed_mps=np.asarray(trajectory_speed_seq, dtype=np.float32),

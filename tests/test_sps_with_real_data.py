@@ -90,7 +90,8 @@ class TestSPSIntegration:
             T_s=T_r,
         )
 
-        current_sp = -1
+        sps_state = sps.initial_state()
+        current_sp = sps_state.target_stopping_point_index
         step_history = []
 
         distances = setup_data["distance"]
@@ -102,9 +103,11 @@ class TestSPSIntegration:
             x = distances[i]
             v = speeds[i]
 
-            new_sp = sps.step_to_next_stopping_point(
-                current_pos=x, current_speed=v, current_time=t, current_sp=current_sp
+            sps_state = sps.advance(
+                sps_state,
+                current_pos=x, current_speed=v, current_time=t
             )
+            new_sp = sps_state.target_stopping_point_index
 
             if new_sp != current_sp:
                 print(

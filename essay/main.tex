@@ -1,0 +1,73 @@
+\documentclass{article}
+\usepackage{ctex} % 支持中文输出
+\usepackage{amsmath, amssymb}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+% 自定义伪代码命令
+\renewcommand{\algorithmicrequire}{\textbf{Input:}}
+\renewcommand{\algorithmicensure}{\textbf{Output:}}
+
+\begin{document}
+
+\section*{Montezuma's Revenge 核心算法伪代码}
+
+\begin{algorithm}[H]
+\caption{基于示范初始化的采样工作进程 (Demonstration-Initialized Rollout Worker)}
+\label{alg:rollout_worker}
+\begin{algorithmic}[1]
+\Require 专家示范数据序列 $\mathcal{T}_{\text{demo}} = \{(\tilde{s}_t, \tilde{a}_t, \tilde{r}_t, \tilde{s}_{t+1}, \tilde{d}_t)\}_{t=0}^T$，起始点采样窗口 $D$，RNN 预热步数 $K$，批次长度 $L$
+\State 从 $\{\tau - D, \dots, \tau\}$ 中均匀随机采样局部起始点 $\tau^* \sim \text{Uniform}(\{\tau - D, \dots, \tau\})$
+\State 将环境重置至示范状态 $\tilde{s}_{\tau^*}$
+\State 初始化时间计数器 $i \leftarrow \tau^* - K$
+\While{$\text{TRUE}$}
+    \State 从中央优化器获取最新策略参数 $\pi(\theta)$ 与全局重置点 $\tau$
+    \State 初始化成功计数器 $W \leftarrow 0$
+    \State 初始化数据批次 $\mathcal{D} \leftarrow \{\}$
+    \For{$\text{step} = 0, \dots, L-1$}
+        \If{$i \ge \tau^*$} \Comment{自主探索阶段}
+            \State 根据当前策略采样动作 $a_i \sim \pi(s_i, \theta)$
+            \State 在环境中执行 $a_i$，获取奖励 $r_i$、下一状态 $s_{i+1}$ 及终止信号 $d_{i+1}$
+            \State 设置训练掩码 $m_i \leftarrow \text{TRUE}$ \Comment{参与 RL 梯度更新}
+        \Else \Comment{RNN 隐藏状态重放预热阶段}
+            \State 复制示范数据 $a_i = \tilde{a}_i, r_i = \tilde{r}_i, s_{i+1} = \tilde{s}_{i+1}, d_i = \tilde{d}_i$
+            \State 设置训练掩码 $m_i \leftarrow \text{FALSE}$ \Comment{屏蔽梯度计算}
+        \EndIf
+        \State 将样本 $\{s_i, a_i, r_i, s_{i+1}, d_i, m_i\}$ 加入批次 $\mathcal{D}$
+        \State 时间计数器递增 $i \leftarrow i + 1$
+        \If{$d_i == \text{TRUE}$} \Comment{回合结束}
+            \If{$\sum_{t \ge \tau^*} r_t \ge \sum_{t \ge \tau^*} \tilde{r}_t$} \Comment{表现优于或等于示范}
+                \State $W \leftarrow W + 1$
+            \EndIf
+            \State 重新采样局部起始点 $\tau^* \sim \text{Uniform}(\{\tau - D, \dots, \tau\})$
+            \State 重置时间计数器 $i \leftarrow \tau^* - K$
+            \State 重置环境至示范状态 $\tilde{s}_{\tau^*}$
+        \EndIf
+    \EndFor
+    \State 将批次 $\mathcal{D}$ 与成功计数器 $W$ 发送至中央优化器
+\EndWhile
+\end{algorithmic}
+\end{algorithm}
+
+\vspace{1em}
+
+\begin{algorithm}[H]
+\caption{中央优化器 (Central Optimizer)}
+\label{alg:optimizer}
+\begin{algorithmic}[1]
+\Require 并行 Worker 数量 $M$，起始点推进步长 $\Delta$，成功率阈值 $\rho$，初始参数 $\theta_0$，示范长度 $T$，底层 RL 算法 $\mathcal{A}$（如 PPO, A3C, IMPALA）
+\State 设置初始全局重置点 $\tau \leftarrow T$ \Comment{置于示范末尾}
+\State 启动并行采样工作进程 Worker$_i$ ($i = 0, \dots, M-1$)
+\While{$\tau > 0$}
+    \State 收集所有 Worker 的数据集合 $\mathcal{D}_{\text{total}} = \{\mathcal{D}_0, \mathcal{D}_1, \dots, \mathcal{D}_{M-1}\}$
+    \If{$\frac{\sum_{i} W_i}{\sum_{i, t} d_{i,t}} \ge \rho$} \Comment{Worker 综合成功率达到阈值}
+        \State 推进全局重置点 $\tau \leftarrow \tau - \Delta$ \Comment{向起点方向回溯}
+    \EndIf
+    \State 使用基础 RL 算法更新参数 $\theta \leftarrow \mathcal{A}(\theta, \mathcal{D}_{\text{total}})$ \Comment{排除 $m_i = \text{FALSE}$ 的样本}
+    \State 广播最新参数 $\theta$ 与重置点 $\tau$ 给所有 Worker
+\EndWhile
+\Ensure 训练完成的策略参数 $\theta$ \Comment{此时 $\tau=0$，智能体可从游戏起点通关}
+\end{algorithmic}
+\end{algorithm}
+
+\end{document}

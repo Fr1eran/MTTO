@@ -1,4 +1,3 @@
-import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -10,15 +9,17 @@ from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
 from rl.env_factory import make_env
-from rl.mtto_env import DEFAULT_PUNCTUALITY_DP_CURVE_DIR, MTTOEnv, RewardConfig
+from rl.mtto_env import MTTOEnv, RewardConfig
+from rl.observation_builder import ObservationBuilder
+from rl.operational_stepper import OperationalStepper
+from rl.reward_calculator import RewardCalculator
 from utils.io_utils import save_curve_and_metrics
 
-SUCCESS_STOP_ERROR_LIMIT_M = 9.0
 PUNCTUAL_ARRIVAL_TIME_ERROR_LIMIT_S = 10.0
 
 BEST_TRAJECTORY_SELECTION_RULE = "arrival_precise_punctual_energy_else_reward"
 BEST_TRAJECTORY_SELECTION_RULE_DESCRIPTION = (
-    "Any successful arrival (stop_error_m < 9.0) outranks any non-arrival "
+    "Any successful arrival (terminated=True and truncated=False) outranks any non-arrival "
     "evaluation. "
     "Among non-arrivals, higher total_reward wins. Among successful arrivals, "
     "precise arrival wins first; if neither trajectory is precise, lower "
@@ -115,10 +116,6 @@ def build_single_eval_env(
     enable_trajectory_tracking: bool = True,
     render_mode: str | None = None,
     reward_config: RewardConfig | None = None,
-    punctuality_dp_curve_dir: str | os.PathLike[str] | None = (
-        DEFAULT_PUNCTUALITY_DP_CURVE_DIR
-    ),
-    punctuality_reference_match_tolerance: float = 1e-3,
 ) -> gym.Env[Any, Any]:
     return make_env(
         vehicle=vehicle,
@@ -131,8 +128,6 @@ def build_single_eval_env(
         enable_trajectory_tracking=enable_trajectory_tracking,
         render_mode=render_mode,
         reward_config=reward_config,
-        punctuality_dp_curve_dir=punctuality_dp_curve_dir,
-        punctuality_reference_match_tolerance=punctuality_reference_match_tolerance,
     )
 
 
@@ -145,11 +140,11 @@ def unwrap_mtto_env(env: gym.Env[Any, Any]) -> MTTOEnv:
 
 def is_successful_arrival(
     *,
-    stop_error_m: float,
-    final_speed_mps: float,
-    train_service: TrainService,
+    terminated: bool,
+    truncated: bool,
 ) -> bool:
-    return bool(abs(float(stop_error_m)) < SUCCESS_STOP_ERROR_LIMIT_M)
+    """Return the environment's authoritative task-completion result."""
+    return bool(terminated and not truncated)
 
 
 def is_precise_arrival(
@@ -179,11 +174,12 @@ def classify_arrival_status(
     time_error_s: float,
     final_speed_mps: float,
     train_service: TrainService,
+    terminated: bool,
+    truncated: bool,
 ) -> tuple[bool, bool, bool]:
     success = is_successful_arrival(
-        stop_error_m=stop_error_m,
-        final_speed_mps=final_speed_mps,
-        train_service=train_service,
+        terminated=terminated,
+        truncated=truncated,
     )
     precise_arrival = is_precise_arrival(
         success=success,
@@ -226,11 +222,11 @@ def evaluate_policy_once(
         total_reward += float(reward)
         episode_steps += 1
 
-        margin_to_vmax = float(mtto_env.current_max_speed) - float(
-            mtto_env.current_speed
+        margin_to_vmax = float(mtto_env.state.max_speed_mps) - float(
+            mtto_env.state.speed_mps
         )
-        margin_to_vmin = float(mtto_env.current_speed) - float(
-            mtto_env.current_min_speed
+        margin_to_vmin = float(mtto_env.state.speed_mps) - float(
+            mtto_env.state.min_speed_mps
         )
         safety_margin = min(margin_to_vmax, margin_to_vmin)
         safety_margins.append(safety_margin)
@@ -253,22 +249,24 @@ def evaluate_policy_once(
         dtype=np.float32,
     )
 
-    final_position = float(basic_info.get("position", mtto_env.current_position))
+    final_position = float(basic_info.get("position", mtto_env.state.position_m))
     target_time_s = float(mtto_env.train_service.schedule_time)
     total_time_s = float(
-        basic_info.get("operation_time", mtto_env.current_operation_time)
+        basic_info.get("operation_time", mtto_env.state.operation_time_s)
     )
     total_energy_kj = float(
-        basic_info.get("energy_consumption", mtto_env.current_energy_consumption)
+        basic_info.get("energy_consumption", mtto_env.state.energy_consumption_kj)
     )
     stop_error_m = abs(float(mtto_env.train_service.target_position) - final_position)
     time_error_s = total_time_s - target_time_s
-    final_speed_mps = float(basic_info.get("speed", mtto_env.current_speed))
+    final_speed_mps = float(basic_info.get("speed", mtto_env.state.speed_mps))
     success, precise_arrival, punctual_arrival = classify_arrival_status(
         stop_error_m=stop_error_m,
         time_error_s=time_error_s,
         final_speed_mps=final_speed_mps,
         train_service=mtto_env.train_service,
+        terminated=terminated,
+        truncated=truncated,
     )
 
     return PolicyEvaluationResult(
@@ -286,12 +284,8 @@ def evaluate_policy_once(
         final_speed_mps=final_speed_mps,
         stop_error_m=stop_error_m,
         time_error_s=time_error_s,
-        strict_stop_error_limit_m=get_strict_stop_error_limit_m(
-            mtto_env.train_service
-        ),
-        strict_time_error_limit_s=get_strict_time_error_limit_s(
-            mtto_env.train_service
-        ),
+        strict_stop_error_limit_m=get_strict_stop_error_limit_m(mtto_env.train_service),
+        strict_time_error_limit_s=get_strict_time_error_limit_s(mtto_env.train_service),
         comfort_tav=float(basic_info.get("comfort_tav", 0.0)),
         comfort_er_pct=float(basic_info.get("comfort_er_pct", 0.0)),
         comfort_rms=float(basic_info.get("comfort_rms", 0.0)),
@@ -302,6 +296,102 @@ def evaluate_policy_once(
         trajectory_speed_mps=trajectory_speed,
         min_safety_margin_mps=min_safety_margin_mps,
         mean_safety_margin_mps=mean_safety_margin_mps,
+    )
+
+
+def evaluate_operational_policy_once(
+    policy: Any,
+    *,
+    stepper: OperationalStepper,
+    reward_calculator: RewardCalculator,
+    observation_builder: ObservationBuilder,
+    deterministic: bool = True,
+) -> PolicyEvaluationResult:
+    """Evaluate a policy without a Gym environment.
+
+    ``policy`` receives the same float32 observation as the training
+    environment and may return either an action array or a scalar action.
+    Stable-Baselines models are accepted directly through their ``predict``
+    method.
+    """
+    state = stepper.reset()
+    total_reward = 0.0
+    comfort_tav = comfort_sum_sq = 0.0
+    comfort_exceedance_count = 0
+    positions = [state.position_m]
+    speeds = [abs(state.speed_mps)]
+    safety_margins: list[float] = []
+    terminated = truncated = False
+
+    while not (terminated or truncated):
+        observation = observation_builder.build(state)
+        if hasattr(policy, "predict"):
+            action, _ = policy.predict(observation, deterministic=deterministic)
+        else:
+            action = policy(observation)
+        action_value = float(np.asarray(action, dtype=np.float32).reshape(-1)[0])
+        acceleration = (
+            stepper.vehicle.max_acc + stepper.vehicle.max_dec
+        ) / 2 + action_value * (stepper.vehicle.max_acc - stepper.vehicle.max_dec) / 2
+        transition = stepper.advance(state, acceleration)
+        breakdown = reward_calculator.calculate(transition)
+        total_reward += breakdown.total
+        delta_acc = abs(transition.acceleration_mps2 - state.acceleration_mps2)
+        comfort_tav += delta_acc
+        comfort_sum_sq += delta_acc**2
+        if delta_acc > stepper.train_service.max_acc_change:
+            comfort_exceedance_count += 1
+        state = transition.next_state
+        terminated, truncated = transition.terminated, transition.truncated
+        positions.append(state.position_m)
+        speeds.append(abs(state.speed_mps))
+        safety_margins.append(
+            min(
+                state.max_speed_mps - state.speed_mps,
+                state.speed_mps - state.min_speed_mps,
+            )
+        )
+
+    steps = state.step_count
+    stop_error = state.stop_error_m
+    time_error = state.operation_time_s - stepper.train_service.schedule_time
+    success, precise_arrival, punctual_arrival = classify_arrival_status(
+        stop_error_m=stop_error,
+        time_error_s=time_error,
+        final_speed_mps=state.speed_mps,
+        train_service=stepper.train_service,
+        terminated=terminated,
+        truncated=truncated,
+    )
+    return PolicyEvaluationResult(
+        success=success,
+        precise_arrival=precise_arrival,
+        punctual_arrival=punctual_arrival,
+        total_reward=total_reward,
+        total_time_s=state.operation_time_s,
+        target_time_s=stepper.train_service.schedule_time,
+        total_energy_j=state.energy_consumption_kj * 1000.0,
+        total_energy_kj=state.energy_consumption_kj,
+        start_position_m=stepper.train_service.start_position,
+        target_position_m=stepper.train_service.target_position,
+        final_position_m=state.position_m,
+        final_speed_mps=state.speed_mps,
+        stop_error_m=stop_error,
+        time_error_s=time_error,
+        strict_stop_error_limit_m=get_strict_stop_error_limit_m(stepper.train_service),
+        strict_time_error_limit_s=get_strict_time_error_limit_s(stepper.train_service),
+        comfort_tav=comfort_tav,
+        comfort_er_pct=comfort_exceedance_count / max(steps, 1) * 100.0,
+        comfort_rms=float(np.sqrt(comfort_sum_sq / max(steps, 1))),
+        terminated=terminated,
+        truncated=truncated,
+        episode_steps=steps,
+        trajectory_pos_m=np.asarray(positions, dtype=np.float32),
+        trajectory_speed_mps=np.asarray(speeds, dtype=np.float32),
+        min_safety_margin_mps=float(np.min(safety_margins)) if safety_margins else 0.0,
+        mean_safety_margin_mps=float(np.mean(safety_margins))
+        if safety_margins
+        else 0.0,
     )
 
 
@@ -348,10 +438,7 @@ def _best_update_reason_for_successes(
     candidate: PolicyEvaluationResult,
     previous: PolicyEvaluationResult,
 ) -> str | None:
-    if (
-        candidate.precise_arrival
-        and not previous.precise_arrival
-    ):
+    if candidate.precise_arrival and not previous.precise_arrival:
         return "precise_arrival_reached"
     if (
         not candidate.precise_arrival
@@ -360,10 +447,7 @@ def _best_update_reason_for_successes(
     ):
         return "lower_stop_error_before_precise_arrival"
 
-    if (
-        candidate.punctual_arrival
-        and not previous.punctual_arrival
-    ):
+    if candidate.punctual_arrival and not previous.punctual_arrival:
         return "punctual_arrival_reached"
     if (
         not candidate.punctual_arrival

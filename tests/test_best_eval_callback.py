@@ -95,6 +95,8 @@ def _build_result(
         time_error_s=resolved_time_error_s,
         final_speed_mps=resolved_final_speed_mps,
         train_service=train_service,
+        terminated=success,
+        truncated=not success,
     )
     return PolicyEvaluationResult(
         success=success,
@@ -341,21 +343,21 @@ def test_safety_violation_position_recorder_records_bins(
     recorder.locals = {
         "infos": [
             {
-                "state": {"position": 100.0},
+                "basic": {"position": 100.0},
+                "outcome": {"truncated": False},
                 "constraint": {
                     "margin_to_vmax_mps": 2.0,
                     "margin_to_vmin_mps": 2.0,
                     "violation_code": 0,
-                    "is_truncated": False,
                 },
             },
             {
-                "state": {"position": 600.0},
+                "basic": {"position": 600.0},
+                "outcome": {"truncated": False},
                 "constraint": {
                     "margin_to_vmax_mps": -0.5,
                     "margin_to_vmin_mps": 1.0,
                     "violation_code": 3,
-                    "is_truncated": False,
                 },
             },
         ],
@@ -366,15 +368,16 @@ def test_safety_violation_position_recorder_records_bins(
     recorder.locals = {
         "infos": [
             {
-                "state": {"position": 650.0},
+                "basic": {"position": 650.0},
+                "outcome": {"truncated": True},
                 "constraint": {
                     "margin_to_vmax_mps": 1.0,
                     "margin_to_vmin_mps": -0.2,
                     "violation_code": 2,
-                    "is_truncated": True,
                 },
             },
             {
+                # Legacy state / constraint payloads remain readable.
                 "state": {"position": 1100.0},
                 "constraint": {
                     "margin_to_vmax_mps": 3.0,
@@ -391,12 +394,12 @@ def test_safety_violation_position_recorder_records_bins(
     recorder.locals = {
         "infos": [
             {
-                "state": {"position": 1500.0},
+                "basic": {"position": 1500.0},
+                "outcome": {"truncated": False},
                 "constraint": {
                     "margin_to_vmax_mps": 4.0,
                     "margin_to_vmin_mps": 4.0,
                     "violation_code": 0,
-                    "is_truncated": False,
                 },
             }
         ],
@@ -479,6 +482,9 @@ def test_to_metrics_includes_selection_rule() -> None:
 
     assert metrics["selection_rule"] == BEST_TRAJECTORY_SELECTION_RULE
     assert metrics["success"] is True
+    assert "terminated" not in metrics
+    assert "truncated" not in metrics
+    assert "violation_code" not in metrics
     assert metrics["precise_arrival"] is True
     assert metrics["punctual_arrival"] is True
     assert metrics["strict_stop_error_limit_m"] == 0.3
@@ -597,22 +603,18 @@ def test_describe_best_update_reason_prefers_lower_time_error_before_punctual_ar
     )
 
 
-def test_successful_arrival_uses_fixed_stop_error_boundary() -> None:
-    train_service = _build_train_service()
+def test_successful_arrival_uses_terminal_flags() -> None:
     assert is_successful_arrival(
-        stop_error_m=8.9999,
-        final_speed_mps=3.0,
-        train_service=train_service,
+        terminated=True,
+        truncated=False,
     )
     assert not is_successful_arrival(
-        stop_error_m=9.0,
-        final_speed_mps=0.0,
-        train_service=train_service,
+        terminated=False,
+        truncated=False,
     )
     assert not is_successful_arrival(
-        stop_error_m=9.0001,
-        final_speed_mps=0.0,
-        train_service=train_service,
+        terminated=True,
+        truncated=True,
     )
 
 

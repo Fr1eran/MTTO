@@ -34,11 +34,9 @@ VIOLATION_RATE_METRIC_CHOICES = ("episode", "sample")
 SAFETY_VIOLATION_DISPLAY_BIN_SIZE_M = 5000.0
 DEFAULT_ABLATION_ROOT = "output/optimal/rl/reward_ablation"
 PROFILE_COLORS: dict[str, str] = {
-    "basic": "#1f77b4",
-    "basic_safety": "#2ca02c",
-    "basic_safety_stopping": "#ff7f0e",
-    "basic_safety_stopping_punctuality": "#d62728",
-    "full_shaping": "#9467bd",
+    "basic": "#0072B2",
+    "basic_safety": "#E69F00",
+    "basic_safety_stopping": "#009E73",
 }
 
 

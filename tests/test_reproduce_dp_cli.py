@@ -27,8 +27,8 @@ def test_reproduce_dp_cli_defaults() -> None:
     assert args.max_outer_iterations == 100
     assert args.precompute_mode == "parallel"
     assert args.precompute_workers == 4
-    assert args.stage_division == "variable"
-    assert args.uniform_step_size == pytest.approx(100.0)
+    assert args.stage_division == "uniform"
+    assert args.uniform_step_size == pytest.approx(30.0)
     assert args.sub_stage_count == 30
     assert args.skip_disk_cache is False
 
@@ -91,7 +91,7 @@ def test_reproduce_dp_cli_stage_division_variable() -> None:
     assert args.stage_division == "variable"
     assert args.sub_stage_count == 20
     # uniform_step_size retains its default even when unused
-    assert args.uniform_step_size == pytest.approx(100.0)
+    assert args.uniform_step_size == pytest.approx(30.0)
 
 
 # ---- _format_float_token ----
@@ -295,3 +295,5 @@ def test_run_optimization_metrics_include_start_and_target_speed(
     metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
     assert metrics["start_speed_mps"] == pytest.approx(1.5)
     assert metrics["target_speed_mps"] == pytest.approx(0.0)
+    assert metrics["max_step_distance_m"] is None
+    assert metrics["stage_division"] == "variable"

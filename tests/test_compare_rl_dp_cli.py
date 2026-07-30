@@ -74,7 +74,7 @@ def test_resolve_curve_artifacts_loads_latest_dp_and_latest_rl_best(
     old_dp_curve, _ = _write_dp_artifact(old_dp_dir)
     new_dp_curve, new_dp_metrics = _write_dp_artifact(new_dp_dir)
 
-    old_rl_dir = rl_root / "430p0_100p0__full_shaping" / "best_steps"
+    old_rl_dir = rl_root / "430p0_100p0__basic_safety_stopping" / "best_steps"
     new_rl_dir = rl_root / "430p0_100p0__basic" / "best_episodes"
     old_rl_dir.mkdir(parents=True)
     new_rl_dir.mkdir(parents=True)

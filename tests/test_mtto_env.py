@@ -1,13 +1,16 @@
+from dataclasses import replace
+
 import numpy as np
 import pytest
 from gymnasium.utils.env_checker import check_env
 
-from model.common import ORS
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo, calc_levi_deceleration_scalar_numba
 from rl import env_factory
+from rl.evaluation import evaluate_operational_policy_once, evaluate_policy_once
 from rl.mtto_env import MTTOEnv, RewardConfig
+from rl.operational_state import OperationalTransition, ViolationCode
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_safeguard_curves,
@@ -15,46 +18,6 @@ from utils.data_loader import (
     load_speed_limits,
     load_stations_goal_positions,
 )
-
-
-def _fake_dp_reference_manifold(
-    self: ORS,
-    *,
-    start_position: float,
-    start_speed: float,
-    target_position: float,
-    schedule_time_s: float,
-    target_speed: float = 0.0,
-    **_kwargs,
-):
-    pos_arr = np.asarray(
-        [
-            start_position,
-            (start_position + target_position) / 2.0,
-            target_position,
-        ],
-        dtype=np.float64,
-    )
-    speed_arr = np.asarray([start_speed, 10.0, target_speed], dtype=np.float64)
-    cum_time_arr = np.asarray(
-        [0.0, schedule_time_s / 2.0, schedule_time_s], dtype=np.float64
-    )
-    ref_redundant_arr = np.asarray([20.0, 10.0, 0.0], dtype=np.float64)
-    return pos_arr, speed_arr, cum_time_arr, ref_redundant_arr
-
-
-@pytest.fixture(scope="module", autouse=True)
-def patch_dp_reference_manifold_for_env_tests():
-    monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(
-        ORS,
-        "load_or_build_ref_redundant_operation_time_from_dp",
-        _fake_dp_reference_manifold,
-    )
-    yield
-    monkeypatch.undo()
-
-
 @pytest.fixture(scope="module")
 def mtto_env():
     # 读取线路数据
@@ -153,45 +116,133 @@ def test_reset(mtto_env: MTTOEnv):
     np.testing.assert_allclose(obs[1], 0.0)  # current_speed
     np.testing.assert_allclose(obs[2], 0.0)  # current_acc
     np.testing.assert_allclose(
-        obs[3], mtto_env._normalize_acc_to_action(mtto_env._calc_coasting_acc())
+        obs[3], mtto_env.observation_builder.normalize_acc_to_action(
+            mtto_env.observation_builder.calc_coasting_acc(mtto_env.state)
+        )
     )  # suggested_dec_normalized
     np.testing.assert_allclose(obs[4], 1.0)  # remaining_schedule_time
     np.testing.assert_allclose(
         obs[5],
-        mtto_env.current_redundant_operation_time
+        mtto_env.state.redundant_operation_time_s
         / mtto_env.train_service.schedule_time,
     )  # time_redundancy
     np.testing.assert_allclose(
         obs[6],
-        mtto_env.current_max_speed / mtto_env.vehicle.max_speed,
+        mtto_env.state.max_speed_mps / mtto_env.vehicle.max_speed,
     )  # current_max_speed
     np.testing.assert_allclose(
         obs[7],
-        mtto_env.current_min_speed / mtto_env.vehicle.max_speed,
+        mtto_env.state.min_speed_mps / mtto_env.vehicle.max_speed,
     )  # current_min_speed
     np.testing.assert_allclose(obs[8], 0.0)  # current_slope
     np.testing.assert_allclose(
         obs[9],
-        mtto_env._calc_lookahead_avg_slope() / mtto_env.vehicle.max_slope_capacity,
+        mtto_env.observation_builder.calc_lookahead_avg_slope(mtto_env.state)
+        / mtto_env.vehicle.max_slope_capacity,
     )  # lookahead_avg_slope
     np.testing.assert_allclose(
         obs[10],
-        mtto_env._calc_lookahead_avg_upper_speed() / mtto_env.vehicle.max_speed,
+        mtto_env.observation_builder.calc_lookahead_avg_upper_speed(mtto_env.state)
+        / mtto_env.vehicle.max_speed,
     )  # lookahead_avg_upper_speed
     np.testing.assert_allclose(obs[11], 0.0)  # approach_progress
     assert info == {}
 
 
+@pytest.mark.parametrize(
+    "action, expected_acceleration",
+    [(-1.0, "max_dec"), (0.0, None), (1.0, "max_acc")],
+)
+def test_observation_builder_denormalizes_actions(
+    mtto_env: MTTOEnv,
+    action: float,
+    expected_acceleration: str | None,
+) -> None:
+    actual = mtto_env.observation_builder.denormalize_action(action)
+    expected = (
+        (mtto_env.vehicle.max_acc + mtto_env.vehicle.max_dec) / 2.0
+        if expected_acceleration is None
+        else getattr(mtto_env.vehicle, expected_acceleration)
+    )
+
+    assert actual == pytest.approx(expected)
+    assert mtto_env.observation_builder.normalize_acc_to_action(actual) == pytest.approx(
+        action
+    )
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        "current_position",
+        "current_speed",
+        "current_acc",
+        "current_operation_time",
+        "current_redundant_operation_time",
+        "current_energy_consumption",
+        "current_slope",
+        "current_min_speed",
+        "current_max_speed",
+        "current_stopping_point_index",
+        "current_steps",
+        "stop_error",
+        "sps",
+        "ors",
+        "ecc",
+        "whole_distance",
+        "direction",
+        "max_episode_steps",
+        "required_episode_steps",
+        "max_energy_consumption",
+        "min_operation_time",
+        "max_redundant_operation_time",
+        "_upper_speed_lut_pos_min",
+        "_upper_speed_lut_step",
+        "_upper_speed_lut_speed_arr",
+        "_get_action_denormalized",
+        "_update_motion",
+        "_get_upper_speed",
+        "_get_upper_speed_or_zero",
+        "_normalize_acc_to_action",
+        "_calc_coasting_acc",
+        "_calc_lookahead_avg_slope",
+        "_calc_lookahead_avg_upper_speed",
+        "_calc_approach_progress",
+        "_get_reward_goal",
+        "_get_obs",
+        "_last_violation_code",
+    ],
+)
+def test_mtto_env_does_not_expose_removed_compatibility_members(
+    mtto_env: MTTOEnv,
+    member: str,
+) -> None:
+    assert not hasattr(mtto_env, member)
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        "VIOLATION_CODE_ONGOING",
+        "VIOLATION_CODE_FAILED_STOP",
+        "VIOLATION_CODE_SPEED_LOW",
+        "VIOLATION_CODE_SPEED_HIGH",
+        "VIOLATION_CODE_STEP_LIMIT",
+    ],
+)
+def test_mtto_env_does_not_expose_legacy_violation_constants(member: str) -> None:
+    assert not hasattr(MTTOEnv, member)
+
+
 def test_suggested_dec_uses_coasting_acc_outside_final_approach(mtto_env: MTTOEnv):
     mtto_env.reset()
-    mtto_env.current_speed = 30.0
-    mtto_env.current_slope = 1.0
+    mtto_env.state = replace(mtto_env.state, speed_mps=30.0, slope_permille=1.0)
 
-    obs = mtto_env._get_obs()
+    obs = mtto_env.observation_builder.build(mtto_env.state)
 
     coasting_dec = calc_levi_deceleration_scalar_numba(
-        mtto_env.current_speed,
-        mtto_env.current_slope,
+        mtto_env.state.speed_mps,
+        mtto_env.state.slope_permille,
         mtto_env.vehicle.mass,
         mtto_env.vehicle.numoftrainsets,
     )
@@ -204,26 +255,29 @@ def test_suggested_dec_uses_coasting_acc_outside_final_approach(mtto_env: MTTOEn
     )
     np.testing.assert_allclose(
         obs[3],
-        mtto_env._normalize_acc_to_action(expected_coasting_acc),
+        mtto_env.observation_builder.normalize_acc_to_action(expected_coasting_acc),
     )
 
 
 def test_suggested_dec_uses_required_stop_dec_in_final_approach(mtto_env: MTTOEnv):
     mtto_env.reset()
-    mtto_env.current_position = mtto_env.train_service.target_position - 1000.0
-    mtto_env.current_speed = 20.0
-    mtto_env.current_slope = 1.0
+    mtto_env.state = replace(
+        mtto_env.state,
+        position_m=mtto_env.train_service.target_position - 1000.0,
+        speed_mps=20.0,
+        slope_permille=1.0,
+    )
 
-    obs = mtto_env._get_obs()
+    obs = mtto_env.observation_builder.build(mtto_env.state)
 
-    required_dec = -(mtto_env.current_speed**2) / (2.0 * 1000.0)
+    required_dec = -(mtto_env.state.speed_mps**2) / (2.0 * 1000.0)
     np.testing.assert_allclose(
         obs[3],
-        mtto_env._normalize_acc_to_action(required_dec),
+        mtto_env.observation_builder.normalize_acc_to_action(required_dec),
     )
     np.testing.assert_allclose(
         obs[11],
-        mtto_env._calc_approach_progress(1000.0),
+        mtto_env.observation_builder.calc_approach_progress(1000.0),
     )  # approach_progress
 
 
@@ -232,17 +286,17 @@ def test_get_upper_speed_or_zero_returns_zero_outside_lut(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     mtto_env.reset()
-    monkeypatch.setattr(mtto_env, "_upper_speed_lut_pos_min", 100.0)
-    monkeypatch.setattr(mtto_env, "_upper_speed_lut_step", 10.0)
+    monkeypatch.setattr(mtto_env.stepper, "_upper_speed_lut_pos_min", 100.0)
+    monkeypatch.setattr(mtto_env.stepper, "_upper_speed_lut_step", 10.0)
     monkeypatch.setattr(
-        mtto_env,
+        mtto_env.stepper,
         "_upper_speed_lut_speed_arr",
         np.asarray([0.0, 10.0, 20.0], dtype=np.float32),
     )
 
-    assert mtto_env._get_upper_speed_or_zero(99.0) == pytest.approx(0.0)
-    assert mtto_env._get_upper_speed_or_zero(110.0) == pytest.approx(10.0)
-    assert mtto_env._get_upper_speed_or_zero(121.0) == pytest.approx(0.0)
+    assert mtto_env.stepper.get_upper_speed_or_zero(99.0) == pytest.approx(0.0)
+    assert mtto_env.stepper.get_upper_speed_or_zero(110.0) == pytest.approx(10.0)
+    assert mtto_env.stepper.get_upper_speed_or_zero(121.0) == pytest.approx(0.0)
 
 
 def test_lookahead_avg_upper_speed_uses_window_average(
@@ -250,18 +304,18 @@ def test_lookahead_avg_upper_speed_uses_window_average(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     mtto_env.reset()
-    mtto_env.current_position = 0.0
-    mtto_env.current_speed = 5.0
-    monkeypatch.setattr(mtto_env, "_upper_speed_lut_pos_min", 0.0)
-    monkeypatch.setattr(mtto_env, "_upper_speed_lut_step", 10.0)
+    mtto_env.state = replace(mtto_env.state, position_m=0.0, speed_mps=5.0)
+    monkeypatch.setattr(mtto_env.stepper, "_upper_speed_lut_pos_min", 0.0)
+    monkeypatch.setattr(mtto_env.stepper, "_upper_speed_lut_step", 10.0)
     monkeypatch.setattr(
-        mtto_env,
+        mtto_env.stepper,
         "_upper_speed_lut_speed_arr",
         np.asarray([20.0, 20.0, 20.0, 20.0, 20.0, 20.0], dtype=np.float32),
     )
 
-    avg_upper_speed = mtto_env._calc_lookahead_avg_upper_speed(
-        lookahead_distance=100.0,
+    avg_upper_speed = mtto_env.observation_builder.calc_lookahead_avg_upper_speed(
+        mtto_env.state,
+        lookahead_distance_m=100.0,
         num_samples=2,
     )
 
@@ -273,12 +327,13 @@ def test_lookahead_avg_slope_uses_window_average(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     mtto_env.reset()
-    mtto_env.current_position = 0.0
+    mtto_env.state = replace(mtto_env.state, position_m=0.0)
     monkeypatch.setattr(mtto_env.track, "slopes", np.asarray([0.0, 4.0]))
     monkeypatch.setattr(mtto_env.track, "slope_intervals", np.asarray([0.0, 50.0]))
 
-    avg_slope = mtto_env._calc_lookahead_avg_slope(
-        lookahead_distance=100.0,
+    avg_slope = mtto_env.observation_builder.calc_lookahead_avg_slope(
+        mtto_env.state,
+        lookahead_distance_m=100.0,
         num_samples=2,
     )
 
@@ -287,24 +342,24 @@ def test_lookahead_avg_slope_uses_window_average(
 
 def test_cal_energy_consumption(mtto_env: MTTOEnv):
     obs, info = mtto_env.reset()
-    mec1, lec1 = mtto_env.ecc.calc_energy(
-        begin_pos=mtto_env.current_position,
-        begin_speed=mtto_env.current_speed,
+    mec1, lec1 = mtto_env.stepper.ecc.calc_energy(
+        begin_pos=mtto_env.state.position_m,
+        begin_speed=mtto_env.state.speed_mps,
         acc=0.0,
         distance=0.0,
-        direction=mtto_env.direction,
+        direction=mtto_env.stepper.direction,
         operation_time=0.0,
         vehicle=mtto_env.vehicle,
         track=mtto_env.track,
     )
     energy_consumption1 = mec1 + lec1
 
-    mec2, lec2 = mtto_env.ecc.calc_energy(
-        begin_pos=mtto_env.current_position,
-        begin_speed=mtto_env.current_speed,
+    mec2, lec2 = mtto_env.stepper.ecc.calc_energy(
+        begin_pos=mtto_env.state.position_m,
+        begin_speed=mtto_env.state.speed_mps,
         acc=1.0,
         distance=100.0,
-        direction=mtto_env.direction,
+        direction=mtto_env.stepper.direction,
         operation_time=14.142,
         vehicle=mtto_env.vehicle,
         track=mtto_env.track,
@@ -317,277 +372,28 @@ def test_cal_energy_consumption(mtto_env: MTTOEnv):
     assert energy_consumption2 >= 0, "Energy consumption should be non-negative"
 
 
-def test_reference_remaining_operation_time_matches_endpoints(mtto_env: MTTOEnv):
-    mtto_env.reset()
-
-    start_remaining = mtto_env._get_ref_remaining_operation_time(
-        mtto_env.train_service.start_position
-    )
-    target_remaining = mtto_env._get_ref_remaining_operation_time(
-        mtto_env.train_service.target_position
-    )
-
-    assert start_remaining == pytest.approx(
-        mtto_env.ref_total_operation_time,
-        rel=1e-3,
-    )
-    assert target_remaining == pytest.approx(0.0, abs=0.5)
 
 
-def test_mtto_env_initializes_v18_dp_reference_with_task_params(
-    mtto_env: MTTOEnv,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-) -> None:
-    called_kwargs = {}
-
-    def fake_load_dp_reference(self: ORS, **kwargs):
-        called_kwargs.update(kwargs)
-        return _fake_dp_reference_manifold(self, **kwargs)
-
-    monkeypatch.setattr(
-        ORS,
-        "load_or_build_ref_redundant_operation_time_from_dp",
-        fake_load_dp_reference,
-    )
-
-    train_service = _clone_train_service(mtto_env.train_service)
-    train_service.schedule_time = 440.0
-    env = _build_env_like(
-        mtto_env,
-        train_service=train_service,
-        punctuality_dp_curve_dir=tmp_path,
-        punctuality_reference_match_tolerance=0.25,
-    )
-
-    assert called_kwargs["start_position"] == pytest.approx(
-        train_service.start_position
-    )
-    assert called_kwargs["start_speed"] == pytest.approx(train_service.start_speed)
-    assert called_kwargs["target_position"] == pytest.approx(
-        train_service.target_position
-    )
-    assert called_kwargs["target_speed"] == pytest.approx(0.0)
-    assert called_kwargs["schedule_time_s"] == pytest.approx(440.0)
-    assert called_kwargs["dp_curve_dir"] == tmp_path
-    assert called_kwargs["force_recompute"] is False
-    assert called_kwargs["match_tolerance"] == pytest.approx(0.25)
-    assert env.ref_redundant_operation_time_func(
-        train_service.start_position
-    ) == pytest.approx(20.0)
 
 
-def test_potential_punctuality_v18_peaks_on_dp_reference(mtto_env: MTTOEnv) -> None:
-    midpoint = (
-        mtto_env.train_service.start_position + mtto_env.train_service.target_position
-    ) / 2.0
-    ref_value = mtto_env.ref_redundant_operation_time_func(midpoint)
-
-    peak = mtto_env._potential_punctuality_v18(
-        pos=midpoint,
-        redundant_operation_time=ref_value,
-    )
-    off_reference = mtto_env._potential_punctuality_v18(
-        pos=midpoint,
-        redundant_operation_time=ref_value + 10.0,
-    )
-
-    assert peak == pytest.approx(0.0)
-    assert off_reference < peak
 
 
-def test_punctuality_dense_reward_uses_dp_speed_reference(
-    mtto_env: MTTOEnv,
-) -> None:
-    mtto_env.reset()
-    midpoint = (
-        mtto_env.train_service.start_position + mtto_env.train_service.target_position
-    ) / 2.0
-    prev_pos = mtto_env.train_service.start_position
-
-    mtto_env.current_position = midpoint
-    mtto_env.current_speed = 15.0
-    mtto_env.last_state["pos"] = prev_pos
-    mtto_env.last_state["speed"] = mtto_env.train_service.start_speed
-
-    expected = mtto_env._potential_punctuality_v39(
-        pos=midpoint,
-        speed=15.0,
-    ) - mtto_env._potential_punctuality_v39(
-        pos=prev_pos,
-        speed=mtto_env.train_service.start_speed,
-    )
-
-    assert mtto_env._get_reward_punctuality_dense() == pytest.approx(expected)
 
 
-def test_dp_speed_reference_is_loaded_and_interpolated(mtto_env: MTTOEnv) -> None:
-    midpoint = (
-        mtto_env.train_service.start_position + mtto_env.train_service.target_position
-    ) / 2.0
-
-    assert mtto_env.ref_dp_speed_pos_arr.size == 3
-    assert mtto_env.ref_dp_speed_arr.size == 3
-    assert mtto_env._get_ref_dp_speed(mtto_env.train_service.start_position) == pytest.approx(
-        mtto_env.train_service.start_speed
-    )
-    assert mtto_env._get_ref_dp_speed(midpoint) == pytest.approx(10.0)
-    assert mtto_env._get_ref_dp_speed(mtto_env.train_service.target_position) == pytest.approx(
-        0.0
-    )
 
 
-def test_potential_punctuality_v39_peaks_on_dp_speed_curve(
-    mtto_env: MTTOEnv,
-) -> None:
-    midpoint = (
-        mtto_env.train_service.start_position + mtto_env.train_service.target_position
-    ) / 2.0
-
-    peak = mtto_env._potential_punctuality_v39(pos=midpoint, speed=10.0)
-    off_reference = mtto_env._potential_punctuality_v39(pos=midpoint, speed=15.0)
-
-    assert peak == pytest.approx(0.0)
-    assert off_reference < peak
 
 
-def test_punctuality_dense_reward_tracks_dp_speed_error(
-    mtto_env: MTTOEnv,
-) -> None:
-    mtto_env.reset()
-    midpoint = (
-        mtto_env.train_service.start_position + mtto_env.train_service.target_position
-    ) / 2.0
-
-    mtto_env.current_position = midpoint
-    mtto_env.current_speed = 15.0
-    mtto_env.last_state["pos"] = mtto_env.train_service.start_position
-    mtto_env.last_state["speed"] = mtto_env.train_service.start_speed
-
-    expected = mtto_env._potential_punctuality_v39(
-        pos=midpoint,
-        speed=15.0,
-    ) - mtto_env._potential_punctuality_v39(
-        pos=mtto_env.train_service.start_position,
-        speed=mtto_env.train_service.start_speed,
-    )
-
-    assert mtto_env._get_reward_punctuality_dense() == pytest.approx(expected)
 
 
-def test_mtto_env_raises_when_v18_dp_reference_is_missing(
-    mtto_env: MTTOEnv,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-) -> None:
-    def raise_missing_reference(self: ORS, **_kwargs):
-        raise FileNotFoundError("missing matching DP trajectory")
-
-    monkeypatch.setattr(
-        ORS,
-        "load_or_build_ref_redundant_operation_time_from_dp",
-        raise_missing_reference,
-    )
-
-    with pytest.raises(FileNotFoundError, match="missing matching DP trajectory"):
-        _build_env_like(mtto_env, punctuality_dp_curve_dir=tmp_path)
 
 
-def test_change_schedule_time_reloads_v18_dp_reference(
-    mtto_env: MTTOEnv,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    schedules_seen: list[float] = []
-
-    def fake_load_dp_reference(self: ORS, **kwargs):
-        schedules_seen.append(float(kwargs["schedule_time_s"]))
-        return _fake_dp_reference_manifold(self, **kwargs)
-
-    monkeypatch.setattr(
-        ORS,
-        "load_or_build_ref_redundant_operation_time_from_dp",
-        fake_load_dp_reference,
-    )
-
-    env = _build_env_like(mtto_env)
-    env.change_schedule_time(445.0)
-
-    assert schedules_seen == pytest.approx([440.0, 445.0])
-    assert env.train_service.schedule_time == pytest.approx(445.0)
 
 
-def test_punctuality_disabled_skips_v18_dp_reference_loading(
-    mtto_env: MTTOEnv,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fail_if_loads_dp_reference(self: ORS, **_kwargs):
-        raise AssertionError("DP reference should not be loaded")
-
-    monkeypatch.setattr(
-        ORS,
-        "load_or_build_ref_redundant_operation_time_from_dp",
-        fail_if_loads_dp_reference,
-    )
-
-    env = _build_env_like(
-        mtto_env,
-        reward_config=RewardConfig(enable_potential_punctuality=False),
-    )
-    env.change_schedule_time(445.0)
-
-    assert env.ref_redundant_operation_time_pos_arr.size == 0
-    assert env.ref_redundant_operation_time_arr.size == 0
-    assert env.train_service.schedule_time == pytest.approx(445.0)
 
 
-def test_make_env_passes_punctuality_reference_options(
-    mtto_env: MTTOEnv,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-) -> None:
-    captured_kwargs = {}
-
-    def fake_env(**kwargs):
-        captured_kwargs.update(kwargs)
-        return object()
-
-    monkeypatch.setattr(env_factory, "MTTOEnv", fake_env)
-
-    result = env_factory.make_env(
-        vehicle=mtto_env.vehicle,
-        track=mtto_env.track,
-        safeguard_utility=mtto_env.safeguard_utility,
-        train_service=_clone_train_service(mtto_env.train_service),
-        gamma=mtto_env.gamma,
-        max_step_distance=mtto_env.max_step_distance,
-        punctuality_dp_curve_dir=tmp_path,
-        punctuality_reference_match_tolerance=0.5,
-    )
-
-    assert result is not None
-    assert captured_kwargs["punctuality_dp_curve_dir"] == tmp_path
-    assert captured_kwargs["punctuality_reference_match_tolerance"] == pytest.approx(
-        0.5
-    )
 
 
-def test_punctuality_reward_depends_on_dp_speed_error(mtto_env: MTTOEnv):
-    mtto_env.reset()
-
-    mtto_env.current_position = mtto_env.train_service.start_position + 5000.0
-    mtto_env.current_operation_time = 120.0
-    mtto_env.last_state["pos"] = mtto_env.current_position - 100.0
-    mtto_env.last_state["operation_time"] = 118.0
-
-    mtto_env.current_speed = 5.0
-    mtto_env.last_state["speed"] = 8.0
-    reward_low_speed = mtto_env._get_reward_punctuality_dense()
-
-    mtto_env.current_speed = 25.0
-    mtto_env.last_state["speed"] = 30.0
-    reward_high_speed = mtto_env._get_reward_punctuality_dense()
-
-    assert reward_low_speed != pytest.approx(reward_high_speed)
 
 
 def test_whole_env(mtto_env: MTTOEnv):
@@ -599,10 +405,9 @@ def test_step_without_diagnostics_keeps_tb_dicts_empty(mtto_env: MTTOEnv):
     try:
         mtto_env.reset()
         action = mtto_env.action_space.sample()
-        _, _, _, _, info = mtto_env.step(action)
+        _, _, terminated, truncated, info = mtto_env.step(action)
 
         assert mtto_env.rewards_info == {}
-        assert mtto_env.state_info == {}
         assert mtto_env.constraint_info == {}
         assert mtto_env.event_info == {}
 
@@ -619,6 +424,10 @@ def test_step_without_diagnostics_keeps_tb_dicts_empty(mtto_env: MTTOEnv):
         assert isinstance(runtime, dict)
         assert expected_runtime_keys.issubset(set(runtime.keys()))
         assert expected_runtime_keys.issubset(set(mtto_env.basic_info.keys()))
+        assert info["outcome"] == {
+            "terminated": terminated,
+            "truncated": truncated,
+        }
         assert "rewards" not in info
         assert "state" not in info
         assert "constraint" not in info
@@ -641,10 +450,17 @@ def test_step_with_diagnostics_puts_namespaces_at_info_top_level(
     assert "tb_diagnostics" not in info
     runtime_namespace = "basic" if "basic" in info else "runtime"
     assert runtime_namespace in info
+    assert "outcome" in info
     assert "rewards" in info
-    assert "state" in info
+    assert "state" not in info
     assert "constraint" in info
     assert "event" in info
+    assert set(info["constraint"]) == {
+        "margin_to_vmax_mps",
+        "margin_to_vmin_mps",
+        "violation_code",
+        "speed_limit_segment",
+    }
 
     runtime = info[runtime_namespace]
     assert isinstance(runtime, dict)
@@ -690,10 +506,10 @@ def test_trajectory_tracking_can_be_enabled_without_rendering(mtto_env: MTTOEnv)
         assert len(mtto_env.trajectory_pos) == 2
         assert len(mtto_env.trajectory_speed_mps) == 2
         assert mtto_env.trajectory_pos[-1] == pytest.approx(
-            float(mtto_env.current_position)
+            float(mtto_env.state.position_m)
         )
         assert mtto_env.trajectory_speed_mps[-1] == pytest.approx(
-            abs(float(mtto_env.current_speed))
+            abs(float(mtto_env.state.speed_mps))
         )
     finally:
         mtto_env.enable_trajectory_tracking = False
@@ -706,19 +522,23 @@ def _patch_step_dependencies_for_outcome_tests(
     *,
     next_speed: float,
 ) -> None:
-    monkeypatch.setattr(mtto_env, "_update_motion", lambda: (next_speed, 0.0, 0.0))
-    monkeypatch.setattr(mtto_env.ecc, "calc_energy", lambda **_kwargs: (0.0, 0.0))
-    monkeypatch.setattr(mtto_env, "_get_upper_speed", lambda _pos: 10_000.0)
-    monkeypatch.setattr(
-        mtto_env.safeguard_utility,
-        "get_min_and_max_speed",
-        lambda **_kwargs: (0.0, 10_000.0),
-    )
-    monkeypatch.setattr(
-        mtto_env.sps,
-        "step_to_next_stopping_point",
-        lambda **_kwargs: -1,
-    )
+    def _advance(state, acceleration):
+        next_state = replace(
+            state,
+            speed_mps=next_speed,
+            acceleration_mps2=acceleration,
+            stop_error_m=abs(mtto_env.train_service.target_position - state.position_m),
+            step_count=state.step_count + 1,
+        )
+        success = next_speed == 0.0 and next_state.stop_error_m <= 9.0
+        failed_stop = next_speed == 0.0 and not success
+        return OperationalTransition(
+            state, next_state, acceleration, 0.0, 0.0, 0.0,
+            success, failed_stop,
+            ViolationCode.ONGOING if success else ViolationCode.FAILED_STOP,
+        )
+
+    monkeypatch.setattr(mtto_env.stepper, "advance", _advance)
 
 
 def test_step_failed_stop_is_truncated_with_fixed_penalty(
@@ -736,9 +556,10 @@ def test_step_failed_stop_is_truncated_with_fixed_penalty(
 
     assert terminated is False
     assert truncated is True
-    assert reward == pytest.approx(-10.0)
+    assert reward == pytest.approx(-2.0)
+    assert info["outcome"] == {"terminated": False, "truncated": True}
     assert "constraint" in info
-    assert info["constraint"]["violation_code"] == MTTOEnv.VIOLATION_CODE_FAILED_STOP
+    assert info["constraint"]["violation_code"] == int(ViolationCode.FAILED_STOP)
 
 
 def test_step_success_is_terminated_without_truncation(
@@ -749,9 +570,13 @@ def test_step_success_is_terminated_without_truncation(
     mtto_env.diagnostics_interval_steps = 1
     mtto_env.reset()
     _patch_step_dependencies_for_outcome_tests(mtto_env, monkeypatch, next_speed=0.0)
-    mtto_env.current_position = mtto_env.train_service.target_position
-    mtto_env.current_speed = 0.0
-    mtto_env.current_operation_time = mtto_env.train_service.schedule_time
+    mtto_env.state = replace(
+        mtto_env.state,
+        position_m=mtto_env.train_service.target_position,
+        speed_mps=0.0,
+        operation_time_s=mtto_env.train_service.schedule_time,
+        stop_error_m=0.0,
+    )
 
     _, _, terminated, truncated, info = mtto_env.step(
         np.asarray([0.0], dtype=np.float32)
@@ -760,96 +585,182 @@ def test_step_success_is_terminated_without_truncation(
     assert terminated is True
     assert truncated is False
     assert "constraint" in info
-    assert info["constraint"]["violation_code"] == MTTOEnv.VIOLATION_CODE_ONGOING
+    assert info["constraint"]["violation_code"] == int(ViolationCode.ONGOING)
 
 
-def test_potential_punctuality_v3_is_finite_for_extreme_negative_input(
+def test_stepper_truncates_at_required_transition_budget(
     mtto_env: MTTOEnv,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    val = mtto_env._potential_punctuality_v3(-100.0)
-    assert np.isfinite(val)
-
-
-def test_potential_punctuality_v4_peaks_at_zero_time_error(
-    mtto_env: MTTOEnv,
-) -> None:
-    peak = mtto_env._potential_punctuality_v4(0.0)
-    early = mtto_env._potential_punctuality_v4(0.1)
-    late = mtto_env._potential_punctuality_v4(-0.1)
-
-    assert peak > early
-    assert peak > late
-    assert late < early
-
-
-def test_potential_punctuality_v4_late_side_drops_monotonically(
-    mtto_env: MTTOEnv,
-) -> None:
-    slightly_late = mtto_env._potential_punctuality_v4(-0.05)
-    clearly_late = mtto_env._potential_punctuality_v4(-0.2)
-
-    assert clearly_late < slightly_late
-
-
-def test_potential_punctuality_v4_is_finite_for_extreme_input(
-    mtto_env: MTTOEnv,
-) -> None:
-    assert np.isfinite(mtto_env._potential_punctuality_v4(-100.0))
-    assert np.isfinite(mtto_env._potential_punctuality_v4(100.0))
-
-
-def test_potential_punctuality_v10_negative_redundancy_decay_grows_with_time(
-    mtto_env: MTTOEnv,
-) -> None:
-    early = mtto_env._potential_punctuality_v10(
-        redundant_operation_time=-10.0,
-        operation_time=100.0,
-    )
-    late = mtto_env._potential_punctuality_v10(
-        redundant_operation_time=-10.0,
-        operation_time=300.0,
+    stepper = mtto_env.stepper
+    state = replace(
+        stepper.reset(),
+        speed_mps=10.0,
+        step_count=stepper.required_episode_steps - 1,
     )
 
-    assert late < early
+    def _build_state(**kwargs):
+        return replace(
+            state,
+            position_m=kwargs["position_m"],
+            speed_mps=10.0,
+            acceleration_mps2=kwargs["acceleration_mps2"],
+            operation_time_s=kwargs["operation_time_s"],
+            energy_consumption_kj=kwargs["energy_consumption_kj"],
+            step_count=kwargs["step_count"],
+            sps_state=kwargs["sps_state"],
+            min_speed_mps=0.0,
+            max_speed_mps=100.0,
+            stop_error_m=10.0,
+        )
+
+    monkeypatch.setattr(stepper, "_build_state", _build_state)
+    transition = stepper.advance(state, 0.0)
+
+    assert transition.next_state.step_count == stepper.required_episode_steps
+    assert transition.terminated is False
+    assert transition.truncated is True
+    assert transition.violation_code is ViolationCode.STEP_LIMIT
 
 
-def test_potential_punctuality_v10_warning_band_does_not_use_time_decay(
+def test_stepper_allows_success_on_required_transition_budget(
+    mtto_env: MTTOEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stepper = mtto_env.stepper
+    state = replace(
+        stepper.reset(),
+        step_count=stepper.required_episode_steps - 1,
+    )
+
+    def _build_state(**kwargs):
+        return replace(
+            state,
+            position_m=mtto_env.train_service.target_position,
+            speed_mps=0.0,
+            acceleration_mps2=kwargs["acceleration_mps2"],
+            operation_time_s=kwargs["operation_time_s"],
+            energy_consumption_kj=kwargs["energy_consumption_kj"],
+            step_count=kwargs["step_count"],
+            sps_state=kwargs["sps_state"],
+            min_speed_mps=0.0,
+            max_speed_mps=100.0,
+            stop_error_m=0.0,
+        )
+
+    monkeypatch.setattr(stepper, "_build_state", _build_state)
+    transition = stepper.advance(state, 0.0)
+
+    assert transition.next_state.step_count == stepper.required_episode_steps
+    assert transition.terminated is True
+    assert transition.truncated is False
+    assert transition.violation_code is ViolationCode.ONGOING
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def test_terminal_punctuality_reward_favors_smaller_time_error(
     mtto_env: MTTOEnv,
 ) -> None:
-    early = mtto_env._potential_punctuality_v10(
-        redundant_operation_time=2.5,
-        operation_time=100.0,
+    terminal_state = replace(
+        mtto_env.state,
+        position_m=mtto_env.train_service.target_position,
+        speed_mps=0.0,
+        stop_error_m=0.0,
+        operation_time_s=mtto_env.train_service.schedule_time,
     )
-    late = mtto_env._potential_punctuality_v10(
-        redundant_operation_time=2.5,
-        operation_time=300.0,
+    punctual_reward = mtto_env.reward_calculator.calculate(
+        OperationalTransition(
+            mtto_env.state,
+            terminal_state,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            True,
+            False,
+            ViolationCode.ONGOING,
+        )
+    )
+    late_state = replace(
+        terminal_state,
+        operation_time_s=terminal_state.operation_time_s + 60.0,
+    )
+    late_reward = mtto_env.reward_calculator.calculate(
+        OperationalTransition(
+            terminal_state,
+            late_state,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            True,
+            False,
+            ViolationCode.ONGOING,
+        )
     )
 
-    np.testing.assert_allclose(early, late)
+    assert punctual_reward.terminal_punctuality > late_reward.terminal_punctuality
 
 
-def test_potential_punctuality_v10_positive_side_does_not_use_time_decay(
-    mtto_env: MTTOEnv,
-) -> None:
-    early = mtto_env._potential_punctuality_v10(
-        redundant_operation_time=10.0,
-        operation_time=100.0,
-    )
-    late = mtto_env._potential_punctuality_v10(
-        redundant_operation_time=10.0,
-        operation_time=300.0,
-    )
-
-    np.testing.assert_allclose(early, late)
-
-
-def test_punctuality_dense_reward_is_stable_for_extreme_time_redundancy(
+def test_change_schedule_time_updates_time_context_without_dp_reference(
     mtto_env: MTTOEnv,
 ) -> None:
     mtto_env.reset()
-    mtto_env.current_redundant_operation_time = -100.0
-    mtto_env.last_state["time_redundancy"] = 0.0
-    val = mtto_env._get_reward_punctuality_dense()
+    observation = mtto_env.change_schedule_time(445.0)
 
-    assert np.isfinite(val)
-    assert abs(val) < 1e4
+    assert mtto_env.train_service.schedule_time == pytest.approx(445.0)
+    assert observation.shape == mtto_env.observation_space.shape
+
+
+def test_external_rollout_uses_same_transition_and_reward_path(mtto_env: MTTOEnv) -> None:
+    action = np.asarray([-1.0], dtype=np.float32)
+    mtto_env.reset()
+    _, env_reward, env_terminated, env_truncated, _ = mtto_env.step(action)
+
+    result = evaluate_operational_policy_once(
+        lambda _obs: action,
+        stepper=mtto_env.stepper,
+        reward_calculator=mtto_env.reward_calculator,
+        observation_builder=mtto_env.observation_builder,
+    )
+
+    # From standstill, maximum braking produces the same immediate failed-stop
+    # truncation in both execution paths.
+    assert result.episode_steps == 1
+    assert result.total_reward == pytest.approx(env_reward)
+    assert result.terminated is env_terminated
+    assert result.truncated is env_truncated
+    assert result.success is False
+
+
+def test_gym_evaluation_uses_terminal_flags_without_persisting_violation_code(
+    mtto_env: MTTOEnv,
+) -> None:
+    class BrakingPolicy:
+        def predict(self, _obs, deterministic: bool = True):
+            return np.asarray([-1.0], dtype=np.float32), None
+
+    result = evaluate_policy_once(BrakingPolicy(), mtto_env)
+
+    assert result.terminated is False
+    assert result.truncated is True
+    assert result.success is False
+    assert "violation_code" not in result.to_metrics()
+    assert "terminated" not in result.to_metrics()
+    assert "truncated" not in result.to_metrics()

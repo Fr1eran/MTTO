@@ -19,7 +19,6 @@ DEFAULT_ABLATION_REWARD_PROFILES: tuple[str, ...] = (
     "basic",
     "basic_safety",
     "basic_safety_stopping",
-    "basic_safety_stopping_punctuality",
 )
 ABLATION_MANIFEST_FILENAME = "reward_ablation_manifest.json"
 
@@ -42,7 +41,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--ablation-output-root",
         type=str,
         default="output/optimal/rl/reward_ablation",
-        help="四种奖励方案消融实验的输出根目录。",
+        help="三种奖励方案消融实验的输出根目录。",
     )
     parser.add_argument(
         "--ablation-tag",
@@ -57,7 +56,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "要运行的奖励预设列表。\
-            默认按 basic -> safety -> stopping -> punctuality 的四种消融情形执行。"
+            默认按 basic -> safety -> stopping 的三种消融情形执行。"
         ),
     )
     parser.add_argument(

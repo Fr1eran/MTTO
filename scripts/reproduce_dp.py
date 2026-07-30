@@ -73,13 +73,13 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--stage-division",
         choices=("variable", "uniform"),
-        default="variable",
+        default="uniform",
         help="阶段划分方式。variable 为基于临界点的变间距划分，uniform 为等间距划分。",
     )
     parser.add_argument(
         "--uniform-step-size",
         type=float,
-        default=100.0,
+        default=30.0,
         help="等间距划分时的阶段步长(m)，仅 --stage-division uniform 时生效。",
     )
     parser.add_argument(
@@ -210,6 +210,12 @@ def _run_optimization(*, cli_args: argparse.Namespace, output_dir: str) -> int:
                 "start_speed_mps": float(train_service.start_speed),
                 "target_position_m": float(train_service.target_position),
                 "target_speed_mps": 0.0,
+                "max_step_distance_m": (
+                    float(cli_args.uniform_step_size)
+                    if cli_args.stage_division == "uniform"
+                    else None
+                ),
+                "stage_division": cli_args.stage_division,
                 **comfort_metrics,
             },
         )

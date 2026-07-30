@@ -183,7 +183,7 @@ class TensorboardCallback(BaseCallback):
 
         buckets = {
             "rewards": [],
-            "state": [],
+            "outcome": [],
             "constraint": [],
             "event": [],
             "basic": [],
@@ -198,7 +198,7 @@ class TensorboardCallback(BaseCallback):
 
         return {ns: pl for ns, pl in buckets.items() if pl}
 
-    def _enrich_state_payloads(
+    def _enrich_basic_payloads(
         self, payloads: list[dict[str, float]]
     ) -> list[dict[str, float]]:
         enriched_payloads: list[dict[str, float]] = []
@@ -219,8 +219,8 @@ class TensorboardCallback(BaseCallback):
     ) -> dict[str, float]:
         if not payloads:
             return {}
-        if namespace == "state":
-            payloads = self._enrich_state_payloads(payloads)
+        if namespace == "basic":
+            payloads = self._enrich_basic_payloads(payloads)
 
         aggregated_values: dict[str, list[float]] = {}
         for payload in payloads:
@@ -517,6 +517,11 @@ class SafetyViolationPositionRecorder(BaseCallback):
         return bool(margin_high < 0.0 or margin_low < 0.0)
 
     def _extract_position(self, info: dict[str, Any]) -> float | None:
+        basic = info.get("basic")
+        if isinstance(basic, dict) and "position" in basic:
+            return float(basic["position"])
+        # Compatibility with diagnostics emitted before basic_info absorbed
+        # the state namespace.
         state = info.get("state")
         if isinstance(state, dict) and "position" in state:
             return float(state["position"])
@@ -561,7 +566,12 @@ class SafetyViolationPositionRecorder(BaseCallback):
 
             bin_index = self._bin_index_for_position(position)
             is_violation = self._is_safety_violation(constraint)
-            is_truncated = bool(constraint.get("is_truncated", False))
+            outcome = info.get("outcome")
+            is_truncated = (
+                bool(outcome.get("truncated", False))
+                if isinstance(outcome, dict)
+                else bool(constraint.get("is_truncated", False))
+            )
 
             self._increment(self._sample_exposure_by_bin, bin_index)
             self._episode_bins_by_env[env_idx].add(bin_index)

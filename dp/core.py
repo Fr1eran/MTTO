@@ -22,7 +22,7 @@ try:
 except ImportError:
     tqdm = None
 
-from model.common import ECC, ORS
+from model.common import ECC, ORS, calc_transition_to_speed_scalar_numba
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
@@ -77,8 +77,11 @@ def _calculate_transition_with_context(
     if math.isclose(speed_k + speed_k_1, 0.0):
         return False, np.inf, np.inf
 
-    # 匀变速模型: a = (v1^2 - v0^2) / (2 * ds)
-    acc = (speed_k_1**2 - speed_k**2) / (2.0 * displacement)
+    acc, time = calc_transition_to_speed_scalar_numba(
+        speed_k,
+        speed_k_1,
+        displacement,
+    )
 
     acc_tol = 1e-9
     if acc > vehicle.max_acc + acc_tol or acc < vehicle.max_dec - acc_tol:
@@ -95,11 +98,6 @@ def _calculate_transition_with_context(
     # 检查是否进入危险速度域
     if safeguard_utility.detect_any_danger(pos=pos_sample, speed=speed_sample):
         return False, np.inf, np.inf
-
-    if np.abs(acc) < 1e-9:
-        time = np.abs(displacement) / speed_k
-    else:
-        time = (speed_k_1 - speed_k) / acc
 
     propulsion_energy, leviation_energy = ecc.calc_energy(
         begin_pos=pos_k,
@@ -310,8 +308,8 @@ class VariableSpacingDPOptimizer:
         precompute_workers: int | None = None,
         precompute_chunk_size: int | None = None,
         mp_start_method: str | None = None,
-        stage_division: Literal["variable", "uniform"] = "variable",
-        uniform_step_size: float = 10.0,
+        stage_division: Literal["variable", "uniform"] = "uniform",
+        uniform_step_size: float = 30.0,
         sub_stage_count: int = 30,
         skip_disk_cache: bool = False,
     ) -> None:

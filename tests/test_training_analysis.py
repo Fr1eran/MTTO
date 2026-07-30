@@ -573,8 +573,8 @@ def _make_callback_locals(
 ) -> dict[str, Any]:
     diagnostics: dict[str, dict[str, float]] = {
         "rewards": {"total": reward_total},
-        "state": {},
-        "constraint": {"is_truncated": truncated},
+        "outcome": {"truncated": truncated},
+        "constraint": {},
         "event": {"episode_truncated_count": truncated},
     }
     if position is not None:
@@ -601,8 +601,9 @@ def test_callback_sampling_throttle():
         callback.locals = _make_callback_locals()
         assert callback._on_step() is True
 
-    # step=1 and step=4 will be sampled, each sample records four namespaces.
-    assert len(logger.records) == 8
+    # step=1 and step=4 will be sampled; empty constraint payloads do not
+    # produce a scalar record.
+    assert len(logger.records) == 6
     assert all(value != 999.0 for _, value in logger.records)
 
 
@@ -636,7 +637,7 @@ def test_callback_reads_terminal_step_diagnostics_from_infos():
     assert callback._on_step() is True
 
     records = dict(logger.records)
-    assert records["constraint/is_truncated"] == 1.0
+    assert records["outcome/truncated"] == 1.0
     assert records["event/episode_truncated_count"] == 1.0
 
 
@@ -693,7 +694,7 @@ def test_callback_tracks_episode_id_from_dones():
         "infos": [
             {
                 "rewards": {},
-                "state": {},
+                    "basic": {},
                 "constraint": {},
                 "event": {},
             }
@@ -707,7 +708,7 @@ def test_callback_tracks_episode_id_from_dones():
         "infos": [
             {
                 "rewards": {},
-                "state": {},
+                    "basic": {},
                 "constraint": {},
                 "event": {},
             }
@@ -721,7 +722,7 @@ def test_callback_tracks_episode_id_from_dones():
         "infos": [
             {
                 "rewards": {},
-                "state": {},
+                    "basic": {},
                 "constraint": {},
                 "event": {},
             }
@@ -731,7 +732,7 @@ def test_callback_tracks_episode_id_from_dones():
     assert callback._on_step() is True
 
     episode_id_values = [
-        value for key, value in logger.records if key == "state/episode_id"
+        value for key, value in logger.records if key == "basic/episode_id"
     ]
     assert episode_id_values == [0.0, 0.0, 1.0]
 
@@ -758,17 +759,17 @@ def _build_sparse_series_map() -> dict[str, ScalarSeries]:
         "rollout/ep_rew_mean": _make_series_with_steps(
             "rollout/ep_rew_mean", steps, [-30.0, -29.5, -29.0]
         ),
-        "state/episode_id": _make_series_with_steps(
-            "state/episode_id", steps, [10.0, 120.0, 240.0]
+        "basic/episode_id": _make_series_with_steps(
+            "basic/episode_id", steps, [10.0, 120.0, 240.0]
         ),
-        "state/position": _make_series_with_steps(
-            "state/position", steps, [0.0, 5000.0, 9000.0]
+        "basic/position": _make_series_with_steps(
+            "basic/position", steps, [0.0, 5000.0, 9000.0]
         ),
-        "state/stopping_point_index": _make_series_with_steps(
-            "state/stopping_point_index", steps, [-1.0, 1.0, 2.0]
+        "basic/stopping_point_index": _make_series_with_steps(
+            "basic/stopping_point_index", steps, [-1.0, 1.0, 2.0]
         ),
-        "constraint/is_truncated": _make_series_with_steps(
-            "constraint/is_truncated", steps, [0.0, 0.0, 0.0]
+        "outcome/truncated": _make_series_with_steps(
+            "outcome/truncated", steps, [0.0, 0.0, 0.0]
         ),
         "constraint/violation_code": _make_series_with_steps(
             "constraint/violation_code", steps, [0.0, 0.0, 0.0]

@@ -63,46 +63,12 @@ def _patch_mock_safeguard_curves(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _patch_mock_punctuality_reference(monkeypatch: pytest.MonkeyPatch) -> None:
-    train_service = SimpleNamespace(
-        start_position=0.0,
-        start_speed=0.0,
-        target_position=100.0,
-    )
-    monkeypatch.setattr(
-        show_potential_function,
-        "build_scenario",
-        lambda *, schedule_time_s: (
-            object(),
-            object(),
-            SimpleNamespace(gamma=0.95),
-            train_service,
-        ),
-    )
-
-    class FakeORS:
-        def __init__(self, *, vehicle, track, factor):
-            del vehicle, track, factor
-
-        def load_or_build_ref_redundant_operation_time_from_dp(self, **kwargs):
-            assert kwargs["schedule_time_s"] == pytest.approx(430.0)
-            assert kwargs["dp_curve_dir"] == "output/optimal/dp"
-            return (
-                np.asarray([0.0, 50.0, 100.0], dtype=np.float64),
-                np.asarray([0.0, 12.0, 0.0], dtype=np.float64),
-                np.asarray([0.0, 200.0, 430.0], dtype=np.float64),
-                np.asarray([10.0, 5.0, 0.0], dtype=np.float64),
-            )
-
-    monkeypatch.setattr(show_potential_function, "ORS", FakeORS)
-
 
 def test_show_potential_function_cli_defaults() -> None:
     parser = show_potential_function._build_cli_parser()
     args = parser.parse_args([])
 
     assert args.plot_type == "stopping-heatmap"
-    assert args.save is False
     assert args.output_file is None
     assert args.minimal is False
 
@@ -123,13 +89,6 @@ def test_show_potential_function_cli_accepts_minimal_flags() -> None:
 
     args_no_minimal = parser.parse_args(["--no-minimal"])
     assert args_no_minimal.minimal is False
-
-
-def test_main_rejects_missing_output_file_when_save_enabled() -> None:
-    with pytest.raises(SystemExit) as exc_info:
-        show_potential_function.main(["--save"])
-
-    assert exc_info.value.code == 2
 
 
 def test_main_dispatches_selected_plot_type(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -175,7 +134,6 @@ def test_main_saves_figure_and_creates_parent_dir(
         [
             "--plot-type",
             "stopping-slices",
-            "--save",
             "--output-file",
             str(output_file),
         ]
@@ -206,7 +164,7 @@ def test_main_does_not_save_when_save_flag_is_disabled(
     )
     monkeypatch.setattr(show_potential_function.plt, "show", lambda: None)
 
-    exit_code = show_potential_function.main(["--plot-type", "punctuality-curve"])
+    exit_code = show_potential_function.main(["--plot-type", "safety-speed"])
 
     assert exit_code == 0
     assert figure.saved_paths == []
@@ -236,97 +194,9 @@ def test_plot_stopping_potential_slices_default_keeps_annotations() -> None:
     show_potential_function.plt.close(fig)
 
 
-def test_plot_punctuality_curve_minimal_has_axis_and_no_legend_or_reference_line() -> None:
-    fig = show_potential_function.plot_punctuality_potential_curve(minimal=True)
-    ax = fig.axes[0]
-
-    assert ax.axison is True
-    assert ax.get_legend() is None
-    assert len(ax.lines) == 3
-    show_potential_function.plt.close(fig)
 
 
-def test_plot_punctuality_curve_default_keeps_legend_and_reference_line() -> None:
-    fig = show_potential_function.plot_punctuality_potential_curve(minimal=False)
-    ax = fig.axes[0]
 
-    assert ax.axison is True
-    assert ax.get_legend() is not None
-    assert len(ax.lines) == 4
-    show_potential_function.plt.close(fig)
-
-
-def test_plot_punctuality_heatmap_v18_default_uses_reference_curve(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _patch_mock_punctuality_reference(monkeypatch)
-
-    fig = show_potential_function.plot_punctuality_potential_heatmap(
-        position_points=24,
-        relative_band_points=16,
-        minimal=False,
-    )
-    ax = fig.axes[0]
-
-    assert len(fig.axes) == 2
-    assert ax.get_xlabel() == "Position (m)"
-    assert ax.get_ylabel() == "Redundant Operation Time (s)"
-    assert ax.get_legend() is not None
-    assert len(ax.lines) == 1
-    assert ax.lines[0].get_linestyle() == "--"
-    show_potential_function.plt.close(fig)
-
-
-def test_plot_punctuality_heatmap_v18_minimal_keeps_reference_without_colorbar(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _patch_mock_punctuality_reference(monkeypatch)
-
-    fig = show_potential_function.plot_punctuality_potential_heatmap(
-        position_points=24,
-        relative_band_points=16,
-        minimal=True,
-    )
-    ax = fig.axes[0]
-
-    assert len(fig.axes) == 1
-    assert ax.axison is True
-    assert len(ax.lines) == 1
-    assert ax.lines[0].get_linestyle() == "--"
-    show_potential_function.plt.close(fig)
-
-
-def test_plot_punctuality_heatmap_v18_missing_dp_error_is_visible(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    train_service = SimpleNamespace(
-        start_position=0.0,
-        start_speed=0.0,
-        target_position=100.0,
-    )
-    monkeypatch.setattr(
-        show_potential_function,
-        "build_scenario",
-        lambda *, schedule_time_s: (
-            object(),
-            object(),
-            SimpleNamespace(gamma=0.95),
-            train_service,
-        ),
-    )
-
-    class FailingORS:
-        def __init__(self, *, vehicle, track, factor):
-            del vehicle, track, factor
-
-        def load_or_build_ref_redundant_operation_time_from_dp(self, **kwargs):
-            del kwargs
-            raise FileNotFoundError("missing matching DP trajectory")
-
-    monkeypatch.setattr(show_potential_function, "ORS", FailingORS)
-
-    with pytest.raises(FileNotFoundError, match="missing matching DP trajectory"):
-        show_potential_function.plot_punctuality_potential_heatmap()
 
 
 def test_plot_safety_speed_minimal_keeps_upper_and_lower_bounds(
@@ -423,4 +293,3 @@ def test_apply_transparent_background_sets_figure_and_axes_transparent() -> None
     assert fig.patch.get_alpha() == 0.0
     assert ax.patch.get_alpha() == 0.0
     show_potential_function.plt.close(fig)
-

@@ -7,7 +7,7 @@ import numpy as np
 
 from utils.data_loader import load_auxiliary_stopping_areas_ap_and_dp, load_stations
 
-from .collect import ScalarSeries
+from .collect import ScalarSeries, with_legacy_info_tag_aliases
 from .process import (
     align_tags_to_reference_steps,
     coefficient_of_variation,
@@ -77,7 +77,7 @@ def _row_normalized(matrix: np.ndarray) -> np.ndarray:
 def _episode_ids_for_reference_steps(
     series_map: dict[str, ScalarSeries],
     reference_steps: np.ndarray,
-    episode_tag: str = "state/episode_id",
+    episode_tag: str = "basic/episode_id",
 ) -> np.ndarray:
     episode_series = series_map.get(episode_tag)
     if episode_series is None or reference_steps.size == 0:
@@ -384,8 +384,9 @@ def compute_reward_component_impact(
     series_map: dict[str, ScalarSeries],
     component_tags: list[str] | None = None,
     episode_window_size: int = 20,
-    episode_tag: str = "state/episode_id",
+    episode_tag: str = "basic/episode_id",
 ) -> dict[str, Any]:
+    series_map = with_legacy_info_tag_aliases(series_map)
     tags = component_tags or DEFAULT_REWARD_COMPONENT_TAGS
     available = [tag for tag in tags if tag in series_map]
 
@@ -661,10 +662,11 @@ def compute_constraint_diagnostic(
     top_k_critical_points: int = 8,
     episode_window_size: int = 20,
 ) -> dict[str, Any]:
+    series_map = with_legacy_info_tag_aliases(series_map)
     required_tags = [
-        "state/position",
-        "state/stopping_point_index",
-        "constraint/is_truncated",
+        "basic/position",
+        "basic/stopping_point_index",
+        "outcome/truncated",
         "constraint/speed_limit_segment",
         "constraint/margin_to_vmax_mps",
         "constraint/margin_to_vmin_mps",
@@ -681,16 +683,16 @@ def compute_constraint_diagnostic(
     optional_tags = []
     if "constraint/violation_code" in series_map:
         optional_tags.append("constraint/violation_code")
-    if "state/episode_id" in series_map:
-        optional_tags.append("state/episode_id")
+    if "basic/episode_id" in series_map:
+        optional_tags.append("basic/episode_id")
 
     _, aligned = align_tags_to_reference_steps(
         series_map,
         required_tags + optional_tags,
-        reference_tag="state/position",
+        reference_tag="basic/position",
     )
 
-    if "state/position" not in aligned or "state/stopping_point_index" not in aligned:
+    if "basic/position" not in aligned or "basic/stopping_point_index" not in aligned:
         return {
             "available": False,
             "geographic_failure_distribution": {},
@@ -699,15 +701,15 @@ def compute_constraint_diagnostic(
             "critical_point_risk": {},
         }
 
-    positions = aligned["state/position"]
-    truncated_flags = aligned["constraint/is_truncated"]
-    sp_values = aligned["state/stopping_point_index"]
+    positions = aligned["basic/position"]
+    truncated_flags = aligned["outcome/truncated"]
+    sp_values = aligned["basic/stopping_point_index"]
     speed_segment_values = aligned["constraint/speed_limit_segment"]
     margin_to_vmax = aligned["constraint/margin_to_vmax_mps"]
     margin_to_vmin = aligned["constraint/margin_to_vmin_mps"]
     violation_codes = aligned.get("constraint/violation_code", np.zeros_like(positions))
     episode_ids = np.rint(
-        aligned.get("state/episode_id", np.full_like(positions, -1.0))
+        aligned.get("basic/episode_id", np.full_like(positions, -1.0))
     ).astype(np.int64)
 
     if positions.size <= 1:
@@ -919,10 +921,11 @@ def compute_evolution_metrics(
     series_map: dict[str, ScalarSeries],
     episode_window_size: int = 20,
 ) -> dict[str, Any]:
+    series_map = with_legacy_info_tag_aliases(series_map)
     required_tags = [
-        "state/episode_id",
-        "state/position",
-        "constraint/is_truncated",
+        "basic/episode_id",
+        "basic/position",
+        "outcome/truncated",
         "constraint/violation_code",
     ]
     if any(tag not in series_map for tag in required_tags):
@@ -935,7 +938,7 @@ def compute_evolution_metrics(
     reference_steps, aligned = align_tags_to_reference_steps(
         series_map,
         required_tags,
-        reference_tag="state/episode_id",
+        reference_tag="basic/episode_id",
     )
     if any(tag not in aligned for tag in required_tags):
         return {
@@ -944,9 +947,9 @@ def compute_evolution_metrics(
             "stage_profiles": [],
         }
 
-    episode_ids = np.rint(aligned["state/episode_id"]).astype(np.int64)
-    positions = aligned["state/position"]
-    truncated_flags = aligned["constraint/is_truncated"] >= 0.5
+    episode_ids = np.rint(aligned["basic/episode_id"]).astype(np.int64)
+    positions = aligned["basic/position"]
+    truncated_flags = aligned["outcome/truncated"] >= 0.5
     violation_states = _to_violation_states(aligned["constraint/violation_code"])
 
     valid_mask = episode_ids >= 0

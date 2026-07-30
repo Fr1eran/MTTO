@@ -18,11 +18,31 @@ class ScalarSeries:
 
 DEFAULT_SAMPLING_HEALTH_TAGS = [
     "rollout/ep_rew_mean",
-    "state/episode_id",
-    "constraint/is_truncated",
+    "basic/episode_id",
+    "outcome/truncated",
     "constraint/violation_code",
     "rewards/safety",
 ]
+
+
+# Writers use the canonical names below.  Readers retain aliases so existing
+# TensorBoard runs generated before the info-contract cleanup remain analyzable.
+LEGACY_INFO_TAG_ALIASES = {
+    "basic/episode_id": "state/episode_id",
+    "basic/position": "state/position",
+    "basic/stopping_point_index": "state/stopping_point_index",
+    "outcome/truncated": "constraint/is_truncated",
+}
+
+
+def with_legacy_info_tag_aliases(
+    series_map: dict[str, ScalarSeries],
+) -> dict[str, ScalarSeries]:
+    resolved = dict(series_map)
+    for canonical_tag, legacy_tag in LEGACY_INFO_TAG_ALIASES.items():
+        if canonical_tag not in resolved and legacy_tag in resolved:
+            resolved[canonical_tag] = resolved[legacy_tag]
+    return resolved
 
 
 def list_run_directories(log_root: str | Path) -> list[Path]:
@@ -129,6 +149,7 @@ def compute_sampling_health(
     *,
     key_tags: list[str] | None = None,
 ) -> dict[str, Any]:
+    series_map = with_legacy_info_tag_aliases(series_map)
     tags = key_tags or DEFAULT_SAMPLING_HEALTH_TAGS
     available_tags = [tag for tag in tags if tag in series_map]
 

@@ -133,8 +133,8 @@ def compute_dp_reference_curve(
     precompute_workers: int | None = 4,
     precompute_chunk_size: int | None = None,
     mp_start_method: str | None = None,
-    stage_division: str = "variable",
-    uniform_step_size: float = 100.0,
+    stage_division: str = "uniform",
+    uniform_step_size: float = 30.0,
     sub_stage_count: int = 30,
     skip_disk_cache: bool = False,
     show_precompute_progress: bool = True,
@@ -187,6 +187,10 @@ def compute_dp_reference_curve(
         "start_speed_mps": float(task_train_service.start_speed),
         "target_position_m": float(task_train_service.target_position),
         "target_speed_mps": float(target_speed),
+        "max_step_distance_m": (
+            float(uniform_step_size) if stage_division == "uniform" else None
+        ),
+        "stage_division": stage_division,
         **comfort_metrics,
     }
 

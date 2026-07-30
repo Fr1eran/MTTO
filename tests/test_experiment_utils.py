@@ -17,28 +17,31 @@ from rl.experiment_utils import (
     reward_profile_names,
     save_run_metadata,
 )
-from rl.mtto_env import DEFAULT_PUNCTUALITY_DP_CURVE_DIR
 
 
-def test_reward_profile_names_include_ablation_profiles() -> None:
+def test_reward_profile_names_include_real_pbrs_ablation_profiles() -> None:
     assert reward_profile_names() == (
-        "full_shaping",
         "basic",
         "basic_safety",
         "basic_safety_stopping",
-        "basic_safety_stopping_punctuality",
     )
 
 
-def test_basic_reward_profiles_keep_energy_and_comfort_enabled() -> None:
-    expected_flags = {
-        "basic": (False, False, False),
-        "basic_safety": (True, False, False),
-        "basic_safety_stopping": (True, True, False),
-        "basic_safety_stopping_punctuality": (True, True, True),
-        DEFAULT_REWARD_PROFILE_NAME: (True, True, True),
-    }
+@pytest.mark.parametrize(
+    "profile_name",
+    ("full_shaping", "basic_safety_stopping_punctuality"),
+)
+def test_removed_punctuality_profiles_are_rejected(profile_name: str) -> None:
+    with pytest.raises(ValueError):
+        resolve_reward_profile(profile_name)
 
+
+def test_reward_profiles_keep_energy_comfort_and_toggle_pbrs() -> None:
+    expected_flags = {
+        "basic": (False, False),
+        "basic_safety": (True, False),
+        "basic_safety_stopping": (True, True),
+    }
     for profile_name, expected in expected_flags.items():
         reward_config = build_reward_config(profile_name)
         assert reward_config.enable_energy is True
@@ -46,7 +49,6 @@ def test_basic_reward_profiles_keep_energy_and_comfort_enabled() -> None:
         assert (
             reward_config.enable_potential_safety,
             reward_config.enable_potential_stopping,
-            reward_config.enable_potential_punctuality,
         ) == expected
 
 
@@ -55,11 +57,11 @@ def test_resolve_output_dir_scopes_non_default_profile_and_experiment_tag() -> N
         output_root="output/optimal/rl",
         schedule_time_s=430.0,
         max_step_distance=100.0,
-        reward_profile_name="basic_safety",
+        reward_profile_name="basic",
         experiment_tag="Trial A",
     )
 
-    assert Path(output_dir).name == "430p0_100p0__basic_safety__trial_a"
+    assert Path(output_dir).name == "430p0_100p0__basic__trial_a"
 
 
 def test_resolve_tb_log_name_generates_experiment_scoped_name() -> None:
@@ -72,7 +74,7 @@ def test_resolve_tb_log_name_generates_experiment_scoped_name() -> None:
         experiment_tag=None,
     )
 
-    assert tb_log_name == "train_log__monitor_best__430p0_100p0__full_shaping"
+    assert tb_log_name == "train_log__monitor_best__430p0_100p0__basic_safety_stopping"
 
 
 def test_load_run_metadata_falls_back_to_parent_directory(tmp_path: Path) -> None:
@@ -90,17 +92,6 @@ def test_load_run_metadata_falls_back_to_parent_directory(tmp_path: Path) -> Non
     assert load_run_metadata(run_dir) == expected_metadata
     assert load_run_metadata(final_dir) == expected_metadata
 
-
-def test_build_run_metadata_records_punctuality_v18_reference() -> None:
-    metadata = build_run_metadata(
-        reward_profile=resolve_reward_profile(DEFAULT_REWARD_PROFILE_NAME),
-        schedule_time_s=430.0,
-        max_step_distance=30.0,
-        reward_discount=0.995,
-    )
-
-    assert metadata["punctuality_potential_version"] == "v18"
-    assert metadata["punctuality_dp_curve_dir"] == DEFAULT_PUNCTUALITY_DP_CURVE_DIR
 
 
 def test_build_rl_trajectory_comparison_key_uses_selection_key() -> None:
@@ -224,4 +215,3 @@ def test_add_panel_label_places_text_on_axes() -> None:
     assert text.get_va() == "top"
 
     plt.close(fig)
-

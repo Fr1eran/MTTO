@@ -112,7 +112,7 @@ DEFAULT_SCHEDULE_TIME_S = 430.0
 DEFAULT_REWARD_DISCOUNT = 0.998
 DEFAULT_ROLLOUT_STEPS_PER_UPDATE = 8192
 DEFAULT_MAX_STEP_DISTANCE = 30.0
-DEFAULT_REWARD_PROFILE_NAME = "full_shaping"
+DEFAULT_REWARD_PROFILE_NAME = "basic_safety_stopping"
 
 # =============================================================================
 # 数据结构 (dataclass)
@@ -121,14 +121,21 @@ DEFAULT_REWARD_PROFILE_NAME = "full_shaping"
 
 @dataclass(frozen=True)
 class RewardProfile:
-    """奖励情形 —— 描述消融实验中启用的 PBRS 势能差分奖励组合。"""
+    """奖励情形 —— 描述安全与停站 PBRS 的消融组合。"""
 
     name: str
     label: str
     description: str
     enable_potential_safety: bool = False
     enable_potential_stopping: bool = False
-    enable_potential_punctuality: bool = False
+
+    def to_reward_config(self) -> RewardConfig:
+        return RewardConfig(
+            enable_energy=True,
+            enable_comfort=True,
+            enable_potential_safety=self.enable_potential_safety,
+            enable_potential_stopping=self.enable_potential_stopping,
+        )
 
     def enabled_shaping_components(self) -> tuple[str, ...]:
         components: list[str] = []
@@ -136,18 +143,7 @@ class RewardProfile:
             components.append("safety")
         if self.enable_potential_stopping:
             components.append("stopping")
-        if self.enable_potential_punctuality:
-            components.append("punctuality")
         return tuple(components)
-
-    def to_reward_config(self) -> RewardConfig:
-        return RewardConfig(
-            enable_potential_safety=self.enable_potential_safety,
-            enable_energy=True,
-            enable_comfort=True,
-            enable_potential_punctuality=self.enable_potential_punctuality,
-            enable_potential_stopping=self.enable_potential_stopping,
-        )
 
     def to_metadata(self) -> dict[str, Any]:
         return {
@@ -218,14 +214,6 @@ def _reward_config_to_dict(reward_config: RewardConfig) -> dict[str, bool]:
 
 
 REWARD_PROFILES: dict[str, RewardProfile] = {
-    "full_shaping": RewardProfile(
-        name="full_shaping",
-        label="basic+safety+stopping+punctuality",
-        description="Base reward keeps energy and comfort, plus all shaping terms.",
-        enable_potential_safety=True,
-        enable_potential_stopping=True,
-        enable_potential_punctuality=True,
-    ),
     "basic": RewardProfile(
         name="basic",
         label="basic",
@@ -234,23 +222,15 @@ REWARD_PROFILES: dict[str, RewardProfile] = {
     "basic_safety": RewardProfile(
         name="basic_safety",
         label="basic+safety",
-        description="Base reward plus safety shaping.",
+        description="Base reward plus safety PBRS shaping.",
         enable_potential_safety=True,
     ),
     "basic_safety_stopping": RewardProfile(
         name="basic_safety_stopping",
         label="basic+safety+stopping",
-        description="Base reward plus safety and stopping shaping.",
+        description="Base reward plus safety and stopping PBRS shaping.",
         enable_potential_safety=True,
         enable_potential_stopping=True,
-    ),
-    "basic_safety_stopping_punctuality": RewardProfile(
-        name="basic_safety_stopping_punctuality",
-        label="basic+safety+stopping+punctuality",
-        description="Base reward plus safety, stopping, and punctuality shaping.",
-        enable_potential_safety=True,
-        enable_potential_stopping=True,
-        enable_potential_punctuality=True,
     ),
 }
 
@@ -258,14 +238,9 @@ REWARD_PROFILE_ALIASES: dict[str, str] = {
     "default": DEFAULT_REWARD_PROFILE_NAME,
     "all": DEFAULT_REWARD_PROFILE_NAME,
     "full": DEFAULT_REWARD_PROFILE_NAME,
-    "full_shaping": DEFAULT_REWARD_PROFILE_NAME,
     "basic": "basic",
     "basic+safety": "basic_safety",
-    "basic_safety": "basic_safety",
-    "basic_safety_stopping": "basic_safety_stopping",
     "basic+safety+stopping": "basic_safety_stopping",
-    "basic_safety_stopping_punctuality": "basic_safety_stopping_punctuality",
-    "basic+safety+stopping+punctuality": "basic_safety_stopping_punctuality",
 }
 
 
@@ -287,7 +262,7 @@ def resolve_reward_profile(profile_name: str | None = None) -> RewardProfile:
     """将奖励情形名称（含别名）解析为 _RewardProfile 实例。
 
     Args:
-        profile_name: 情形名，支持别名（如 "basic+safety"）。默认使用 full_shaping。
+        profile_name: 情形名，支持 ``basic``、``default``、``all`` 和 ``full``。
 
     Returns:
         对应的 _RewardProfile 实例。

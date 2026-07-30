@@ -17,6 +17,7 @@ from .collect import (
     compute_sampling_health,
     load_scalar_series_from_run,
     resolve_run_directory,
+    with_legacy_info_tag_aliases,
 )
 from .output import build_analysis_payload, write_analysis_outputs
 from .process import build_episode_snapshots, build_step_snapshots
@@ -86,12 +87,12 @@ DEFAULT_SNAPSHOT_TAGS = [
     "rewards/comfort",
     "rewards/punctuality",
     "rewards/stopping",
-    "state/episode_id",
-    "state/position",
-    "state/stopping_point_index",
+    "basic/episode_id",
+    "basic/position",
+    "basic/stopping_point_index",
     "constraint/margin_to_vmax_mps",
     "constraint/margin_to_vmin_mps",
-    "constraint/is_truncated",
+    "outcome/truncated",
 ]
 
 
@@ -100,7 +101,7 @@ def _resolve_sampling_quality_mode(mode: str) -> str:
 
 
 def _count_unique_episodes(series_map: dict[str, Any]) -> int:
-    episode_series = series_map.get("state/episode_id")
+    episode_series = series_map.get("basic/episode_id")
     if episode_series is None or episode_series.values.size == 0:
         return 0
     return int(np.unique(np.rint(episode_series.values).astype(np.int64)).size)
@@ -166,7 +167,7 @@ def _score_snapshot_severity(
     if not isinstance(metrics, dict):
         return "normal"
 
-    truncated_stats = metrics.get("constraint/is_truncated", {})
+    truncated_stats = metrics.get("outcome/truncated", {})
     if isinstance(truncated_stats, dict):
         if float(truncated_stats.get("max", 0.0)) >= 0.5:
             return "critical"
@@ -216,7 +217,7 @@ def run_training_analysis(
 ) -> dict[str, Any]:
     cfg = config or AnalysisConfig()
     run_dir = resolve_run_directory(log_root=log_root, run_name=run_name)
-    series_map = load_scalar_series_from_run(run_dir)
+    series_map = with_legacy_info_tag_aliases(load_scalar_series_from_run(run_dir))
     sampling_health = compute_sampling_health(
         series_map,
         key_tags=cfg.sampling_health_tags,

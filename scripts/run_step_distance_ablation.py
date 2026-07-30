@@ -38,7 +38,7 @@ DEFAULT_SEEDS: tuple[int, ...] = (
 )  # 5个随机数种子
 DEFAULT_OUTPUT_ROOT = "output/optimal/rl/step_distance_ablation"
 STEP_DISTANCE_MANIFEST_FILENAME = "step_distance_ablation_manifest.json"
-FIXED_REWARD_PROFILE = "full_shaping"
+FIXED_REWARD_PROFILE = "basic_safety_stopping"
 BEST_TRAJECTORY_METRICS_FILENAME = "best_trajectory_metrics.json"
 DEFAULT_BEST_EVAL_TRIGGER_INTERVAL = 200_000
 TRAJECTORY_METRIC_KEYS: tuple[str, ...] = (

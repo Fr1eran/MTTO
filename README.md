@@ -24,7 +24,6 @@
   - [计算并保存防护曲线 · `calc_and_save_safeguard_curves`](#计算并保存防护曲线--calc_and_save_safeguard_curves)
   - [最短运行时间曲线 · `calc_min_operation_time_curve`](#最短运行时间曲线--calc_min_operation_time_curve)
   - [实际运营数据 · `show_real_operation_data`](#实际运营数据--show_real_operation_data)
-  - [奖励函数展示 · `show_reward_function`](#奖励函数展示--show_reward_function)
   - [势函数展示 · `show_potential_function`](#势函数展示--show_potential_function)
 - [测试](#测试)
 
@@ -77,7 +76,6 @@ MTTO/
 | 计算并保存防护曲线 | `python -m scripts.calc_and_save_safeguard_curves` |
 | 最短运行时间曲线 | `python -m scripts.calc_min_operation_time_curve` |
 | 实际运营数据展示 | `python -m scripts.show_real_operation_data` |
-| 奖励函数可视化 | `python -m scripts.show_reward_function` |
 | 势函数可视化 | `python -m scripts.show_potential_function` |
 
 RL 工作流脚本 `train_rl`、`train_reward_ablation`、`evaluate_rl`、`run_schedule_time_change evaluate`、`analyze_training_data`、`show_rl_result`、`show_reward_ablation` 统一支持 `--dry-run`，用于预览有效配置、路径解析结果、运行矩阵或展示计划，而不执行训练/评估/分析/绘图。
@@ -113,10 +111,10 @@ RL 工作流脚本 `train_rl`、`train_reward_ablation`、`evaluate_rl`、`run_s
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `--reward-profile` | `str` | `full_shaping` | 奖励预设：`basic`、`basic_safety`、`basic_safety_stopping`、`basic_safety_stopping_punctuality`、`full_shaping` |
+| `--reward-profile` | `str` | `basic_safety_stopping` | 奖励预设：`basic`、`basic_safety`、`basic_safety_stopping` |
 | `--experiment-tag` | `str` | `None` | 附加实验标签，用于隔离输出目录与 TensorBoard 运行名 |
 
-`basic` 固定包含 `energy + comfort`；其余预设仅沿 `safety / stopping / punctuality` 三个 shaping 维度逐级打开。
+`basic` 固定包含 `energy + comfort`；其余预设仅沿 `safety / stopping` 两个 shaping 维度逐级打开。准点要求仅通过成功到站后的终端奖励和评估指标表达。
 
 #### PPO 超参数
 
@@ -173,6 +171,8 @@ Best-eval 排序规则：
 
 如果后续要执行 PBRS 消融实验，建议统一使用 `monitor_best` 模式，以保留 rollout 基础监控和训练期最优轨迹评估，同时避免高频诊断采样带来的额外开销。
 
+当前 PBRS 仅包含安全势函数与停站势函数：`basic` 不启用势函数，`basic_safety` 启用安全势函数，`basic_safety_stopping` 同时启用安全与停站势函数。准点仅在成功到站时通过终端奖励计分，不包含准点势函数或准点稠密奖励。
+
 #### 训练后自动分析
 
 | 参数 | 类型 | 默认值 | 说明 |
@@ -220,19 +220,18 @@ python -m scripts.train_rl --output-root output/optimal/rl/safety_speed/ --sched
 
 ### RL 消融训练 · `train_reward_ablation`
 
-按四种 PBRS 奖励方案批量串行训练 PPO，并强制运行在 `monitor_best` 语义下。该脚本不是 `train_rl` 的全量参数代理，而是一个精简入口：只暴露 `monitor_best` 仍然有意义的训练参数；`--run-mode`、`--reward-profile`、`--output-root`、`--tb-log-name`、所有 `--enable-*` 开关、高频 callback flush 参数和自动分析参数都被隐藏并由脚本内部固定。
+按三种 PBRS 奖励方案批量串行训练 PPO，并强制运行在 `monitor_best` 语义下。该脚本不是 `train_rl` 的全量参数代理，而是一个精简入口：只暴露 `monitor_best` 仍然有意义的训练参数；`--run-mode`、`--reward-profile`、`--output-root`、`--tb-log-name`、所有 `--enable-*` 开关、高频 callback flush 参数和自动分析参数都被隐藏并由脚本内部固定。
 
 默认 reward case 顺序如下：
 - `basic`
 - `basic_safety`
 - `basic_safety_stopping`
-- `basic_safety_stopping_punctuality`
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `--ablation-output-root` | `str` | `output/optimal/rl/ablation` | 消融批次输出根目录 |
 | `--ablation-tag` | `str` | `None` | 批次标签；若存在重复训练，会自动附加 repeat 标识 |
-| `--reward-profiles` | `list[str]` | 上述四种默认 case | 指定 reward case 子集或重排顺序 |
+| `--reward-profiles` | `list[str]` | 上述三种默认 case | 指定 reward case 子集或重排顺序 |
 | `--repeats` | `int` | `1` | 每种情形的重复训练次数 |
 | `--seed-list` | `list[int]` | `None` | 显式指定每次重复的 seed；指定后优先于 `--repeats` / `--base-seed` |
 | `--base-seed` | `int` | `None` | 当 `repeats > 1` 时按 `base-seed + repeat_index` 推导各轮 seed |
@@ -286,7 +285,7 @@ python -m scripts.train_reward_ablation \
 | `--reward-discount` | `float` | 从 `run_metadata.json` 读取，否则 `0.995` | 折扣因子（重建环境用） |
 | `--schedule-time-s` | `float` | 从 `run_metadata.json` 读取，否则 `430.0` | 规划运行时间 |
 | `--step-distance` | `float` | 从 `run_metadata.json` 读取，否则 `100.0` | 环境最大步距 (m) |
-| `--reward-profile` | `str` | 从 `run_metadata.json` 读取，否则 `full_shaping` | 评估所使用的奖励预设 |
+| `--reward-profile` | `str` | 从 `run_metadata.json` 读取，否则 `basic_safety_stopping` | 评估所使用的奖励预设 |
 | `--device` | `str` | `cpu` | 推理设备 |
 | `--deterministic` | `bool` | `True` | 是否使用确定性策略 |
 | `--record-video` | `bool` | `False` | 是否录制评估视频 |
@@ -342,7 +341,7 @@ python -m scripts.evaluate_rl --load-dir output/optimal/rl/.../final/ --dry-run
 | `--reward-discount` | `float` | 从 `run_metadata.json` 读取，否则 `0.995` | 折扣因子（重建环境用） |
 | `--schedule-time-s` | `float` | 从 `run_metadata.json` 读取，否则 `430.0` | 突变前的初始规划运行时间 |
 | `--step-distance` | `float` | 从 `run_metadata.json` 读取，否则 `100.0` | 环境最大步距 (m) |
-| `--reward-profile` | `str` | 从 `run_metadata.json` 读取，否则 `full_shaping` | 评估所使用的奖励预设 |
+| `--reward-profile` | `str` | 从 `run_metadata.json` 读取，否则 `basic_safety_stopping` | 评估所使用的奖励预设 |
 | `--device` | `str` | `cpu` | 推理设备 |
 | `--deterministic` | `bool` | `True` | 是否使用确定性策略 |
 | `--change-distance-m` | `float` | `800.0` | 触发计划时间变化的位置 (m) |
@@ -760,16 +759,6 @@ python -m scripts.calc_min_operation_time_curve
 
 ```bash
 python -m scripts.show_real_operation_data
-```
-
----
-
-### 奖励函数展示 · `show_reward_function`
-
-可视化 RL 环境中的奖励函数曲线（能耗舒适度奖励、对标停车奖励、准点奖励）。
-
-```bash
-python -m scripts.show_reward_function
 ```
 
 ---
