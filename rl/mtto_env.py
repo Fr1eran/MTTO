@@ -13,6 +13,7 @@ from model.vehicle import VehicleInfo
 from rl.observation_builder import ObservationBuilder
 from rl.operational_state import OperationalState, OperationalTransition
 from rl.operational_stepper import OperationalStepper
+from rl.reference_initial_state_provider import ReferenceInitialStateProvider
 from rl.reward_calculator import RewardBreakdown, RewardCalculator, RewardConfig
 from utils.indexing_utils import get_interval_index
 from utils.plot_utils import set_chinese_font
@@ -67,6 +68,7 @@ class MTTOEnv(gym.Env):
         render_mode: str | None = None,
         use_animation: bool = False,
         reward_config: RewardConfig | None = None,
+        reference_initial_state_provider: ReferenceInitialStateProvider | None = None,
     ) -> None:
         super().__init__()
         self.vehicle, self.track = vehicle, track
@@ -102,6 +104,10 @@ class MTTOEnv(gym.Env):
             reward_config=reward_config,
         )
         self.reward_config = self.reward_calculator.reward_config
+        self.reference_initial_state_provider = reference_initial_state_provider
+        self._reference_context_sample_id: int | None = None
+        self._reference_context_index: int | None = None
+        self._reference_context_distribution_version: int | None = None
         self.state: OperationalState = self.stepper.reset()
         self.last_transition: OperationalTransition | None = None
         self.last_reward_breakdown = RewardBreakdown()
@@ -137,6 +143,24 @@ class MTTOEnv(gym.Env):
             self.state = self.stepper.refresh_schedule_time(self.state)
         return self.observation_builder.build(self.state)
 
+    def set_reference_initial_state_provider(
+        self, provider: ReferenceInitialStateProvider | None
+    ) -> None:
+        """Attach or remove the optional reference-state reset provider."""
+        self.reference_initial_state_provider = provider
+
+    def set_reference_initial_state_distribution(
+        self,
+        weights: NDArray[np.floating] | list[float],
+        *,
+        version: int,
+    ) -> None:
+        """Update the provider distribution for resets after this call."""
+        provider = self.reference_initial_state_provider
+        if provider is None:
+            raise RuntimeError("reference initial-state provider is not configured")
+        provider.set_sampling_distribution(weights, version=version)
+
     def _reset_trajectory(self) -> None:
         if not self.enable_trajectory_tracking:
             self.trajectory_pos = self.trajectory_speed_mps = None
@@ -155,7 +179,22 @@ class MTTOEnv(gym.Env):
 
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
         super().reset(seed=seed, options=options)
-        self.state = self.stepper.reset()
+        provider = self.reference_initial_state_provider
+        if provider is None:
+            self.state = self.stepper.reset()
+            self._reference_context_sample_id = None
+            self._reference_context_index = None
+            self._reference_context_distribution_version = None
+        else:
+            if seed is not None:
+                provider.reseed(seed)
+            reference_sample = provider.sample()
+            self.state = reference_sample.runtime_state
+            self._reference_context_sample_id = reference_sample.sample_id
+            self._reference_context_index = reference_sample.reference_index
+            self._reference_context_distribution_version = (
+                reference_sample.distribution_version
+            )
         self.last_transition = None
         self.last_reward_breakdown = RewardBreakdown()
         self.basic_info = {}
@@ -201,6 +240,14 @@ class MTTOEnv(gym.Env):
         )
         self._record_basic_info()
         info = self._get_basic_info()
+        if self._reference_context_sample_id is not None:
+            info.update(
+                reference_context_sample_id=self._reference_context_sample_id,
+                reference_context_index=self._reference_context_index,
+                reference_context_distribution_version=(
+                    self._reference_context_distribution_version
+                ),
+            )
         # Keep the terminal outcome available even when detailed diagnostics
         # are disabled (for example, vectorized evaluation rollouts).
         info.update(outcome=dict(self.outcome_info))

@@ -107,6 +107,8 @@ def test_resolve_ablation_run_matrix_enforces_monitor_best_semantics() -> None:
     assert first_entry.training_run_spec.enable_env_diagnostics is True
     assert first_entry.training_run_spec.env_diagnostics_interval_steps == 1
     assert first_entry.training_run_spec.enable_safety_violation_bins is True
+    assert first_entry.training_run_spec.curriculum_profile.name == "none"
+    assert first_entry.train_args.reference_curve_dir is None
     assert first_entry.training_run_spec.safety_position_bin_size_m == 5000.0
     assert (
         first_entry.training_run_spec.run_metadata["enable_safety_violation_bins"]

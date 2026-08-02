@@ -4,6 +4,7 @@ import pytest
 from pathlib import Path
 
 from rl.experiment_utils import (
+    curriculum_profile_names,
     DEFAULT_REWARD_PROFILE_NAME,
     RUN_METADATA_FILENAME,
     add_panel_label,
@@ -12,11 +13,31 @@ from rl.experiment_utils import (
     build_reward_config,
     load_run_metadata,
     resolve_output_dir,
+    resolve_curriculum_profile,
     resolve_reward_profile,
     resolve_tb_log_name,
     reward_profile_names,
     save_run_metadata,
 )
+
+
+def test_curriculum_profiles_resolve_with_disabled_default() -> None:
+    assert curriculum_profile_names() == ("none", "fixed_reverse", "spdl")
+    assert resolve_curriculum_profile().enabled is False
+    assert resolve_curriculum_profile("fixed_reverse").enabled is True
+    assert resolve_curriculum_profile("spdl").enabled is True
+
+
+def test_curriculum_profile_scopes_nonbaseline_output_name() -> None:
+    output_dir = resolve_output_dir(
+        output_root="output/optimal/rl",
+        schedule_time_s=430.0,
+        max_step_distance=30.0,
+        reward_profile_name="basic",
+        curriculum_profile_name="fixed_reverse",
+    )
+
+    assert Path(output_dir).name == "430p0_30p0__basic__fixed_reverse"
 
 
 def test_reward_profile_names_include_real_pbrs_ablation_profiles() -> None:

@@ -7,9 +7,9 @@ import multiprocessing as mp
 import os
 import re
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from stable_baselines3 import PPO
@@ -28,13 +28,22 @@ from model.vehicle import VehicleInfo
 from rl.callbacks import (
     BestTrajectoryRecorder,
     EpisodeMetricsCollector,
+    FixedReverseCurriculumCallback,
     PeriodicEvalCallback,
     SafetyViolationPositionRecorder,
+    SPDLReferenceCurriculumCallback,
     TensorboardCallback,
 )
+from rl.dp_trajectory_reader import DPTrajectoryReader
 from rl.env_factory import make_env
 from rl.evaluation import build_single_eval_env
 from rl.mtto_env import RewardConfig
+from rl.observation_builder import ObservationBuilder
+from rl.operational_stepper import OperationalStepper
+from rl.reference_trajectory_sampler import (
+    ReferenceTrajectory,
+    ReferenceTrajectorySampler,
+)
 from rl.training_analysis import AnalysisConfig, run_training_analysis
 from utils.io_utils import format_float_token, load_optimized_curve_and_metrics
 from utils.plot_utils import set_global_plot_style
@@ -52,13 +61,18 @@ __all__ = [
     "DEFAULT_REWARD_DISCOUNT",
     "DEFAULT_MAX_STEP_DISTANCE",
     "DEFAULT_REWARD_PROFILE_NAME",
+    "DEFAULT_CURRICULUM_PROFILE_NAME",
     # dataclass
+    "CurriculumProfile",
     "RewardProfile",
     "TrainingRunSpec",
     # reward profile
     "reward_profile_names",
     "resolve_reward_profile",
     "build_reward_config",
+    # curriculum profile
+    "curriculum_profile_names",
+    "resolve_curriculum_profile",
     # 路径 & 元数据
     "resolve_output_dir",
     "resolve_tb_log_name",
@@ -113,6 +127,7 @@ DEFAULT_REWARD_DISCOUNT = 0.998
 DEFAULT_ROLLOUT_STEPS_PER_UPDATE = 8192
 DEFAULT_MAX_STEP_DISTANCE = 30.0
 DEFAULT_REWARD_PROFILE_NAME = "basic_safety_stopping"
+DEFAULT_CURRICULUM_PROFILE_NAME = "none"
 
 # =============================================================================
 # 数据结构 (dataclass)
@@ -156,6 +171,59 @@ class RewardProfile:
 
 
 @dataclass(frozen=True)
+class CurriculumProfile:
+    """Curriculum reset distribution preset."""
+
+    name: str
+    label: str
+    description: str
+    controller_kind: Literal["disabled", "fixed_reverse", "spdl"]
+    min_remaining_distance_m: float | None = None
+    initial_max_remaining_distance_m: float | None = None
+    expansion_start_ratio: float | None = None
+    expansion_end_ratio: float | None = None
+    start_only_ratio: float | None = None
+    base_start_probability: float | None = None
+    spdl_initial_easy_mass: float | None = None
+    spdl_initial_start_mass: float | None = None
+    spdl_initial_uniform_mass: float | None = None
+    spdl_target_uniform_mass: float | None = None
+    spdl_alpha_warmup_updates: int | None = None
+    spdl_relative_entropy_bound: float | None = None
+    spdl_zeta: float | None = None
+    spdl_min_context_samples: int | None = None
+    spdl_min_completed_episodes: int | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return self.controller_kind != "disabled"
+
+    def to_metadata(self) -> dict[str, object]:
+        return {
+            "profile_name": self.name,
+            "profile_label": self.label,
+            "profile_description": self.description,
+            "controller_kind": self.controller_kind,
+            "enabled": self.enabled,
+            "min_remaining_distance_m": self.min_remaining_distance_m,
+            "initial_max_remaining_distance_m": self.initial_max_remaining_distance_m,
+            "expansion_start_ratio": self.expansion_start_ratio,
+            "expansion_end_ratio": self.expansion_end_ratio,
+            "start_only_ratio": self.start_only_ratio,
+            "base_start_probability": self.base_start_probability,
+            "spdl_initial_easy_mass": self.spdl_initial_easy_mass,
+            "spdl_initial_start_mass": self.spdl_initial_start_mass,
+            "spdl_initial_uniform_mass": self.spdl_initial_uniform_mass,
+            "spdl_target_uniform_mass": self.spdl_target_uniform_mass,
+            "spdl_alpha_warmup_updates": self.spdl_alpha_warmup_updates,
+            "spdl_relative_entropy_bound": self.spdl_relative_entropy_bound,
+            "spdl_zeta": self.spdl_zeta,
+            "spdl_min_context_samples": self.spdl_min_context_samples,
+            "spdl_min_completed_episodes": self.spdl_min_completed_episodes,
+        }
+
+
+@dataclass(frozen=True)
 class TrainingRunSpec:
     """单次训练运行的完整配置快照，由 CLI 参数解析得到。"""
 
@@ -164,6 +232,10 @@ class TrainingRunSpec:
     reward_discount: float
     reward_profile: RewardProfile
     reward_config: RewardConfig
+    curriculum_profile: CurriculumProfile
+    reference_curve_dir: str | None
+    reference_curve_artifact_path: str | None
+    reference_curve_metrics_path: str | None
     output_root: str
     output_dir: str
     final_output_dir: str
@@ -243,10 +315,78 @@ REWARD_PROFILE_ALIASES: dict[str, str] = {
     "basic+safety+stopping": "basic_safety_stopping",
 }
 
+CURRICULUM_PROFILES: dict[str, CurriculumProfile] = {
+    "none": CurriculumProfile(
+        name="none",
+        label="no curriculum",
+        description="Always reset from the real operational start state.",
+        controller_kind="disabled",
+    ),
+    "fixed_reverse": CurriculumProfile(
+        name="fixed_reverse",
+        label="fixed reverse curriculum",
+        description=(
+            "Expand reference initial states from the terminal-side region while "
+            "retaining real-start samples, then consolidate from the real start."
+        ),
+        controller_kind="fixed_reverse",
+        min_remaining_distance_m=300.0,
+        initial_max_remaining_distance_m=3000.0,
+        expansion_start_ratio=0.10,
+        expansion_end_ratio=0.45,
+        start_only_ratio=0.55,
+        base_start_probability=0.15,
+    ),
+    "spdl": CurriculumProfile(
+        name="spdl",
+        label="discrete SPDL",
+        description=(
+            "Importance-weighted self-paced learning over reconstructed "
+            "reference initial states."
+        ),
+        controller_kind="spdl",
+        min_remaining_distance_m=300.0,
+        initial_max_remaining_distance_m=3000.0,
+        spdl_initial_easy_mass=0.84,
+        spdl_initial_start_mass=0.15,
+        spdl_initial_uniform_mass=0.01,
+        spdl_target_uniform_mass=1e-3,
+        spdl_alpha_warmup_updates=10,
+        spdl_relative_entropy_bound=0.05,
+        spdl_zeta=0.4,
+        spdl_min_context_samples=32,
+        spdl_min_completed_episodes=8,
+    ),
+}
+
 
 def reward_profile_names() -> tuple[str, ...]:
     """返回所有已注册奖励情形的名称元组。"""
     return tuple(REWARD_PROFILES.keys())
+
+
+def curriculum_profile_names() -> tuple[str, ...]:
+    return tuple(CURRICULUM_PROFILES.keys())
+
+
+def resolve_curriculum_profile(
+    profile_name: str | None = None,
+) -> CurriculumProfile:
+    normalized = (
+        DEFAULT_CURRICULUM_PROFILE_NAME
+        if profile_name is None
+        else str(profile_name).strip().lower().replace("-", "_").replace(" ", "_")
+    )
+    if not normalized:
+        normalized = DEFAULT_CURRICULUM_PROFILE_NAME
+    profile = CURRICULUM_PROFILES.get(normalized)
+    if profile is None:
+        available = ", ".join(curriculum_profile_names())
+        raise ValueError(
+            "Unknown curriculum profile "
+            f"'{profile_name}'. Available profiles: {available}"
+        )
+    return profile
 
 
 def _normalize_reward_profile_token(profile_name: str | None) -> str:
@@ -311,12 +451,14 @@ def _build_experiment_token(
     schedule_time_s: float,
     max_step_distance: float,
     reward_profile_name: str | None = None,
+    curriculum_profile_name: str | None = None,
     experiment_tag: str | None = None,
     include_default_profile: bool = False,
 ) -> str:
     schedule_token = format_float_token(schedule_time_s)
     max_step_token = format_float_token(max_step_distance)
     profile = resolve_reward_profile(reward_profile_name)
+    curriculum_profile = resolve_curriculum_profile(curriculum_profile_name)
 
     tokens = [f"{schedule_token}_{max_step_token}"]
     if (
@@ -325,6 +467,8 @@ def _build_experiment_token(
         or experiment_tag
     ):
         tokens.append(profile.name)
+    if curriculum_profile.enabled:
+        tokens.append(curriculum_profile.name)
     if experiment_tag:
         tokens.append(_sanitize_identifier_token(experiment_tag))
     return "__".join(tokens)
@@ -336,6 +480,7 @@ def resolve_output_dir(
     schedule_time_s: float,
     max_step_distance: float,
     reward_profile_name: str | None = None,
+    curriculum_profile_name: str | None = None,
     experiment_tag: str | None = None,
 ) -> str:
     """根据实验参数解析输出目录路径。
@@ -354,6 +499,7 @@ def resolve_output_dir(
         schedule_time_s=schedule_time_s,
         max_step_distance=max_step_distance,
         reward_profile_name=reward_profile_name,
+        curriculum_profile_name=curriculum_profile_name,
         experiment_tag=experiment_tag,
     )
     return os.path.join(output_root, experiment_token)
@@ -366,6 +512,7 @@ def resolve_tb_log_name(
     schedule_time_s: float,
     max_step_distance: float,
     reward_profile_name: str | None = None,
+    curriculum_profile_name: str | None = None,
     experiment_tag: str | None = None,
 ) -> str:
     """解析 TensorBoard 日志名称。
@@ -388,6 +535,7 @@ def resolve_tb_log_name(
         schedule_time_s=schedule_time_s,
         max_step_distance=max_step_distance,
         reward_profile_name=reward_profile_name,
+        curriculum_profile_name=curriculum_profile_name,
         experiment_tag=experiment_tag,
         include_default_profile=True,
     )
@@ -402,6 +550,10 @@ def resolve_tb_log_name(
 def build_run_metadata(
     *,
     reward_profile: RewardProfile,
+    curriculum_profile: CurriculumProfile | None = None,
+    reference_curve_dir: str | None = None,
+    reference_curve_artifact_path: str | None = None,
+    reference_curve_metrics_path: str | None = None,
     schedule_time_s: float,
     max_step_distance: float,
     reward_discount: float,
@@ -460,6 +612,20 @@ def build_run_metadata(
         包含实验完整元数据的字典。
     """
     metadata = reward_profile.to_metadata()
+    resolved_curriculum = curriculum_profile or resolve_curriculum_profile()
+    metadata["curriculum"] = {
+        **resolved_curriculum.to_metadata(),
+        "reference_curve_dir": reference_curve_dir,
+        "reference_curve_artifact_path": reference_curve_artifact_path,
+        "reference_curve_metrics_path": reference_curve_metrics_path,
+        "rl_max_step_distance_m": (
+            float(max_step_distance) if resolved_curriculum.enabled else None
+        ),
+        "eligible_reference_node_count": None,
+        "initial_sampling_distribution_version": (
+            0 if resolved_curriculum.enabled else None
+        ),
+    }
 
     metadata.update({
         "schedule_time_s": float(schedule_time_s),
@@ -471,6 +637,7 @@ def build_run_metadata(
         schedule_time_s=schedule_time_s,
         max_step_distance=max_step_distance,
         reward_profile_name=reward_profile.name,
+        curriculum_profile_name=resolved_curriculum.name,
         experiment_tag=experiment_tag,
         include_default_profile=True,
     )
@@ -587,6 +754,8 @@ def build_default_training_args() -> argparse.Namespace:
         schedule_time_s=DEFAULT_SCHEDULE_TIME_S,
         max_step_distance=DEFAULT_MAX_STEP_DISTANCE,
         reward_profile=DEFAULT_REWARD_PROFILE_NAME,
+        curriculum_profile=DEFAULT_CURRICULUM_PROFILE_NAME,
+        reference_curve_dir=None,
         experiment_tag=None,
         run_mode="tune",
         enable_tb=None,
@@ -776,6 +945,25 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
     reward_discount = float(args.reward_discount)
     reward_profile = resolve_reward_profile(args.reward_profile)
     reward_config = reward_profile.to_reward_config()
+    curriculum_profile = resolve_curriculum_profile(
+        getattr(args, "curriculum_profile", DEFAULT_CURRICULUM_PROFILE_NAME)
+    )
+    reference_curve_dir_raw = getattr(args, "reference_curve_dir", None)
+    reference_curve_dir: str | None = None
+    if curriculum_profile.enabled:
+        if (
+            not isinstance(reference_curve_dir_raw, str)
+            or not reference_curve_dir_raw.strip()
+        ):
+            raise ValueError(
+                "reference_curve_dir is required when a curriculum profile is enabled"
+            )
+        reference_dir_path = Path(reference_curve_dir_raw)
+        if not reference_dir_path.is_dir():
+            raise FileNotFoundError(
+                f"reference trajectory directory does not exist: {reference_dir_path}"
+            )
+        reference_curve_dir = str(reference_dir_path)
 
     output_root = args.output_root
     output_dir = resolve_output_dir(
@@ -783,6 +971,7 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
         schedule_time_s=schedule_time_s,
         max_step_distance=ds,
         reward_profile_name=reward_profile.name,
+        curriculum_profile_name=curriculum_profile.name,
         experiment_tag=args.experiment_tag,
     )
     final_output_dir = os.path.join(output_dir, "final")
@@ -811,6 +1000,7 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
         schedule_time_s=schedule_time_s,
         max_step_distance=ds,
         reward_profile_name=reward_profile.name,
+        curriculum_profile_name=curriculum_profile.name,
         experiment_tag=args.experiment_tag,
     )
 
@@ -848,6 +1038,8 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
 
     run_metadata = build_run_metadata(
         reward_profile=reward_profile,
+        curriculum_profile=curriculum_profile,
+        reference_curve_dir=reference_curve_dir,
         schedule_time_s=schedule_time_s,
         max_step_distance=ds,
         reward_discount=reward_discount,
@@ -881,6 +1073,10 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
         reward_discount=reward_discount,
         reward_profile=reward_profile,
         reward_config=reward_config,
+        curriculum_profile=curriculum_profile,
+        reference_curve_dir=reference_curve_dir,
+        reference_curve_artifact_path=None,
+        reference_curve_metrics_path=None,
         output_root=output_root,
         output_dir=output_dir,
         final_output_dir=final_output_dir,
@@ -958,6 +1154,9 @@ def _build_env_initializer(
     enable_diagnostics: bool,
     diagnostics_interval_steps: int,
     reward_config: RewardConfig | None = None,
+    reference_trajectory: ReferenceTrajectory | None = None,
+    reference_initial_state_weights: np.ndarray | None = None,
+    reference_initial_state_seed: int | None = None,
 ) -> Callable[[], Any]:
     def _init():
         return make_env(
@@ -970,6 +1169,9 @@ def _build_env_initializer(
             enable_diagnostics=enable_diagnostics,
             diagnostics_interval_steps=diagnostics_interval_steps,
             reward_config=reward_config,
+            reference_trajectory=reference_trajectory,
+            reference_initial_state_weights=reference_initial_state_weights,
+            reference_initial_state_seed=reference_initial_state_seed,
         )
 
     return _init
@@ -1000,13 +1202,92 @@ def train_single_experiment(
             using_cuda=True if resolved_spec.device == "cuda" else False,
         )
 
-    os.makedirs(resolved_spec.output_dir, exist_ok=True)
-    os.makedirs(resolved_spec.final_output_dir, exist_ok=True)
-    save_run_metadata(resolved_spec.output_dir, resolved_spec.run_metadata)
-
     vehicle, track, safeguard_utility, train_service = build_scenario(
         schedule_time_s=resolved_spec.schedule_time_s
     )
+
+    reference_trajectory: ReferenceTrajectory | None = None
+    initial_reference_weights: np.ndarray | None = None
+    curriculum_callback: BaseCallback | None = None
+    if resolved_spec.curriculum_profile.enabled:
+        if resolved_spec.reference_curve_dir is None:
+            raise RuntimeError("enabled curriculum is missing reference_curve_dir")
+        artifact = DPTrajectoryReader.resolve_matching_artifact(
+            curve_dir=resolved_spec.reference_curve_dir,
+            train_service=train_service,
+        )
+        reference_trajectory = DPTrajectoryReader.from_artifact(
+            artifact=artifact,
+            train_service=train_service,
+        )
+        parent_stepper = OperationalStepper(
+            vehicle=vehicle,
+            track=track,
+            safeguard_utility=safeguard_utility,
+            train_service=train_service,
+            max_step_distance_m=resolved_spec.max_step_distance,
+        )
+        parent_sampler = ReferenceTrajectorySampler(
+            reference_trajectory,
+            stepper=parent_stepper,
+        )
+        remaining_distances_m = np.asarray(
+            [state.remaining_distance_m for state in parent_sampler.states[:-1]],
+            dtype=np.float64,
+        )
+        if resolved_spec.curriculum_profile.controller_kind == "fixed_reverse":
+            curriculum_callback = FixedReverseCurriculumCallback(
+                remaining_distances_m=remaining_distances_m,
+                whole_distance_m=parent_stepper.whole_distance_m,
+                total_timesteps=resolved_spec.total_timesteps,
+                profile=resolved_spec.curriculum_profile,
+            )
+        elif resolved_spec.curriculum_profile.controller_kind == "spdl":
+            observation_builder = ObservationBuilder(
+                vehicle=vehicle,
+                track=track,
+                train_service=train_service,
+                max_step_distance_m=resolved_spec.max_step_distance,
+                direction=parent_stepper.direction,
+                whole_distance_m=parent_stepper.whole_distance_m,
+                get_upper_speed_or_zero=parent_stepper.get_upper_speed_or_zero,
+            )
+            reference_observations = np.stack(
+                [
+                    observation_builder.build(state.runtime_state)
+                    for state in parent_sampler.states[:-1]
+                ],
+                axis=0,
+            )
+            curriculum_callback = SPDLReferenceCurriculumCallback(
+                remaining_distances_m=remaining_distances_m,
+                reference_observations=reference_observations,
+                gamma=resolved_spec.reward_discount,
+                profile=resolved_spec.curriculum_profile,
+            )
+        else:
+            raise RuntimeError("unsupported enabled curriculum controller")
+        initial_reference_weights = curriculum_callback.initial_weights()
+        curriculum_metadata = dict(resolved_spec.run_metadata["curriculum"])
+        curriculum_metadata.update({
+            "reference_curve_artifact_path": artifact.npz_path,
+            "reference_curve_metrics_path": artifact.metrics_path,
+            "rl_max_step_distance_m": resolved_spec.max_step_distance,
+            "eligible_reference_node_count": parent_sampler.eligible_node_count,
+            "initial_sampling_distribution_version": 0,
+        })
+        resolved_metadata = dict(resolved_spec.run_metadata)
+        resolved_metadata["curriculum"] = curriculum_metadata
+        resolved_spec = replace(
+            resolved_spec,
+            reference_curve_artifact_path=artifact.npz_path,
+            reference_curve_metrics_path=artifact.metrics_path,
+            run_metadata=resolved_metadata,
+        )
+
+    os.makedirs(resolved_spec.output_dir, exist_ok=True)
+    os.makedirs(resolved_spec.final_output_dir, exist_ok=True)
+    save_run_metadata(resolved_spec.output_dir, resolved_spec.run_metadata)
 
     env_initializers: list[Callable[[], Any]] = [
         _build_env_initializer(
@@ -1019,8 +1300,13 @@ def train_single_experiment(
             enable_diagnostics=resolved_spec.enable_env_diagnostics,
             diagnostics_interval_steps=resolved_spec.env_diagnostics_interval_steps,
             reward_config=resolved_spec.reward_config,
+            reference_trajectory=reference_trajectory,
+            reference_initial_state_weights=initial_reference_weights,
+            reference_initial_state_seed=(
+                None if resolved_spec.seed is None else resolved_spec.seed + env_rank
+            ),
         )
-        for _ in range(resolved_spec.num_envs)
+        for env_rank in range(resolved_spec.num_envs)
     ]
     if resolved_spec.use_subproc:
         if resolved_spec.subproc_start_method is None:
@@ -1068,6 +1354,8 @@ def train_single_experiment(
     )
 
     callbacks: list[BaseCallback] = []
+    if curriculum_callback is not None:
+        callbacks.append(curriculum_callback)
     callbacks.append(
         EpisodeMetricsCollector(
             output_path=os.path.join(

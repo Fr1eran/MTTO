@@ -1,12 +1,20 @@
-from .dp_trajectory_sampler import DPTrajectorySampler, DPTrajectoryState
+from .dp_trajectory_reader import DPTrajectoryReader
+from .observation_builder import ObservationBuilder
 from .operational_state import OperationalState, OperationalTransition, ViolationCode
 from .operational_stepper import OperationalStepper
-from .observation_builder import ObservationBuilder
+from .reference_trajectory_sampler import (
+    ReferenceTrajectory,
+    ReferenceTrajectorySampler,
+    ReferenceTrajectoryState,
+)
+from .reference_initial_state_provider import (
+    ReferenceInitialStateProvider,
+    ReferenceInitialStateSample,
+)
 from .reward_calculator import RewardBreakdown, RewardCalculator, RewardConfig
 
 __all__ = [
-    "DPTrajectorySampler",
-    "DPTrajectoryState",
+    "DPTrajectoryReader",
     "ObservationBuilder",
     "OperationalState",
     "OperationalStepper",
@@ -14,5 +22,10 @@ __all__ = [
     "RewardBreakdown",
     "RewardCalculator",
     "RewardConfig",
+    "ReferenceTrajectory",
+    "ReferenceTrajectorySampler",
+    "ReferenceTrajectoryState",
+    "ReferenceInitialStateProvider",
+    "ReferenceInitialStateSample",
     "ViolationCode",
 ]

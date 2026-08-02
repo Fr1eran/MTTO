@@ -1019,6 +1019,46 @@ def test_train_rl_cli_accepts_reward_profile_and_experiment_tag() -> None:
     assert args.experiment_tag == "trial_a"
 
 
+def test_train_rl_cli_validates_curriculum_reference_directory(tmp_path: Path) -> None:
+    parser = build_train_rl_arg_parser()
+    args = parser.parse_args([
+        "--curriculum-profile",
+        "fixed_reverse",
+        "--reference-curve-dir",
+        str(tmp_path),
+        "--dry-run",
+    ])
+
+    spec = resolve_training_run_spec(args)
+    assert spec.curriculum_profile.name == "fixed_reverse"
+    assert spec.reference_curve_dir == str(tmp_path)
+    assert "fixed_reverse" in Path(spec.output_dir).name
+    assert spec.run_metadata["curriculum"]["reference_curve_artifact_path"] is None
+
+
+def test_train_rl_cli_resolves_spdl_profile(tmp_path: Path) -> None:
+    parser = build_train_rl_arg_parser()
+    args = parser.parse_args([
+        "--curriculum-profile",
+        "spdl",
+        "--reference-curve-dir",
+        str(tmp_path),
+        "--dry-run",
+    ])
+
+    spec = resolve_training_run_spec(args)
+    assert spec.curriculum_profile.controller_kind == "spdl"
+    assert spec.run_metadata["curriculum"]["spdl_relative_entropy_bound"] == 0.05
+    assert "spdl" in Path(spec.output_dir).name
+
+
+def test_train_rl_curriculum_requires_existing_reference_directory() -> None:
+    parser = build_train_rl_arg_parser()
+    args = parser.parse_args(["--curriculum-profile", "fixed_reverse"])
+    with pytest.raises(ValueError, match="reference_curve_dir is required"):
+        resolve_training_run_spec(args)
+
+
 def test_train_rl_cli_accepts_dry_run() -> None:
     parser = build_train_rl_arg_parser()
     args = parser.parse_args([
@@ -1056,7 +1096,7 @@ def test_resolve_training_run_spec_plans_paths_and_switches() -> None:
     assert spec.enable_callback is False
     assert spec.enable_best_eval is True
     assert spec.reward_profile.name == "basic_safety"
-    assert Path(spec.output_dir).name == "430p0_100p0__basic_safety__batch_a"
+    assert Path(spec.output_dir).name == "430p0_30p0__basic_safety__batch_a"
     assert Path(spec.run_metadata_path).name == "run_metadata.json"
     assert spec.run_metadata["reward_profile_name"] == "basic_safety"
     assert spec.subproc_start_method is None

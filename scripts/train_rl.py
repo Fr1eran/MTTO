@@ -1,10 +1,12 @@
 import argparse
 
 from rl.experiment_utils import (
+    DEFAULT_CURRICULUM_PROFILE_NAME,
     DEFAULT_REWARD_DISCOUNT,
     DEFAULT_REWARD_PROFILE_NAME,
     DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
     TrainingRunSpec,
+    curriculum_profile_names,
     resolve_training_run_spec,
     reward_profile_names,
     train_single_experiment,
@@ -30,7 +32,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-step-distance",
         type=float,
-        default=100.0,
+        default=30.0,
         help="训练环境相邻状态转移间的最大移动距离。",
     )
     parser.add_argument(
@@ -42,6 +44,19 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "奖励配置预设。basic 固定包含 energy/comfort；"
             "其余预设仅沿 safety/stopping 两个 shaping 维度逐级打开。"
         ),
+    )
+    parser.add_argument(
+        "--curriculum-profile",
+        type=str,
+        choices=tuple(curriculum_profile_names()),
+        default=DEFAULT_CURRICULUM_PROFILE_NAME,
+        help="初态课程预设。none 保持真实起点训练；fixed_reverse 启用固定逆向课程。",
+    )
+    parser.add_argument(
+        "--reference-curve-dir",
+        type=str,
+        default=None,
+        help="启用课程时必填：包含任务匹配 DP 参考轨迹的目录。",
     )
     parser.add_argument(
         "--experiment-tag",
@@ -272,6 +287,9 @@ def print_training_run_spec(spec: TrainingRunSpec) -> None:
     print(f"- run_mode={spec.run_mode}")
     print(f"- reward_profile={spec.reward_profile.name}")
     print(f"- reward_config={spec.run_metadata['reward_config']}")
+    print(f"- curriculum_profile={spec.curriculum_profile.name}")
+    if spec.curriculum_profile.enabled:
+        print(f"- reference_curve_dir={spec.reference_curve_dir}")
     print(f"- enable_tb={spec.enable_tb}")
     print(f"- enable_callback={spec.enable_callback}")
     print(f"- enable_monitor={spec.enable_monitor}")

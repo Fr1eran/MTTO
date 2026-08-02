@@ -1,4 +1,5 @@
 from dataclasses import replace
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -147,6 +148,64 @@ def test_reset(mtto_env: MTTOEnv):
     )  # lookahead_avg_upper_speed
     np.testing.assert_allclose(obs[11], 0.0)  # approach_progress
     assert info == {}
+
+
+class _ReferenceProviderStub:
+    def __init__(self, runtime_state) -> None:
+        self.runtime_state = runtime_state
+        self.reseeded_with: int | None = None
+        self.updated: tuple[object, int] | None = None
+
+    def reseed(self, seed: int) -> None:
+        self.reseeded_with = seed
+
+    def sample(self):
+        return SimpleNamespace(
+            runtime_state=self.runtime_state,
+            sample_id=11,
+            reference_index=2,
+            distribution_version=4,
+        )
+
+    def set_sampling_distribution(self, weights, *, version: int) -> None:
+        self.updated = (weights, version)
+
+
+def test_reset_can_use_reference_provider_and_clears_episode_state(
+    mtto_env: MTTOEnv,
+) -> None:
+    reference_state = replace(
+        mtto_env.stepper.reset(),
+        position_m=mtto_env.train_service.start_position + 100.0,
+        operation_time_s=4.0,
+        energy_consumption_kj=12.0,
+        step_count=3,
+    )
+    provider = _ReferenceProviderStub(reference_state)
+    env = _build_env_like(
+        mtto_env,
+        reference_initial_state_provider=provider,  # type: ignore[arg-type]
+        enable_trajectory_tracking=True,
+    )
+    env.last_transition = object()  # type: ignore[assignment]
+    env._comfort_tav = 8.0
+
+    observation, info = env.reset(seed=123)
+
+    assert info == {}
+    assert provider.reseeded_with == 123
+    assert env.state is reference_state
+    assert env.last_transition is None
+    assert env._comfort_tav == 0.0
+    assert env.trajectory_pos == [reference_state.position_m]
+    assert observation[0] < 1.0
+    _, _, _, _, info = env.step(np.asarray([0.0], dtype=np.float32))
+    assert info["reference_context_sample_id"] == 11
+    assert info["reference_context_index"] == 2
+    assert info["reference_context_distribution_version"] == 4
+
+    env.set_reference_initial_state_distribution([1.0], version=4)
+    assert provider.updated == ([1.0], 4)
 
 
 @pytest.mark.parametrize(
@@ -655,6 +714,54 @@ def test_stepper_allows_success_on_required_transition_budget(
     assert transition.terminated is True
     assert transition.truncated is False
     assert transition.violation_code is ViolationCode.ONGOING
+
+
+def test_stepper_custom_requested_distance_matches_default_at_maximum(
+    mtto_env: MTTOEnv,
+) -> None:
+    stepper = mtto_env.stepper
+    state = replace(stepper.reset(), speed_mps=10.0)
+
+    default_transition = stepper.advance(state, 0.0)
+    explicit_transition = stepper.advance(
+        state,
+        0.0,
+        requested_distance_m=stepper.max_step_distance_m,
+    )
+
+    assert explicit_transition.distance_m == pytest.approx(default_transition.distance_m)
+    assert explicit_transition.duration_s == pytest.approx(default_transition.duration_s)
+    assert explicit_transition.next_state.position_m == pytest.approx(
+        default_transition.next_state.position_m
+    )
+    assert explicit_transition.energy_delta_kj == pytest.approx(
+        default_transition.energy_delta_kj
+    )
+
+
+def test_stepper_supports_short_reference_replay_segment(mtto_env: MTTOEnv) -> None:
+    stepper = mtto_env.stepper
+    state = replace(stepper.reset(), speed_mps=10.0)
+
+    transition = stepper.advance(state, 0.0, requested_distance_m=2.5)
+
+    assert transition.distance_m == pytest.approx(2.5)
+    assert transition.duration_s == pytest.approx(0.25)
+    assert transition.next_state.position_m == pytest.approx(state.position_m + 2.5)
+
+
+@pytest.mark.parametrize("requested_distance_m", [0.0, -1.0, float("inf"), 11.0])
+def test_stepper_rejects_invalid_requested_distance(
+    mtto_env: MTTOEnv,
+    requested_distance_m: float,
+) -> None:
+    stepper = mtto_env.stepper
+    with pytest.raises(ValueError, match="requested_distance_m"):
+        stepper.advance(
+            stepper.reset(),
+            0.0,
+            requested_distance_m=requested_distance_m,
+        )
 
 
 

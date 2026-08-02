@@ -5,6 +5,7 @@ from typing import Any
 
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
+import torch as th
 
 from rl.evaluation import (
     PolicyEvaluationResult,
@@ -24,6 +25,428 @@ def _safe_mean(values):
 class BufferedScalarEvent:
     step: int
     scalars: dict[str, float]
+
+
+class FixedReverseCurriculumCallback(BaseCallback):
+    """Broadcast a deterministic reverse-curriculum reset distribution."""
+
+    def __init__(
+        self,
+        *,
+        remaining_distances_m: np.ndarray,
+        whole_distance_m: float,
+        total_timesteps: int,
+        profile: Any,
+        verbose: int = 0,
+    ) -> None:
+        super().__init__(verbose)
+        remaining = np.asarray(remaining_distances_m, dtype=np.float64)
+        if remaining.ndim != 1 or remaining.size == 0:
+            raise ValueError("remaining_distances_m must be a non-empty 1-D array")
+        if not np.all(np.isfinite(remaining)) or np.any(remaining < 0.0):
+            raise ValueError("remaining_distances_m must be finite and non-negative")
+        if not np.isfinite(whole_distance_m) or whole_distance_m <= 0.0:
+            raise ValueError("whole_distance_m must be finite and positive")
+        if total_timesteps <= 0:
+            raise ValueError("total_timesteps must be positive")
+        if getattr(profile, "controller_kind", None) != "fixed_reverse":
+            raise ValueError("profile must use the fixed_reverse controller")
+        self._remaining_distances_m = remaining
+        self._whole_distance_m = float(whole_distance_m)
+        self._total_timesteps = int(total_timesteps)
+        self._profile = profile
+        self._version = 0
+        self._rollout_index = 0
+        self._start_index = int(np.argmax(remaining))
+        self._current_weights = self._weights_for_progress(0.0)
+
+    def initial_weights(self) -> np.ndarray:
+        """Return the distribution required before SB3's first environment reset."""
+        return self._current_weights.copy()
+
+    def _on_rollout_start(self) -> None:
+        if self._rollout_index > 0:
+            progress = min(1.0, float(self.num_timesteps) / self._total_timesteps)
+            weights = self._weights_for_progress(progress)
+            if not np.array_equal(weights, self._current_weights):
+                self._version += 1
+                self.training_env.env_method(
+                    "set_reference_initial_state_distribution",
+                    weights,
+                    version=self._version,
+                )
+                self._current_weights = weights
+        self._rollout_index += 1
+
+    def _on_step(self) -> bool:
+        return True
+
+    def _on_training_end(self) -> None:
+        # Do not alter workers here: only release the schedule data retained by
+        # the callback after learning has finished.
+        self._remaining_distances_m = np.empty(0, dtype=np.float64)
+
+    def _weights_for_progress(self, progress: float) -> np.ndarray:
+        start = float(self._profile.expansion_start_ratio)
+        end = float(self._profile.expansion_end_ratio)
+        start_only = float(self._profile.start_only_ratio)
+        minimum = float(self._profile.min_remaining_distance_m)
+        base_start_probability = float(self._profile.base_start_probability)
+        initial_cap = min(
+            float(self._profile.initial_max_remaining_distance_m),
+            self._whole_distance_m,
+        )
+
+        if progress < start:
+            cap = initial_cap
+            start_probability = base_start_probability
+        elif progress < end:
+            ratio = (progress - start) / max(end - start, 1e-12)
+            cap = initial_cap + ratio * (self._whole_distance_m - initial_cap)
+            start_probability = base_start_probability
+        elif progress < start_only:
+            cap = self._whole_distance_m
+            ratio = (progress - end) / max(start_only - end, 1e-12)
+            start_probability = base_start_probability + (
+                1.0 - base_start_probability
+            ) * ratio
+        else:
+            result = np.zeros_like(self._remaining_distances_m)
+            result[self._start_index] = 1.0
+            return result
+
+        base_mask = (self._remaining_distances_m >= minimum) & (
+            self._remaining_distances_m <= cap
+        )
+        if not np.any(base_mask):
+            raise ValueError(
+                "fixed reverse curriculum range contains no eligible nodes"
+            )
+        base_weights = base_mask.astype(np.float64)
+        base_weights /= float(np.sum(base_weights))
+        if not 0.0 <= start_probability <= 1.0:
+            raise ValueError("base_start_probability must be within [0, 1]")
+        start_weights = np.zeros_like(base_weights)
+        start_weights[self._start_index] = 1.0
+        return (
+            (1.0 - start_probability) * base_weights
+            + start_probability * start_weights
+        )
+
+
+@dataclass(frozen=True)
+class _SPDLContextSample:
+    reference_index: int
+    distribution_version: int
+
+
+class SPDLReferenceCurriculumCallback(BaseCallback):
+    """Paper-style importance-weighted SPDL over discrete reference contexts."""
+
+    _KL_TOLERANCE = 1e-10
+    _TARGET_KL_TOLERANCE = 1e-8
+
+    def __init__(
+        self,
+        *,
+        remaining_distances_m: np.ndarray,
+        reference_observations: np.ndarray,
+        gamma: float,
+        profile: Any,
+        verbose: int = 0,
+    ) -> None:
+        super().__init__(verbose)
+        remaining = np.asarray(remaining_distances_m, dtype=np.float64)
+        observations = np.asarray(reference_observations, dtype=np.float32)
+        if remaining.ndim != 1 or remaining.size == 0:
+            raise ValueError("remaining_distances_m must be a non-empty 1-D array")
+        if not np.all(np.isfinite(remaining)) or np.any(remaining < 0.0):
+            raise ValueError("remaining_distances_m must be finite and non-negative")
+        if observations.ndim != 2 or observations.shape[0] != remaining.size:
+            raise ValueError(
+                "reference_observations must have one row per eligible reference node"
+            )
+        if not np.all(np.isfinite(observations)):
+            raise ValueError("reference_observations must be finite")
+        if not 0.0 < float(gamma) <= 1.0:
+            raise ValueError("gamma must be within (0, 1]")
+        if getattr(profile, "controller_kind", None) != "spdl":
+            raise ValueError("profile must use the spdl controller")
+
+        self._remaining_distances_m = remaining
+        self._reference_observations = observations
+        self._gamma = float(gamma)
+        self._profile = profile
+        self._start_index = int(np.argmax(remaining))
+        self._validate_profile()
+        self._target_weights = self._build_target_weights()
+        self._current_weights = self._build_initial_weights()
+        self._weights_by_version: dict[int, np.ndarray] = {
+            0: self._current_weights.copy()
+        }
+        self._version = 0
+        self._rollout_index = 0
+        self._context_update_count = 0
+        self._context_samples: list[_SPDLContextSample] = []
+        self._completed_returns: list[float] = []
+        self._active_context_by_env: dict[int, tuple[int, int, int, float, float]] = {}
+
+    def initial_weights(self) -> np.ndarray:
+        """Return the all-support distribution injected before the first reset."""
+        return self._current_weights.copy()
+
+    @property
+    def target_weights(self) -> np.ndarray:
+        return self._target_weights.copy()
+
+    def _on_rollout_start(self) -> None:
+        if self._rollout_index > 0:
+            self._maybe_update_distribution()
+        self._rollout_index += 1
+
+    def _on_step(self) -> bool:
+        infos = self.locals.get("infos", [])
+        rewards = self.locals.get("rewards", [])
+        dones_raw = self.locals.get("dones", [])
+        if not isinstance(infos, (list, tuple)):
+            return True
+        try:
+            dones = list(dones_raw)
+        except TypeError:
+            dones = [bool(dones_raw)]
+        reward_values = np.asarray(rewards, dtype=np.float64).reshape(-1)
+
+        for env_index, info in enumerate(infos):
+            if not isinstance(info, dict) or env_index >= reward_values.size:
+                continue
+            sample = self._context_from_info(info)
+            if sample is None:
+                continue
+            sample_id, reference_index, version = sample
+            active = self._active_context_by_env.get(env_index)
+            if active is None or active[0] != sample_id:
+                self._context_samples.append(
+                    _SPDLContextSample(reference_index, version)
+                )
+                active = (sample_id, reference_index, version, 0.0, 1.0)
+
+            _, active_index, active_version, total_return, discount = active
+            total_return += discount * float(reward_values[env_index])
+            discount *= self._gamma
+            self._active_context_by_env[env_index] = (
+                sample_id,
+                active_index,
+                active_version,
+                total_return,
+                discount,
+            )
+            if env_index < len(dones) and bool(dones[env_index]):
+                self._completed_returns.append(total_return)
+                self._active_context_by_env.pop(env_index, None)
+        return True
+
+    def _on_training_end(self) -> None:
+        self._context_samples.clear()
+        self._completed_returns.clear()
+        self._active_context_by_env.clear()
+        self._weights_by_version.clear()
+        self._reference_observations = np.empty((0, 0), dtype=np.float32)
+
+    def _maybe_update_distribution(self) -> None:
+        min_context_samples = int(self._profile.spdl_min_context_samples)
+        if len(self._context_samples) < min_context_samples:
+            return
+
+        warmup_updates = int(self._profile.spdl_alpha_warmup_updates)
+        alpha = 0.0
+        if self._context_update_count >= warmup_updates:
+            min_completed = int(self._profile.spdl_min_completed_episodes)
+            if len(self._completed_returns) < min_completed:
+                return
+            mean_return = float(np.mean(self._completed_returns))
+            target_kl = self._kl_divergence(
+                self._current_weights, self._target_weights
+            )
+            if mean_return <= 0.0 or target_kl <= self._TARGET_KL_TOLERANCE:
+                self._clear_update_buffers()
+                return
+            alpha = float(self._profile.spdl_zeta) * mean_return / target_kl
+
+        coefficients = self._importance_weighted_coefficients()
+        candidate = self._solve_distribution(coefficients, alpha)
+        self._context_update_count += 1
+        self._clear_update_buffers()
+        if np.allclose(candidate, self._current_weights, rtol=1e-10, atol=1e-12):
+            return
+
+        self._version += 1
+        self.training_env.env_method(
+            "set_reference_initial_state_distribution",
+            candidate,
+            version=self._version,
+        )
+        self._current_weights = candidate
+        self._weights_by_version[self._version] = candidate.copy()
+
+    def _importance_weighted_coefficients(self) -> np.ndarray:
+        counts_by_index: dict[int, int] = {}
+        denominator_sum_by_index: dict[int, float] = {}
+        for sample in self._context_samples:
+            weights = self._weights_by_version.get(sample.distribution_version)
+            if weights is None:
+                raise RuntimeError("missing sampling distribution for SPDL context")
+            index = sample.reference_index
+            if not 0 <= index < self._current_weights.size:
+                raise RuntimeError("SPDL context index is outside the eligible range")
+            counts_by_index[index] = counts_by_index.get(index, 0) + 1
+            denominator_sum_by_index[index] = (
+                denominator_sum_by_index.get(index, 0.0) + 1.0 / weights[index]
+            )
+
+        values = self._critic_values(np.asarray(list(counts_by_index), dtype=np.int64))
+        coefficients = np.zeros_like(self._current_weights)
+        sample_count = float(len(self._context_samples))
+        for index, value in zip(counts_by_index, values, strict=True):
+            coefficients[index] = value * denominator_sum_by_index[index] / sample_count
+        return coefficients
+
+    def _critic_values(self, indices: np.ndarray) -> np.ndarray:
+        if indices.size == 0:
+            return np.empty(0, dtype=np.float64)
+        normalizer = self.training_env
+        normalize_obs = getattr(normalizer, "normalize_obs", None)
+        if not callable(normalize_obs):
+            raise TypeError("SPDL requires the training VecEnv to normalize observations")
+        normalized = normalize_obs(self._reference_observations[indices])
+        observations = np.asarray(normalized, dtype=np.float32)
+        policy = self.model.policy
+        observation_tensor, _ = policy.obs_to_tensor(observations)
+        with th.no_grad():
+            values = policy.predict_values(observation_tensor)
+        return values.detach().cpu().numpy().reshape(-1).astype(np.float64)
+
+    def _solve_distribution(self, coefficients: np.ndarray, alpha: float) -> np.ndarray:
+        bound = float(self._profile.spdl_relative_entropy_bound)
+        if alpha > 0.0:
+            unconstrained = self._weights_for_dual(coefficients, alpha, 0.0)
+            if self._kl_divergence(unconstrained, self._current_weights) <= bound:
+                return unconstrained
+
+        lower = 0.0
+        upper = 1.0
+        while self._kl_divergence(
+            self._weights_for_dual(coefficients, alpha, upper),
+            self._current_weights,
+        ) > bound:
+            upper *= 2.0
+            if upper > 1e12:
+                raise RuntimeError("could not satisfy the SPDL relative-entropy bound")
+
+        for _ in range(80):
+            middle = (lower + upper) / 2.0
+            candidate = self._weights_for_dual(coefficients, alpha, middle)
+            if self._kl_divergence(candidate, self._current_weights) > bound:
+                lower = middle
+            else:
+                upper = middle
+        return self._weights_for_dual(coefficients, alpha, upper)
+
+    def _weights_for_dual(
+        self, coefficients: np.ndarray, alpha: float, dual: float
+    ) -> np.ndarray:
+        denominator = alpha + dual
+        if denominator <= 0.0:
+            raise ValueError("SPDL dual denominator must be positive")
+        log_weights = (
+            coefficients / denominator
+            + alpha / denominator * np.log(self._target_weights)
+            + dual / denominator * np.log(self._current_weights)
+        )
+        log_weights -= float(np.max(log_weights))
+        weights = np.maximum(np.exp(log_weights), np.finfo(np.float64).tiny)
+        return weights / float(np.sum(weights))
+
+    def _build_initial_weights(self) -> np.ndarray:
+        easy_mask = (
+            self._remaining_distances_m
+            >= float(self._profile.min_remaining_distance_m)
+        ) & (
+            self._remaining_distances_m
+            <= float(self._profile.initial_max_remaining_distance_m)
+        )
+        if not np.any(easy_mask):
+            raise ValueError("SPDL initial easy range contains no eligible nodes")
+        easy = easy_mask.astype(np.float64)
+        easy /= float(np.sum(easy))
+        start = np.zeros_like(easy)
+        start[self._start_index] = 1.0
+        uniform = np.full_like(easy, 1.0 / easy.size)
+        weights = (
+            float(self._profile.spdl_initial_easy_mass) * easy
+            + float(self._profile.spdl_initial_start_mass) * start
+            + float(self._profile.spdl_initial_uniform_mass) * uniform
+        )
+        return weights / float(np.sum(weights))
+
+    def _build_target_weights(self) -> np.ndarray:
+        uniform_mass = float(self._profile.spdl_target_uniform_mass)
+        target = np.full(
+            self._current_size(), uniform_mass / self._current_size(), dtype=np.float64
+        )
+        target[self._start_index] += 1.0 - uniform_mass
+        return target / float(np.sum(target))
+
+    def _current_size(self) -> int:
+        return int(self._remaining_distances_m.size)
+
+    def _validate_profile(self) -> None:
+        masses = np.asarray(
+            [
+                self._profile.spdl_initial_easy_mass,
+                self._profile.spdl_initial_start_mass,
+                self._profile.spdl_initial_uniform_mass,
+            ],
+            dtype=np.float64,
+        )
+        if not np.all(np.isfinite(masses)) or np.any(masses < 0.0):
+            raise ValueError("SPDL initial distribution masses must be non-negative")
+        if not np.isclose(float(np.sum(masses)), 1.0, atol=1e-12, rtol=0.0):
+            raise ValueError("SPDL initial distribution masses must sum to one")
+        target_uniform_mass = float(self._profile.spdl_target_uniform_mass)
+        if not 0.0 < target_uniform_mass < 1.0:
+            raise ValueError("SPDL target uniform mass must be within (0, 1)")
+        if int(self._profile.spdl_alpha_warmup_updates) < 0:
+            raise ValueError("SPDL alpha warm-up updates must be non-negative")
+        if not 0.0 < float(self._profile.spdl_relative_entropy_bound):
+            raise ValueError("SPDL relative-entropy bound must be positive")
+        if not 0.0 <= float(self._profile.spdl_zeta):
+            raise ValueError("SPDL zeta must be non-negative")
+        if int(self._profile.spdl_min_context_samples) <= 0:
+            raise ValueError("SPDL minimum context sample count must be positive")
+        if int(self._profile.spdl_min_completed_episodes) <= 0:
+            raise ValueError("SPDL minimum completed episode count must be positive")
+
+    @staticmethod
+    def _context_from_info(info: dict[str, Any]) -> tuple[int, int, int] | None:
+        try:
+            return (
+                int(info["reference_context_sample_id"]),
+                int(info["reference_context_index"]),
+                int(info["reference_context_distribution_version"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _clear_update_buffers(self) -> None:
+        self._context_samples.clear()
+        self._completed_returns.clear()
+
+    @staticmethod
+    def _kl_divergence(left: np.ndarray, right: np.ndarray) -> float:
+        smallest = np.finfo(np.float64).tiny
+        safe_left = np.maximum(left, smallest)
+        safe_right = np.maximum(right, smallest)
+        return float(np.sum(safe_left * (np.log(safe_left) - np.log(safe_right))))
 
 
 class TensorboardCallback(BaseCallback):

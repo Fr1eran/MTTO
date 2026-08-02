@@ -200,10 +200,34 @@ class OperationalStepper:
         )
 
     def advance(
-        self, state: OperationalState, acceleration_mps2: float
+        self,
+        state: OperationalState,
+        acceleration_mps2: float,
+        *,
+        requested_distance_m: float | None = None,
     ) -> OperationalTransition:
+        """Advance one constant-acceleration transition.
+
+        ``requested_distance_m`` is primarily intended for replaying a
+        reference trajectory whose final segment is shorter than the regular
+        RL step.  Normal environment interaction leaves it as ``None`` and
+        therefore preserves the configured fixed-step behaviour.
+        """
+        if requested_distance_m is None:
+            step_distance_m = self.max_step_distance_m
+        else:
+            step_distance_m = float(requested_distance_m)
+            if (
+                not math.isfinite(step_distance_m)
+                or step_distance_m <= 0.0
+                or step_distance_m > self.max_step_distance_m
+            ):
+                raise ValueError(
+                    "requested_distance_m must be finite, positive, and no greater "
+                    "than max_step_distance_m"
+                )
         next_speed, distance, duration = calc_transition_from_acc_scalar_numba(
-            state.speed_mps, float(acceleration_mps2), self.max_step_distance_m
+            state.speed_mps, float(acceleration_mps2), step_distance_m
         )
         energy_mec, energy_lec = self.ecc.calc_energy(
             begin_pos=state.position_m,

@@ -262,6 +262,9 @@ def _apply_ablation_overrides(
 
     train_args.output_root = args.ablation_output_root
     train_args.reward_profile = reward_profile_name
+    # Reward ablations must retain the real-start baseline distribution.
+    train_args.curriculum_profile = "none"
+    train_args.reference_curve_dir = None
     train_args.experiment_tag = _build_repeat_experiment_tag(
         ablation_tag=args.ablation_tag,
         repeat_index=repeat_index,
