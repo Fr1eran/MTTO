@@ -31,7 +31,7 @@ class RewardBreakdown:
 class RewardCalculator:
     """Calculate reward from an explicit transition.
 
-    Safety v3 and stopping v1 are the PBRS terms from the latest commit.
+    Safety v3 and the stopping PBRS term are the dense guidance terms.
     Punctuality deliberately remains terminal-only.
     """
 
@@ -150,41 +150,52 @@ class RewardCalculator:
     def _potential_safety(
         *, speed_mps: float, min_speed_mps: float, max_speed_mps: float
     ) -> float:
-        """Safety potential, restored verbatim from the latest commit."""
-        speed_band = max_speed_mps - min_speed_mps + 0.1
-        upper_bound = max(speed_band * 0.1, 2.0)
-        lower_bound = speed_band * 0.1
+        """PBRS safety potential with a band-scaled, non-overlapping buffer."""
+        K_safety = 1.0
+        speed_band = max_speed_mps - min_speed_mps
+        safety_buffer = min(max(0.15 * speed_band, 1.0), 5.0)
+
         alpha = 3.0
 
         margin_upper = max_speed_mps - speed_mps
-        x_upper = 1.0 - margin_upper / upper_bound
+        x_upper = 1.0 - margin_upper / safety_buffer
         z_upper = math.log1p(math.exp(alpha * x_upper)) / alpha
         phi_upper = -(z_upper**2)
         if min_speed_mps > 0.0:
             margin_lower = speed_mps - min_speed_mps
-            x_lower = 1.0 - margin_lower / lower_bound
+            x_lower = 1.0 - margin_lower / safety_buffer
             z_lower = math.log1p(math.exp(alpha * x_lower)) / alpha
             phi_lower = -(z_lower**2)
         else:
             phi_lower = 0.0
-        return phi_upper + phi_lower
+        return K_safety * (phi_upper + phi_lower)
 
     def _reward_stopping_potential(self, transition: OperationalTransition) -> float:
         previous = transition.previous_state
         current = transition.next_state
         phi_previous = self._potential_stopping(
-            position_m=previous.position_m, speed_mps=previous.speed_mps
+            position_m=previous.position_m,
+            speed_mps=previous.speed_mps,
+            max_speed_mps=previous.max_speed_mps,
         )
         phi_current = self._potential_stopping(
-            position_m=current.position_m, speed_mps=current.speed_mps
+            position_m=current.position_m,
+            speed_mps=current.speed_mps,
+            max_speed_mps=current.max_speed_mps,
         )
         return self.gamma * phi_current - phi_previous
 
-    def _potential_stopping(self, *, position_m: float, speed_mps: float) -> float:
-        """Stopping potential, restored verbatim from the latest commit."""
+    def _potential_stopping(
+        self, *, position_m: float, speed_mps: float, max_speed_mps: float
+    ) -> float:
+        """Stopping potential with a state-local speed scale.
+
+        ``max_speed_mps`` is the operational upper speed limit in the evaluated
+        state, rather than the vehicle's global design speed.
+        """
         distance = abs(position_m - self.train_service.target_position)
         if distance > self.target_attraction_domain_radius_m:
             return 0.0
         sigma_distance = 0.1 * self.target_attraction_domain_radius_m
-        sigma_speed = 0.2 * self.vehicle_max_speed_mps
+        sigma_speed = 0.2 * max_speed_mps + 1.0
         return 10.0 * math.exp(-distance / sigma_distance - speed_mps / sigma_speed)

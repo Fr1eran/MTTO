@@ -1,3 +1,5 @@
+import math
+
 import pytest
 
 from model.ocs import SPSState, TrainService
@@ -130,7 +132,7 @@ def test_safety_potential_uses_v3_pbrs_difference(calculator: RewardCalculator) 
     assert reward.safety == pytest.approx(expected)
 
 
-def test_stopping_potential_uses_v1_pbrs_difference(
+def test_stopping_potential_uses_pbrs_difference(
     calculator: RewardCalculator,
 ) -> None:
     previous = _state(position=-1000.0, speed=30.0)
@@ -148,11 +150,33 @@ def test_stopping_potential_uses_v1_pbrs_difference(
     )
     reward = calculator.calculate(transition)
     expected = calculator.gamma * calculator._potential_stopping(
-        position_m=current.position_m, speed_mps=current.speed_mps
+        position_m=current.position_m,
+        speed_mps=current.speed_mps,
+        max_speed_mps=current.max_speed_mps,
     ) - calculator._potential_stopping(
-        position_m=previous.position_m, speed_mps=previous.speed_mps
+        position_m=previous.position_m,
+        speed_mps=previous.speed_mps,
+        max_speed_mps=previous.max_speed_mps,
     )
     assert reward.stopping == pytest.approx(expected)
+
+
+def test_stopping_potential_uses_state_local_speed_limit(
+    calculator: RewardCalculator,
+) -> None:
+    low_limit_potential = calculator._potential_stopping(
+        position_m=100.0,
+        speed_mps=10.0,
+        max_speed_mps=10.0,
+    )
+    high_limit_potential = calculator._potential_stopping(
+        position_m=100.0,
+        speed_mps=10.0,
+        max_speed_mps=100.0,
+    )
+
+    assert low_limit_potential == pytest.approx(10.0 * math.exp(-10.0 / 3.0))
+    assert high_limit_potential > low_limit_potential
 
 
 def test_potential_flags_disable_only_their_own_components() -> None:

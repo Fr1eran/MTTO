@@ -26,7 +26,8 @@ def _patch_compact_linspace(monkeypatch: pytest.MonkeyPatch, limit: int = 32) ->
     original_linspace = show_potential_function.np.linspace
 
     def _compact_linspace(start, stop, num, *args, **kwargs):
-        return original_linspace(start, stop, min(int(num), limit), *args, **kwargs)
+        compact_num = min(int(num), limit) if int(num) > 256 else int(num)
+        return original_linspace(start, stop, compact_num, *args, **kwargs)
 
     monkeypatch.setattr(show_potential_function.np, "linspace", _compact_linspace)
 
@@ -39,20 +40,34 @@ def _patch_mock_safeguard_curves(monkeypatch: pytest.MonkeyPatch) -> None:
         ],
         dtype=np.float64,
     )
-    min_curves_list = [dummy_curve.copy() for _ in range(8)]
-    max_curves_list = [dummy_curve.copy() for _ in range(8)]
+    min_curves_list = [dummy_curve.copy() for _ in range(9)]
+    max_curves_list = [dummy_curve.copy() for _ in range(10)]
 
     min_curves_list[6] = np.asarray(
         [
-            [0.0, 50.0, 100.0],
-            [45.0, 30.0, 10.0],
+            [10700.0, 17828.0, 18067.0],
+            [20.0, 10.0, 0.0],
         ],
         dtype=np.float64,
     )
     max_curves_list[7] = np.asarray(
         [
-            [0.0, 50.0, 100.0],
-            [55.0, 45.0, 20.0],
+            [10700.0, 17828.0, 18067.0],
+            [55.0, 45.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    min_curves_list[8] = np.asarray(
+        [
+            [29010.0, 29270.0, 29340.0],
+            [12.0, 4.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    max_curves_list[9] = np.asarray(
+        [
+            [29010.0, 29270.0, 29340.0],
+            [25.0, 10.0, 0.0],
         ],
         dtype=np.float64,
     )
@@ -60,6 +75,14 @@ def _patch_mock_safeguard_curves(monkeypatch: pytest.MonkeyPatch) -> None:
         show_potential_function,
         "load_safeguard_curves",
         lambda *_keys: (min_curves_list, max_curves_list),
+    )
+    monkeypatch.setattr(
+        show_potential_function,
+        "load_speed_limits",
+        lambda **_kwargs: (
+            np.asarray([60.0, 50.0, 30.0], dtype=np.float64),
+            np.asarray([0.0, 28000.0, 29000.0, 30000.0], dtype=np.float64),
+        ),
     )
 
 
@@ -209,7 +232,7 @@ def test_plot_safety_speed_minimal_keeps_upper_and_lower_bounds(
     ax = fig.axes[0]
 
     assert ax.axison is True
-    assert len(ax.lines) == 2
+    assert len(ax.lines) == 3
     assert len(fig.axes) == 1
     show_potential_function.plt.close(fig)
 
@@ -257,6 +280,7 @@ def test_plot_stopping_heatmap_2d_minimal_skips_colorbar(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_compact_linspace(monkeypatch)
+    _patch_mock_safeguard_curves(monkeypatch)
 
     fig_minimal = show_potential_function.plot_stopping_potential_heatmap(
         view_mode="2d",
@@ -269,9 +293,104 @@ def test_plot_stopping_heatmap_2d_minimal_skips_colorbar(
 
     assert len(fig_minimal.axes) == 1
     assert len(fig_default.axes) == 2
+    assert len(fig_minimal.axes[0].lines) == 3
+    assert len(fig_default.axes[0].lines) == 3
+    assert len(fig_default.legends) == 1
 
     show_potential_function.plt.close(fig_minimal)
     show_potential_function.plt.close(fig_default)
+
+
+def test_safety_speed_single_plot_matches_guidance_wide_style(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_compact_linspace(monkeypatch)
+    _patch_mock_safeguard_curves(monkeypatch)
+
+    fig = show_potential_function.plot_safety_potential_heatmap_speed(minimal=False)
+    ax, colorbar_axis = fig.axes
+
+    assert len(ax.lines) == 3
+    assert len(fig.legends) == 1
+    assert colorbar_axis.get_position().x0 > ax.get_position().x1
+    assert colorbar_axis.get_ylabel() == ""
+    show_potential_function.plt.close(fig)
+
+
+def test_plot_guidance_potentials_wide_uses_shared_final_stop_domain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_compact_linspace(monkeypatch)
+    _patch_mock_safeguard_curves(monkeypatch)
+
+    fig = show_potential_function.plot_guidance_potentials_wide(minimal=False)
+    ax_safety, ax_stopping, *_colorbars = fig.axes
+
+    assert len(fig.axes) == 4
+    np.testing.assert_allclose(ax_safety.get_xlim(), ax_stopping.get_xlim())
+    np.testing.assert_allclose(ax_safety.get_ylim(), ax_stopping.get_ylim())
+    assert len(ax_safety.lines) == 3
+    assert len(ax_stopping.lines) == 3
+    assert [text.get_text() for text in fig.texts] == ["(a)", "(b)"]
+    assert len(fig.legends) == 1
+    assert [text.get_text() for text in fig.legends[0].get_texts()] == [
+        r"$v_{\min}(x)$",
+        r"$v_{\max}(x)$",
+        "Target position",
+    ]
+    safety_colorbar_axis, stopping_colorbar_axis = fig.axes[2:]
+    assert safety_colorbar_axis.get_xlabel() == ""
+    assert stopping_colorbar_axis.get_xlabel() == ""
+    assert safety_colorbar_axis.get_position().x0 > ax_safety.get_position().x1
+    assert stopping_colorbar_axis.get_position().x0 > ax_stopping.get_position().x1
+    show_potential_function.plt.close(fig)
+
+
+def test_plot_guidance_potentials_wide_minimal_hides_colorbars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_compact_linspace(monkeypatch)
+    _patch_mock_safeguard_curves(monkeypatch)
+
+    fig = show_potential_function.plot_guidance_potentials_wide(minimal=True)
+
+    assert len(fig.axes) == 2
+    assert all(axis.axison for axis in fig.axes)
+    show_potential_function.plt.close(fig)
+
+
+def test_final_stop_field_masks_values_outside_both_speed_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_compact_linspace(monkeypatch)
+    _patch_mock_safeguard_curves(monkeypatch)
+
+    field = show_potential_function._build_seventh_auxiliary_stop_field()
+
+    assert np.all(
+        field.speed_grid_mps[field.feasible_mask]
+        >= field.min_speed_grid_mps[field.feasible_mask]
+    )
+    assert np.all(
+        field.speed_grid_mps[field.feasible_mask]
+        <= field.max_speed_grid_mps[field.feasible_mask]
+    )
+    assert np.any(field.speed_grid_mps < field.min_speed_grid_mps)
+    assert np.any(field.speed_grid_mps > field.max_speed_grid_mps)
+
+
+def test_stopping_potential_v3_uses_state_local_speed_limit() -> None:
+    pos = np.asarray([100.0, 100.0], dtype=np.float64)
+    speed = np.asarray([10.0, 10.0], dtype=np.float64)
+    potential = show_potential_function._potential_stopping_v3(
+        pos,
+        speed,
+        target_pos=100.0,
+        max_speed_mps=np.asarray([10.0, 100.0], dtype=np.float64),
+    )
+
+    assert potential[0] == pytest.approx(10.0 * np.exp(-10.0 / 3.0))
+    assert potential[1] > potential[0]
 
 
 def test_apply_minimal_axis_style_keeps_3d_axis_on() -> None:
