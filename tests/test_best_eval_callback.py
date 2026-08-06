@@ -32,11 +32,11 @@ class DummyLogger:
 
 
 class DummyModel:
-    def __init__(self, training_env: DummyTrainingEnv, logger: DummyLogger):
+    def __init__(self, training_env: object, logger: DummyLogger):
         self._training_env = training_env
         self.logger = logger
 
-    def get_env(self) -> DummyTrainingEnv:
+    def get_env(self) -> object:
         return self._training_env
 
     def save(self, path: str) -> None:
@@ -44,8 +44,7 @@ class DummyModel:
 
 
 class DummyTrainingEnv:
-    def save(self, path: str) -> None:
-        Path(path).write_text("vecnormalize", encoding="utf-8")
+    pass
 
 
 class DummyEvalEnv:
@@ -196,7 +195,6 @@ def test_periodic_eval_callback_triggers_on_episode_interval(
     assert callback.best_result is not None
     assert callback.best_trigger_interval == 3
     assert (tmp_path / "best_model.zip").exists()
-    assert (tmp_path / "best_vecnormalize.pkl").exists()
     assert (tmp_path / "best_trajectory.npz").exists()
     metrics = json.loads(
         (tmp_path / "best_trajectory_metrics.json").read_text(encoding="utf-8")

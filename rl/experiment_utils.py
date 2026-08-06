@@ -19,7 +19,6 @@ from stable_baselines3.common.vec_env import (
     DummyVecEnv,
     SubprocVecEnv,
     VecMonitor,
-    VecNormalize,
 )
 
 from model.ocs import SafeGuardUtility, TrainService
@@ -53,7 +52,6 @@ from utils.trajectory import OptimizedCurveArtifact
 __all__ = [
     # 常量
     "RL_FINAL_MODEL_FILENAME",
-    "RL_FINAL_VECNORMALIZE_FILENAME",
     "RUN_METADATA_FILENAME",
     "RL_DEFAULT_SEARCH_DIR",
     "RL_TRAJECTORY_SOURCE_CHOICES",
@@ -105,7 +103,6 @@ __all__ = [
 # =============================================================================
 
 RL_FINAL_MODEL_FILENAME = "final_model.zip"
-RL_FINAL_VECNORMALIZE_FILENAME = "final_vecnormalize.pkl"
 RUN_METADATA_FILENAME = "run_metadata.json"
 RL_DEFAULT_SEARCH_DIR = "output/optimal/rl"
 
@@ -241,7 +238,6 @@ class TrainingRunSpec:
     final_output_dir: str
     best_eval_output_dir: str
     final_model_save_path: str
-    final_vecnormalize_save_path: str
     run_metadata_path: str
     run_metadata: dict[str, Any]
     run_mode: str
@@ -341,7 +337,7 @@ CURRICULUM_PROFILES: dict[str, CurriculumProfile] = {
         name="spdl",
         label="discrete SPDL",
         description=(
-            "Importance-weighted self-paced learning over reconstructed "
+            "Critic-evaluated self-paced learning over reconstructed "
             "reference initial states."
         ),
         controller_kind="spdl",
@@ -976,10 +972,6 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
     )
     final_output_dir = os.path.join(output_dir, "final")
     final_model_save_path = os.path.join(final_output_dir, RL_FINAL_MODEL_FILENAME)
-    final_vecnormalize_save_path = os.path.join(
-        final_output_dir,
-        RL_FINAL_VECNORMALIZE_FILENAME,
-    )
     best_eval_output_dir = os.path.join(
         output_dir, f"best_{args.best_eval_trigger_mode}"
     )
@@ -1082,7 +1074,6 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
         final_output_dir=final_output_dir,
         best_eval_output_dir=best_eval_output_dir,
         final_model_save_path=final_model_save_path,
-        final_vecnormalize_save_path=final_vecnormalize_save_path,
         run_metadata_path=os.path.join(output_dir, RUN_METADATA_FILENAME),
         run_metadata=run_metadata,
         run_mode=run_mode,
@@ -1322,12 +1313,6 @@ def train_single_experiment(
 
     if resolved_spec.enable_monitor:
         venv_train = VecMonitor(venv_train)
-    venv_train = VecNormalize(
-        venv=venv_train,
-        norm_obs=False,
-        norm_reward=True,
-        gamma=resolved_spec.reward_discount,
-    )
 
     model = PPO(
         "MlpPolicy",
@@ -1421,15 +1406,10 @@ def train_single_experiment(
         progress_bar=True,
     )
     model.save(resolved_spec.final_model_save_path)
-    venv_train.save(resolved_spec.final_vecnormalize_save_path)
     venv_train.close()
 
     print("Training finished.")
     print(f"Final Model saved to: {resolved_spec.final_model_save_path}")
-    print(
-        f"Final VecNormalize stats saved to: \
-        {resolved_spec.final_vecnormalize_save_path}"
-    )
     if resolved_spec.enable_best_eval:
         print(
             f"Best trajectory artifacts saved under: \

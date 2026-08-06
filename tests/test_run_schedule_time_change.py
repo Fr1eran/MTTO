@@ -3,17 +3,27 @@ import os
 from pathlib import Path
 
 import pytest
+import numpy as np
 
 from scripts.run_schedule_time_change import (
     DEFAULT_DELTA_TIMES_S,
     DEFAULT_EVALUATE_LOAD_DIR,
     DEFAULT_OUTPUT_DIR,
     SUMMARY_FILENAME,
+    _as_batch_observation,
     build_arg_parser,
     build_schedule_change_case,
     resolve_schedule_change_experiment_dir,
     should_trigger_schedule_change,
 )
+
+
+def test_as_batch_observation_preserves_environment_normalized_values() -> None:
+    observation = _as_batch_observation([0.25, -0.5, 1.0])
+
+    assert observation.dtype == np.float32
+    assert observation.shape == (1, 3)
+    np.testing.assert_allclose(observation, [[0.25, -0.5, 1.0]])
 
 
 def test_cli_evaluate_and_show_load_dir_defaults_are_mode_specific() -> None:

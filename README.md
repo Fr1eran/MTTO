@@ -167,7 +167,7 @@ Best-eval 排序规则：
 - 如果当前还没有成功轨迹，才回退到按总 reward 比较
 - 停站误差与绝对时间误差仅作为稳定 tie-break
 
-每次刷新最优时，在实验目录下的 `best_{trigger_mode}/` 中保存模型、VecNormalize、`best_trajectory.npz` 与 `best_trajectory_metrics.json`。
+每次刷新最优时，在实验目录下的 `best_{trigger_mode}/` 中保存模型、`best_trajectory.npz` 与 `best_trajectory_metrics.json`。
 
 如果后续要执行 PBRS 消融实验，建议统一使用 `monitor_best` 模式，以保留 rollout 基础监控和训练期最优轨迹评估，同时避免高频诊断采样带来的额外开销。
 
@@ -281,7 +281,7 @@ python -m scripts.train_reward_ablation \
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `--load-dir` | `str` | `output/optimal/rl/final/` | 模型与 VecNormalize 文件所在目录 |
+| `--load-dir` | `str` | `output/optimal/rl/final/` | PPO 模型所在目录 |
 | `--reward-discount` | `float` | 从 `run_metadata.json` 读取，否则 `0.995` | 折扣因子（重建环境用） |
 | `--schedule-time-s` | `float` | 从 `run_metadata.json` 读取，否则 `430.0` | 规划运行时间 |
 | `--step-distance` | `float` | 从 `run_metadata.json` 读取，否则 `100.0` | 环境最大步距 (m) |
@@ -336,7 +336,7 @@ python -m scripts.evaluate_rl --load-dir output/optimal/rl/.../final/ --dry-run
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `--load-dir` | `str` | `output/optimal/rl/final/` | 模型与 VecNormalize 文件所在目录 |
+| `--load-dir` | `str` | `output/optimal/rl/final/` | PPO 模型所在目录 |
 | `--output-dir` | `str` | `output/optimal/rl/schedule_time_change_eval/` | 突变实验输出根目录；每次运行会创建时间戳子目录 |
 | `--reward-discount` | `float` | 从 `run_metadata.json` 读取，否则 `0.995` | 折扣因子（重建环境用） |
 | `--schedule-time-s` | `float` | 从 `run_metadata.json` 读取，否则 `430.0` | 突变前的初始规划运行时间 |

@@ -5,7 +5,7 @@ from datetime import datetime
 
 import numpy as np
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize, VecVideoRecorder
+from stable_baselines3.common.vec_env import DummyVecEnv, VecVideoRecorder
 
 from rl.env_factory import make_env
 from rl.evaluation import (
@@ -20,7 +20,6 @@ from rl.experiment_utils import (
     DEFAULT_REWARD_PROFILE_NAME,
     DEFAULT_SCHEDULE_TIME_S,
     RL_FINAL_MODEL_FILENAME,
-    RL_FINAL_VECNORMALIZE_FILENAME,
     build_run_metadata,
     load_run_metadata,
     resolve_reward_profile,
@@ -136,7 +135,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--load-dir",
         type=str,
         default="output/optimal/rl/final/",
-        help="PPO 模型文件和 vecnormalize 文件的搜索路径",
+        help="PPO 模型文件所在目录",
     )
     parser.add_argument(
         "--reward-discount",
@@ -261,7 +260,6 @@ def main() -> None:
     output_dir = args.output_dir if args.output_dir is not None else load_dir
 
     model_zip_path = os.path.join(load_dir, RL_FINAL_MODEL_FILENAME)
-    vecnormalize_pkl_path = os.path.join(load_dir, RL_FINAL_VECNORMALIZE_FILENAME)
     if args.dry_run:
         print("========== Evaluation Dry Run ==========")
         print(f"  load_dir:            {load_dir}")
@@ -277,17 +275,11 @@ def main() -> None:
         print(f"  plot_operation_time_series: {args.plot_operation_time_series}")
         print(f"  model_zip_path:      {model_zip_path}")
         print(f"  model_exists:        {os.path.exists(model_zip_path)}")
-        print(f"  vecnormalize_path:   {vecnormalize_pkl_path}")
-        print(f"  vecnormalize_exists: {os.path.exists(vecnormalize_pkl_path)}")
         print("========================================")
         return
 
     if not os.path.exists(model_zip_path):
         raise FileNotFoundError(f"Model file not found: {model_zip_path}")
-    if not os.path.exists(vecnormalize_pkl_path):
-        raise FileNotFoundError(
-            f"VecNormalize stats file not found: {vecnormalize_pkl_path}"
-        )
 
     vehicle, track, safeguard_utility, train_service = build_scenario(
         schedule_time_s=schedule_time_s
@@ -307,10 +299,6 @@ def main() -> None:
             reward_config=reward_config,
         )
     ])
-
-    venv_eval = VecNormalize.load(vecnormalize_pkl_path, venv_eval)
-    venv_eval.training = False
-    venv_eval.norm_reward = False
 
     if args.record_video:
         eval_name_prefix = f"eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}"

@@ -11,7 +11,7 @@ from typing import Any
 import matplotlib.pyplot as plt
 import numpy as np
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+from stable_baselines3.common.vec_env import DummyVecEnv
 
 from model.ocs import SafeGuardUtility
 from rl.env_factory import make_env
@@ -27,7 +27,6 @@ from rl.experiment_utils import (
     DEFAULT_REWARD_PROFILE_NAME,
     DEFAULT_SCHEDULE_TIME_S,
     RL_FINAL_MODEL_FILENAME,
-    RL_FINAL_VECNORMALIZE_FILENAME,
     apply_rl_curve_plot_style,
     load_run_metadata,
     resolve_reward_profile,
@@ -187,7 +186,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--load-dir",
         type=str,
         default=DEFAULT_EVALUATE_LOAD_DIR,
-        help="PPO model and VecNormalize directory.",
+        help="PPO model directory.",
     )
     evaluate_parser.add_argument(
         "--output-dir",
@@ -304,20 +303,16 @@ def _make_experiment_dir(output_dir: str | os.PathLike[str]) -> Path:
     return experiment_dir
 
 
-def _normalize_raw_vec_obs(venv_eval: VecNormalize, raw_obs: Any) -> np.ndarray:
+def _as_batch_observation(raw_obs: Any) -> np.ndarray:
     raw_obs_arr = np.asarray(raw_obs, dtype=np.float32)
     if raw_obs_arr.ndim == 1:
         raw_obs_arr = raw_obs_arr.reshape(1, -1)
-    normalized = venv_eval.normalize_obs(raw_obs_arr)
-    if not isinstance(normalized, np.ndarray):
-        raise TypeError("VecNormalize.normalize_obs must return a numpy.ndarray")
-    return normalized
+    return raw_obs_arr
 
 
 def _run_one_case(
     *,
     model: PPO,
-    vecnormalize_pkl_path: str,
     load_dir: str,
     experiment_dir: Path,
     case: ScheduleChangeCase,
@@ -346,10 +341,6 @@ def _run_one_case(
             reward_config=reward_config,
         )
     ])
-    venv_eval = VecNormalize.load(vecnormalize_pkl_path, venv_eval)
-    venv_eval.training = False
-    venv_eval.norm_reward = False
-
     total_reward = 0.0
     episode_steps = 0
     start_position_m = float(train_service.start_position)
@@ -383,7 +374,7 @@ def _run_one_case(
                 "change_schedule_time",
                 float(schedule_time_s + case.delta_time_s),
             )[0]
-            obs = _normalize_raw_vec_obs(venv_eval, raw_obs)
+            obs = _as_batch_observation(raw_obs)
             change_triggered = True
             change_step = 0
             change_position_m = current_position_m
@@ -426,7 +417,7 @@ def _run_one_case(
                     "change_schedule_time",
                     float(schedule_time_s + case.delta_time_s),
                 )[0]
-                obs = _normalize_raw_vec_obs(venv_eval, raw_obs)
+                obs = _as_batch_observation(raw_obs)
                 change_triggered = True
                 change_step = episode_steps
                 change_position_m = current_position_m
@@ -609,7 +600,6 @@ def run_evaluate(args: argparse.Namespace) -> None:
     reward_config = reward_profile.to_reward_config()
 
     model_zip_path = os.path.join(load_dir, RL_FINAL_MODEL_FILENAME)
-    vecnormalize_pkl_path = os.path.join(load_dir, RL_FINAL_VECNORMALIZE_FILENAME)
     cases = [build_schedule_change_case(delta) for delta in args.delta_times_s]
 
     if args.dry_run:
@@ -626,8 +616,6 @@ def run_evaluate(args: argparse.Namespace) -> None:
         print(f"  deterministic:       {args.deterministic}")
         print(f"  model_zip_path:      {model_zip_path}")
         print(f"  model_exists:        {os.path.exists(model_zip_path)}")
-        print(f"  vecnormalize_path:   {vecnormalize_pkl_path}")
-        print(f"  vecnormalize_exists: {os.path.exists(vecnormalize_pkl_path)}")
         print("  cases:")
         for case in cases:
             print(f"    - {case.label}: delta={case.delta_time_s:g}s")
@@ -636,10 +624,6 @@ def run_evaluate(args: argparse.Namespace) -> None:
 
     if not os.path.exists(model_zip_path):
         raise FileNotFoundError(f"Model file not found: {model_zip_path}")
-    if not os.path.exists(vecnormalize_pkl_path):
-        raise FileNotFoundError(
-            f"VecNormalize stats file not found: {vecnormalize_pkl_path}"
-        )
 
     experiment_dir = _make_experiment_dir(args.output_dir)
     model = PPO.load(model_zip_path, device=args.device)
@@ -648,7 +632,6 @@ def run_evaluate(args: argparse.Namespace) -> None:
     for case in cases:
         result = _run_one_case(
             model=model,
-            vecnormalize_pkl_path=vecnormalize_pkl_path,
             load_dir=load_dir,
             experiment_dir=experiment_dir,
             case=case,

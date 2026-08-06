@@ -5,7 +5,6 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.colors import TwoSlopeNorm
 from matplotlib.figure import Figure
 
 from utils.data_loader import load_safeguard_curves, load_speed_limits

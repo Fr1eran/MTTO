@@ -20,9 +20,6 @@ class _VecEnv:
     def __init__(self) -> None:
         self.calls: list[tuple[str, np.ndarray, int]] = []
 
-    def normalize_obs(self, observations):
-        return np.asarray(observations, dtype=np.float32)
-
     def env_method(self, method_name, weights, *, version):
         self.calls.append((method_name, np.asarray(weights), version))
 
@@ -77,19 +74,17 @@ def test_spdl_initial_and_target_distributions_have_required_support() -> None:
     assert np.all(target[1:] == pytest.approx(1e-3 / 4))
 
 
-def test_spdl_importance_coefficients_use_sampling_distribution_version() -> None:
+def test_spdl_critic_values_cover_full_pool_regardless_of_sampled_contexts() -> None:
     callback, _ = _build_callback()
     callback._context_samples = [
-        _SPDLContextSample(reference_index=0, distribution_version=0),
-        _SPDLContextSample(reference_index=0, distribution_version=0),
-        _SPDLContextSample(reference_index=3, distribution_version=0),
+        _SPDLContextSample(reference_index=0),
+        _SPDLContextSample(reference_index=0),
+        _SPDLContextSample(reference_index=3),
     ]
 
-    coefficients = callback._importance_weighted_coefficients()
-    initial = callback.initial_weights()
-    assert coefficients[0] == pytest.approx(2.0 * 4.0 / (3.0 * initial[0]))
-    assert coefficients[3] == pytest.approx(1.0 / (3.0 * initial[3]))
-    assert coefficients[1] == 0.0
+    coefficients = callback._all_context_critic_values()
+
+    assert coefficients == pytest.approx([4.0, 3.0, 2.0, 1.0])
 
 
 def test_spdl_warmup_broadcasts_kl_bounded_distribution_after_first_rollout() -> None:
@@ -112,15 +107,31 @@ def test_spdl_warmup_broadcasts_kl_bounded_distribution_after_first_rollout() ->
     )
 
 
-def test_spdl_post_warmup_skips_update_for_nonpositive_returns() -> None:
+def test_spdl_post_warmup_clips_negative_return_alpha_and_updates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     callback, env = _build_callback()
     callback._context_update_count = 10
     _record_context_steps(callback)
     callback._completed_returns = [-1.0] * 8
+    captured_alphas: list[float] = []
+    original_solver = callback._solve_distribution
+
+    def capture_solver(coefficients: np.ndarray, alpha: float) -> np.ndarray:
+        captured_alphas.append(alpha)
+        return original_solver(coefficients, alpha)
+
+    monkeypatch.setattr(callback, "_solve_distribution", capture_solver)
     callback._on_rollout_start()
     callback._on_rollout_start()
 
-    assert env.calls == []
+    assert captured_alphas == [0.0]
+    assert len(env.calls) == 1
+    _, weights, _ = env.calls[0]
+    assert (
+        callback._kl_divergence(weights, callback.initial_weights())
+        <= 0.05 + 1e-8
+    )
     assert callback._context_samples == []
 
 

@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-from stable_baselines3.common.callbacks import BaseCallback
 import torch as th
+from stable_baselines3.common.callbacks import BaseCallback
 
 from rl.evaluation import (
     PolicyEvaluationResult,
@@ -107,9 +107,9 @@ class FixedReverseCurriculumCallback(BaseCallback):
         elif progress < start_only:
             cap = self._whole_distance_m
             ratio = (progress - end) / max(start_only - end, 1e-12)
-            start_probability = base_start_probability + (
-                1.0 - base_start_probability
-            ) * ratio
+            start_probability = (
+                base_start_probability + (1.0 - base_start_probability) * ratio
+            )
         else:
             result = np.zeros_like(self._remaining_distances_m)
             result[self._start_index] = 1.0
@@ -129,19 +129,17 @@ class FixedReverseCurriculumCallback(BaseCallback):
         start_weights = np.zeros_like(base_weights)
         start_weights[self._start_index] = 1.0
         return (
-            (1.0 - start_probability) * base_weights
-            + start_probability * start_weights
-        )
+            1.0 - start_probability
+        ) * base_weights + start_probability * start_weights
 
 
 @dataclass(frozen=True)
 class _SPDLContextSample:
     reference_index: int
-    distribution_version: int
 
 
 class SPDLReferenceCurriculumCallback(BaseCallback):
-    """Paper-style importance-weighted SPDL over discrete reference contexts."""
+    """Discrete SPDL driven by Critic values over the full reference-context pool."""
 
     _KL_TOLERANCE = 1e-10
     _TARGET_KL_TOLERANCE = 1e-8
@@ -181,15 +179,12 @@ class SPDLReferenceCurriculumCallback(BaseCallback):
         self._validate_profile()
         self._target_weights = self._build_target_weights()
         self._current_weights = self._build_initial_weights()
-        self._weights_by_version: dict[int, np.ndarray] = {
-            0: self._current_weights.copy()
-        }
         self._version = 0
         self._rollout_index = 0
         self._context_update_count = 0
         self._context_samples: list[_SPDLContextSample] = []
         self._completed_returns: list[float] = []
-        self._active_context_by_env: dict[int, tuple[int, int, int, float, float]] = {}
+        self._active_context_by_env: dict[int, tuple[int, int, float, float]] = {}
 
     def initial_weights(self) -> np.ndarray:
         """Return the all-support distribution injected before the first reset."""
@@ -222,21 +217,20 @@ class SPDLReferenceCurriculumCallback(BaseCallback):
             sample = self._context_from_info(info)
             if sample is None:
                 continue
-            sample_id, reference_index, version = sample
+            sample_id, reference_index = sample
+            if not 0 <= reference_index < self._current_weights.size:
+                continue
             active = self._active_context_by_env.get(env_index)
             if active is None or active[0] != sample_id:
-                self._context_samples.append(
-                    _SPDLContextSample(reference_index, version)
-                )
-                active = (sample_id, reference_index, version, 0.0, 1.0)
+                self._context_samples.append(_SPDLContextSample(reference_index))
+                active = (sample_id, reference_index, 0.0, 1.0)
 
-            _, active_index, active_version, total_return, discount = active
+            _, active_index, total_return, discount = active
             total_return += discount * float(reward_values[env_index])
             discount *= self._gamma
             self._active_context_by_env[env_index] = (
                 sample_id,
                 active_index,
-                active_version,
                 total_return,
                 discount,
             )
@@ -249,7 +243,6 @@ class SPDLReferenceCurriculumCallback(BaseCallback):
         self._context_samples.clear()
         self._completed_returns.clear()
         self._active_context_by_env.clear()
-        self._weights_by_version.clear()
         self._reference_observations = np.empty((0, 0), dtype=np.float32)
 
     def _maybe_update_distribution(self) -> None:
@@ -264,15 +257,17 @@ class SPDLReferenceCurriculumCallback(BaseCallback):
             if len(self._completed_returns) < min_completed:
                 return
             mean_return = float(np.mean(self._completed_returns))
-            target_kl = self._kl_divergence(
-                self._current_weights, self._target_weights
-            )
-            if mean_return <= 0.0 or target_kl <= self._TARGET_KL_TOLERANCE:
+            target_kl = self._kl_divergence(self._current_weights, self._target_weights)
+            if target_kl <= self._TARGET_KL_TOLERANCE:
                 self._clear_update_buffers()
                 return
-            alpha = float(self._profile.spdl_zeta) * mean_return / target_kl
+            alpha = (
+                float(self._profile.spdl_zeta)
+                * max(0.0, mean_return)
+                / target_kl
+            )
 
-        coefficients = self._importance_weighted_coefficients()
+        coefficients = self._all_context_critic_values()
         candidate = self._solve_distribution(coefficients, alpha)
         self._context_update_count += 1
         self._clear_update_buffers()
@@ -286,39 +281,16 @@ class SPDLReferenceCurriculumCallback(BaseCallback):
             version=self._version,
         )
         self._current_weights = candidate
-        self._weights_by_version[self._version] = candidate.copy()
 
-    def _importance_weighted_coefficients(self) -> np.ndarray:
-        counts_by_index: dict[int, int] = {}
-        denominator_sum_by_index: dict[int, float] = {}
-        for sample in self._context_samples:
-            weights = self._weights_by_version.get(sample.distribution_version)
-            if weights is None:
-                raise RuntimeError("missing sampling distribution for SPDL context")
-            index = sample.reference_index
-            if not 0 <= index < self._current_weights.size:
-                raise RuntimeError("SPDL context index is outside the eligible range")
-            counts_by_index[index] = counts_by_index.get(index, 0) + 1
-            denominator_sum_by_index[index] = (
-                denominator_sum_by_index.get(index, 0.0) + 1.0 / weights[index]
-            )
-
-        values = self._critic_values(np.asarray(list(counts_by_index), dtype=np.int64))
-        coefficients = np.zeros_like(self._current_weights)
-        sample_count = float(len(self._context_samples))
-        for index, value in zip(counts_by_index, values, strict=True):
-            coefficients[index] = value * denominator_sum_by_index[index] / sample_count
-        return coefficients
+    def _all_context_critic_values(self) -> np.ndarray:
+        """Estimate $a_i$ for every eligible context with the current Critic."""
+        indices = np.arange(self._current_weights.size, dtype=np.int64)
+        return self._critic_values(indices)
 
     def _critic_values(self, indices: np.ndarray) -> np.ndarray:
         if indices.size == 0:
             return np.empty(0, dtype=np.float64)
-        normalizer = self.training_env
-        normalize_obs = getattr(normalizer, "normalize_obs", None)
-        if not callable(normalize_obs):
-            raise TypeError("SPDL requires the training VecEnv to normalize observations")
-        normalized = normalize_obs(self._reference_observations[indices])
-        observations = np.asarray(normalized, dtype=np.float32)
+        observations = np.asarray(self._reference_observations[indices], dtype=np.float32)
         policy = self.model.policy
         observation_tensor, _ = policy.obs_to_tensor(observations)
         with th.no_grad():
@@ -334,10 +306,13 @@ class SPDLReferenceCurriculumCallback(BaseCallback):
 
         lower = 0.0
         upper = 1.0
-        while self._kl_divergence(
-            self._weights_for_dual(coefficients, alpha, upper),
-            self._current_weights,
-        ) > bound:
+        while (
+            self._kl_divergence(
+                self._weights_for_dual(coefficients, alpha, upper),
+                self._current_weights,
+            )
+            > bound
+        ):
             upper *= 2.0
             if upper > 1e12:
                 raise RuntimeError("could not satisfy the SPDL relative-entropy bound")
@@ -368,8 +343,7 @@ class SPDLReferenceCurriculumCallback(BaseCallback):
 
     def _build_initial_weights(self) -> np.ndarray:
         easy_mask = (
-            self._remaining_distances_m
-            >= float(self._profile.min_remaining_distance_m)
+            self._remaining_distances_m >= float(self._profile.min_remaining_distance_m)
         ) & (
             self._remaining_distances_m
             <= float(self._profile.initial_max_remaining_distance_m)
@@ -427,14 +401,13 @@ class SPDLReferenceCurriculumCallback(BaseCallback):
             raise ValueError("SPDL minimum completed episode count must be positive")
 
     @staticmethod
-    def _context_from_info(info: dict[str, Any]) -> tuple[int, int, int] | None:
+    def _context_from_info(info: dict[str, Any]) -> tuple[int, int] | None:
         try:
             return (
                 int(info["reference_context_sample_id"]),
                 int(info["reference_context_index"]),
-                int(info["reference_context_distribution_version"]),
             )
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             return None
 
     def _clear_update_buffers(self) -> None:
@@ -650,7 +623,7 @@ class TensorboardCallback(BaseCallback):
             for key, value in payload.items():
                 try:
                     scalar_value = float(value)
-                except (TypeError, ValueError):
+                except TypeError, ValueError:
                     continue
                 aggregated_values.setdefault(key, []).append(scalar_value)
 
@@ -794,18 +767,9 @@ class BestTrajectoryRecorder:
         best_update_reason: str,
     ) -> None:
         model_path = os.path.join(self.output_dir, "best_model")
-        vecnormalize_path = os.path.join(self.output_dir, "best_vecnormalize.pkl")
         trajectory_path = os.path.join(self.output_dir, "best_trajectory.npz")
 
         callback.model.save(model_path)
-
-        training_env = callback.training_env
-        save_training_env = getattr(training_env, "save", None)
-        if not callable(save_training_env):
-            raise TypeError(
-                "Training environment does not support saving VecNormalize stats"
-            )
-        save_training_env(vecnormalize_path)
 
         extra_metrics = result.to_metrics(
             num_timesteps=int(callback.num_timesteps),
@@ -910,9 +874,9 @@ class SafetyViolationPositionRecorder(BaseCallback):
             self._episode_violation_bins_by_env.append(set())
         if len(self._episode_bins_by_env) > num_envs:
             self._episode_bins_by_env = self._episode_bins_by_env[:num_envs]
-            self._episode_violation_bins_by_env = (
-                self._episode_violation_bins_by_env[:num_envs]
-            )
+            self._episode_violation_bins_by_env = self._episode_violation_bins_by_env[
+                :num_envs
+            ]
 
     def _bin_index_for_position(self, position: float) -> int:
         return int(np.floor(float(position) / self.position_bin_size_m))
@@ -935,7 +899,7 @@ class SafetyViolationPositionRecorder(BaseCallback):
         try:
             margin_high = float(margin_to_vmax)
             margin_low = float(margin_to_vmin)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return False
         return bool(margin_high < 0.0 or margin_low < 0.0)
 
@@ -982,7 +946,7 @@ class SafetyViolationPositionRecorder(BaseCallback):
                 continue
             try:
                 position = self._extract_position(info)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 continue
             if position is None:
                 continue
@@ -1076,7 +1040,9 @@ class SafetyViolationPositionRecorder(BaseCallback):
                 where=episode_exposure > 0.0,
             ),
             safety_truncation_count=safety_truncation,
-            position_bin_size_m=np.asarray([self.position_bin_size_m], dtype=np.float64),
+            position_bin_size_m=np.asarray(
+                [self.position_bin_size_m], dtype=np.float64
+            ),
         )
 
 
