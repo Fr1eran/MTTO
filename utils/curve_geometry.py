@@ -35,9 +35,7 @@ def cut_curve_by_crosspoint(
 def cal_regions(
     above_curves_list: list[NDArray[np.float64]],
     below_curves_list: list[NDArray[np.float64]],
-) -> tuple[
-    NDArray[np.float64], list[NDArray[np.float64]], list[NDArray[np.float64]]
-]:
+) -> tuple[NDArray[np.float64], list[NDArray[np.float64]], list[NDArray[np.float64]]]:
     if len(above_curves_list) != len(below_curves_list):
         raise Exception("Two curve sets must have the same size")
     cross_points = np.empty((2, len(above_curves_list)))
@@ -93,12 +91,18 @@ def pad_2curves(
     if pad_width > 0:
         curve2_y = np.pad(curve2_y, (0, pad_width), mode="edge")
         curve2_x = np.pad(
-            curve2_x, (0, pad_width), mode="linear_ramp", end_values=curve1_x[-1]
+            curve2_x,
+            (0, pad_width),
+            mode="linear_ramp",
+            end_values=curve1_x[-1],
         )
     elif pad_width < 0:
         curve1_y = np.pad(curve1_y, (0, -pad_width), mode="edge")
         curve1_x = np.pad(
-            curve1_x, (0, -pad_width), mode="linear_ramp", end_values=curve2_x[-1]
+            curve1_x,
+            (0, -pad_width),
+            mode="linear_ramp",
+            end_values=curve2_x[-1],
         )
     return curve1_x, curve1_y, curve2_x, curve2_y
 

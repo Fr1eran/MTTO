@@ -3,7 +3,9 @@ from __future__ import annotations
 from typing import NamedTuple, overload
 
 import numpy as np
-from numba import njit
+from numba import (
+    njit,
+)
 from numpy.typing import ArrayLike, NDArray
 
 from utils.type_utils import ScalarNumeric, restore_output_type
@@ -17,12 +19,12 @@ def get_interval_index(
 
 @overload
 def get_interval_index(
-    pos: ArrayLike, interval_points: NDArray[np.floating]
+    pos: NDArray[np.floating], interval_points: NDArray[np.floating]
 ) -> NDArray[np.intp]: ...
 
 
 def get_interval_index(
-    pos: ScalarNumeric | ArrayLike,
+    pos: ScalarNumeric | NDArray[np.floating],
     interval_points: NDArray[np.floating],
     side_right: bool = True,
 ) -> np.intp | NDArray[np.intp]:

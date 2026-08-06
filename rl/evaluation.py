@@ -9,17 +9,18 @@ from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
 from rl.env_factory import make_env
-from rl.mtto_env import MTTOEnv, RewardConfig
+from rl.mtto_env import MTTOEnv
 from rl.observation_builder import ObservationBuilder
 from rl.operational_stepper import OperationalStepper
-from rl.reward_calculator import RewardCalculator
+from rl.reward_calculator import RewardCalculator, RewardConfig
 from utils.io_utils import save_curve_and_metrics
 
 PUNCTUAL_ARRIVAL_TIME_ERROR_LIMIT_S = 10.0
 
 BEST_TRAJECTORY_SELECTION_RULE = "arrival_precise_punctual_energy_else_reward"
 BEST_TRAJECTORY_SELECTION_RULE_DESCRIPTION = (
-    "Any successful arrival (terminated=True and truncated=False) outranks any non-arrival "
+    "Any successful arrival (terminated=True and truncated=False) outranks "
+    "any non-arrival "
     "evaluation. "
     "Among non-arrivals, higher total_reward wins. Among successful arrivals, "
     "precise arrival wins first; if neither trajectory is precise, lower "
@@ -65,8 +66,8 @@ class PolicyEvaluationResult:
         num_timesteps: int | None = None,
         eval_trigger_mode: str | None = None,
         eval_trigger_interval: int | None = None,
-    ) -> dict[str, Any]:
-        metrics: dict[str, Any] = {
+    ) -> dict[str, object]:
+        metrics: dict[str, object] = {
             "total_reward": self.total_reward,
             "target_time_s": self.target_time_s,
             "total_time_s": self.total_time_s,
@@ -116,7 +117,7 @@ def build_single_eval_env(
     enable_trajectory_tracking: bool = True,
     render_mode: str | None = None,
     reward_config: RewardConfig | None = None,
-) -> gym.Env[Any, Any]:
+) -> gym.Env[np.ndarray, np.ndarray]:
     return make_env(
         vehicle=vehicle,
         track=track,
@@ -131,7 +132,7 @@ def build_single_eval_env(
     )
 
 
-def unwrap_mtto_env(env: gym.Env[Any, Any]) -> MTTOEnv:
+def unwrap_mtto_env(env: gym.Env[np.ndarray, np.ndarray]) -> MTTOEnv:
     mtto_env = env.unwrapped
     if not isinstance(mtto_env, MTTOEnv):
         raise TypeError(f"Expected MTTOEnv, got {type(mtto_env)!r}")
@@ -162,6 +163,7 @@ def is_punctual_arrival(
     time_error_s: float,
     train_service: TrainService,
 ) -> bool:
+    del train_service
     return bool(
         precise_arrival
         and abs(float(time_error_s)) < PUNCTUAL_ARRIVAL_TIME_ERROR_LIMIT_S
@@ -177,6 +179,7 @@ def classify_arrival_status(
     terminated: bool,
     truncated: bool,
 ) -> tuple[bool, bool, bool]:
+    del final_speed_mps
     success = is_successful_arrival(
         terminated=terminated,
         truncated=truncated,
@@ -199,12 +202,13 @@ def get_strict_stop_error_limit_m(train_service: TrainService) -> float:
 
 
 def get_strict_time_error_limit_s(train_service: TrainService) -> float:
+    del train_service
     return PUNCTUAL_ARRIVAL_TIME_ERROR_LIMIT_S
 
 
 def evaluate_policy_once(
     model: Any,
-    env: gym.Env[Any, Any],
+    env: gym.Env[np.ndarray, np.ndarray],
     *,
     deterministic: bool = True,
 ) -> PolicyEvaluationResult:
@@ -399,7 +403,7 @@ def save_policy_evaluation_curve(
     result: PolicyEvaluationResult,
     output_path: str,
     *,
-    extra_metrics: dict[str, Any] | None = None,
+    extra_metrics: dict[str, object] | None = None,
 ) -> tuple[str, str]:
     metrics = result.to_metrics()
     if extra_metrics:

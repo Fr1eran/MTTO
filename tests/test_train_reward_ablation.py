@@ -27,45 +27,47 @@ def test_ablation_cli_hides_train_rl_run_mode_and_overrides() -> None:
     parser = build_arg_parser()
 
     with pytest.raises(SystemExit):
-        parser.parse_args(["--run-mode", "monitor_best"])
+        _ = parser.parse_args(["--run-mode", "monitor_best"])
 
     with pytest.raises(SystemExit):
-        parser.parse_args(["--enable-best-eval"])
+        _ = parser.parse_args(["--enable-best-eval"])
 
 
 def test_ablation_cli_rejects_removed_subproc_start_method_option() -> None:
     parser = build_arg_parser()
 
     with pytest.raises(SystemExit):
-        parser.parse_args(["--subproc-start-method", "spawn"])
+        _ = parser.parse_args(["--subproc-start-method", "spawn"])
 
 
 def test_ablation_cli_rejects_removed_rollout_record_trigger_mode_option() -> None:
     parser = build_arg_parser()
 
     with pytest.raises(SystemExit):
-        parser.parse_args(["--rollout-record-trigger-mode", "episodes"])
+        _ = parser.parse_args(["--rollout-record-trigger-mode", "episodes"])
 
 
 def test_ablation_cli_rejects_removed_safety_eval_options() -> None:
     parser = build_arg_parser()
 
     with pytest.raises(SystemExit):
-        parser.parse_args(["--enable-safety-curve"])
+        _ = parser.parse_args(["--enable-safety-curve"])
 
     with pytest.raises(SystemExit):
-        parser.parse_args(["--safety-eval-margin-threshold-mps", "5.0"])
+        _ = parser.parse_args(["--safety-eval-margin-threshold-mps", "5.0"])
 
 
 def test_resolve_ablation_seeds_prefers_seed_list() -> None:
     parser = build_arg_parser()
-    args = parser.parse_args([
-        "--repeats",
-        "3",
-        "--seed-list",
-        "11",
-        "12",
-    ])
+    args = parser.parse_args(
+        [
+            "--repeats",
+            "3",
+            "--seed-list",
+            "11",
+            "12",
+        ]
+    )
 
     assert resolve_ablation_seeds(args) == [11, 12]
 
@@ -75,21 +77,23 @@ def test_resolve_ablation_seeds_requires_source_for_multiple_repeats() -> None:
     args = parser.parse_args(["--repeats", "2"])
 
     with pytest.raises(ValueError, match="--base-seed 或 --seed-list"):
-        resolve_ablation_seeds(args)
+        _ = resolve_ablation_seeds(args)
 
 
 def test_resolve_ablation_run_matrix_enforces_monitor_best_semantics() -> None:
     parser = build_arg_parser()
-    args = parser.parse_args([
-        "--base-seed",
-        "10",
-        "--repeats",
-        "2",
-        "--ablation-tag",
-        "trial_a",
-        "--log-interval",
-        "3",
-    ])
+    args = parser.parse_args(
+        [
+            "--base-seed",
+            "10",
+            "--repeats",
+            "2",
+            "--ablation-tag",
+            "trial_a",
+            "--log-interval",
+            "3",
+        ]
+    )
 
     run_entries = resolve_ablation_run_matrix(args)
 
@@ -114,7 +118,10 @@ def test_resolve_ablation_run_matrix_enforces_monitor_best_semantics() -> None:
         first_entry.training_run_spec.run_metadata["enable_safety_violation_bins"]
         is True
     )
-    assert first_entry.training_run_spec.run_metadata["safety_position_bin_size_m"] == 5000.0
+    assert (
+        first_entry.training_run_spec.run_metadata["safety_position_bin_size_m"]
+        == 5000.0
+    )
     assert first_entry.training_run_spec.log_interval == 3
     assert first_entry.train_args.rollout_record_trigger_mode == "steps"
     assert (
@@ -129,13 +136,15 @@ def test_resolve_ablation_run_matrix_enforces_monitor_best_semantics() -> None:
 
 def test_resolve_ablation_run_matrix_allows_subset_profiles() -> None:
     parser = build_arg_parser()
-    args = parser.parse_args([
-        "--reward-profiles",
-        "basic_safety",
-        "basic_safety_stopping",
-        "--base-seed",
-        "5",
-    ])
+    args = parser.parse_args(
+        [
+            "--reward-profiles",
+            "basic_safety",
+            "basic_safety_stopping",
+            "--base-seed",
+            "5",
+        ]
+    )
 
     run_entries = resolve_ablation_run_matrix(args)
 
@@ -143,4 +152,3 @@ def test_resolve_ablation_run_matrix_allows_subset_profiles() -> None:
         "basic_safety",
         "basic_safety_stopping",
     ]
-

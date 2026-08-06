@@ -1,12 +1,16 @@
+import numpy as np
+from numpy.typing import NDArray
+
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
-from rl.mtto_env import MTTOEnv, RewardConfig
+from rl.mtto_env import MTTOEnv
 from rl.reference_initial_state_provider import ReferenceInitialStateProvider
 from rl.reference_trajectory_sampler import (
     ReferenceTrajectory,
     ReferenceTrajectorySampler,
 )
+from rl.reward_calculator import RewardConfig
 
 
 def make_env(
@@ -22,7 +26,7 @@ def make_env(
     render_mode: str | None = None,
     reward_config: RewardConfig | None = None,
     reference_trajectory: ReferenceTrajectory | None = None,
-    reference_initial_state_weights=None,
+    reference_initial_state_weights: NDArray[np.floating] | list[float] | None = None,
     reference_initial_state_seed: int | None = None,
 ):
     env = MTTOEnv(

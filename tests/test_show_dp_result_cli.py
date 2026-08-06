@@ -1,9 +1,8 @@
 import os
 from pathlib import Path
 
-import pytest
-
 import numpy as np
+import pytest
 
 from scripts.show_dp_result import (
     _build_cli_parser,
@@ -21,10 +20,12 @@ def test_show_dp_result_cli_defaults() -> None:
 
 def test_show_dp_result_cli_accepts_explicit_curve_dir() -> None:
     parser = _build_cli_parser()
-    args = parser.parse_args([
-        "--curve-dir",
-        "output/custom/dp_curves",
-    ])
+    args = parser.parse_args(
+        [
+            "--curve-dir",
+            "output/custom/dp_curves",
+        ]
+    )
 
     assert args.curve_dir == "output/custom/dp_curves"
 
@@ -45,10 +46,10 @@ def test_resolve_curve_and_metrics_paths_uses_latest_curve_and_same_dir_metrics(
     old_metrics = run_old_dir / "optimized_speed_curve_metrics.json"
     new_metrics = run_new_dir / "optimized_speed_curve_metrics.json"
 
-    old_curve.write_bytes(b"old")
-    new_curve.write_bytes(b"new")
-    old_metrics.write_text("{}", encoding="utf-8")
-    new_metrics.write_text("{}", encoding="utf-8")
+    _ = old_curve.write_bytes(b"old")
+    _ = new_curve.write_bytes(b"new")
+    _ = old_metrics.write_text("{}", encoding="utf-8")
+    _ = new_metrics.write_text("{}", encoding="utf-8")
 
     os.utime(old_curve, (1, 1))
     os.utime(new_curve, (2, 2))
@@ -70,7 +71,7 @@ def test_resolve_curve_and_metrics_paths_raises_when_curve_missing(
     curve_root.mkdir(parents=True)
 
     with pytest.raises(FileNotFoundError, match="optimized_speed_curve.npz"):
-        _resolve_curve_and_metrics_paths(
+        _ = _resolve_curve_and_metrics_paths(
             curve_dir=str(curve_root),
         )
 
@@ -82,15 +83,15 @@ def test_resolve_curve_and_metrics_paths_raises_when_same_dir_metrics_missing(
     run_dir = curve_root / "440p0_0p1"
     run_dir.mkdir(parents=True)
 
-    (run_dir / "optimized_speed_curve.npz").write_bytes(b"curve")
+    _ = (run_dir / "optimized_speed_curve.npz").write_bytes(b"curve")
 
     with pytest.raises(FileNotFoundError, match="optimized_speed_curve_metrics.json"):
-        _resolve_curve_and_metrics_paths(
+        _ = _resolve_curve_and_metrics_paths(
             curve_dir=str(curve_root),
         )
 
 
-def test_calc_redundant_operation_time_arr_uses_schedule_elapsed_and_min_remaining() -> None:
+def test_calc_redundant_operation_time_arr_uses_schedule_and_remaining() -> None:
     def fake_min_remaining(
         begin_pos: float,
         begin_speed: float,

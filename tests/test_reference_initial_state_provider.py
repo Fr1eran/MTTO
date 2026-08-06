@@ -1,27 +1,35 @@
 from types import SimpleNamespace
+from typing import cast
 
 import numpy as np
 import pytest
+from numpy.typing import NDArray
 
 from rl.reference_initial_state_provider import ReferenceInitialStateProvider
+from rl.reference_trajectory_sampler import ReferenceTrajectorySampler
 
 
 class _Sampler:
-    eligible_node_count = 3
+    eligible_node_count: int = 3
 
-    def sample(self, rng, *, weights):
+    def sample(
+        self,
+        rng: np.random.Generator,
+        *,
+        weights: NDArray[np.floating] | list[float],
+    ) -> object:
         index = int(rng.choice(np.arange(3), p=np.asarray(weights)[:3]))
         return SimpleNamespace(reference_index=index)
 
 
 def test_provider_samples_only_eligible_nodes_and_is_reproducible() -> None:
     first = ReferenceInitialStateProvider(
-        sampler=_Sampler(),  # type: ignore[arg-type]
+        sampler=cast(ReferenceTrajectorySampler, cast(object, _Sampler())),
         initial_weights=[0.2, 0.3, 0.5],
         seed=17,
     )
     second = ReferenceInitialStateProvider(
-        sampler=_Sampler(),  # type: ignore[arg-type]
+        sampler=cast(ReferenceTrajectorySampler, cast(object, _Sampler())),
         initial_weights=[0.2, 0.3, 0.5],
         seed=17,
     )
@@ -33,7 +41,7 @@ def test_provider_samples_only_eligible_nodes_and_is_reproducible() -> None:
 
 def test_provider_updates_versioned_distribution() -> None:
     provider = ReferenceInitialStateProvider(
-        sampler=_Sampler(),  # type: ignore[arg-type]
+        sampler=cast(ReferenceTrajectorySampler, cast(object, _Sampler())),
         initial_weights=[1.0, 0.0, 0.0],
         seed=1,
     )
@@ -49,7 +57,7 @@ def test_provider_updates_versioned_distribution() -> None:
 
 def test_provider_samples_include_monotonic_token_and_distribution_version() -> None:
     provider = ReferenceInitialStateProvider(
-        sampler=_Sampler(),  # type: ignore[arg-type]
+        sampler=cast(ReferenceTrajectorySampler, cast(object, _Sampler())),
         initial_weights=[1.0, 0.0, 0.0],
         seed=1,
     )
@@ -73,10 +81,10 @@ def test_provider_samples_include_monotonic_token_and_distribution_version() -> 
     "weights",
     ([1.0, 0.0], [1.0, -1.0, 1.0], [0.0, 0.0, 0.0], [np.nan, 0.0, 1.0]),
 )
-def test_provider_rejects_invalid_weights(weights) -> None:
+def test_provider_rejects_invalid_weights(weights: list[float]) -> None:
     with pytest.raises(ValueError):
-        ReferenceInitialStateProvider(
-            sampler=_Sampler(),  # type: ignore[arg-type]
+        _ = ReferenceInitialStateProvider(
+            sampler=cast(ReferenceTrajectorySampler, cast(object, _Sampler())),
             initial_weights=weights,
             seed=1,
         )

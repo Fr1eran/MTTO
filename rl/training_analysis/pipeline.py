@@ -59,12 +59,12 @@ class AnalysisConfig:
         if self.rollout_steps_per_update < 1:
             raise ValueError(
                 "rollout_steps_per_update must be >= 1, "
-                f"got {self.rollout_steps_per_update}"
+                + f"got {self.rollout_steps_per_update}"
             )
         if self.sampling_quality_mode not in ("warn_only", "strict_fail"):
             raise ValueError(
-                f"sampling_quality_mode must be 'warn_only' or 'strict_fail', "
-                f"got {self.sampling_quality_mode}"
+                "sampling_quality_mode must be 'warn_only' or 'strict_fail', "
+                + f"got {self.sampling_quality_mode}"
             )
         if self.position_bin_size_m <= 0:
             raise ValueError(
@@ -72,7 +72,8 @@ class AnalysisConfig:
             )
         if self.critical_point_radius_m <= 0:
             raise ValueError(
-                f"critical_point_radius_m must be > 0, got {self.critical_point_radius_m}"
+                "critical_point_radius_m must be > 0, "
+                f"got {self.critical_point_radius_m}"
             )
 
 
@@ -130,17 +131,18 @@ def _evaluate_sampling_quality(
     if not checks["points_per_10k_ok"]:
         reasons.append(
             "mean_samples_per_10k_steps "
-            f"{points_per_10k:.3f} < {float(config.min_points_per_10k_steps):.3f}"
+            + f"{points_per_10k:.3f} < {float(config.min_points_per_10k_steps):.3f}"
         )
     if not checks["unique_episodes_ok"]:
         reasons.append(
-            f"unique_episode_count {unique_episode_count} < {int(config.min_unique_episodes)}"
+            "unique_episode_count "
+            f"{unique_episode_count} < {int(config.min_unique_episodes)}"
         )
     if not checks["mean_step_gap_ok"]:
         reasons.append(
             "max_mean_step_gap "
-            f"{mean_step_gap:.3f} > rollout_steps_per_update "
-            f"{max_allowed_mean_step_gap:.3f}"
+            + f"{mean_step_gap:.3f} > rollout_steps_per_update "
+            + f"{max_allowed_mean_step_gap:.3f}"
         )
 
     return {
@@ -314,4 +316,3 @@ def run_training_analysis(
     payload["output_paths"] = output_paths
 
     return payload
-

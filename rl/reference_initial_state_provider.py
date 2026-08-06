@@ -42,11 +42,13 @@ class ReferenceInitialStateProvider:
         initial_weights: NDArray[np.floating] | list[float],
         seed: int | None = None,
     ) -> None:
-        self.sampler = sampler
-        self._rng = np.random.default_rng(seed)
-        self._weights = self._validate_and_normalize_weights(initial_weights)
-        self._version = 0
-        self._next_sample_id = 0
+        self.sampler: ReferenceTrajectorySampler = sampler
+        self._rng: np.random.Generator = np.random.default_rng(seed)
+        self._weights: NDArray[np.float64] = self._validate_and_normalize_weights(
+            initial_weights
+        )
+        self._version: int = 0
+        self._next_sample_id: int = 0
 
     @property
     def version(self) -> int:
@@ -97,7 +99,7 @@ class ReferenceInitialStateProvider:
         if values.ndim != 1 or values.size != self.sampler.eligible_node_count:
             raise ValueError(
                 "weights must have one finite non-negative value per eligible "
-                "reference node"
+                + "reference node"
             )
         if not np.all(np.isfinite(values)) or np.any(values < 0.0):
             raise ValueError("weights must be finite and non-negative")

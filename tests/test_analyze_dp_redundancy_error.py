@@ -101,15 +101,18 @@ def test_load_or_reconstruct_redundant_operation_time_falls_back_when_missing(
 
 
 def test_reconstruct_redundant_operation_time_validates_lengths() -> None:
+    def _zero_remaining_time(*_args: float) -> float:
+        return 0.0
+
     with pytest.raises(ValueError, match="same length"):
-        reconstruct_redundant_operation_time(
+        _ = reconstruct_redundant_operation_time(
             pos_arr=np.asarray([0.0, 1.0]),
             speed_arr=np.asarray([0.0]),
             cum_time_arr=np.asarray([0.0, 1.0]),
             schedule_time_s=10.0,
             target_position=1.0,
             target_speed=0.0,
-            min_remaining_time_fn=lambda *_args: 0.0,
+            min_remaining_time_fn=_zero_remaining_time,
         )
 
 

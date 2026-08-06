@@ -44,7 +44,11 @@ def load_optimized_curve_and_metrics(
     *,
     dtype: np.dtype | type[np.floating] = np.float32,
     use_metrics_cache: bool = True,
-) -> tuple[NDArray[np.floating], NDArray[np.floating], dict[str, Any]]:
+) -> tuple[
+    NDArray[np.floating],
+    NDArray[np.floating],
+    dict[str, Any],
+]:
     """Load optimized trajectory arrays and metrics payload."""
     with np.load(npz_path, allow_pickle=False) as npz_data:
         keys = set(npz_data.files)
@@ -104,11 +108,11 @@ def load_curve_with_cum_time_and_metrics(
 
 
 def save_curve_and_metrics(
-    pos_arr: Sequence[float] | NDArray,
-    speed_arr: Sequence[float] | NDArray,
+    pos_arr: Sequence[float] | NDArray[np.floating],
+    speed_arr: Sequence[float] | NDArray[np.floating],
     output_path: str,
     metrics: dict[str, Any] | None = None,
-    extra_arrays: dict[str, Sequence[float] | NDArray] | None = None,
+    extra_arrays: dict[str, Sequence[float] | NDArray[np.floating]] | None = None,
 ) -> tuple[str, str]:
     """Save trajectory arrays to NPZ and metrics payload to JSON."""
     pos = np.asarray(pos_arr, dtype=np.float32)
@@ -122,18 +126,18 @@ def save_curve_and_metrics(
     base_name = os.path.splitext(os.path.basename(output_path))[0]
     metrics_json_path = os.path.join(output_dir, f"{base_name}_metrics.json")
 
-    npz_payload: dict[str, NDArray] = {
+    npz_payload: dict[str, NDArray[np.floating] | NDArray[np.str_]] = {
         "pos_m": pos,
         "speed_mps": speed,
-        "created_at": np.asarray([created_at], dtype=str),
+        "created_at": np.asarray([created_at], dtype=np.str_),
     }
     if extra_arrays:
         for key, value in extra_arrays.items():
             npz_payload[str(key)] = np.asarray(value, dtype=np.float32)
 
-    np.savez_compressed(output_path, **npz_payload)
+    np.savez_compressed(output_path, allow_pickle=True, **npz_payload)
 
-    metrics_payload: dict[str, Any] = {"created_at": created_at}
+    metrics_payload: dict[str, object] = {"created_at": created_at}
     if metrics:
         for key, value in metrics.items():
             if isinstance(value, np.generic):

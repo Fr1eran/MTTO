@@ -2,6 +2,7 @@ import os
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import numpy as np
 import pytest
@@ -11,6 +12,7 @@ from model.ocs import TrainService
 from model.ocs.stopping_points_stepping import SPSState
 from rl.dp_trajectory_reader import DPTrajectoryReader
 from rl.operational_state import OperationalState, OperationalTransition, ViolationCode
+from rl.operational_stepper import OperationalStepper
 from rl.reference_trajectory_sampler import ReferenceTrajectorySampler
 from utils.io_utils import save_curve_and_metrics
 from utils.trajectory import OptimizedCurveArtifact
@@ -45,7 +47,7 @@ def _write_artifact(
     }
     if metrics_updates is not None:
         metrics.update(metrics_updates)
-    save_curve_and_metrics(
+    _ = save_curve_and_metrics(
         pos_arr=[0.0, 10.0, 20.0],
         speed_arr=[0.0, 10.0, 0.0],
         output_path=str(curve_path),
@@ -80,7 +82,7 @@ def test_dp_adapter_selects_newest_matching_artifact(
 ) -> None:
     old_artifact = _write_artifact(tmp_path / "old")
     selected_artifact = _write_artifact(tmp_path / "selected")
-    _write_artifact(tmp_path / "mismatch", metrics_updates={"target_time_s": 11.0})
+    _ = _write_artifact(tmp_path / "mismatch", metrics_updates={"target_time_s": 11.0})
     os.utime(old_artifact.npz_path, (1, 1))
     os.utime(selected_artifact.npz_path, (2, 2))
 
@@ -97,7 +99,7 @@ class _FakeStepper:
     def __init__(
         self, *, max_step_distance_m: float = 5.0, truncate_step: int | None = None
     ):
-        self.train_service = TrainService(
+        self.train_service: TrainService = TrainService(
             start_position=0.0,
             start_speed=0.0,
             target_position=9.0,
@@ -106,11 +108,11 @@ class _FakeStepper:
             max_arr_time_error_ratio=0.1,
             max_stop_error=1.0,
         )
-        self.direction = 1
-        self.whole_distance_m = 9.0
-        self.max_step_distance_m = max_step_distance_m
-        self.vehicle = SimpleNamespace(max_dec=-2.5, max_acc=2.5)
-        self._truncate_step = truncate_step
+        self.direction: int = 1
+        self.whole_distance_m: float = 9.0
+        self.max_step_distance_m: float = max_step_distance_m
+        self.vehicle: object = SimpleNamespace(max_dec=-2.5, max_acc=2.5)
+        self._truncate_step: int | None = truncate_step
         self.requested_distances: list[float] = []
 
     def reset(self) -> OperationalState:
@@ -183,7 +185,7 @@ def _build_reference_sampler(
         position_m=[0.0, 4.0, 9.0],
         speed_mps=[0.0, 4.0, 0.0],
         cumulative_time_s=[0.0, 2.0, 4.5],
-        stepper=resolved_stepper,  # type: ignore[arg-type]
+        stepper=cast(OperationalStepper, cast(object, resolved_stepper)),
     )
     return sampler, resolved_stepper
 
@@ -211,19 +213,19 @@ def test_reference_sampler_weighted_sampling_excludes_terminal_node() -> None:
 
     assert sampled.reference_index == 1
     with pytest.raises(ValueError, match="non-terminal"):
-        sampler.sample(np.random.default_rng(1), index_range=(2, 2))
+        _ = sampler.sample(np.random.default_rng(1), index_range=(2, 2))
 
 
 def test_reference_sampler_rejects_inconsistent_source_time() -> None:
     with pytest.raises(ValueError, match="cumulative time"):
-        ReferenceTrajectorySampler.from_arrays(
+        _ = ReferenceTrajectorySampler.from_arrays(
             position_m=[0.0, 4.0, 9.0],
             speed_mps=[0.0, 4.0, 0.0],
             cumulative_time_s=[0.0, 3.0, 4.5],
-            stepper=_FakeStepper(),  # type: ignore[arg-type]
+            stepper=cast(OperationalStepper, cast(object, _FakeStepper())),
         )
 
 
 def test_reference_sampler_rejects_early_truncation() -> None:
     with pytest.raises(ValueError, match="becomes done"):
-        _build_reference_sampler(stepper=_FakeStepper(truncate_step=1))
+        _ = _build_reference_sampler(stepper=_FakeStepper(truncate_step=1))

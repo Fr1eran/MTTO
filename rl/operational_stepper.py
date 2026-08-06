@@ -3,9 +3,10 @@
 import math
 
 import numpy as np
+from numpy.typing import NDArray
 
 from model.common import ECC, ORS, calc_transition_from_acc_scalar_numba
-from model.ocs import SPS, SafeGuardUtility, TrainService
+from model.ocs import SPS, SafeGuardUtility, SPSState, TrainService
 from model.track import TrackInfo, get_slope_scalar_numba
 from model.vehicle import VehicleInfo
 from rl.operational_state import OperationalState, OperationalTransition, ViolationCode
@@ -23,25 +24,25 @@ class OperationalStepper:
         train_service: TrainService,
         max_step_distance_m: float,
     ) -> None:
-        self.vehicle = vehicle
-        self.track = track
-        self.safeguard_utility = safeguard_utility
-        self.train_service = train_service
-        self.max_step_distance_m = float(max_step_distance_m)
-        self.whole_distance_m = abs(
+        self.vehicle: VehicleInfo = vehicle
+        self.track: TrackInfo = track
+        self.safeguard_utility: SafeGuardUtility = safeguard_utility
+        self.train_service: TrainService = train_service
+        self.max_step_distance_m: float = float(max_step_distance_m)
+        self.whole_distance_m: float = abs(
             train_service.target_position - train_service.start_position
         )
-        self.direction = (
+        self.direction: int = (
             1 if train_service.start_position < train_service.target_position else -1
         )
         # The final transition is available to complete the task.  A
         # non-terminal transition at this boundary is truncated in advance().
-        self.required_episode_steps = math.ceil(
+        self.required_episode_steps: int = math.ceil(
             self.whole_distance_m / self.max_step_distance_m
         )
         # Compatibility name retained for reward normalization and callers.
-        self.max_episode_steps = self.required_episode_steps
-        self.ecc = ECC(
+        self.max_episode_steps: int = self.required_episode_steps
+        self.ecc: ECC = ECC(
             R_m=0.2796,
             L_d=0.0002,
             R_k=50.0,
@@ -50,8 +51,10 @@ class OperationalStepper:
             Psi_fd=3.9629,
             k_c=0.8,
         )
-        self.ors = ORS(vehicle=vehicle, track=track, factor=safeguard_utility.gamma)
-        self.sps = SPS(
+        self.ors: ORS = ORS(
+            vehicle=vehicle, track=track, factor=safeguard_utility.gamma
+        )
+        self.sps: SPS = SPS(
             sgu=safeguard_utility,
             ASA_ap_list=track.ASA_aps,
             ASA_dp_list=track.ASA_dps,
@@ -63,11 +66,15 @@ class OperationalStepper:
             end_pos=train_service.target_position + train_service.max_stop_error * 20,
             end_speed=0.0,
         )
+        self._upper_speed_lut_pos_min: float
+        self._upper_speed_lut_step: float
+        self._upper_speed_lut_speed_arr: NDArray[np.float64]
         (
             self._upper_speed_lut_pos_min,
             self._upper_speed_lut_step,
             self._upper_speed_lut_speed_arr,
         ) = self._build_upper_speed_lookup_table(profile_pos, profile_speed)
+        self.min_operation_time_s: float
         mec, lec, self.min_operation_time_s = (
             self.ors.calc_max_energy_and_min_operation_time(
                 begin_pos=train_service.start_position,
@@ -78,7 +85,7 @@ class OperationalStepper:
                 energy_con_calc=self.ecc,
             )
         )
-        self.max_energy_consumption_kj = float(mec + lec)
+        self.max_energy_consumption_kj: float = float(mec + lec)
 
     @staticmethod
     def _build_upper_speed_lookup_table(
@@ -103,7 +110,11 @@ class OperationalStepper:
             * step
         )
         values = np.interp(
-            positions, pos, speed, left=float(speed[0]), right=float(speed[-1])
+            positions,
+            pos,
+            speed,
+            left=float(speed[0]),
+            right=float(speed[-1]),
         )
         return float(pos[0]), step, np.maximum(values, 0.0).astype(np.float32)
 
@@ -150,7 +161,7 @@ class OperationalStepper:
         operation_time_s: float,
         energy_consumption_kj: float,
         step_count: int,
-        sps_state,
+        sps_state: SPSState,
     ) -> OperationalState:
         slope = float(
             get_slope_scalar_numba(
@@ -224,7 +235,7 @@ class OperationalStepper:
             ):
                 raise ValueError(
                     "requested_distance_m must be finite, positive, and no greater "
-                    "than max_step_distance_m"
+                    + "than max_step_distance_m"
                 )
         next_speed, distance, duration = calc_transition_from_acc_scalar_numba(
             state.speed_mps, float(acceleration_mps2), step_distance_m
@@ -265,8 +276,7 @@ class OperationalStepper:
         # precedence, so Gymnasium never sees termination and truncation
         # together.
         step_limit = (
-            not terminated
-            and next_state.step_count >= self.required_episode_steps
+            not terminated and next_state.step_count >= self.required_episode_steps
         )
         failed_stop = stopped and not terminated
         truncated = not terminated and (low or high or step_limit or failed_stop)

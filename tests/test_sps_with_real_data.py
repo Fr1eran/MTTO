@@ -1,7 +1,10 @@
+from typing import TypedDict
+
 import numpy as np
 import pytest
+from numpy.typing import NDArray
 
-from model.ocs import SafeGuardUtility,SPS
+from model.ocs import SPS, SafeGuardUtility
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_excel,
@@ -11,9 +14,25 @@ from utils.data_loader import (
 )
 
 
+class _SetupData(TypedDict):
+    distance: NDArray[np.float64]
+    speed: NDArray[np.float64]
+    time: NDArray[np.float64]
+    slopes: NDArray[np.float64]
+    slope_intervals: NDArray[np.float64]
+    speed_limits: NDArray[np.float64]
+    speed_limit_intervals: NDArray[np.float64]
+    accessible_points: list[float]
+    dangerous_points: list[float]
+    levi_curves_list: list[NDArray[np.float64]]
+    brake_curves_list: list[NDArray[np.float64]]
+    min_curves_list: list[NDArray[np.float64]]
+    max_curves_list: list[NDArray[np.float64]]
+
+
 class TestSPSIntegration:
     @pytest.fixture
-    def setup_data(self):
+    def setup_data(self) -> _SetupData:
         raw_data = load_excel(
             "data/operation/a_longyang_to_airport.xlsx",
             sheet_name="a轨_双端两步4节_龙阳－机场",
@@ -61,7 +80,7 @@ class TestSPSIntegration:
         }
 
     @pytest.fixture
-    def setup_system(self, setup_data):
+    def setup_system(self, setup_data: _SetupData) -> tuple[SafeGuardUtility, int]:
 
         # Initialize SafeGuardUtility
         safeguard_utility = SafeGuardUtility(
@@ -76,7 +95,11 @@ class TestSPSIntegration:
 
         return safeguard_utility, len(setup_data["accessible_points"])
 
-    def test_sps_stepping_with_real_data(self, setup_data, setup_system):
+    def test_sps_stepping_with_real_data(
+        self,
+        setup_data: _SetupData,
+        setup_system: tuple[SafeGuardUtility, int],
+    ):
         """
         使用真实运行数据测试停车点步进机制实现
         """
@@ -105,13 +128,16 @@ class TestSPSIntegration:
 
             sps_state = sps.advance(
                 sps_state,
-                current_pos=x, current_speed=v, current_time=t
+                current_pos=x,
+                current_speed=v,
+                current_time=t,
             )
             new_sp = sps_state.target_stopping_point_index
 
             if new_sp != current_sp:
                 print(
-                    f"Step changed from {current_sp} to {new_sp} at time={t:.2f}s, pos={x:.2f}m, speed={v:.2f}m/s"
+                    f"Step changed from {current_sp} to {new_sp} at "
+                    f"time={t:.2f}s, pos={x:.2f}m, speed={v:.2f}m/s"
                 )
                 step_history.append((t, current_sp, new_sp))
                 current_sp = new_sp

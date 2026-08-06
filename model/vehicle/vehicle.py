@@ -4,8 +4,10 @@ from dataclasses import dataclass
 from typing import overload
 
 import numpy as np
-from numba import njit
-from numpy.typing import ArrayLike, NDArray
+from numba import (
+    njit,
+)
+from numpy.typing import NDArray
 
 from model.force import (
     air_resis_force,
@@ -123,8 +125,8 @@ def calc_levi_deceleration(
     *,
     mass: float,
     numoftrainsets: int,
-    speed: ArrayLike,
-    slope: ArrayLike,
+    speed: NDArray[np.floating],
+    slope: ScalarNumeric | NDArray[np.floating],
 ) -> NDArray[np.float64]: ...
 
 
@@ -132,8 +134,8 @@ def calc_levi_deceleration(
     *,
     mass: float,
     numoftrainsets: int,
-    speed: ScalarNumeric | ArrayLike,
-    slope: ScalarNumeric | ArrayLike,
+    speed: ScalarNumeric | NDArray[np.floating],
+    slope: ScalarNumeric | NDArray[np.floating],
 ) -> np.float64 | NDArray[np.float64]:
     """
     计算列车悬浮减速度大小
@@ -183,8 +185,8 @@ def calc_brake_deceleration(
     *,
     mass: float,
     numoftrainsets: int,
-    speed: ArrayLike,
-    slope: ArrayLike,
+    speed: NDArray[np.floating],
+    slope: ScalarNumeric | NDArray[np.floating],
     level: int,
 ) -> NDArray[np.float64]: ...
 
@@ -193,8 +195,8 @@ def calc_brake_deceleration(
     *,
     mass: float,
     numoftrainsets: int,
-    speed: ScalarNumeric | ArrayLike,
-    slope: ScalarNumeric | ArrayLike,
+    speed: ScalarNumeric | NDArray[np.floating],
+    slope: ScalarNumeric | NDArray[np.floating],
     level: int,
 ) -> np.float64 | NDArray[np.float64]:
     """
@@ -259,9 +261,9 @@ def calc_longitudinal_force(
     *,
     mass: float,
     numoftrainsets: int,
-    acc: ArrayLike,
-    speed: ArrayLike,
-    slope: ArrayLike,
+    acc: NDArray[np.floating],
+    speed: ScalarNumeric | NDArray[np.floating],
+    slope: ScalarNumeric | NDArray[np.floating],
 ) -> NDArray[np.float64]: ...
 
 
@@ -269,9 +271,9 @@ def calc_longitudinal_force(
     *,
     mass: float,
     numoftrainsets: int,
-    acc: ScalarNumeric | ArrayLike,
-    speed: ScalarNumeric | ArrayLike,
-    slope: ScalarNumeric | ArrayLike,
+    acc: ScalarNumeric | NDArray[np.floating],
+    speed: ScalarNumeric | NDArray[np.floating],
+    slope: ScalarNumeric | NDArray[np.floating],
 ) -> np.float64 | NDArray[np.float64]:
     """
     计算列车受到牵引系统施加的纵向力大小

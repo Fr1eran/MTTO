@@ -37,19 +37,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="运行 PBRS 奖励消融实验（训练曲线记录模式固定为 steps）",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--ablation-output-root",
         type=str,
         default="output/optimal/rl/reward_ablation",
         help="三种奖励方案消融实验的输出根目录。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--ablation-tag",
         type=str,
         default=None,
         help="批次标签; 若 repeats > 1, 会自动附加 repeat 标识。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--reward-profiles",
         nargs="+",
         choices=reward_profile_names(),
@@ -59,121 +59,121 @@ def build_arg_parser() -> argparse.ArgumentParser:
             默认按 basic -> safety -> stopping 的三种消融情形执行。"
         ),
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--repeats",
         type=int,
         default=1,
         help="每种奖励情形的重复训练次数。未指定 seed-list 时生效。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--seed-list",
         nargs="+",
         type=int,
         default=None,
         help="显式指定每次重复训练使用的 seed; 指定后优先于 repeats/base-seed。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--base-seed",
         type=int,
         default=None,
         help="重复训练的基准 seed; 若 repeats > 1, \
              则按 base-seed + repeat_index 推导。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--schedule-time-s",
         type=float,
         default=430.0,
         help="规划运行时间(s)",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--max-step-distance",
         type=float,
         default=30.0,
         help="训练环境相邻状态转移间的最大移动距离。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--reward-discount",
         type=float,
         default=DEFAULT_REWARD_DISCOUNT,
         help="回报折扣因子。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--num-envs",
         type=int,
         default=1,
         help="训练环境数量。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--vec-env-type",
         type=str,
         choices=["dummy", "subproc"],
         default="subproc",
         help="向量化环境后端。subproc 在 num_envs > 1 时启用并行采样。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--rollout-steps-per-update",
         type=int,
         default=2048,
         help="PPO rollout 步数。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--n-steps-per-env",
         type=int,
         default=None,
         help="PPO n_steps 步数。\
              如果未指定, 则根据 rollout-steps-per-update 和 num-envs 计算得出。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--total-timesteps",
         type=int,
         default=1_000_000,
         help="PPO 总训练步数。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--tensorboard-log-dir",
         type=str,
         default="mtto_ppo_tb_logs",
         help="TensorBoard 日志输出根目录。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--log-interval",
         type=int,
         default=None,
         help="PPO log_interval。未指定时沿用 monitor_best 语义下的默认值。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--best-eval-trigger-mode",
         type=str,
         choices=["steps", "episodes"],
         default="steps",
         help="最优评估回调的触发模式。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--best-eval-trigger-interval",
         type=int,
         default=10_000,
         help="根据 best-eval-trigger-mode 的设置, \
              以步数或回合数为单位的最佳评估触发间隔。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--best-eval-deterministic",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="在运行最佳评估回放时, 使用确定性策略。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--safety-position-bin-size-m",
         type=float,
         default=5000.0,
         help="安全违规位置统计使用的位置分桶长度(m)。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--device",
         type=str,
         default="cpu",
         help="指定运行 PPO 算法的硬件设备, 例如 'cpu' 或 'cuda'。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--dry-run",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -331,19 +331,21 @@ def build_ablation_manifest(
             (entry.reward_profile_name, entry.repeat_index),
             {"status": "pending"},
         )
-        manifest_runs.append({
-            "reward_profile_name": entry.reward_profile_name,
-            "repeat_index": entry.repeat_index,
-            "seed": entry.seed,
-            "experiment_tag": entry.experiment_tag,
-            "run_mode": entry.training_run_spec.run_mode,
-            "output_dir": entry.training_run_spec.output_dir,
-            "final_output_dir": entry.training_run_spec.final_output_dir,
-            "best_eval_output_dir": entry.training_run_spec.best_eval_output_dir,
-            "tb_log_name": entry.training_run_spec.tb_log_name,
-            "run_metadata_path": entry.training_run_spec.run_metadata_path,
-            **status_payload,
-        })
+        manifest_runs.append(
+            {
+                "reward_profile_name": entry.reward_profile_name,
+                "repeat_index": entry.repeat_index,
+                "seed": entry.seed,
+                "experiment_tag": entry.experiment_tag,
+                "run_mode": entry.training_run_spec.run_mode,
+                "output_dir": entry.training_run_spec.output_dir,
+                "final_output_dir": entry.training_run_spec.final_output_dir,
+                "best_eval_output_dir": entry.training_run_spec.best_eval_output_dir,
+                "tb_log_name": entry.training_run_spec.tb_log_name,
+                "run_metadata_path": entry.training_run_spec.run_metadata_path,
+                **status_payload,
+            }
+        )
 
     return {
         "ablation_output_root": args.ablation_output_root,
@@ -370,10 +372,10 @@ def _print_run_matrix(run_entries: list[AblationRunEntry]) -> None:
     print("rollout_record_trigger_mode is fixed to 'steps' for reward ablation.")
     for index, entry in enumerate(run_entries, start=1):
         print(
-            f"[{index}] profile={entry.reward_profile_name} \
-             repeat={entry.repeat_index + 1}"
-            f"seed={entry.seed} output_dir={entry.training_run_spec.output_dir} "
-            f"tb_log_name={entry.training_run_spec.tb_log_name}"
+            f"[{index}] profile={entry.reward_profile_name}"
+            + f"             repeat={entry.repeat_index + 1}"
+            + f"seed={entry.seed} output_dir={entry.training_run_spec.output_dir} "
+            + f"tb_log_name={entry.training_run_spec.tb_log_name}"
         )
 
 
@@ -403,11 +405,11 @@ def main() -> None:
     for index, entry in enumerate(run_entries, start=1):
         print(
             f"Running ablation job {index}/{len(run_entries)}: "
-            f"profile={entry.reward_profile_name}, \
+            + f"profile={entry.reward_profile_name}, \
             repeat={entry.repeat_index + 1}, seed={entry.seed}"
         )
         try:
-            train_single_experiment(entry.train_args, spec=entry.training_run_spec)
+            _ = train_single_experiment(entry.train_args, spec=entry.training_run_spec)
             statuses[(entry.reward_profile_name, entry.repeat_index)] = {
                 "status": "completed"
             }
@@ -416,13 +418,13 @@ def main() -> None:
                 "status": "failed",
                 "error_message": str(exc),
             }
-            _write_ablation_manifest(
+            _ = _write_ablation_manifest(
                 args.ablation_output_root,
                 build_ablation_manifest(args, run_entries, statuses=statuses),
             )
             raise
 
-        _write_ablation_manifest(
+        _ = _write_ablation_manifest(
             args.ablation_output_root,
             build_ablation_manifest(args, run_entries, statuses=statuses),
         )

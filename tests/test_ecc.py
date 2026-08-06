@@ -1,6 +1,11 @@
+from typing import cast
+
 import numpy as np
 import pytest
-from scipy.integrate import trapezoid
+from numba.core.errors import TypingError
+from scipy.integrate import (
+    trapezoid,
+)
 
 from model.common import ECC
 from model.track import TrackInfo, get_slope
@@ -71,7 +76,8 @@ def _calc_energy_constant_acc_reference(
         t_nodes = np.zeros_like(d_nodes)
         for i in range(n_samples):
             avg_speed = np.maximum(
-                (speed_nodes[i] + speed_nodes[i + 1]) / 2.0, 1e-6
+                (speed_nodes[i] + speed_nodes[i + 1]) / 2.0,
+                1e-6,
             )
             t_nodes[i + 1] = t_nodes[i] + np.abs(delta_d[i]) / avg_speed
 
@@ -131,13 +137,13 @@ def _calc_energy_constant_acc_reference(
     ],
 )
 def test_calc_energy_constant_acc_matches_reference(
-    energy_consumption_calculator_case,
-    begin_pos,
-    begin_speed,
-    acc,
-    distance,
-    direction,
-    operation_time,
+    energy_consumption_calculator_case: tuple[ECC, VehicleInfo, TrackInfo],
+    begin_pos: float,
+    begin_speed: float,
+    acc: float,
+    distance: float,
+    direction: int,
+    operation_time: float | None,
 ):
     ecc, vehicle, track = energy_consumption_calculator_case
     expected_pec, expected_lec = _calc_energy_constant_acc_reference(
@@ -168,14 +174,17 @@ def test_calc_energy_constant_acc_matches_reference(
     assert lec == pytest.approx(expected_lec, rel=1e-10, abs=1e-10)
 
 
-def test_calc_energy_rejects_callable_acc(energy_consumption_calculator_case):
+def test_calc_energy_rejects_callable_acc(
+    energy_consumption_calculator_case: tuple[ECC, VehicleInfo, TrackInfo],
+):
     ecc, vehicle, track = energy_consumption_calculator_case
 
-    with pytest.raises(TypeError, match="acc must be a float constant"):
-        ecc.calc_energy(
+    with pytest.raises(TypingError, match="Cannot determine Numba type"):
+        invalid_acc = cast(float, lambda _: 0.2)
+        _ = ecc.calc_energy(
             begin_pos=200.0,
             begin_speed=7.5,
-            acc=lambda _: 0.2,  # type: ignore[arg-type]
+            acc=invalid_acc,
             distance=80.0,
             direction=1,
             operation_time=None,

@@ -1,7 +1,11 @@
 import numpy as np
-from numba import njit
+from numba import (
+    njit,
+)
 from numpy.typing import NDArray
-from scipy.integrate import cumulative_trapezoid
+from scipy.integrate import (
+    cumulative_trapezoid,
+)
 
 from model.track import TrackInfo, get_slope, get_slope_scalar_numba
 from model.vehicle import (
@@ -81,7 +85,11 @@ def _calc_energy_constant_acc_numba(
             pos_next = begin_pos + d_next * direction
             slope_next = get_slope_scalar_numba(pos_next, slopes, slope_intervals)
             f_next = calc_longitudinal_force_scalar_numba(
-                speed_next, slope_next, acc, mass, numoftrainsets
+                speed_next,
+                slope_next,
+                acc,
+                mass,
+                numoftrainsets,
             )
             abs_f_next = np.abs(f_next)
             motor_r_next = f_next**2 * motor_r_coeff

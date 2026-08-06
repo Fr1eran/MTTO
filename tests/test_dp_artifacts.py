@@ -1,13 +1,16 @@
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import numpy as np
 import pytest
 
 from dp.core import VariableSpacingDPOptimizer
 from dp.experiment_utils import compute_dp_reference_curve, load_dp_curve_artifact
-from model.ocs import TrainService
+from model.ocs import SafeGuardUtility, TrainService
+from model.track import TrackInfo
+from model.vehicle import VehicleInfo
 from utils.io_utils import save_curve_and_metrics
 from utils.trajectory import OptimizedCurveArtifact
 
@@ -41,7 +44,9 @@ def test_dp_inner_result_includes_cumulative_time_from_policy() -> None:
             ],
         }
 
-    optimizer._prepare_transition_graph_cache = _prepare_transition_graph_cache
+    object.__setattr__(
+        optimizer, "_prepare_transition_graph_cache", _prepare_transition_graph_cache
+    )
 
     result = optimizer._solve_dp_inner(
         lambda_time=10.0,
@@ -62,7 +67,7 @@ def test_save_curve_and_metrics_writes_extra_cumulative_time_array(
     curve_path = tmp_path / "optimized_speed_curve.npz"
     cum_time = np.asarray([0.0, 1.0, 3.0], dtype=np.float32)
 
-    save_curve_and_metrics(
+    _ = save_curve_and_metrics(
         pos_arr=[0.0, 1.0, 3.0],
         speed_arr=[1.0, 1.0, 1.0],
         output_path=str(curve_path),
@@ -96,7 +101,7 @@ def test_load_dp_curve_artifact_recovers_cumulative_time_for_legacy_npz(
         pos_m=np.asarray([0.0, 1.0, 3.0], dtype=np.float32),
         speed_mps=np.asarray([1.0, 1.0, 1.0], dtype=np.float32),
     )
-    metrics_path.write_text(json.dumps({"total_time_s": 3.0}), encoding="utf-8")
+    _ = metrics_path.write_text(json.dumps({"total_time_s": 3.0}), encoding="utf-8")
 
     artifact = OptimizedCurveArtifact(
         npz_path=str(curve_path),
@@ -111,11 +116,11 @@ def test_load_dp_curve_artifact_recovers_cumulative_time_for_legacy_npz(
 
 def test_compute_dp_reference_curve_saves_and_returns_cumulative_time(
     tmp_path: Path,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeOptimizer:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
+        def __init__(self, **kwargs: object):
+            self.kwargs: dict[str, object] = kwargs
 
         def optimize(self, *, max_speed: float, delta_speed: float, max_iters: int):
             del max_speed, delta_speed, max_iters
@@ -128,9 +133,14 @@ def test_compute_dp_reference_curve_saves_and_returns_cumulative_time(
             }
 
     monkeypatch.setattr("dp.experiment_utils.VariableSpacingDPOptimizer", FakeOptimizer)
+
+    def _fake_compute_comfort_metrics(**kwargs: object) -> dict[str, object]:
+        del kwargs
+        return {}
+
     monkeypatch.setattr(
         "dp.experiment_utils.compute_comfort_metrics_from_trajectory",
-        lambda **kwargs: {},
+        _fake_compute_comfort_metrics,
     )
     train_service = TrainService(
         start_position=0.0,
@@ -143,9 +153,9 @@ def test_compute_dp_reference_curve_saves_and_returns_cumulative_time(
     )
 
     pos_arr, speed_arr, cum_time_arr, metrics = compute_dp_reference_curve(
-        vehicle=SimpleNamespace(max_speed=30.0),
-        track=object(),
-        safeguard_utility=object(),
+        vehicle=cast(VehicleInfo, cast(object, SimpleNamespace(max_speed=30.0))),
+        track=cast(TrackInfo, object()),
+        safeguard_utility=cast(SafeGuardUtility, object()),
         train_service=train_service,
         output_dir=tmp_path,
         start_position=0.0,

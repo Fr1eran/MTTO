@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.widgets import Slider
+from numpy.typing import NDArray
 
 
 def run_workbench():
@@ -16,7 +17,9 @@ def run_workbench():
     x = np.linspace(0, 15, 1000)
 
     # 4. 计算得分与梯度的核心函数
-    def calculate_curves(x, x1, beta):
+    def calculate_curves(
+        x: NDArray[np.floating], x1: float, beta: float
+    ) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
         delta = np.maximum(0.0, x - x1)
         # 计算得分
         score = 1.0 / (1.0 + (delta / beta) ** 2)
@@ -37,16 +40,20 @@ def run_workbench():
     )
     peak_x = init_x1 + init_beta / np.sqrt(3.0)
     v_line_peak = ax.axvline(
-        x=peak_x, color="purple", linestyle=":", lw=2, label="Peak Gradient Position"
+        x=peak_x,
+        color="purple",
+        linestyle=":",
+        lw=2,
+        label="Peak Gradient Position",
     )
 
     # 6. 美化图表样式
-    ax.set_xlim(0, 15)
-    ax.set_ylim(0, 1.1)
-    ax.set_xlabel(r"$\Delta x$", fontsize=14)
-    ax.set_ylabel("Score / Gradient", fontsize=12)
+    _ = ax.set_xlim(0, 15)
+    _ = ax.set_ylim(0, 1.1)
+    _ = ax.set_xlabel(r"$\Delta x$", fontsize=14)
+    _ = ax.set_ylabel("Score / Gradient", fontsize=12)
     ax.grid(True, linestyle="-", alpha=0.3)
-    ax.legend(loc="upper right", fontsize=10)
+    _ = ax.legend(loc="upper right", fontsize=10)
 
     # 动态信息文本展示
     info_text = ax.text(
@@ -58,16 +65,16 @@ def run_workbench():
         bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
     )
 
-    def update_info_text(x1, beta):
+    def update_info_text(x1: float, beta: float):
         peak_pos = x1 + beta / np.sqrt(3.0)
         max_grad = (3.0 * np.sqrt(3.0)) / (8.0 * beta)
         info_text.set_text(
-            f"Parameters:\n"
-            f" ↳ x1 (Deadzone) = {x1:.2f}\n"
-            f" ↳ beta (Scale) = {beta:.2f}\n"
-            f"Metrics:\n"
-            f" ↳ Max Gradient Location = {peak_pos:.2f}\n"
-            f" ↳ Max Gradient Value = {max_grad:.3f}"
+            "Parameters:\n"
+            + f" ↳ x1 (Deadzone) = {x1:.2f}\n"
+            + f" ↳ beta (Scale) = {beta:.2f}\n"
+            + "Metrics:\n"
+            + f" ↳ Max Gradient Location = {peak_pos:.2f}\n"
+            + f" ↳ Max Gradient Value = {max_grad:.3f}"
         )
 
     update_info_text(init_x1, init_beta)
@@ -90,7 +97,7 @@ def run_workbench():
     )
 
     # 8. 回调更新函数
-    def update(val):
+    def update(_val: float):
         x1 = slider_x1.val
         beta = slider_beta.val
 
@@ -110,8 +117,8 @@ def run_workbench():
         # 重新渲染画布
         fig.canvas.draw_idle()
 
-    slider_x1.on_changed(update)
-    slider_beta.on_changed(update)
+    _ = slider_x1.on_changed(update)
+    _ = slider_beta.on_changed(update)
 
     plt.show()
 

@@ -1,11 +1,13 @@
 import json
 from pathlib import Path
+from typing import cast
 
 import numpy as np
+import pytest
+from stable_baselines3.common.base_class import BaseAlgorithm
 
 from model.ocs import TrainService
 from rl.callbacks import (
-    BestTrajectoryRecorder,
     PeriodicEvalCallback,
     SafetyViolationPositionRecorder,
 )
@@ -24,7 +26,7 @@ class DummyLogger:
     def __init__(self) -> None:
         self.records: list[tuple[str, float]] = []
 
-    def record(self, key: str, value: float, *_args, **_kwargs) -> None:
+    def record(self, key: str, value: float, *_args: object, **_kwargs: object) -> None:
         self.records.append((key, value))
 
     def values_for(self, key: str) -> list[float]:
@@ -33,14 +35,14 @@ class DummyLogger:
 
 class DummyModel:
     def __init__(self, training_env: object, logger: DummyLogger):
-        self._training_env = training_env
-        self.logger = logger
+        self._training_env: object = training_env
+        self.logger: DummyLogger = logger
 
     def get_env(self) -> object:
         return self._training_env
 
     def save(self, path: str) -> None:
-        Path(f"{path}.zip").write_text("model", encoding="utf-8")
+        _ = Path(f"{path}.zip").write_text("model", encoding="utf-8")
 
 
 class DummyTrainingEnv:
@@ -76,9 +78,7 @@ def _build_result(
     mean_safety_margin_mps: float = 0.0,
 ) -> PolicyEvaluationResult:
     resolved_stop_error = (
-        float(stop_error_m)
-        if stop_error_m is not None
-        else (0.0 if success else 12.0)
+        float(stop_error_m) if stop_error_m is not None else (0.0 if success else 12.0)
     )
     resolved_time_error_s = (
         float(time_error_s) if time_error_s is not None else (0.0 if success else 20.0)
@@ -144,44 +144,30 @@ def _prepare_callback(
         eval_trigger_interval=trigger_interval,
         deterministic=True,
     )
-    callback.init_callback(DummyModel(training_env=training_env, logger=logger))  # type: ignore
-    callback.locals = {}
-    return callback
-
-
-def _prepare_callback_with_recorders(
-    *,
-    trigger_mode: str,
-    trigger_interval: int,
-    recorders: list[object],
-) -> PeriodicEvalCallback:
-    training_env = DummyTrainingEnv()
-    logger = DummyLogger()
-    callback = PeriodicEvalCallback(
-        eval_env=DummyEvalEnv(),
-        recorders=recorders,
-        eval_trigger_mode=trigger_mode,
-        eval_trigger_interval=trigger_interval,
-        deterministic=True,
+    callback.init_callback(
+        cast(
+            BaseAlgorithm,
+            cast(object, DummyModel(training_env=training_env, logger=logger)),
+        )
     )
-    callback.init_callback(DummyModel(training_env=training_env, logger=logger))  # type: ignore
     callback.locals = {}
     return callback
 
 
 def test_periodic_eval_callback_triggers_on_episode_interval(
     tmp_path: Path,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     callback = _prepare_callback(
         tmp_path,
         trigger_mode="episodes",
         trigger_interval=3,
     )
-    monkeypatch.setattr(
-        "rl.callbacks.evaluate_policy_once",
-        lambda *_args, **_kwargs: _build_result(success=True, total_reward=42.0),
-    )
+
+    def _fake_evaluate(*_args: object, **_kwargs: object) -> PolicyEvaluationResult:
+        return _build_result(success=True, total_reward=42.0)
+
+    monkeypatch.setattr("rl.callbacks.evaluate_policy_once", _fake_evaluate)
 
     callback.locals = {"dones": np.asarray([True, False], dtype=bool)}
     callback.num_timesteps = 10
@@ -205,7 +191,7 @@ def test_periodic_eval_callback_triggers_on_episode_interval(
 
 def test_periodic_eval_callback_prefers_success_over_reward(
     tmp_path: Path,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     callback = _prepare_callback(
         tmp_path,
@@ -216,10 +202,11 @@ def test_periodic_eval_callback_prefers_success_over_reward(
         _build_result(success=False, total_reward=100.0),
         _build_result(success=True, total_reward=1.0),
     ]
-    monkeypatch.setattr(
-        "rl.callbacks.evaluate_policy_once",
-        lambda *_args, **_kwargs: results.pop(0),
-    )
+
+    def _fake_evaluate(*_args: object, **_kwargs: object) -> PolicyEvaluationResult:
+        return results.pop(0)
+
+    monkeypatch.setattr("rl.callbacks.evaluate_policy_once", _fake_evaluate)
 
     callback.num_timesteps = 1
     assert callback._on_step() is True
@@ -241,7 +228,7 @@ def test_periodic_eval_callback_prefers_success_over_reward(
 
 def test_periodic_eval_callback_persists_artifact_metadata(
     tmp_path: Path,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     callback = _prepare_callback(
         tmp_path,
@@ -252,10 +239,11 @@ def test_periodic_eval_callback_persists_artifact_metadata(
             "experiment_tag": "trial_a",
         },
     )
-    monkeypatch.setattr(
-        "rl.callbacks.evaluate_policy_once",
-        lambda *_args, **_kwargs: _build_result(success=True, total_reward=9.0),
-    )
+
+    def _fake_evaluate(*_args: object, **_kwargs: object) -> PolicyEvaluationResult:
+        return _build_result(success=True, total_reward=9.0)
+
+    monkeypatch.setattr("rl.callbacks.evaluate_policy_once", _fake_evaluate)
 
     callback.num_timesteps = 1
     assert callback._on_step() is True
@@ -270,7 +258,7 @@ def test_periodic_eval_callback_persists_artifact_metadata(
 
 def test_periodic_eval_callback_prefers_lower_energy_after_arrival_requirements(
     tmp_path: Path,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     callback = _prepare_callback(
         tmp_path,
@@ -281,10 +269,11 @@ def test_periodic_eval_callback_prefers_lower_energy_after_arrival_requirements(
         _build_result(success=True, total_reward=50.0, total_energy_j=6_000.0),
         _build_result(success=True, total_reward=10.0, total_energy_j=4_000.0),
     ]
-    monkeypatch.setattr(
-        "rl.callbacks.evaluate_policy_once",
-        lambda *_args, **_kwargs: results.pop(0),
-    )
+
+    def _fake_evaluate(*_args: object, **_kwargs: object) -> PolicyEvaluationResult:
+        return results.pop(0)
+
+    monkeypatch.setattr("rl.callbacks.evaluate_policy_once", _fake_evaluate)
 
     callback.num_timesteps = 1
     assert callback._on_step() is True
@@ -303,7 +292,7 @@ def test_periodic_eval_callback_prefers_lower_energy_after_arrival_requirements(
 
 def test_periodic_eval_callback_evaluates_once_per_trigger(
     tmp_path: Path,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     callback = _prepare_callback(
         tmp_path,
@@ -312,7 +301,7 @@ def test_periodic_eval_callback_evaluates_once_per_trigger(
     )
     call_count = 0
 
-    def _fake_evaluate(*_args, **_kwargs):
+    def _fake_evaluate(*_args: object, **_kwargs: object):
         nonlocal call_count
         call_count += 1
         return _build_result(success=True, total_reward=42.0)
@@ -335,7 +324,13 @@ def test_safety_violation_position_recorder_records_bins(
         position_bin_size_m=500.0,
     )
     recorder.init_callback(
-        DummyModel(training_env=DummyTrainingEnv(), logger=DummyLogger())  # type: ignore[arg-type]
+        cast(
+            BaseAlgorithm,
+            cast(
+                object,
+                DummyModel(training_env=DummyTrainingEnv(), logger=DummyLogger()),
+            ),
+        )
     )
 
     recorder.locals = {
@@ -420,28 +415,33 @@ def test_safety_violation_position_recorder_records_bins(
             [0.0, 1.0, 0.0, 0.0],
         )
         np.testing.assert_allclose(data["episode_exposure_count"], [1.0, 2.0, 1.0, 1.0])
-        np.testing.assert_allclose(data["episode_violation_count"], [0.0, 2.0, 0.0, 0.0])
+        np.testing.assert_allclose(
+            data["episode_violation_count"], [0.0, 2.0, 0.0, 0.0]
+        )
         np.testing.assert_allclose(
             data["episode_violation_rate"],
             [0.0, 1.0, 0.0, 0.0],
         )
-        np.testing.assert_allclose(data["safety_truncation_count"], [0.0, 1.0, 0.0, 0.0])
+        np.testing.assert_allclose(
+            data["safety_truncation_count"], [0.0, 1.0, 0.0, 0.0]
+        )
         np.testing.assert_allclose(data["position_bin_size_m"], [500.0])
 
 
 def test_periodic_eval_default_recorder_does_not_write_safety_violation_bins(
     tmp_path: Path,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     callback = _prepare_callback(
         tmp_path,
         trigger_mode="steps",
         trigger_interval=1,
     )
-    monkeypatch.setattr(
-        "rl.callbacks.evaluate_policy_once",
-        lambda *_args, **_kwargs: _build_result(success=True, total_reward=42.0),
-    )
+
+    def _fake_evaluate(*_args: object, **_kwargs: object) -> PolicyEvaluationResult:
+        return _build_result(success=True, total_reward=42.0)
+
+    monkeypatch.setattr("rl.callbacks.evaluate_policy_once", _fake_evaluate)
 
     callback.num_timesteps = 1
     assert callback._on_step() is True
@@ -525,15 +525,10 @@ def test_describe_best_update_reason_prefers_precise_arrival() -> None:
         time_error_s=0.0,
     )
 
-    assert (
-        describe_best_update_reason(candidate, previous)
-        == "precise_arrival_reached"
-    )
+    assert describe_best_update_reason(candidate, previous) == "precise_arrival_reached"
 
 
-def test_describe_best_update_reason_prefers_lower_stop_error_before_precise_arrival() -> (
-    None
-):
+def test_describe_best_update_reason_stop_error_precedence() -> None:
     candidate = _build_result(
         success=True,
         total_reward=1.0,
@@ -572,14 +567,11 @@ def test_describe_best_update_reason_prefers_punctual_arrival() -> None:
     )
 
     assert (
-        describe_best_update_reason(candidate, previous)
-        == "punctual_arrival_reached"
+        describe_best_update_reason(candidate, previous) == "punctual_arrival_reached"
     )
 
 
-def test_describe_best_update_reason_prefers_lower_time_error_before_punctual_arrival() -> (
-    None
-):
+def test_describe_best_update_reason_time_error_precedence() -> None:
     candidate = _build_result(
         success=True,
         total_reward=1.0,

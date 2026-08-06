@@ -1,7 +1,9 @@
 from typing import NamedTuple, TypedDict
 
 import numpy as np
-from numba import njit
+from numba import (
+    njit,
+)
 from numpy.typing import NDArray
 
 from model.common.energy_consumption_calculator import ECC
@@ -183,8 +185,8 @@ class ORS:
     def __init__(
         self, *, vehicle: VehicleInfo, track: TrackInfo, factor: float
     ) -> None:
-        self.vehicle = vehicle
-        self.track = track
+        self.vehicle: VehicleInfo = vehicle
+        self.track: TrackInfo = track
         self.gamma: float = factor
         self._speed_limits_scaled: NDArray[np.float64] = (
             self.track.speed_limits * self.gamma
@@ -484,14 +486,16 @@ class ORS:
                         begin_pos=ascend_begin_pos, begin_speed=ascend_begin_speed
                     )
 
-                    ascend_operations.append({
-                        "ascend_begin_pos": ascend_begin_pos,
-                        "ascend_begin_speed": ascend_begin_speed,
-                        "ascend_operation_time": ascend_operation_time,
-                        "ascend_end_pos": ascend_end_pos,
-                        "ascend_end_interval": ascend_end_interval,
-                        "ascend_begin_interval": ascend_begin_interval,
-                    })
+                    ascend_operations.append(
+                        {
+                            "ascend_begin_pos": ascend_begin_pos,
+                            "ascend_begin_speed": ascend_begin_speed,
+                            "ascend_operation_time": ascend_operation_time,
+                            "ascend_end_pos": ascend_end_pos,
+                            "ascend_end_interval": ascend_end_interval,
+                            "ascend_begin_interval": ascend_begin_interval,
+                        }
+                    )
                     prev_ascend_end_interval = ascend_end_interval
 
             prev_descend_begin_interval = brake_begin_interval
@@ -509,14 +513,16 @@ class ORS:
                         end_pos=descend_end_pos, end_speed=descend_end_speed
                     )
 
-                    descend_operations.append({
-                        "descend_end_pos": descend_end_pos,
-                        "descend_end_speed": descend_end_speed,
-                        "descend_operation_time": descend_operation_time,
-                        "descend_begin_pos": descend_begin_pos,
-                        "descend_begin_interval": descend_begin_interval,
-                        "descend_end_interval": descend_end_interval,
-                    })
+                    descend_operations.append(
+                        {
+                            "descend_end_pos": descend_end_pos,
+                            "descend_end_speed": descend_end_speed,
+                            "descend_operation_time": descend_operation_time,
+                            "descend_begin_pos": descend_begin_pos,
+                            "descend_begin_interval": descend_begin_interval,
+                            "descend_end_interval": descend_end_interval,
+                        }
+                    )
             # descend_operations不必反转
             # ToDO: 添加其他特殊情况下的子操作剔除
             # 计算操作模式
@@ -810,7 +816,7 @@ class ORS:
                     actual_time = (np.sqrt(discriminant) - current_speed_i) / acc
 
                 # 计算该段的能耗
-                PEC, LEC = energy_con_calc.calc_energy(
+                pec, lec = energy_con_calc.calc_energy(
                     begin_pos=current_pos_i,
                     begin_speed=current_speed_i,
                     acc=acc,
@@ -821,13 +827,13 @@ class ORS:
                     track=self.track,
                 )
 
-                ref_mec += PEC
-                ref_lec += LEC
+                ref_mec += pec
+                ref_lec += lec
                 ref_operation_time += actual_time
                 break
             else:
                 # 该段未达到目标位移，计算完整段的能耗
-                PEC, LEC = energy_con_calc.calc_energy(
+                pec, lec = energy_con_calc.calc_energy(
                     begin_pos=current_pos_i,
                     begin_speed=current_speed_i,
                     acc=acc,
@@ -838,8 +844,8 @@ class ORS:
                     track=self.track,
                 )
 
-                ref_mec += PEC
-                ref_lec += LEC
+                ref_mec += pec
+                ref_lec += lec
                 ref_operation_time += operation_time
                 accumulated_distance += segment_distance
 

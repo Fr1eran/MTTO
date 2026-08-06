@@ -1,8 +1,9 @@
 import numpy as np
 import pytest
+
 from model.ocs import SafeGuardCurves
-from model.vehicle import VehicleInfo
 from model.track import TrackInfo
+from model.vehicle import VehicleInfo
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_slopes,
@@ -11,7 +12,7 @@ from utils.data_loader import (
 
 
 @pytest.fixture(scope="module")
-def safeguard_curves_and_vehicle():
+def safeguard_curves_and_vehicle() -> tuple[SafeGuardCurves, VehicleInfo]:
     # 坡度，百分位
     slopes, slope_intervals = load_slopes()
 
@@ -33,10 +34,12 @@ def safeguard_curves_and_vehicle():
     return cal_SGC, vehicle
 
 
-def test_cal_levi_curves(safeguard_curves_and_vehicle):
+def test_cal_levi_curves(
+    safeguard_curves_and_vehicle: tuple[SafeGuardCurves, VehicleInfo],
+):
     cal_SGC, vehicle = safeguard_curves_and_vehicle
     aps, _ = load_auxiliary_stopping_areas_ap_and_dp()
-    curves = cal_SGC.calc_levi_curves(aps, vehicle, ds=1)
+    curves = cal_SGC.calc_levi_curves(np.asarray(aps, dtype=np.float64), vehicle, ds=1)
     # 检查返回类型和内容
     assert isinstance(curves, list)
     assert all(isinstance(item, np.ndarray) and item.shape[0] == 2 for item in curves)
@@ -46,10 +49,12 @@ def test_cal_levi_curves(safeguard_curves_and_vehicle):
         assert isinstance(item[1, :], np.ndarray)  # 每条曲线纵坐标数组
 
 
-def test_cal_brake_curves(safeguard_curves_and_vehicle):
+def test_cal_brake_curves(
+    safeguard_curves_and_vehicle: tuple[SafeGuardCurves, VehicleInfo],
+):
     cal_SGC, vehicle = safeguard_curves_and_vehicle
     _, dps = load_auxiliary_stopping_areas_ap_and_dp()
-    curves = cal_SGC.calc_brake_curves(dps, vehicle, ds=1)
+    curves = cal_SGC.calc_brake_curves(np.asarray(dps, dtype=np.float64), vehicle, ds=1)
     assert isinstance(curves, list)
     assert all(isinstance(item, np.ndarray) and item.shape[0] == 2 for item in curves)
     for item in curves:
@@ -57,7 +62,9 @@ def test_cal_brake_curves(safeguard_curves_and_vehicle):
         assert isinstance(item[1, :], np.ndarray)
 
 
-def test_calc_brake_and_max_curves_max_speed_is_monotone(safeguard_curves_and_vehicle):
+def test_calc_brake_and_max_curves_max_speed_is_monotone(
+    safeguard_curves_and_vehicle: tuple[SafeGuardCurves, VehicleInfo],
+):
     cal_SGC, vehicle = safeguard_curves_and_vehicle
     _, dps = load_auxiliary_stopping_areas_ap_and_dp()
     _, max_curves = cal_SGC.calc_brake_and_max_curves(

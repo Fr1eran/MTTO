@@ -3,6 +3,9 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
+from numpy.typing import NDArray
 
 from utils.plot_utils import set_global_plot_style
 
@@ -13,7 +16,9 @@ STOPPING_ERROR_MAX_M = 10.0
 PUNCTUALITY_ERROR_MAX_S = 140.0
 
 
-def current_stopping_score(abs_stop_error_m):
+def current_stopping_score(
+    abs_stop_error_m: NDArray[np.floating] | float,
+) -> NDArray[np.float64] | np.float64:
     """Mirror MTTOEnv._calc_stopping_score for positive absolute stop error."""
     abs_stop_error_m = np.asarray(abs_stop_error_m, dtype=np.float64)
     beta = 0.8
@@ -21,7 +26,9 @@ def current_stopping_score(abs_stop_error_m):
     return 1.0 / (1.0 + (delta / beta) ** 2)
 
 
-def current_punctuality_score(abs_time_error_s):
+def current_punctuality_score(
+    abs_time_error_s: NDArray[np.floating] | float,
+) -> NDArray[np.float64] | np.float64:
     """Mirror MTTOEnv._calc_punctuality_score for positive absolute time error."""
     abs_time_error_s = np.asarray(abs_time_error_s, dtype=np.float64)
     return np.exp(-abs_time_error_s / PUNCTUALITY_DECAY_TIME_S)
@@ -33,7 +40,7 @@ def visualize_stopping_score_function():
 
     fig, ax_score = plt.subplots(figsize=(10, 6))
 
-    ax_score.plot(
+    _ = ax_score.plot(
         x_values,
         rewards,
         label=r"$f_s(x)=\frac{1}{1+\max(0,x-x_1)^2}$",
@@ -41,20 +48,20 @@ def visualize_stopping_score_function():
         linewidth=2.5,
     )
 
-    ax_score.axvline(
+    _ = ax_score.axvline(
         x=MAX_STOP_ERROR_M,
         color="green",
         linestyle=":",
         label=rf"$x_1 = {MAX_STOP_ERROR_M}\,\mathrm{{m}}$",
     )
-    ax_score.axhline(y=0, color="black", linewidth=1)
-    ax_score.set_ylabel("stopping score", fontsize=12)
-    ax_score.set_ylim(0.0, 1.05)
+    _ = ax_score.axhline(y=0, color="black", linewidth=1)
+    _ = ax_score.set_ylabel("stopping score", fontsize=12)
+    _ = ax_score.set_ylim(0.0, 1.05)
     ax_score.grid(True, alpha=0.3)
-    ax_score.legend(loc="upper right", fontsize=11)
+    _ = ax_score.legend(loc="upper right", fontsize=11)
 
-    ax_score.set_xlabel(r"$|\Delta x|$ / m", fontsize=12)
-    ax_score.set_xlim(0, STOPPING_ERROR_MAX_M)
+    _ = ax_score.set_xlabel(r"$|\Delta x|$ / m", fontsize=12)
+    _ = ax_score.set_xlim(0, STOPPING_ERROR_MAX_M)
 
     fig.tight_layout()
     return fig
@@ -66,21 +73,21 @@ def visualize_punctuality_score_function():
 
     fig, ax_score = plt.subplots(figsize=(10, 6))
 
-    ax_score.plot(
+    _ = ax_score.plot(
         x_values,
         rewards,
         label=r"$f_t(x)=\exp\left(-x/60\right)$",
         color="blue",
         linewidth=2.5,
     )
-    ax_score.axhline(y=0, color="black", linewidth=1)
-    ax_score.set_ylabel("punctuality score", fontsize=12)
-    ax_score.set_ylim(0.0, 1.05)
-    ax_score.set_xlim(0, PUNCTUALITY_ERROR_MAX_S)
+    _ = ax_score.axhline(y=0, color="black", linewidth=1)
+    _ = ax_score.set_ylabel("punctuality score", fontsize=12)
+    _ = ax_score.set_ylim(0.0, 1.05)
+    _ = ax_score.set_xlim(0, PUNCTUALITY_ERROR_MAX_S)
     ax_score.grid(True, alpha=0.3)
-    ax_score.legend(loc="upper right", fontsize=11)
+    _ = ax_score.legend(loc="upper right", fontsize=11)
 
-    ax_score.set_xlabel(r"$|\Delta t|$ / s", fontsize=12)
+    _ = ax_score.set_xlabel(r"$|\Delta t|$ / s", fontsize=12)
 
     fig.tight_layout()
     return fig
@@ -91,8 +98,8 @@ def visualize_combined_score_functions():
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
 
-    def add_panel_label(ax, label: str) -> None:
-        ax.text(
+    def add_panel_label(ax: Axes, label: str) -> None:
+        _ = ax.text(
             0.5,
             -0.18,
             label,
@@ -159,30 +166,33 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Visualize score functions and optionally save a compact figure."
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--plot",
         choices=("combined", "stopping", "punctuality"),
         default="combined",
         help="Score function figure to display.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--output-file",
         type=Path,
-        help="Path for saving a compact paper-ready figure. If omitted, only display the figure.",
+        help=(
+            "Path for saving a compact paper-ready figure. "
+            "If omitted, only display the figure."
+        ),
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--dpi",
         type=float,
         default=300.0,
         help="DPI used when saving the figure.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--pad-inches",
         type=float,
         default=0.03,
         help="Padding around the tight saved figure.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--no-show",
         action="store_true",
         help="Save without opening the interactive display window.",
@@ -191,11 +201,11 @@ def parse_args():
 
 
 def save_compact_figure(
-    fig,
+    fig: Figure,
     output_file: Path,
     dpi: float,
     pad_inches: float,
-):
+) -> Path:
     if output_file.suffix == "":
         output_file = output_file.with_suffix(".png")
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -210,7 +220,7 @@ def save_compact_figure(
 
 if __name__ == "__main__":
     args = parse_args()
-    set_global_plot_style(
+    _ = set_global_plot_style(
         font_preset="sci",
         preferred_font="Times New Roman",
         title_font_size=12.0,

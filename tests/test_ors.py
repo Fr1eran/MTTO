@@ -1,10 +1,11 @@
+from collections.abc import Sequence
+
 import numpy as np
 import pytest
 
-from model.vehicle import VehicleInfo
-from model.track import TrackInfo
-from model.ocs import TrainService
 from model.common import ORS
+from model.track import TrackInfo
+from model.vehicle import VehicleInfo
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_slopes,
@@ -25,7 +26,7 @@ def operation_reference_system():
     aps, dps = load_auxiliary_stopping_areas_ap_and_dp()
 
     # 车站
-    ly_zp, pa_zp = load_stations_goal_positions()
+    _ = load_stations_goal_positions()
 
     track = TrackInfo(
         slopes,
@@ -36,19 +37,10 @@ def operation_reference_system():
         ASA_dps=dps,
     )
     vehicle = VehicleInfo(mass=317.5, numoftrainsets=5, length=128.5)
-    train_service = TrainService(
-        start_position=ly_zp,
-        start_speed=0.0,
-        target_position=pa_zp,
-        schedule_time=440.0,
-        max_acc_change=0.75,
-        max_arr_time_error_ratio=120.0,
-        max_stop_error=0.3,
-    )
     return ORS(vehicle=vehicle, track=track, factor=0.95)
 
 
-def _sum_operation_time(operations) -> float:
+def _sum_operation_time(operations: Sequence[tuple[object, float]]) -> float:
     return float(sum(float(time) for _, time in operations))
 
 
@@ -159,4 +151,3 @@ def test_calc_min_operation_time_matches_runtime_operation_sum(
 
 def test_ors_does_not_own_dp_trajectory_loading() -> None:
     assert not hasattr(ORS, "load_or_build_ref_redundant_operation_time_from_dp")
-

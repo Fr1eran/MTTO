@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
@@ -59,7 +59,7 @@ def _find_latest_named_file(*, search_dir: str, file_name: str) -> Path:
     if len(matches) > 1:
         print(
             f"Found {len(matches)} '{file_name}' files under '{search_dir}', "
-            f"using latest: {matches[0]}"
+            + f"using latest: {matches[0]}"
         )
     return matches[0]
 
@@ -85,7 +85,7 @@ def resolve_dp_curve_artifact(*, curve_dir: str) -> OptimizedCurveArtifact:
     if not metrics_path.is_file():
         raise FileNotFoundError(
             f"Could not find '{metrics_file_name}' in the same directory as "
-            f"curve file: {curve_path}"
+            + f"curve file: {curve_path}"
         )
     return OptimizedCurveArtifact(
         npz_path=str(curve_path),
@@ -129,11 +129,11 @@ def compute_dp_reference_curve(
     max_speed: float | None = None,
     delta_speed_mps: float = 0.1,
     max_outer_iterations: int = 100,
-    precompute_mode: str = "parallel",
+    precompute_mode: Literal["serial", "parallel"] = "parallel",
     precompute_workers: int | None = 4,
     precompute_chunk_size: int | None = None,
     mp_start_method: str | None = None,
-    stage_division: str = "uniform",
+    stage_division: Literal["variable", "uniform"] = "uniform",
     uniform_step_size: float = 30.0,
     sub_stage_count: int = 30,
     skip_disk_cache: bool = False,
@@ -156,11 +156,11 @@ def compute_dp_reference_curve(
         safeguard_utility=safeguard_utility,
         train_service=task_train_service,
         show_precompute_progress=show_precompute_progress,
-        precompute_mode=precompute_mode,  # type: ignore[arg-type]
+        precompute_mode=precompute_mode,
         precompute_workers=precompute_workers,
         precompute_chunk_size=precompute_chunk_size,
         mp_start_method=mp_start_method,
-        stage_division=stage_division,  # type: ignore[arg-type]
+        stage_division=stage_division,
         uniform_step_size=uniform_step_size,
         sub_stage_count=sub_stage_count,
         skip_disk_cache=skip_disk_cache,
@@ -195,7 +195,7 @@ def compute_dp_reference_curve(
     }
 
     output_path = Path(output_dir) / DP_CURVE_FILENAME
-    save_curve_and_metrics(
+    _ = save_curve_and_metrics(
         pos_arr=result["pos"],
         speed_arr=result["speed"],
         output_path=str(output_path),

@@ -1,6 +1,8 @@
 import argparse
 
 import matplotlib.pyplot as plt
+import numpy as np
+from numpy.typing import NDArray
 
 from rl.experiment_utils import (
     RL_DEFAULT_SEARCH_DIR as _RL_DEFAULT_SEARCH_DIR,
@@ -56,29 +58,29 @@ def _print_metrics(metrics: dict[str, object]) -> None:
 
 def _build_cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="加载并显示已保存的强化学习轨迹结果。")
-    parser.add_argument(
+    _ = parser.add_argument(
         "--curve-dir",
         default=_RL_DEFAULT_SEARCH_DIR,
         help="用于搜索强化学习轨迹相关产物的路径",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--trajectory-source",
         choices=_RL_TRAJECTORY_SOURCE_CHOICES,
         default="best",
         help="选择加载哪条保存的轨迹: 'best' 'best_steps' 'best_episodes' 'final'",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--no-safeguard",
         action="store_true",
         help="不绘制安全防护曲线",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--factor",
         type=float,
         default=0.99,
         help="在启用安全防护时用于渲染的速度上限因数。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--dry-run",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -90,14 +92,14 @@ def _build_cli_parser() -> argparse.ArgumentParser:
 
 def plot_rl_curve(
     *,
-    pos_arr,
-    speed_arr,
+    pos_arr: NDArray[np.float64],
+    speed_arr: NDArray[np.float64],
     metrics: dict[str, object],
     no_safeguard: bool,
     factor: float,
 ) -> None:
     apply_rl_curve_plot_style()
-    fig, ax = plt.subplots(figsize=(12, 7))
+    _, ax = plt.subplots(figsize=(12, 7))
     render_rl_curve_on_axes(
         ax=ax,
         pos_arr=pos_arr,
@@ -106,7 +108,7 @@ def plot_rl_curve(
         no_safeguard=no_safeguard,
         factor=factor,
     )
-    ax.legend(loc="upper right")
+    _ = ax.legend(loc="upper right")
 
     plt.tight_layout()
     plt.show()

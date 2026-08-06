@@ -3,6 +3,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.figure import Figure
 
 from model.ocs import SafeGuardUtility
 from utils.data_loader import (
@@ -20,24 +21,27 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Show environment data and optionally save a compact figure."
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--output-file",
         type=Path,
-        help="Path for saving a compact paper-ready figure. If omitted, only show the figure.",
+        help=(
+            "Path for saving a compact paper-ready figure. "
+            "If omitted, only show the figure."
+        ),
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--dpi",
         type=float,
         default=300.0,
         help="DPI used when saving the figure.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--pad-inches",
         type=float,
         default=0.03,
         help="Padding around the tight saved figure.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--no-show",
         action="store_true",
         help="Save without opening the interactive display window.",
@@ -46,7 +50,7 @@ def parse_args():
 
 
 def set_plot_style():
-    set_global_plot_style(
+    _ = set_global_plot_style(
         font_preset="sci",
         preferred_font="Times New Roman",
         title_font_size=8.0,
@@ -68,10 +72,12 @@ def create_env_data_figure():
     longyang_end = stations_data["start_station"]["end"]
     putong_start = stations_data["end_station"]["start"]
     putong_end = stations_data["end_station"]["end"]
-    stations_cor = np.array([
-        [longyang_start, putong_start],
-        [longyang_end, putong_end],
-    ])
+    stations_cor = np.array(
+        [
+            [longyang_start, putong_start],
+            [longyang_end, putong_end],
+        ]
+    )
 
     # 加速区
     acceleration_zone_data = load_acceleration_zones()
@@ -190,7 +196,9 @@ def create_env_data_figure():
     return fig
 
 
-def save_compact_figure(fig, output_file: Path, dpi: float, pad_inches: float):
+def save_compact_figure(
+    fig: Figure, output_file: Path, dpi: float, pad_inches: float
+) -> Path:
     if output_file.suffix == "":
         output_file = output_file.with_suffix(".png")
     output_file.parent.mkdir(parents=True, exist_ok=True)

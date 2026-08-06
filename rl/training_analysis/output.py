@@ -61,7 +61,7 @@ def _flatten_numeric_fields(
     if isinstance(value, dict):
         for key, child in value.items():
             next_prefix = f"{prefix}.{key}" if prefix else str(key)
-            _flatten_numeric_fields(child, prefix=next_prefix, out=out)
+            _ = _flatten_numeric_fields(child, prefix=next_prefix, out=out)
         return out
 
     if isinstance(value, list):
@@ -263,15 +263,15 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
     )
     lines.append(
         "- boundary_adhesion_ratio_by_distance: "
-        f"{_format_percent(boundary_adhesion.get('near_miss_distance_ratio'))}"
+        + f"{_format_percent(boundary_adhesion.get('near_miss_distance_ratio'))}"
     )
     lines.append(
         "- mean_survival_distance_m: "
-        f"{_format_number(evolution.get('mean_survival_distance_m'))}"
+        + f"{_format_number(evolution.get('mean_survival_distance_m'))}"
     )
     lines.append(
         "- overall_normal_to_speed_violation_transition_rate: "
-        f"{
+        + f"{
             _format_percent(
                 (evolution.get('overall_transition_probabilities') or [[0, 0, 0]])[0][2]
                 if evolution.get('overall_transition_probabilities')
@@ -286,29 +286,29 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
     failure_ratio = (failure_count / sample_count) if sample_count > 0 else 0.0
     lines.append(
         "- safety_signal_ratio(sample): "
-        f"failure={_format_percent(failure_ratio)}, "
-        f"violation={_format_percent(sbt.get('violation_ratio'))}, "
-        f"near_miss={_format_percent(sbt.get('near_miss_ratio'))}"
+        + f"failure={_format_percent(failure_ratio)}, "
+        + f"violation={_format_percent(sbt.get('violation_ratio'))}, "
+        + f"near_miss={_format_percent(sbt.get('near_miss_ratio'))}"
     )
 
     best_eval = payload.get("best_eval_metrics", {})
     if isinstance(best_eval, dict) and best_eval.get("available", False):
         lines.append(
             "- best_eval: "
-            f"arrival_success_rate={
+            + f"arrival_success_rate={
                 _format_percent(_best_eval_metric_final(best_eval, 'best_success'))
             }, "
-            f"precise_arrival_rate={
+            + f"precise_arrival_rate={
                 _format_percent(
                     _best_eval_metric_final(best_eval, 'best_precise_arrival')
                 )
             }, "
-            f"punctual_arrival_rate={
+            + f"punctual_arrival_rate={
                 _format_percent(
                     _best_eval_metric_final(best_eval, 'best_punctual_arrival')
                 )
             }, "
-            f"best_reward={
+            + f"best_reward={
                 _format_number(_best_eval_metric_final(best_eval, 'best_total_reward'))
             }"
         )
@@ -327,8 +327,8 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
         top_conflict = strong_negative_pairs[0]
         lines.append(
             "- top_objective_conflict: "
-            f"{top_conflict.get('left', '')} vs {top_conflict.get('right', '')}"
-            f" (pearson={_format_number(top_conflict.get('pearson'))})"
+            + f"{top_conflict.get('left', '')} vs {top_conflict.get('right', '')}"
+            + f" (pearson={_format_number(top_conflict.get('pearson'))})"
         )
 
     survival_slope = evolution.get("survival_distance_slope_per_stage")
@@ -352,32 +352,33 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
     lines.append("")
     lines.append(
         "- convergence: "
-        f"final_ep_rew_mean={_format_number(convergence.get('final_ep_rew_mean'))}, "
-        f"rise_slope_per_step={
+        + f"final_ep_rew_mean={_format_number(convergence.get('final_ep_rew_mean'))}, "
+        + f"rise_slope_per_step={
             _format_number(convergence.get('rise_slope_per_step'))
         }, "
-        f"volatility_cv={_format_number(convergence.get('volatility_cv'))}"
+        + f"volatility_cv={_format_number(convergence.get('volatility_cv'))}"
     )
     lines.append(
         "- policy_vitality: "
-        f"entropy_trend_slope={
+        + f"entropy_trend_slope={
             _format_number(vitality.get('entropy_trend_slope_per_step'))
         }, "
-        f"rigidity_risk_score={_format_number(vitality.get('rigidity_risk_score'))}"
+        + f"rigidity_risk_score={_format_number(vitality.get('rigidity_risk_score'))}"
     )
     lines.append(
         "- critic_foresight: "
-        f"explained_variance_mean={
+        + f"explained_variance_mean={
             _format_number(critic.get('explained_variance_mean'))
         }, "
-        f"low_explained_variance_ratio={
+        + f"low_explained_variance_ratio={
             _format_percent(critic.get('low_explained_variance_ratio'))
         }"
     )
     lines.append(
         "- update_safety: "
-        f"approx_kl_p95={_format_number(update_safety.get('approx_kl_p95'))}, "
-        f"approx_kl_exceed_ratio={_format_percent(update_safety.get('approx_kl_exceed_ratio'))}"
+        + f"approx_kl_p95={_format_number(update_safety.get('approx_kl_p95'))}, "
+        + "approx_kl_exceed_ratio="
+        + f"{_format_percent(update_safety.get('approx_kl_exceed_ratio'))}"
     )
 
     best_eval = payload.get("best_eval_metrics", {})
@@ -412,8 +413,9 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
     if top_dominance:
         lines.append("- dominance_by_component:")
         for tag, value in top_dominance:
+            tag_label = _short_component_name(tag)
             lines.append(
-                f"  - {_short_component_name(tag)}: \
+                f"  - {tag_label}: \
                 {_ascii_bar(value, width=bar_width)}"
             )
     else:
@@ -424,19 +426,21 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
         for pair in strong_negative_pairs[:5]:
             lines.append(
                 "  - "
-                f"{pair.get('left', '')} vs {pair.get('right', '')}: "
-                f"pearson={_format_number(pair.get('pearson'))}"
+                + f"{pair.get('left', '')} vs {pair.get('right', '')}: "
+                + f"pearson={_format_number(pair.get('pearson'))}"
             )
     else:
         lines.append("- objective_conflicts: no strong negative pairs detected")
 
     if isinstance(stage_component_profile, list) and stage_component_profile:
-        component_keys = sorted({
-            key
-            for stage in stage_component_profile
-            if isinstance(stage, dict)
-            for key in (stage.get("mean_ratio", {}) or {}).keys()
-        })
+        component_keys = sorted(
+            {
+                key
+                for stage in stage_component_profile
+                if isinstance(stage, dict)
+                for key in (stage.get("mean_ratio", {}) or {}).keys()
+            }
+        )
         if component_keys:
             lines.append("")
             header = (
@@ -458,9 +462,9 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
                 ]
                 lines.append(
                     "| "
-                    f"{stage.get('window_index', 'N/A')} | "
-                    f"[{stage.get('episode_start', 'N/A')}, \
-                    {stage.get('episode_end', 'N/A')}) | "
+                    + f"{stage.get('window_index', 'N/A')} | "
+                    + f"[{stage.get('episode_start', 'N/A')}, "
+                    + f"{stage.get('episode_end', 'N/A')}) | "
                     + " | ".join(ratio_cells)
                     + " |"
                 )
@@ -470,32 +474,34 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
     lines.append("")
     lines.append(
         "- boundary_adhesion_ratio_by_distance: "
-        f"{
+        + f"{
             _ascii_bar(
-                boundary_adhesion.get('near_miss_distance_ratio', 0.0), width=bar_width
+                boundary_adhesion.get('near_miss_distance_ratio', 0.0),
+                width=bar_width,
             )
         }"
     )
     lines.append(
         "- boundary_adhesion_distance: "
-        f"near_miss_distance_m={
+        + f"near_miss_distance_m={
             _format_number(boundary_adhesion.get('near_miss_distance_m'))
         }, "
-        f"total_distance_m={_format_number(boundary_adhesion.get('total_distance_m'))}"
+        + "total_distance_m="
+        + f"{_format_number(boundary_adhesion.get('total_distance_m'))}"
     )
     lines.append(
         "- geographic_failure_distribution: "
-        f"truncated_count={gfd.get('truncated_count', 0)}"
+        + f"truncated_count={gfd.get('truncated_count', 0)}"
     )
     lines.append(
         "- safety_band_tolerance: "
-        f"avg_distance_to_vmax={
+        + f"avg_distance_to_vmax={
             _format_number(sbt.get('average_distance_to_vmax_mps'))
         }, "
-        f"avg_distance_to_vmin={
+        + f"avg_distance_to_vmin={
             _format_number(sbt.get('average_distance_to_vmin_mps'))
         }, "
-        f"near_miss_ratio(sample)={_format_percent(sbt.get('near_miss_ratio'))}"
+        + f"near_miss_ratio(sample)={_format_percent(sbt.get('near_miss_ratio'))}"
     )
 
     top_risk_bins = gfd.get("top_risk_bins", [])
@@ -512,16 +518,16 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
                 continue
             lines.append(
                 "| "
-                f"[{_format_number(item.get('bin_start_m'))}, \
-                {_format_number(item.get('bin_end_m'))}) | "
-                f"{item.get('exposure_count', 0)} | "
-                f"{item.get('near_miss_count', 0)} | "
-                f"{item.get('violation_count', 0)} | "
-                f"{item.get('failure_count', 0)} | "
-                f"{_format_percent(item.get('near_miss_risk'))} | "
-                f"{_format_percent(item.get('violation_risk'))} | "
-                f"{_format_percent(item.get('failure_risk'))} | "
-                f"{_ascii_bar(item.get('near_miss_risk', 0.0), width=bar_width)} |"
+                + f"[{_format_number(item.get('bin_start_m'))}, "
+                + f"{_format_number(item.get('bin_end_m'))}) | "
+                + f"{item.get('exposure_count', 0)} | "
+                + f"{item.get('near_miss_count', 0)} | "
+                + f"{item.get('violation_count', 0)} | "
+                + f"{item.get('failure_count', 0)} | "
+                + f"{_format_percent(item.get('near_miss_risk'))} | "
+                + f"{_format_percent(item.get('violation_risk'))} | "
+                + f"{_format_percent(item.get('failure_risk'))} | "
+                + f"{_ascii_bar(item.get('near_miss_risk', 0.0), width=bar_width)} |"
             )
 
     top_risky_points = critical_points.get("top_risky_points", [])
@@ -546,15 +552,15 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
             failure_risk = item.get("failure_risk", item.get("risk"))
             lines.append(
                 "| "
-                f"{item.get('type', 'N/A')} | "
-                f"{_format_number(item.get('point_m'))} | "
-                f"{item.get('exposure_count', 0)} | "
-                f"{item.get('near_miss_count', 0)} | "
-                f"{item.get('violation_count', 0)} | "
-                f"{item.get('failure_count', 0)} | "
-                f"{_format_percent(item.get('near_miss_risk'))} | "
-                f"{_format_percent(item.get('violation_risk'))} | "
-                f"{_format_percent(failure_risk)} |"
+                + f"{item.get('type', 'N/A')} | "
+                + f"{_format_number(item.get('point_m'))} | "
+                + f"{item.get('exposure_count', 0)} | "
+                + f"{item.get('near_miss_count', 0)} | "
+                + f"{item.get('violation_count', 0)} | "
+                + f"{item.get('failure_count', 0)} | "
+                + f"{_format_percent(item.get('near_miss_risk'))} | "
+                + f"{_format_percent(item.get('violation_risk'))} | "
+                + f"{_format_percent(failure_risk)} |"
             )
 
     lines.append("")
@@ -562,15 +568,15 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
     lines.append("")
     lines.append(
         "- survival_distance_slope_per_stage: "
-        f"{_format_number(evolution.get('survival_distance_slope_per_stage'))}"
+        + f"{_format_number(evolution.get('survival_distance_slope_per_stage'))}"
     )
     lines.append(
         "- mean_survival_distance_m: "
-        f"{_format_number(evolution.get('mean_survival_distance_m'))}"
+        + f"{_format_number(evolution.get('mean_survival_distance_m'))}"
     )
     lines.append(
         "- truncated_episode_ratio: "
-        f"{_format_percent(evolution.get('truncated_episode_ratio'))}"
+        + f"{_format_percent(evolution.get('truncated_episode_ratio'))}"
     )
 
     if evolution_available:
@@ -610,14 +616,14 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
             )
             lines.append(
                 "| "
-                f"{stage.get('window_index', 'N/A')} | "
-                f"[{stage.get('episode_start', 'N/A')}, \
-                {stage.get('episode_end', 'N/A')}) | "
-                f"{_format_number(stage.get('avg_survival_distance_m'))} | "
-                f"{growth_text} | "
-                f"{_format_percent(normal_to_speed_rate)} | "
-                f"{_format_percent(terminal_to_speed_rate)} | "
-                f"{_format_percent(speed_to_terminal_rate)} |"
+                + f"{stage.get('window_index', 'N/A')} | "
+                + f"[{stage.get('episode_start', 'N/A')}, "
+                + f"{stage.get('episode_end', 'N/A')}) | "
+                + f"{_format_number(stage.get('avg_survival_distance_m'))} | "
+                + f"{growth_text} | "
+                + f"{_format_percent(normal_to_speed_rate)} | "
+                + f"{_format_percent(terminal_to_speed_rate)} | "
+                + f"{_format_percent(speed_to_terminal_rate)} |"
             )
 
     lines.append("")
@@ -649,7 +655,7 @@ def write_analysis_outputs(
         json.dump(payload, json_file, ensure_ascii=False, indent=2)
 
     markdown_report = _generate_markdown_report(payload)
-    markdown_path.write_text(markdown_report, encoding="utf-8")
+    _ = markdown_path.write_text(markdown_report, encoding="utf-8")
 
     output_paths: dict[str, str] = {
         "output_dir": str(output_dir),

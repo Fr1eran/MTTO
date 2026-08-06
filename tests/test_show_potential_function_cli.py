@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from types import SimpleNamespace
+from typing import cast
 
 import matplotlib
 import numpy as np
 import pytest
+from numpy.typing import NDArray
 
 matplotlib.use("Agg")
 
@@ -17,17 +19,31 @@ class _FakeFigure:
         self.saved_paths: list[Path] = []
         self.savefig_calls: list[dict[str, object]] = []
 
-    def savefig(self, path: str | Path, *args, **kwargs) -> None:
+    def savefig(self, path: str | Path, *args: object, **kwargs: object) -> None:
         self.saved_paths.append(Path(path))
         self.savefig_calls.append({"args": args, "kwargs": kwargs})
 
 
 def _patch_compact_linspace(monkeypatch: pytest.MonkeyPatch, limit: int = 32) -> None:
-    original_linspace = show_potential_function.np.linspace
+    original_linspace = cast(
+        Callable[..., NDArray[np.floating]], show_potential_function.np.linspace
+    )
 
-    def _compact_linspace(start, stop, num, *args, **kwargs):
+    def _compact_linspace(
+        start: float | NDArray[np.floating],
+        stop: float | NDArray[np.floating],
+        num: float,
+        *args: object,
+        **kwargs: object,
+    ) -> NDArray[np.floating]:
         compact_num = min(int(num), limit) if int(num) > 256 else int(num)
-        return original_linspace(start, stop, compact_num, *args, **kwargs)
+        return original_linspace(
+            start,
+            stop,
+            compact_num,
+            *args,
+            **kwargs,
+        )
 
     monkeypatch.setattr(show_potential_function.np, "linspace", _compact_linspace)
 
@@ -71,20 +87,30 @@ def _patch_mock_safeguard_curves(monkeypatch: pytest.MonkeyPatch) -> None:
         ],
         dtype=np.float64,
     )
+
+    def _fake_load_safeguard_curves(
+        *_keys: object,
+    ) -> tuple[list[NDArray[np.float64]], list[NDArray[np.float64]]]:
+        return min_curves_list, max_curves_list
+
+    def _fake_load_speed_limits(
+        **_kwargs: object,
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        return (
+            np.asarray([60.0, 50.0, 30.0], dtype=np.float64),
+            np.asarray([0.0, 28000.0, 29000.0, 30000.0], dtype=np.float64),
+        )
+
     monkeypatch.setattr(
         show_potential_function,
         "load_safeguard_curves",
-        lambda *_keys: (min_curves_list, max_curves_list),
+        _fake_load_safeguard_curves,
     )
     monkeypatch.setattr(
         show_potential_function,
         "load_speed_limits",
-        lambda **_kwargs: (
-            np.asarray([60.0, 50.0, 30.0], dtype=np.float64),
-            np.asarray([0.0, 28000.0, 29000.0, 30000.0], dtype=np.float64),
-        ),
+        _fake_load_speed_limits,
     )
-
 
 
 def test_show_potential_function_cli_defaults() -> None:
@@ -145,11 +171,17 @@ def test_main_saves_figure_and_creates_parent_dir(
     figure = _FakeFigure()
     output_file = tmp_path / "nested" / "potential.png"
 
+    def _fake_resolve_plotter(
+        _plot_type: str, *, minimal: bool
+    ) -> Callable[[], object]:
+        del minimal
+        return lambda: figure
+
     monkeypatch.setattr(show_potential_function, "_apply_plot_style", lambda: None)
     monkeypatch.setattr(
         show_potential_function,
         "_resolve_plotter",
-        lambda _plot_type, *, minimal: (lambda: figure),
+        _fake_resolve_plotter,
     )
     monkeypatch.setattr(show_potential_function.plt, "show", lambda: None)
 
@@ -179,11 +211,17 @@ def test_main_does_not_save_when_save_flag_is_disabled(
 ) -> None:
     figure = _FakeFigure()
 
+    def _fake_resolve_plotter(
+        _plot_type: str, *, minimal: bool
+    ) -> Callable[[], object]:
+        del minimal
+        return lambda: figure
+
     monkeypatch.setattr(show_potential_function, "_apply_plot_style", lambda: None)
     monkeypatch.setattr(
         show_potential_function,
         "_resolve_plotter",
-        lambda _plot_type, *, minimal: (lambda: figure),
+        _fake_resolve_plotter,
     )
     monkeypatch.setattr(show_potential_function.plt, "show", lambda: None)
 
@@ -193,11 +231,13 @@ def test_main_does_not_save_when_save_flag_is_disabled(
     assert figure.saved_paths == []
 
 
-def test_plot_stopping_potential_slices_minimal_keeps_axis_and_hides_annotations() -> None:
+def test_plot_stopping_potential_slices_minimal_keeps_axis_and_hides_annotations() -> (
+    None
+):
     fig = show_potential_function.plot_stopping_potential_slices(minimal=True)
     ax_left, ax_right = fig.axes
 
-    assert fig._suptitle is None
+    assert getattr(fig, "_suptitle", None) is None
     assert ax_left.axison is True
     assert ax_right.axison is True
     assert len(ax_left.lines) == 1
@@ -209,17 +249,12 @@ def test_plot_stopping_potential_slices_default_keeps_annotations() -> None:
     fig = show_potential_function.plot_stopping_potential_slices(minimal=False)
     ax_left, ax_right = fig.axes
 
-    assert fig._suptitle is not None
+    assert getattr(fig, "_suptitle", None) is not None
     assert ax_left.axison is True
     assert ax_right.axison is True
     assert len(ax_left.lines) == 4
     assert len(ax_right.lines) == 3
     show_potential_function.plt.close(fig)
-
-
-
-
-
 
 
 def test_plot_safety_speed_minimal_keeps_upper_and_lower_bounds(

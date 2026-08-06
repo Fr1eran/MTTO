@@ -1,10 +1,13 @@
 import math
-from typing import Any, TypedDict, cast
+from typing import Any, TypedDict, cast, final, override
 
 import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.axes import Axes
 from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
 from numpy.typing import NDArray
 
 from model.ocs import SafeGuardUtility, TrainService
@@ -49,10 +52,11 @@ class EventInfo(TypedDict, total=False):
     episode_high_violation_count: int
 
 
-class MTTOEnv(gym.Env):
+@final
+class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
     """Gym adapter over the shared operational transition/reward pipeline."""
 
-    metadata = {"render_modes": ["human", "rgb_array"]}
+    metadata: dict[str, list[str]] = {"render_modes": ["human", "rgb_array"]}
 
     def __init__(
         self,
@@ -71,21 +75,20 @@ class MTTOEnv(gym.Env):
         reference_initial_state_provider: ReferenceInitialStateProvider | None = None,
     ) -> None:
         super().__init__()
-        self.vehicle, self.track = vehicle, track
-        self.safeguard_utility, self.train_service, self.gamma = (
-            safeguard_utility,
-            train_service,
-            gamma,
-        )
-        self.max_step_distance = float(max_step_distance)
-        self.stepper = OperationalStepper(
+        self.vehicle: VehicleInfo = vehicle
+        self.track: TrackInfo = track
+        self.safeguard_utility: SafeGuardUtility = safeguard_utility
+        self.train_service: TrainService = train_service
+        self.gamma: float = gamma
+        self.max_step_distance: float = float(max_step_distance)
+        self.stepper: OperationalStepper = OperationalStepper(
             vehicle=vehicle,
             track=track,
             safeguard_utility=safeguard_utility,
             train_service=train_service,
             max_step_distance_m=max_step_distance,
         )
-        self.observation_builder = ObservationBuilder(
+        self.observation_builder: ObservationBuilder = ObservationBuilder(
             vehicle=vehicle,
             track=track,
             train_service=train_service,
@@ -94,7 +97,7 @@ class MTTOEnv(gym.Env):
             whole_distance_m=self.stepper.whole_distance_m,
             get_upper_speed_or_zero=self.stepper.get_upper_speed_or_zero,
         )
-        self.reward_calculator = RewardCalculator(
+        self.reward_calculator: RewardCalculator = RewardCalculator(
             train_service,
             max_episode_steps=self.stepper.required_episode_steps,
             whole_distance_m=self.stepper.whole_distance_m,
@@ -103,39 +106,47 @@ class MTTOEnv(gym.Env):
             vehicle_max_speed_mps=vehicle.max_speed,
             reward_config=reward_config,
         )
-        self.reward_config = self.reward_calculator.reward_config
-        self.reference_initial_state_provider = reference_initial_state_provider
+        self.reward_config: RewardConfig = self.reward_calculator.reward_config
+        self.reference_initial_state_provider: ReferenceInitialStateProvider | None = (
+            reference_initial_state_provider
+        )
         self._reference_context_sample_id: int | None = None
         self._reference_context_index: int | None = None
         self._reference_context_distribution_version: int | None = None
         self.state: OperationalState = self.stepper.reset()
         self.last_transition: OperationalTransition | None = None
-        self.last_reward_breakdown = RewardBreakdown()
+        self.last_reward_breakdown: RewardBreakdown = RewardBreakdown()
 
         low = np.array([0, 0, -1, -1, -1, -1, 0, 0, -1, -1, 0, 0], dtype=np.float32)
         high = np.ones(12, dtype=np.float32)
         self.observation_space = gym.spaces.Box(low=low, high=high, dtype=np.float32)
         self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
-        self.enable_diagnostics = enable_diagnostics
-        self.diagnostics_interval_steps = max(1, int(diagnostics_interval_steps))
-        self._collect_step_diagnostics = False
+        self.enable_diagnostics: bool = enable_diagnostics
+        self.diagnostics_interval_steps: int = max(1, int(diagnostics_interval_steps))
+        self._collect_step_diagnostics: bool = False
         self.basic_info: BasicInfo = {}
         self.outcome_info: OutcomeInfo = {"terminated": False, "truncated": False}
         self.rewards_info: dict[str, float] = {}
         self.constraint_info: ConstraintInfo = {}
         self.event_info: EventInfo = {}
-        self.episode_truncated_count = self.episode_low_violation_count = (
-            self.episode_high_violation_count
-        ) = 0
-        self._comfort_tav = self._comfort_sum_sq_delta_acc = 0.0
-        self._comfort_exceedance_count = 0
-        self.enable_trajectory_tracking = enable_trajectory_tracking
+        self.episode_truncated_count: int = 0
+        self.episode_low_violation_count: int = 0
+        self.episode_high_violation_count: int = 0
+        self._comfort_tav: float = 0.0
+        self._comfort_sum_sq_delta_acc: float = 0.0
+        self._comfort_exceedance_count: int = 0
+        self.enable_trajectory_tracking: bool = enable_trajectory_tracking
         self.trajectory_pos: list[float] | None = None
         self.trajectory_speed_mps: list[float] | None = None
-        self.render_mode, self.use_animation = render_mode, use_animation
-        self.fig = self.ax = self.vehicle_dot = self.traj_line = self.animation = None
-        self.animation_running = False
-        self.animation_interval = 15
+        self.render_mode: str | None = render_mode
+        self.use_animation: bool = use_animation
+        self.fig: Figure | None = None
+        self.ax: Axes | None = None
+        self.vehicle_dot: Line2D | None = None
+        self.traj_line: Line2D | None = None
+        self.animation: object | None = None
+        self.animation_running: bool = False
+        self.animation_interval: int = 15
 
     def change_schedule_time(self, new_schedule_time: float) -> NDArray[np.float32]:
         if new_schedule_time != self.train_service.schedule_time:
@@ -177,8 +188,14 @@ class MTTOEnv(gym.Env):
             self.trajectory_pos.append(self.state.position_m)
             self.trajectory_speed_mps.append(abs(self.state.speed_mps))
 
-    def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
-        super().reset(seed=seed, options=options)
+    @override
+    def reset(
+        self,
+        *,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[NDArray[np.float32], dict[str, object]]:
+        _ = super().reset(seed=seed, options=options)
         provider = self.reference_initial_state_provider
         if provider is None:
             self.state = self.stepper.reset()
@@ -211,8 +228,10 @@ class MTTOEnv(gym.Env):
         self._reset_trajectory()
         return self.observation_builder.build(self.state), {}
 
+    @override
     def step(
-        self, action: Any
+        self,
+        action: Any,
     ) -> tuple[NDArray[np.float32], float, bool, bool, dict[str, object]]:
         acceleration = self.observation_builder.denormalize_action(float(action[0]))
         transition = self.stepper.advance(self.state, acceleration)
@@ -324,6 +343,7 @@ class MTTOEnv(gym.Env):
             "episode_high_violation_count": self.episode_high_violation_count,
         }
 
+    @override
     def render(self):
         if self.render_mode is None:
             gym.logger.warn(
@@ -348,8 +368,7 @@ class MTTOEnv(gym.Env):
         canvas.draw()
         w, h = canvas.get_width_height()
         return (
-            np
-            .frombuffer(canvas.buffer_rgba(), dtype=np.uint8)
+            np.frombuffer(canvas.buffer_rgba(), dtype=np.uint8)
             .reshape((h, w, 4))[:, :, :3]
             .copy()
         )
@@ -357,21 +376,21 @@ class MTTOEnv(gym.Env):
     def _setup_figure(self, mode: str) -> None:
         set_chinese_font()
         if mode == "human":
-            plt.ion()
+            _ = plt.ion()
         self.fig, self.ax = plt.subplots(figsize=(10, 6))
-        self.fig.suptitle("磁悬浮列车智能体训练过程", fontsize=14)
+        _ = self.fig.suptitle("磁悬浮列车智能体训练过程", fontsize=14)
         margin = self.stepper.whole_distance_m * 0.1
-        self.ax.set_xlim(
+        _ = self.ax.set_xlim(
             min(self.train_service.start_position, self.train_service.target_position)
             - margin,
             max(self.train_service.start_position, self.train_service.target_position)
             + margin,
         )
-        self.ax.set_ylim(0, 600)
+        _ = self.ax.set_ylim(0, 600)
         self.safeguard_utility.render(ax=self.ax)
         (self.vehicle_dot,) = self.ax.plot([], [], "g*", markersize=8, label="列车")
         (self.traj_line,) = self.ax.plot([], [], "b-", lw=2, label="轨迹")
-        self.ax.legend()
+        _ = self.ax.legend()
         self.ax.grid(True, alpha=0.3)
 
     def _update_figure_data(self) -> None:
@@ -383,6 +402,7 @@ class MTTOEnv(gym.Env):
                 self.trajectory_pos, [x * 3.6 for x in self.trajectory_speed_mps]
             )
 
+    @override
     def close(self) -> None:
         if self.fig is not None:
             plt.close(self.fig)

@@ -51,7 +51,7 @@ safeguard = SafeGuardUtility(
     factor=0.99,
 )
 
-set_global_plot_style(
+_ = set_global_plot_style(
     font_preset="sci",
     preferred_font="Calibri",
     title_font_size=8.0,
@@ -67,7 +67,7 @@ set_global_plot_style(
 fig1 = plt.figure()
 ax1 = fig1.add_subplot()
 safeguard.render(ax=ax1, layers=SafeGuardUtility.FULL_CURVE_VIEW_LAYERS)
-ax1.hlines(
+_ = ax1.hlines(
     y=np.zeros_like(accessible_points),
     xmin=accessible_points,
     xmax=dangerous_points,
@@ -77,7 +77,7 @@ ax1.hlines(
     label="Auxiliary Stopping Area",
     alpha=0.7,
 )
-ax1.hlines(
+_ = ax1.hlines(
     y=np.zeros(2),
     xmin=stations_cor[0, :],
     xmax=stations_cor[1, :],
@@ -87,7 +87,7 @@ ax1.hlines(
     label="Station",
     alpha=0.5,
 )
-ax1.hlines(
+_ = ax1.hlines(
     y=np.zeros(2),
     xmin=acceleration_zone_start,
     xmax=acceleration_zone_end,
@@ -97,11 +97,11 @@ ax1.hlines(
     label="Acceleration Zone",
     alpha=0.5,
 )
-ax1.set_xlim((0.0, 30000.0))
-ax1.set_ylim((0.0, 500.0))
-ax1.set_xlabel("Position")
-ax1.set_ylabel("Speed")
-ax1.legend()
+_ = ax1.set_xlim((0.0, 30000.0))
+_ = ax1.set_ylim((0.0, 500.0))
+_ = ax1.set_xlabel("Position")
+_ = ax1.set_ylabel("Speed")
+_ = ax1.legend()
 
 
 # 绘制危险交叉点后的安全防护曲线和围成的危险速度域
@@ -112,7 +112,7 @@ ax2 = fig2.add_subplot()
 safeguard.render(ax=ax2, layers=SafeGuardUtility.DANGER_VIEW_LAYERS)
 
 # 绘制辅助停车区、车站
-ax2.hlines(
+_ = ax2.hlines(
     y=np.zeros_like(accessible_points[:-1]),
     xmin=accessible_points[:-1],
     xmax=dangerous_points[:-1],
@@ -122,7 +122,7 @@ ax2.hlines(
     label="Auxiliary Stopping Area",
     alpha=0.7,
 )
-ax2.hlines(
+_ = ax2.hlines(
     y=np.zeros(2),
     xmin=stations_cor[0, :],
     xmax=stations_cor[1, :],
@@ -132,7 +132,7 @@ ax2.hlines(
     label="Station",
     alpha=0.5,
 )
-ax2.hlines(
+_ = ax2.hlines(
     y=np.zeros(2),
     xmin=acceleration_zone_start,
     xmax=acceleration_zone_end,
@@ -143,10 +143,10 @@ ax2.hlines(
     alpha=0.5,
 )
 
-ax2.set_xlim((0.0, 30000.0))
-ax2.set_ylim((0.0, 500.0))
-ax2.set_xlabel("Position")
-ax2.set_ylabel("Speed")
-ax2.legend()
+_ = ax2.set_xlim((0.0, 30000.0))
+_ = ax2.set_ylim((0.0, 500.0))
+_ = ax2.set_xlabel("Position")
+_ = ax2.set_ylabel("Speed")
+_ = ax2.legend()
 
 plt.show()

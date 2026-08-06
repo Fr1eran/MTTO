@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -15,7 +16,9 @@ REQUIRED_COLUMNS = ("里程(km)", "速度(km/h)", "加速度(m/s2)", "时间(s)"
 MIN_TIME_STEP_S = 1e-9
 
 
-def _as_1d_float_array(name: str, values) -> NDArray[np.float64]:
+def _as_1d_float_array(
+    name: str, values: NDArray[np.floating] | Sequence[float]
+) -> NDArray[np.float64]:
     array = np.asarray(values, dtype=np.float64)
     if array.ndim != 1:
         raise ValueError(f"{name} must be a 1-D array")
@@ -77,10 +80,10 @@ def recompute_time_and_acceleration(
 
 def transform_operation_curve_arrays(
     *,
-    source_position_m,
-    speed_kmh,
-    acc_mps2,
-    time_s,
+    source_position_m: NDArray[np.floating] | Sequence[float],
+    speed_kmh: NDArray[np.floating] | Sequence[float],
+    acc_mps2: NDArray[np.floating] | Sequence[float],
+    time_s: NDArray[np.floating] | Sequence[float],
     start_position_m: float,
     target_position_m: float,
 ) -> dict[str, NDArray[np.float64] | np.float64]:
@@ -98,7 +101,8 @@ def transform_operation_curve_arrays(
         and time_arr.size == sample_count
     ):
         raise ValueError(
-            "source_position_m, speed_kmh, acc_mps2, and time_s must have the same length"
+            "source_position_m, speed_kmh, acc_mps2, and time_s must "
+            "have the same length"
         )
     if not np.all(np.isfinite(source_position)):
         raise ValueError("source_position_m must contain only finite values")
@@ -193,6 +197,7 @@ def save_transformed_operation_curve(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         output_path,
+        allow_pickle=True,
         **{
             key: np.asarray(value, dtype=np.float64)
             for key, value in curve_arrays.items()
@@ -205,29 +210,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="将实际运行曲线线性重标定到指定起点和终点，并保存为 NPZ 数组。"
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--input-file",
         default=DEFAULT_INPUT_FILE,
         help="实际运行数据 Excel 文件路径。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--sheet-name",
         default=DEFAULT_SHEET_NAME,
         help="实际运行数据所在工作表名称。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--start-position",
         type=float,
         default=None,
         help="目标起点位置 (m)。默认读取 stations.json 的 start_station.target。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--target-position",
         type=float,
         default=None,
         help="目标终点位置 (m)。默认读取 stations.json 的 end_station.target。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--output-file",
         default=DEFAULT_OUTPUT_FILE,
         help="输出 NPZ 文件路径。",
@@ -261,16 +266,16 @@ def main() -> int:
     print(f"Saved transformed operation curve to: {output_path}")
     print(
         "Source position: "
-        f"{float(curve_arrays['source_start_position_m']):.3f} m -> "
-        f"{float(curve_arrays['source_target_position_m']):.3f} m"
+        + f"{float(curve_arrays['source_start_position_m']):.3f} m -> "
+        + f"{float(curve_arrays['source_target_position_m']):.3f} m"
     )
     print(
         "Target position: "
-        f"{float(curve_arrays['start_position_m']):.3f} m -> "
-        f"{float(curve_arrays['target_position_m']):.3f} m"
+        + f"{float(curve_arrays['start_position_m']):.3f} m -> "
+        + f"{float(curve_arrays['target_position_m']):.3f} m"
     )
     print(f"Position scale: {float(curve_arrays['position_scale']):.9f}")
-    print(f"Samples: {len(curve_arrays['position_m'])}")
+    print(f"Samples: {np.asarray(curve_arrays['position_m']).size}")
     return 0
 
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -58,8 +57,8 @@ def _deduplicate_consecutive_positions(
 
 
 def smooth_trajectory(
-    pos_arr: Sequence[float] | NDArray[np.floating[Any]],
-    speed_arr: Sequence[float] | NDArray[np.floating[Any]],
+    pos_arr: Sequence[float] | NDArray[np.floating],
+    speed_arr: Sequence[float] | NDArray[np.floating],
     *,
     samples_per_segment: int = 20,
     method: str = "uniform_acceleration",
@@ -146,8 +145,8 @@ def smooth_trajectory(
 
 
 def recover_time_axis_from_trajectory(
-    pos_arr: Sequence[float] | NDArray[np.floating[Any]],
-    speed_arr: Sequence[float] | NDArray[np.floating[Any]],
+    pos_arr: Sequence[float] | NDArray[np.floating],
+    speed_arr: Sequence[float] | NDArray[np.floating],
     *,
     position_tolerance: float = 1e-9,
     speed_tolerance: float = 1e-9,
@@ -213,8 +212,8 @@ def recover_time_axis_from_trajectory(
 
 
 def compute_segment_accelerations(
-    pos_arr: Sequence[float] | NDArray[np.floating[Any]],
-    speed_arr: Sequence[float] | NDArray[np.floating[Any]],
+    pos_arr: Sequence[float] | NDArray[np.floating],
+    speed_arr: Sequence[float] | NDArray[np.floating],
 ) -> NDArray[np.float64]:
     """由离散位置/速度序列反推每段加速度。
 
@@ -249,8 +248,8 @@ def compute_segment_accelerations(
 
 
 def compute_comfort_metrics_from_trajectory(
-    pos_arr: Sequence[float] | NDArray[np.floating[Any]],
-    speed_arr: Sequence[float] | NDArray[np.floating[Any]],
+    pos_arr: Sequence[float] | NDArray[np.floating],
+    speed_arr: Sequence[float] | NDArray[np.floating],
     *,
     max_acc_change: float,
 ) -> dict[str, float]:
@@ -299,8 +298,8 @@ def compute_comfort_metrics_from_trajectory(
 
 
 def compute_cumulative_energy_from_trajectory(
-    pos_arr: Sequence[float] | NDArray[np.floating[Any]],
-    speed_arr: Sequence[float] | NDArray[np.floating[Any]],
+    pos_arr: Sequence[float] | NDArray[np.floating],
+    speed_arr: Sequence[float] | NDArray[np.floating],
     *,
     vehicle: VehicleInfo,
     track: TrackInfo,

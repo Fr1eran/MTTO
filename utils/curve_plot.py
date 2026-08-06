@@ -32,12 +32,12 @@ def draw_regions(
     alpha: float,
 ) -> None:
     above_curves_x_con, above_curves_y_con = concatenate_curves_list(above_curves_list)
-    below_curves_x_con, below_curves_y_con = concatenate_curves_list(below_curves_list)
+    _below_curves_x_con, below_curves_y_con = concatenate_curves_list(below_curves_list)
 
     above_curves_y_con *= 3.6
     below_curves_y_con *= 3.6
 
-    ax.fill_between(
+    _ = ax.fill_between(
         above_curves_x_con,
         above_curves_y_con,
         below_curves_y_con,

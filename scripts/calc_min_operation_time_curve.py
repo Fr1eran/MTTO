@@ -1,5 +1,9 @@
+from collections.abc import Callable
+from typing import cast
+
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.backend_bases import Event, KeyEvent
 
 from model.common import ECC, ORS
 from model.ocs import SafeGuardUtility, TrainService
@@ -94,7 +98,7 @@ fig, ax = plt.subplots(figsize=(12, 7))
 # 绘制静态元素（区间限速、危险速度域和终点等）
 safeguard_utility.render(ax=ax, layers=SafeGuardUtility.DANGER_VIEW_LAYERS)
 
-ax.scatter(
+_ = ax.scatter(
     end_pos,
     end_speed * 3.6,
     marker="o",
@@ -107,12 +111,12 @@ ax.scatter(
     linewidths=1.5,
 )
 
-ax.set_xlim((0.0, 30000.0))
-ax.set_ylim((0.0, 500.0))
-ax.set_xlabel(r"位置$s\left( m \right)$")
-ax.set_ylabel(r"速度$v\left( km/h \right)$")
+_ = ax.set_xlim((0.0, 30000.0))
+_ = ax.set_ylim((0.0, 500.0))
+_ = ax.set_xlabel(r"位置$s\left( m \right)$")
+_ = ax.set_ylabel(r"速度$v\left( km/h \right)$")
 ax.grid(True, alpha=0.3)
-ax.legend(loc="upper right")
+_ = ax.legend(loc="upper right")
 
 # 初始化动态元素的引用（起点和运行曲线）
 start_point = None
@@ -126,7 +130,7 @@ instructions = (
     "  P - 在控制台打印当前参数\n"
     "  Q - 退出程序"
 )
-fig.text(
+_ = fig.text(
     0.02,
     0.98,
     instructions,
@@ -137,11 +141,11 @@ fig.text(
 )
 
 # 更新标题显示命令提示
-ax.set_title("极限操作模式下的最短运行时间曲线", fontsize=12)
+_ = ax.set_title("极限操作模式下的最短运行时间曲线", fontsize=12)
 
 
 # 绘制曲线的通用函数
-def draw_curve(pos, speed) -> bool:
+def draw_curve(pos: float, speed: float) -> bool:
     global start_point, curve_line, info_text
 
     try:
@@ -214,7 +218,7 @@ def draw_curve(pos, speed) -> bool:
         )
 
         # 更新标题
-        ax.set_title(
+        _ = ax.set_title(
             "极限操作模式下的最短运行时间曲线\n"
             + f"起点: ({pos:.2f}m, {speed:.2f}m/s) "
             + f"运行能耗: {total_energy:.2f} 运行时间: {total_operation_time:.2f}\n"
@@ -224,7 +228,7 @@ def draw_curve(pos, speed) -> bool:
         )
 
         # 更新图例
-        ax.legend(loc="upper right")
+        _ = ax.legend(loc="upper right")
 
         fig.canvas.draw_idle()
         return True
@@ -235,7 +239,7 @@ def draw_curve(pos, speed) -> bool:
 
 
 # 定义键盘事件处理函数
-def on_key(event):
+def on_key(event: KeyEvent):
     global begin_pos, begin_speed, start_point, curve_line, info_text
 
     if event.key is None:
@@ -333,7 +337,10 @@ def on_key(event):
 
 
 # 连接键盘事件
-fig.canvas.mpl_connect("key_press_event", on_key)
+_ = fig.canvas.mpl_connect(
+    "key_press_event",
+    cast(Callable[[Event], None], on_key),
+)
 
 # 显示图形并阻塞
 plt.show()

@@ -29,7 +29,7 @@ class DPTrajectoryReader:
     for RL-grid resampling and environment-state reconstruction.
     """
 
-    _METRIC_EXPECTATIONS = (
+    _METRIC_EXPECTATIONS: tuple[tuple[str, str], ...] = (
         ("target_time_s", "schedule_time"),
         ("start_position_m", "start_position"),
         ("start_speed_mps", "start_speed"),

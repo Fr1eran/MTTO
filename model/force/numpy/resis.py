@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import overload
 
 import numpy as np
-from numpy.typing import ArrayLike, NDArray
+from numpy.typing import NDArray
 
 from utils.type_utils import ScalarNumeric, restore_output_type
 
@@ -18,14 +18,14 @@ def added_resis_force(
 
 @overload
 def added_resis_force(
-    speed: ArrayLike,
+    speed: NDArray[np.floating],
     mass: ScalarNumeric,
     kind: int,
 ) -> NDArray[np.float64]: ...
 
 
 def added_resis_force(
-    speed: ScalarNumeric | ArrayLike,
+    speed: ScalarNumeric | NDArray[np.floating],
     mass: ScalarNumeric,
     kind: int,
 ) -> np.float64 | NDArray[np.float64]:
@@ -64,13 +64,13 @@ def air_resis_force(
 
 @overload
 def air_resis_force(
-    speed: ArrayLike,
+    speed: NDArray[np.floating],
     numoftrainsets: int,
 ) -> NDArray[np.float64]: ...
 
 
 def air_resis_force(
-    speed: ScalarNumeric | ArrayLike,
+    speed: ScalarNumeric | NDArray[np.floating],
     numoftrainsets: int,
 ) -> np.float64 | NDArray[np.float64]:
     """
@@ -99,13 +99,13 @@ def guideway_vortex_resis_force(
 
 @overload
 def guideway_vortex_resis_force(
-    speed: ArrayLike,
+    speed: NDArray[np.floating],
     numoftrainsets: int,
 ) -> NDArray[np.float64]: ...
 
 
 def guideway_vortex_resis_force(
-    speed: ScalarNumeric | ArrayLike,
+    speed: ScalarNumeric | NDArray[np.floating],
     numoftrainsets: int,
 ) -> np.float64 | NDArray[np.float64]:
     """
@@ -139,13 +139,13 @@ def linear_generator_resis_force(
 
 @overload
 def linear_generator_resis_force(
-    speed: ArrayLike,
+    speed: NDArray[np.floating],
     numoftrainsets: int,
 ) -> NDArray[np.float64]: ...
 
 
 def linear_generator_resis_force(
-    speed: ScalarNumeric | ArrayLike,
+    speed: ScalarNumeric | NDArray[np.floating],
     numoftrainsets: int,
 ) -> np.float64 | NDArray[np.float64]:
     """
@@ -187,13 +187,13 @@ def slope_resis_force(
 @overload
 def slope_resis_force(
     mass: ScalarNumeric,
-    slope: ArrayLike,
+    slope: NDArray[np.floating],
 ) -> NDArray[np.float64]: ...
 
 
 def slope_resis_force(
     mass: ScalarNumeric,
-    slope: ScalarNumeric | ArrayLike,
+    slope: ScalarNumeric | NDArray[np.floating],
 ) -> np.float64 | NDArray[np.float64]:
     """
     计算斜坡阻力

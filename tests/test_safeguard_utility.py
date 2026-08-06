@@ -1,6 +1,6 @@
+import matplotlib
 import numpy as np
 import pytest
-import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -34,7 +34,7 @@ def _build_safeguard_utility() -> SafeGuardUtility:
 
 
 @pytest.fixture(scope="module")
-def safeguard_utility():
+def safeguard_utility() -> SafeGuardUtility:
     return _build_safeguard_utility()
 
 
@@ -92,7 +92,7 @@ def test_render_raises_for_mutually_exclusive_layers(layers: tuple[str, str]):
         plt.close(fig)
 
 
-def test_detect_danger(safeguard_utility):
+def test_detect_danger(safeguard_utility: SafeGuardUtility):
     pos = np.array(
         [
             725,
@@ -118,27 +118,31 @@ def test_detect_danger(safeguard_utility):
         )
         / 3.6
     )
-    expected_result = np.array([
-        False,
-        True,
-        False,
-        True,
-        True,
-        True,
-        False,
-        True,
-        False,
-        True,
-        False,
-        True,
-        True,
-        False,
-    ])
+    expected_result = np.array(
+        [
+            False,
+            True,
+            False,
+            True,
+            True,
+            True,
+            False,
+            True,
+            False,
+            True,
+            False,
+            True,
+            True,
+            False,
+        ]
+    )
     result = safeguard_utility.detect_danger(pos, speed)
     np.testing.assert_array_equal(result, expected_result)
 
 
-def test_get_min_and_max_speed_with_current_stopping_point_is_none(safeguard_utility):
+def test_get_min_and_max_speed_with_current_stopping_point_is_none(
+    safeguard_utility: SafeGuardUtility,
+):
     pos: list[float] = [
         200.0,
         530.0,
@@ -224,7 +228,7 @@ def test_get_min_and_max_speed_with_current_stopping_point_is_none(safeguard_uti
 
 
 def test_get_min_and_max_speed_with_current_stopping_point_is_not_none(
-    safeguard_utility,
+    safeguard_utility: SafeGuardUtility,
 ):
     pos: list[float] = [
         200.0,
@@ -313,7 +317,7 @@ def test_get_min_and_max_speed_with_current_stopping_point_is_not_none(
 
 
 @pytest.fixture(scope="module")
-def position_safeguard_utility():
+def position_safeguard_utility() -> SafeGuardUtility:
     safeguard_utility = SafeGuardUtility.__new__(SafeGuardUtility)
     safeguard_utility.speed_limits = np.array([10.0], dtype=np.float64)
     safeguard_utility.speed_limit_intervals = np.array([0.0, 100.0], dtype=np.float64)
@@ -341,7 +345,9 @@ def position_safeguard_utility():
     return safeguard_utility
 
 
-def test_get_min_and_max_position_with_currentsp(position_safeguard_utility):
+def test_get_min_and_max_position_with_currentsp(
+    position_safeguard_utility: SafeGuardUtility,
+):
     min_pos, max_pos = (
         position_safeguard_utility.get_latest_traction_and_braking_intervention_points(
             current_speed=1.5,
@@ -353,7 +359,7 @@ def test_get_min_and_max_position_with_currentsp(position_safeguard_utility):
 
 
 def test_get_min_and_max_position_with_currentsp_extrapolation(
-    position_safeguard_utility,
+    position_safeguard_utility: SafeGuardUtility,
 ):
     min_pos, max_pos = (
         position_safeguard_utility.get_latest_traction_and_braking_intervention_points(
@@ -366,7 +372,7 @@ def test_get_min_and_max_position_with_currentsp_extrapolation(
 
 
 def test_get_min_and_max_position_with_currentsp_negative_one(
-    position_safeguard_utility,
+    position_safeguard_utility: SafeGuardUtility,
 ):
     min_pos, max_pos = (
         position_safeguard_utility.get_latest_traction_and_braking_intervention_points(
@@ -378,7 +384,9 @@ def test_get_min_and_max_position_with_currentsp_negative_one(
     np.testing.assert_allclose(max_pos, 2.25)
 
 
-def test_get_min_and_max_position_real_data_smoke(safeguard_utility):
+def test_get_min_and_max_position_real_data_smoke(
+    safeguard_utility: SafeGuardUtility,
+):
     min_pos, max_pos = (
         safeguard_utility.get_latest_traction_and_braking_intervention_points(
             current_speed=2.0,
@@ -399,12 +407,16 @@ def test_sanitize_curve_projects_speed_to_monotone():
     assert np.all(np.diff(sanitized_curve[1, :]) <= 1e-9)
 
 
-def test_loaded_max_curves_are_monotone_after_init(safeguard_utility):
+def test_loaded_max_curves_are_monotone_after_init(
+    safeguard_utility: SafeGuardUtility,
+):
     for curve_speed in safeguard_utility._max_curve_speed_list:
         assert np.all(np.diff(curve_speed) <= 1e-9)
 
 
-def test_get_min_and_max_position_real_data_sp7_regression(safeguard_utility):
+def test_get_min_and_max_position_real_data_sp7_regression(
+    safeguard_utility: SafeGuardUtility,
+):
     if len(safeguard_utility._max_curve_speed_list) < 9:
         pytest.skip("requires full rail data with at least 9 max curves")
 
@@ -428,7 +440,10 @@ def test_get_interval_index_scalar_numba_matches_reference():
 
     expected = np.asarray(get_interval_index(points, interval_points), dtype=np.int64)
     actual = np.asarray(
-        [get_interval_index_scalar_numba(float(pos), interval_points) for pos in points],
+        [
+            get_interval_index_scalar_numba(float(pos), interval_points)
+            for pos in points
+        ],
         dtype=np.int64,
     )
     np.testing.assert_array_equal(actual, expected)
@@ -470,7 +485,9 @@ def test_get_interval_index_scalar_numba_supports_left_and_right_side():
     np.testing.assert_array_equal(actual_left, expected_left)
 
 
-def test_get_min_and_max_speed_fast_matches_legacy(safeguard_utility):
+def test_get_min_and_max_speed_fast_matches_legacy(
+    safeguard_utility: SafeGuardUtility,
+):
     rng = np.random.default_rng(0)
     pos_random = rng.uniform(
         low=float(safeguard_utility.speed_limit_intervals[0] - 500.0),
@@ -501,7 +518,9 @@ def test_get_min_and_max_speed_fast_matches_legacy(safeguard_utility):
     )
 
 
-def test_get_min_speed_matches_get_min_and_max_speed(safeguard_utility):
+def test_get_min_speed_matches_get_min_and_max_speed(
+    safeguard_utility: SafeGuardUtility,
+):
     rng = np.random.default_rng(1)
     positions = rng.uniform(
         low=float(safeguard_utility.speed_limit_intervals[0]),
@@ -517,7 +536,9 @@ def test_get_min_speed_matches_get_min_and_max_speed(safeguard_utility):
             np.testing.assert_allclose(min_only, min_speed, rtol=0.0, atol=1e-12)
 
 
-def test_get_max_speed_matches_get_min_and_max_speed(safeguard_utility):
+def test_get_max_speed_matches_get_min_and_max_speed(
+    safeguard_utility: SafeGuardUtility,
+):
     rng = np.random.default_rng(2)
     positions = rng.uniform(
         low=float(safeguard_utility.speed_limit_intervals[0]),

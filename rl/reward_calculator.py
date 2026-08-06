@@ -47,16 +47,16 @@ class RewardCalculator:
         target_attraction_domain_radius_m: float = 3000.0,
         reward_config: RewardConfig | None = None,
     ) -> None:
-        self.train_service = train_service
-        self.max_episode_steps = max_episode_steps
-        self.whole_distance_m = whole_distance_m
-        self.max_energy_consumption_kj = max(max_energy_consumption_kj, 1e-12)
-        self.gamma = float(gamma)
-        self.vehicle_max_speed_mps = float(vehicle_max_speed_mps)
-        self.target_attraction_domain_radius_m = float(
+        self.train_service: TrainService = train_service
+        self.max_episode_steps: int = max_episode_steps
+        self.whole_distance_m: float = whole_distance_m
+        self.max_energy_consumption_kj: float = max(max_energy_consumption_kj, 1e-12)
+        self.gamma: float = float(gamma)
+        self.vehicle_max_speed_mps: float = float(vehicle_max_speed_mps)
+        self.target_attraction_domain_radius_m: float = float(
             target_attraction_domain_radius_m
         )
-        self.reward_config = reward_config or RewardConfig()
+        self.reward_config: RewardConfig = reward_config or RewardConfig()
 
     def calculate(self, transition: OperationalTransition) -> RewardBreakdown:
         state = transition.next_state

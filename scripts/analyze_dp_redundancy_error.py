@@ -39,7 +39,9 @@ class RedundancySeries:
     key: str | None
 
 
-def _as_1d_float_array(values: Sequence[float] | NDArray[Any], name: str) -> NDArray[np.float64]:
+def _as_1d_float_array(
+    values: Sequence[float] | NDArray[Any], name: str
+) -> NDArray[np.float64]:
     arr = np.asarray(values, dtype=np.float64)
     if arr.ndim != 1:
         raise ValueError(f"{name} must be a 1-D array")
@@ -50,7 +52,9 @@ def _as_1d_float_array(values: Sequence[float] | NDArray[Any], name: str) -> NDA
     return arr
 
 
-def _validate_same_length(named_arrays: Sequence[tuple[str, NDArray[np.float64]]]) -> None:
+def _validate_same_length(
+    named_arrays: Sequence[tuple[str, NDArray[np.float64]]],
+) -> None:
     sizes = {arr.size for _name, arr in named_arrays}
     if len(sizes) != 1:
         names = ", ".join(name for name, _arr in named_arrays)
@@ -83,8 +87,8 @@ def load_redundant_operation_time_from_npz(
         if redundant_key is not None:
             if redundant_key not in npz_data.files:
                 raise ValueError(
-                    f"DP curve does not contain redundant array key "
-                    f"{redundant_key!r}. Available keys: {available_keys!r}"
+                    "DP curve does not contain redundant array key "
+                    + f"{redundant_key!r}. Available keys: {available_keys!r}"
                 )
             selected_key = redundant_key
         else:
@@ -100,7 +104,7 @@ def load_redundant_operation_time_from_npz(
     if values.size != int(expected_size):
         raise ValueError(
             f"Redundant array '{selected_key}' length {values.size} does not match "
-            f"trajectory length {int(expected_size)}"
+            + f"trajectory length {int(expected_size)}"
         )
     return RedundancySeries(
         values=values,
@@ -142,7 +146,9 @@ def reconstruct_redundant_operation_time(
         dtype=np.float64,
     )
     if min_remaining_arr.ndim != 1 or min_remaining_arr.size != pos.size:
-        raise ValueError("min_remaining_time_fn must return one finite scalar per sample")
+        raise ValueError(
+            "min_remaining_time_fn must return one finite scalar per sample"
+        )
     if not np.all(np.isfinite(min_remaining_arr)):
         raise ValueError("min_remaining_time_fn returned non-finite values")
     return float(schedule_time_s) - cum_time - min_remaining_arr
@@ -231,7 +237,9 @@ def summarize_error_statistics(
     pos = _as_1d_float_array(pos_arr, "pos_arr")
     cum_time = _as_1d_float_array(cum_time_arr, "cum_time_arr")
     error = _as_1d_float_array(error_arr, "error_arr")
-    _validate_same_length((("pos_arr", pos), ("cum_time_arr", cum_time), ("error_arr", error)))
+    _validate_same_length(
+        (("pos_arr", pos), ("cum_time_arr", cum_time), ("error_arr", error))
+    )
     if zero_eps < 0.0 or not math.isfinite(float(zero_eps)):
         raise ValueError("zero_eps must be finite and non-negative")
 
@@ -459,7 +467,7 @@ def write_point_csv(
 
 def write_summary_json(output_path: Path, payload: dict[str, Any]) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
+    _ = output_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
@@ -535,54 +543,54 @@ def _build_cli_parser() -> argparse.ArgumentParser:
             "expected redundant-time curve."
         )
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--curve-dir",
         default=DP_DEFAULT_SEARCH_DIR,
         help="Directory to recursively search for the optimized DP curve.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--redundant-key",
         help="NPZ key to read as the redundant-time array.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--initial-redundant-s",
         type=float,
         help="Initial expected redundant time. Defaults to the first actual sample.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--zero-eps",
         type=float,
         default=1e-9,
         help="Absolute error tolerance treated as near zero.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--output-json",
         type=Path,
         help="Optional path for saving summary statistics as JSON.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--output-csv",
         type=Path,
         help="Optional path for saving per-sample analysis rows as CSV.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--output-file",
         type=Path,
         help="Optional path for saving the figure. A .png suffix is added if omitted.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--dpi",
         type=float,
         default=300.0,
         help="DPI used when saving the figure.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--pad-inches",
         type=float,
         default=0.03,
         help="Padding around the tight saved figure.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--no-show",
         action="store_true",
         help="Do not open the interactive display window.",
@@ -692,7 +700,7 @@ def main() -> None:
         )
         print(f"Saved per-sample CSV to {output_csv}")
 
-    set_global_plot_style(
+    _ = set_global_plot_style(
         font_preset="sci",
         preferred_font="Calibri",
         title_font_size=9.0,

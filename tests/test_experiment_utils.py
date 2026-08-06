@@ -1,19 +1,18 @@
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import pytest
 
-from pathlib import Path
-
 from rl.experiment_utils import (
-    curriculum_profile_names,
     DEFAULT_REWARD_PROFILE_NAME,
     RUN_METADATA_FILENAME,
     add_panel_label,
-    build_rl_trajectory_comparison_key,
-    build_run_metadata,
     build_reward_config,
+    build_rl_trajectory_comparison_key,
+    curriculum_profile_names,
     load_run_metadata,
-    resolve_output_dir,
     resolve_curriculum_profile,
+    resolve_output_dir,
     resolve_reward_profile,
     resolve_tb_log_name,
     reward_profile_names,
@@ -54,7 +53,7 @@ def test_reward_profile_names_include_real_pbrs_ablation_profiles() -> None:
 )
 def test_removed_punctuality_profiles_are_rejected(profile_name: str) -> None:
     with pytest.raises(ValueError):
-        resolve_reward_profile(profile_name)
+        _ = resolve_reward_profile(profile_name)
 
 
 def test_reward_profiles_keep_energy_comfort_and_toggle_pbrs() -> None:
@@ -114,7 +113,6 @@ def test_load_run_metadata_falls_back_to_parent_directory(tmp_path: Path) -> Non
     assert load_run_metadata(final_dir) == expected_metadata
 
 
-
 def test_build_rl_trajectory_comparison_key_uses_selection_key() -> None:
     success_high_energy = {
         "selection_comparison_key": [1.0, 1.0, 0.0, 1.0, 0.0, -8_000.0],
@@ -136,7 +134,7 @@ def test_build_rl_trajectory_comparison_key_uses_selection_key() -> None:
 
 def test_build_rl_trajectory_comparison_key_requires_new_metrics() -> None:
     with pytest.raises(ValueError, match="required trajectory selection fields"):
-        build_rl_trajectory_comparison_key(
+        _ = build_rl_trajectory_comparison_key(
             {
                 "success": True,
                 "total_energy_j": 4_000.0,

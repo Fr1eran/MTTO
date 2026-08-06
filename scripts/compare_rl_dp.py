@@ -129,28 +129,28 @@ def _build_cli_parser() -> argparse.ArgumentParser:
             "view (speed, acceleration, cumulative energy)."
         )
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--dp-curve-dir",
         default=DP_DEFAULT_SEARCH_DIR,
         help="Directory used to recursively search DP optimized trajectory artifacts.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--rl-curve-dir",
         default=RL_DEFAULT_SEARCH_DIR,
         help="Directory used to recursively search RL trajectory artifacts.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--trajectory-source",
         choices=RL_TRAJECTORY_SOURCE_CHOICES,
         default="best",
         help="RL trajectory source: best, best_steps, best_episodes, final.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--no-safeguard",
         action="store_true",
         help="Do not render safeguard background on the speed panel.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--factor",
         type=float,
         default=0.99,
@@ -254,7 +254,7 @@ def main() -> None:
     )
 
     apply_rl_curve_plot_style()
-    fig, (ax_speed, ax_acc, ax_energy) = plt.subplots(
+    _, (ax_speed, ax_acc, ax_energy) = plt.subplots(
         nrows=3,
         ncols=1,
         figsize=(6, 8),

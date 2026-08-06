@@ -9,5 +9,5 @@ __all__ = [
     "calc_transition_from_acc_scalar_numba",
     "calc_transition_to_speed_scalar_numba",
     "ECC",
-    "ORS"
+    "ORS",
 ]

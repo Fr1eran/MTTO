@@ -69,7 +69,7 @@ def test_smooth_trajectory_validates_shapes(
     error_msg: str,
 ) -> None:
     with pytest.raises(ValueError, match=error_msg):
-        smooth_trajectory(pos, speed)
+        _ = smooth_trajectory(pos, speed)
 
 
 def test_smooth_trajectory_validates_options() -> None:
@@ -77,13 +77,13 @@ def test_smooth_trajectory_validates_options() -> None:
     speed = np.asarray([0.0, 1.0], dtype=np.float64)
 
     with pytest.raises(ValueError, match=">= 2"):
-        smooth_trajectory(pos, speed, samples_per_segment=1)
+        _ = smooth_trajectory(pos, speed, samples_per_segment=1)
 
     with pytest.raises(ValueError, match=">= 0"):
-        smooth_trajectory(pos, speed, duplicate_tolerance=-1.0)
+        _ = smooth_trajectory(pos, speed, duplicate_tolerance=-1.0)
 
     with pytest.raises(ValueError, match="Unknown method"):
-        smooth_trajectory(pos, speed, method="pchip")
+        _ = smooth_trajectory(pos, speed, method="pchip")
 
 
 def test_recover_time_axis_from_trajectory_matches_uniform_motion() -> None:
@@ -120,7 +120,7 @@ def test_recover_time_axis_from_trajectory_validates_shapes(
     error_msg: str,
 ) -> None:
     with pytest.raises(ValueError, match=error_msg):
-        recover_time_axis_from_trajectory(pos, speed)
+        _ = recover_time_axis_from_trajectory(pos, speed)
 
 
 def test_recover_time_axis_from_trajectory_validates_tolerances() -> None:
@@ -128,7 +128,7 @@ def test_recover_time_axis_from_trajectory_validates_tolerances() -> None:
     speed = np.asarray([0.0, 1.0], dtype=np.float64)
 
     with pytest.raises(ValueError, match=">= 0"):
-        recover_time_axis_from_trajectory(pos, speed, position_tolerance=-1.0)
+        _ = recover_time_axis_from_trajectory(pos, speed, position_tolerance=-1.0)
 
     with pytest.raises(ValueError, match=">= 0"):
-        recover_time_axis_from_trajectory(pos, speed, speed_tolerance=-1.0)
+        _ = recover_time_axis_from_trajectory(pos, speed, speed_tolerance=-1.0)

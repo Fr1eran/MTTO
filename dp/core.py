@@ -9,10 +9,10 @@ import os
 import pickle
 import signal
 from collections.abc import Iterable, Sequence
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal, TypedDict
+from typing import Literal, Protocol, TypedDict, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -36,9 +36,9 @@ __all__ = [
 
 
 class OptimalSpeedProfile(TypedDict):
-    pos: Sequence[float] | NDArray
-    speed: Sequence[float] | NDArray
-    cum_time_s: Sequence[float] | NDArray
+    pos: Sequence[float] | NDArray[np.float64]
+    speed: Sequence[float] | NDArray[np.float64]
+    cum_time_s: Sequence[float] | NDArray[np.float64]
     total_time: float
     total_energy: float
 
@@ -57,7 +57,36 @@ SparseTransitionEntry = tuple[
 SparseTransitionRows = list[tuple[int, list[SparseTransitionEntry]]]
 TransitionBatchResult = tuple[SparseTransitionRows, int, int]
 
-_DP_PARALLEL_CONTEXT: dict[str, Any] | None = None
+
+class _TransitionGraphCache(TypedDict):
+    stages: NDArray[np.float64]
+    speed_states: NDArray[np.float64]
+    stage_speed_upper_idx: NDArray[np.int_]
+    transitions: list[list[TransitionPayload | None]]
+    total_valid_edges: int
+
+
+class _TerminableProcess(Protocol):
+    def is_alive(self) -> bool: ...
+
+    def terminate(self) -> None: ...
+
+    def kill(self) -> None: ...
+
+    def join(self, timeout: float | None = None) -> None: ...
+
+
+class _ParallelWorkerContext(TypedDict):
+    stages: NDArray[np.float64]
+    speed_states: NDArray[np.float64]
+    stage_speed_upper_idx: NDArray[np.int_]
+    vehicle: VehicleInfo
+    safeguard_utility: SafeGuardUtility
+    ecc: ECC
+    track: TrackInfo
+
+
+_dp_parallel_context: _ParallelWorkerContext | None = None
 
 
 def _calculate_transition_with_context(
@@ -87,7 +116,7 @@ def _calculate_transition_with_context(
     if acc > vehicle.max_acc + acc_tol or acc < vehicle.max_dec - acc_tol:
         return False, np.inf, np.inf
 
-    sample_count = max(10, int(np.abs(displacement) / 10.0))
+    sample_count = max(10, int(abs(displacement) / 10.0))
     distance_sample = np.linspace(0.0, displacement, sample_count, dtype=np.float64)
     pos_sample = distance_sample + pos_k
 
@@ -146,8 +175,8 @@ def _compute_transition_batch(
             # 基于加减速度物理边界的下一阶段速度索引剪枝
             v2_min = max(speed_k**2 + 2.0 * vehicle.max_dec * abs_delta_pos, 0.0)
             v2_max = max(speed_k**2 + 2.0 * vehicle.max_acc * abs_delta_pos, 0.0)
-            v_next_min = np.sqrt(v2_min)
-            v_next_max = np.sqrt(v2_max)
+            v_next_min = math.sqrt(v2_min)
+            v_next_max = math.sqrt(v2_max)
 
             j_min = int(np.searchsorted(speed_states, v_next_min, side="left"))
             j_max = int(np.searchsorted(speed_states, v_next_max, side="right") - 1)
@@ -182,12 +211,14 @@ def _compute_transition_batch(
             if not next_indices:
                 continue
 
-            row_entries.append((
-                i,
-                np.asarray(next_indices, dtype=np.int_),
-                np.asarray(delta_energy_list, dtype=np.float64),
-                np.asarray(delta_time_list, dtype=np.float64),
-            ))
+            row_entries.append(
+                (
+                    i,
+                    np.asarray(next_indices, dtype=np.int_),
+                    np.asarray(delta_energy_list, dtype=np.float64),
+                    np.asarray(delta_time_list, dtype=np.float64),
+                )
+            )
             total_valid_edges += len(next_indices)
 
         if row_entries:
@@ -196,34 +227,34 @@ def _compute_transition_batch(
     return batch_rows, total_valid_edges, k_end - k_start
 
 
-def _init_transition_worker(context: dict[str, Any]) -> None:
-    global _DP_PARALLEL_CONTEXT
+def _init_transition_worker(context: _ParallelWorkerContext) -> None:
+    global _dp_parallel_context
     try:
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        _ = signal.signal(signal.SIGINT, signal.SIG_IGN)
         # Windows平台使用SIGBREAK
         sigbreak = getattr(signal, "SIGBREAK", None)
         if sigbreak is not None:
-            signal.signal(sigbreak, signal.SIG_IGN)
+            _ = signal.signal(cast(int, sigbreak), signal.SIG_IGN)
     except ValueError, AttributeError:
         # 非主进程/不支持的平台上忽略注册错误
         pass
-    _DP_PARALLEL_CONTEXT = context
+    _dp_parallel_context = context
 
 
 def _compute_transition_batch_worker(k_start: int, k_end: int) -> TransitionBatchResult:
-    if _DP_PARALLEL_CONTEXT is None:
+    if _dp_parallel_context is None:
         raise RuntimeError("worker context is not initialized")
 
     return _compute_transition_batch(
         k_start=k_start,
         k_end=k_end,
-        stages=_DP_PARALLEL_CONTEXT["stages"],
-        speed_states=_DP_PARALLEL_CONTEXT["speed_states"],
-        stage_speed_upper_idx=_DP_PARALLEL_CONTEXT["stage_speed_upper_idx"],
-        vehicle=_DP_PARALLEL_CONTEXT["vehicle"],
-        safeguard_utility=_DP_PARALLEL_CONTEXT["safeguard_utility"],
-        ecc=_DP_PARALLEL_CONTEXT["ecc"],
-        track=_DP_PARALLEL_CONTEXT["track"],
+        stages=_dp_parallel_context["stages"],
+        speed_states=_dp_parallel_context["speed_states"],
+        stage_speed_upper_idx=_dp_parallel_context["stage_speed_upper_idx"],
+        vehicle=_dp_parallel_context["vehicle"],
+        safeguard_utility=_dp_parallel_context["safeguard_utility"],
+        ecc=_dp_parallel_context["ecc"],
+        track=_dp_parallel_context["track"],
     )
 
 
@@ -256,12 +287,12 @@ class VariableSpacingDPOptimizer:
     @staticmethod
     def _cancel_parallel_futures(
         executor: ProcessPoolExecutor | None,
-        futures: list[Any],
+        futures: list[Future[TransitionBatchResult]],
         *,
         force_terminate_running: bool = False,
     ) -> None:
         for future in futures:
-            future.cancel()
+            _ = future.cancel()
 
         if executor is not None:
             if force_terminate_running:
@@ -276,7 +307,8 @@ class VariableSpacingDPOptimizer:
         if not isinstance(processes, dict):
             return
 
-        for process in list(processes.values()):
+        terminable_processes = cast(dict[object, _TerminableProcess | None], processes)
+        for process in list(terminable_processes.values()):
             if process is None:
                 continue
             try:
@@ -285,7 +317,7 @@ class VariableSpacingDPOptimizer:
             except Exception:
                 continue
 
-        for process in list(processes.values()):
+        for process in list(terminable_processes.values()):
             if process is None:
                 continue
             try:
@@ -328,21 +360,21 @@ class VariableSpacingDPOptimizer:
         if sub_stage_count < 1:
             raise ValueError("sub_stage_count must be >= 1")
 
-        self.vehicle = vehicle
-        self.track = track
-        self.safeguard_utility = safeguard_utility
-        self.train_service = train_service
-        self.show_precompute_progress = show_precompute_progress
-        self.precompute_progress_desc = precompute_progress_desc
-        self.precompute_mode = precompute_mode
-        self.precompute_workers = precompute_workers
-        self.precompute_chunk_size = precompute_chunk_size
-        self.mp_start_method = mp_start_method
-        self.stage_division = stage_division
-        self.uniform_step_size = uniform_step_size
-        self.sub_stage_count = sub_stage_count
-        self.skip_disk_cache = skip_disk_cache
-        self.ecc = ECC(
+        self.vehicle: VehicleInfo = vehicle
+        self.track: TrackInfo = track
+        self.safeguard_utility: SafeGuardUtility = safeguard_utility
+        self.train_service: TrainService = train_service
+        self.show_precompute_progress: bool = show_precompute_progress
+        self.precompute_progress_desc: str = precompute_progress_desc
+        self.precompute_mode: Literal["serial", "parallel"] = precompute_mode
+        self.precompute_workers: int | None = precompute_workers
+        self.precompute_chunk_size: int | None = precompute_chunk_size
+        self.mp_start_method: str | None = mp_start_method
+        self.stage_division: Literal["variable", "uniform"] = stage_division
+        self.uniform_step_size: float = uniform_step_size
+        self.sub_stage_count: int = sub_stage_count
+        self.skip_disk_cache: bool = skip_disk_cache
+        self.ecc: ECC = ECC(
             R_m=0.2796,
             L_d=0.0002,
             R_k=50.0,
@@ -351,12 +383,14 @@ class VariableSpacingDPOptimizer:
             Psi_fd=3.9629,
             k_c=0.8,
         )
-        self.ors = ORS(
+        self.ors: ORS = ORS(
             vehicle=self.vehicle,
             track=self.track,
             factor=self.safeguard_utility.gamma,
         )
         # 计算最短运行时间参考曲线
+        self.ref_curve_pos: NDArray[np.float64]
+        self.ref_curve_speed: NDArray[np.float64]
         self.ref_curve_pos, self.ref_curve_speed = (
             self.ors.calc_min_operation_time_curve(
                 begin_pos=self.train_service.start_position,
@@ -368,7 +402,7 @@ class VariableSpacingDPOptimizer:
         self._graph_cache_signature: (
             tuple[float, float, str, int, float, str] | None
         ) = None
-        self._graph_cache: dict[str, Any] | None = None
+        self._graph_cache: _TransitionGraphCache | None = None
 
     def _get_ref_speed(self, pos: float) -> float:
         return max(0.0, np.interp(pos, self.ref_curve_pos, self.ref_curve_speed))
@@ -385,7 +419,7 @@ class VariableSpacingDPOptimizer:
 
     def _build_transition_graph(
         self, stages: NDArray[np.float64], speed_states: NDArray[np.float64]
-    ) -> dict[str, Any]:
+    ) -> _TransitionGraphCache:
         """
         预计算状态转移图（可行性/能耗/时间）, 供外层不同lambda复用。
         """
@@ -459,8 +493,8 @@ class VariableSpacingDPOptimizer:
                         speed_k**2 + 2.0 * self.vehicle.max_acc * abs_delta_pos,
                         0.0,
                     )
-                    v_next_min = np.sqrt(v2_min)
-                    v_next_max = np.sqrt(v2_max)
+                    v_next_min = math.sqrt(v2_min)
+                    v_next_max = math.sqrt(v2_max)
 
                     j_min = int(np.searchsorted(speed_states, v_next_min, side="left"))
                     j_max = int(
@@ -511,7 +545,7 @@ class VariableSpacingDPOptimizer:
         finally:
             close_fn = getattr(step_iter, "close", None)
             if callable(close_fn):
-                close_fn()
+                _ = close_fn()
 
         return transitions, total_valid_edges
 
@@ -550,7 +584,7 @@ class VariableSpacingDPOptimizer:
 
         print(
             "并行预计算配置: "
-            f"workers={workers}, chunk_size={chunk_size}, tasks={len(task_ranges)}"
+            + f"workers={workers}, chunk_size={chunk_size}, tasks={len(task_ranges)}"
         )
 
         transitions: list[list[TransitionPayload | None]] = [
@@ -558,7 +592,7 @@ class VariableSpacingDPOptimizer:
         ]
         total_valid_edges = 0
 
-        worker_context: dict[str, Any] = {
+        worker_context: _ParallelWorkerContext = {
             "stages": stages,
             "speed_states": speed_states,
             "stage_speed_upper_idx": stage_speed_upper_idx,
@@ -579,7 +613,7 @@ class VariableSpacingDPOptimizer:
             )
 
         executor: ProcessPoolExecutor | None = None
-        futures: list[Any] = []
+        futures: list[Future[TransitionBatchResult]] = []
         shutdown_called = False
 
         try:
@@ -611,7 +645,7 @@ class VariableSpacingDPOptimizer:
                         )
 
                 if progress_bar is not None:
-                    progress_bar.update(batch_steps)
+                    _ = progress_bar.update(batch_steps)
         except KeyboardInterrupt:
             if progress_bar is not None:
                 progress_bar.close()
@@ -658,7 +692,7 @@ class VariableSpacingDPOptimizer:
 
     def _prepare_transition_graph_cache(
         self, max_speed: float, delta_speed: float
-    ) -> dict[str, Any]:
+    ) -> _TransitionGraphCache:
         stages = self._generate_stages().astype(np.float64)
         speed_states = np.arange(0, max_speed, delta_speed, dtype=np.float64)
         stage_speed_upper_idx = self._get_stage_speed_upper_indices(
@@ -715,39 +749,43 @@ class VariableSpacingDPOptimizer:
         assert self._graph_cache is not None
         return self._graph_cache
 
-    def _generate_variable_spacing_stages(self) -> NDArray:
+    def _generate_variable_spacing_stages(self) -> NDArray[np.float64]:
         """
         基于临界点的变间距阶段划分
         将线路按照临界点划分为大分区, 每个大分区等分为 sub_stage_count 个子阶段
         """
-        critical_points_position_arr = np.concatenate((
-            np.array([self.train_service.start_position]),
-            self.safeguard_utility.get_intersecting_dangerous_point(),
-            np.array([self.train_service.target_position]),
-        ))
-        stages = []
+        critical_points_position_arr = np.concatenate(
+            (
+                np.array([self.train_service.start_position]),
+                self.safeguard_utility.get_intersecting_dangerous_point(),
+                np.array([self.train_service.target_position]),
+            )
+        )
+        stages: list[np.floating] = []
 
         for i in range(len(critical_points_position_arr) - 1):
             interval_start_pos = critical_points_position_arr[i]
             interval_end_pos = critical_points_position_arr[i + 1]
-            partition_stages = np.linspace(
-                interval_start_pos, interval_end_pos, self.sub_stage_count + 1
+            partition_stages: NDArray[np.float64] = np.linspace(
+                interval_start_pos,
+                interval_end_pos,
+                self.sub_stage_count + 1,
             )
             if i == 0:
                 stages.extend(partition_stages)
             else:
                 stages.extend(partition_stages[1:])
 
-        return np.array(stages)
+        return np.asarray(stages, dtype=np.float64)
 
-    def _generate_uniform_spacing_stages(self) -> NDArray:
+    def _generate_uniform_spacing_stages(self) -> NDArray[np.float64]:
         """基于等间距的阶段划分，从起点到终点按 uniform_step_size 等分。"""
         start = self.train_service.start_position
         end = self.train_service.target_position
-        num_steps = max(1, int(np.ceil((end - start) / self.uniform_step_size)))
+        num_steps = max(1, int(math.ceil((end - start) / self.uniform_step_size)))
         return np.linspace(start, end, num_steps + 1)
 
-    def _generate_stages(self) -> NDArray:
+    def _generate_stages(self) -> NDArray[np.float64]:
         """根据 stage_division 配置调度对应的阶段划分方法。"""
         if self.stage_division == "uniform":
             return self._generate_uniform_spacing_stages()
@@ -830,7 +868,7 @@ class VariableSpacingDPOptimizer:
 
     def _save_transition_graph_to_disk(
         self,
-        graph_cache: dict[str, Any],
+        graph_cache: _TransitionGraphCache,
         delta_speed: float,
         content_hash: str,
     ) -> None:
@@ -849,7 +887,7 @@ class VariableSpacingDPOptimizer:
             graph_bytes = gzip.compress(
                 pickle.dumps(graph_cache, protocol=5), compresslevel=5
             )
-            graph_path.write_bytes(graph_bytes)
+            _ = graph_path.write_bytes(graph_bytes)
         except Exception as exc:
             print(f"写入缓存文件失败 ({graph_path}): {exc}")
             # 清理不完整的文件
@@ -876,13 +914,13 @@ class VariableSpacingDPOptimizer:
             "created_at": datetime.now().isoformat(),
         }
         try:
-            meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False))
+            _ = meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False))
         except OSError as exc:
             print(f"写入缓存元数据失败 ({meta_path}): {exc}")
 
     def _load_transition_graph_from_disk(
         self, delta_speed: float, content_hash: str
-    ) -> dict[str, Any] | None:
+    ) -> _TransitionGraphCache | None:
         cache_dir = self._get_disk_cache_dir(delta_speed, content_hash)
         graph_path = cache_dir / "graph_data.pkl.gz"
         meta_path = cache_dir / "metadata.json"
@@ -891,7 +929,7 @@ class VariableSpacingDPOptimizer:
             return None
 
         try:
-            metadata = json.loads(meta_path.read_text())
+            metadata: dict[str, object] = json.loads(meta_path.read_text())
         except (json.JSONDecodeError, OSError) as exc:
             print(f"缓存元数据损坏，将重新计算 ({meta_path}): {exc}")
             return None
@@ -913,7 +951,7 @@ class VariableSpacingDPOptimizer:
             return None
 
         try:
-            graph_cache = pickle.loads(gzip.decompress(graph_bytes))
+            graph_cache: object = pickle.loads(gzip.decompress(graph_bytes))
         except Exception as exc:
             print(f"缓存文件反序列化失败 ({graph_path}): {exc}")
             return None
@@ -924,9 +962,9 @@ class VariableSpacingDPOptimizer:
 
         print(
             f"从磁盘缓存加载状态转移图: {cache_dir.name} "
-            f"({graph_cache['total_valid_edges']} 条可行转移边)"
+            + f"({graph_cache['total_valid_edges']} 条可行转移边)"
         )
-        return graph_cache
+        return cast(_TransitionGraphCache, cast(object, graph_cache))
 
     def _solve_dp_inner(
         self, lambda_time: float, max_speed: float, delta_speed: float

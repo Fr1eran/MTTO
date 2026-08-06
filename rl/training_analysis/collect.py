@@ -5,7 +5,9 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from tensorboard.backend.event_processing import event_accumulator
+from tensorboard.backend.event_processing import (
+    event_accumulator,
+)
 
 
 @dataclass(frozen=True)
@@ -113,9 +115,11 @@ def load_scalar_series_from_run(run_dir: str | Path) -> dict[str, ScalarSeries]:
         str(run_path),
         size_guidance={event_accumulator.SCALARS: 0},
     )
-    accumulator.Reload()
+    _ = accumulator.Reload()
 
     scalar_tags = accumulator.Tags().get("scalars", [])
+    if not isinstance(scalar_tags, list):
+        scalar_tags = []
     series_map: dict[str, ScalarSeries] = {}
 
     for tag in scalar_tags:

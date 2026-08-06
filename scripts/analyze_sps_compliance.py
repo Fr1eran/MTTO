@@ -31,11 +31,13 @@ from utils.trajectory import OptimizedCurveArtifact, recover_time_axis_from_traj
 _OUTPUT_MODE_TEXT = "text"
 _OUTPUT_MODE_PLOT = "plot"
 _OUTPUT_MODE_JSON = "json"
-_VALID_OUTPUT_MODES = frozenset({
-    _OUTPUT_MODE_TEXT,
-    _OUTPUT_MODE_PLOT,
-    _OUTPUT_MODE_JSON,
-})
+_VALID_OUTPUT_MODES = frozenset(
+    {
+        _OUTPUT_MODE_TEXT,
+        _OUTPUT_MODE_PLOT,
+        _OUTPUT_MODE_JSON,
+    }
+)
 _ANALYSIS_MODE_COMPARE = "compare"
 _ANALYSIS_MODE_SINGLE = "single"
 _VALID_ANALYSIS_MODES = (_ANALYSIS_MODE_SINGLE, _ANALYSIS_MODE_COMPARE)
@@ -207,7 +209,7 @@ def _parse_output_mode(raw_mode: str) -> set[str]:
     if unknown_modes:
         raise ValueError(
             "Unknown output mode(s): "
-            f"{unknown_modes}. Choices: text, plot, json, text+plot"
+            + f"{unknown_modes}. Choices: text, plot, json, text+plot"
         )
 
     return modes
@@ -221,80 +223,80 @@ def _build_cli_parser() -> argparse.ArgumentParser:
             "Default output mode is text+plot."
         )
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--dp-curve-dir",
         default=DP_DEFAULT_SEARCH_DIR,
         help="Directory used to recursively search DP trajectory artifacts.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--rl-curve-dir",
         default=RL_DEFAULT_SEARCH_DIR,
         help="Directory used to recursively search RL trajectory artifacts.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--trajectory-source",
         choices=RL_TRAJECTORY_SOURCE_CHOICES,
         default="best",
         help="RL trajectory source: best, best_steps, best_episodes, final.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--analysis-mode",
         choices=_VALID_ANALYSIS_MODES,
         default=_ANALYSIS_MODE_COMPARE,
         help="Analysis mode: single (DP or RL only) or compare (DP and RL).",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--trajectory-kind",
         choices=_VALID_TRAJECTORY_KINDS,
         default=None,
         help="Trajectory kind for single mode: dp or rl.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--schedule-time-s",
         type=float,
         default=None,
         help="Optional schedule time override for scenario construction.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--step-delay-s",
         type=float,
         default=2.0,
         help="SPS average delay T_s used by replay, in seconds.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--boundary-eps",
         type=float,
         default=1e-6,
         help="Numerical tolerance for min/max boundary violation checks.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--output-mode",
         default="text+plot",
         help="Output mode: text, plot, json, text+plot, or comma/plus combinations.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--json-output-path",
         default=None,
         help="When json output is enabled, optionally save payload to this path.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--event-annotation",
         choices=("auto", "text", "marker-only"),
         default="auto",
         help="Event annotation mode on the main figure.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--max-text-annotations",
         type=int,
         default=12,
         help="Max event labels for auto annotation mode.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--no-safeguard",
         action="store_true",
         help="Do not render safeguard background on the main speed-position figure.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--factor",
         type=float,
         default=0.99,
@@ -324,10 +326,15 @@ def _deduplicate_legend(ax: Any, *, loc: str = "upper right") -> None:
         ax.legend(filtered_handles, filtered_labels, loc=loc)
 
 
-def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+def _validate_cli_args(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> None:
     if args.analysis_mode == _ANALYSIS_MODE_SINGLE and args.trajectory_kind is None:
         parser.error("--trajectory-kind is required when --analysis-mode=single")
-    if args.analysis_mode == _ANALYSIS_MODE_COMPARE and args.trajectory_kind is not None:
+    if (
+        args.analysis_mode == _ANALYSIS_MODE_COMPARE
+        and args.trajectory_kind is not None
+    ):
         parser.error("--trajectory-kind is only valid when --analysis-mode=single")
 
 
@@ -597,18 +604,18 @@ def _print_result_summary(result: SPSComplianceResult) -> None:
     print(f"  unfinished_count: {result.unfinished_count}")
     print(
         "  boundary_violations(min/max): "
-        f"{result.min_violation_count}/{result.max_violation_count}"
+        + f"{result.min_violation_count}/{result.max_violation_count}"
     )
     print(
         "  delay_related_violations(min/max): "
-        f"{result.delay_related_min_violation_count}/"
-        f"{result.delay_related_max_violation_count}"
+        + f"{result.delay_related_min_violation_count}/"
+        + f"{result.delay_related_max_violation_count}"
     )
     print(f"  delay_window_total_s: {result.delay_window_total_s:.6f}")
     print(f"  delay_tolerance_s: {result.delay_tolerance_s:.6f}")
     print(
         "  first_failure_reason: "
-        f"{result.first_failure_reason if result.first_failure_reason else 'none'}"
+        + f"{result.first_failure_reason if result.first_failure_reason else 'none'}"
     )
 
 
@@ -623,16 +630,16 @@ def _print_comparison_summary(
     )
     print(
         "  complete_count (dp/rl): "
-        f"{dp_result.complete_count}/{rl_result.complete_count}"
+        + f"{dp_result.complete_count}/{rl_result.complete_count}"
     )
     print(
         "  delay_window_total_s (dp/rl): "
-        f"{dp_result.delay_window_total_s:.6f}/{rl_result.delay_window_total_s:.6f}"
+        + f"{dp_result.delay_window_total_s:.6f}/{rl_result.delay_window_total_s:.6f}"
     )
     print(
         "  delay_related_violation_count (dp/rl): "
-        f"{dp_result.delay_related_min_violation_count + dp_result.delay_related_max_violation_count}/"  # noqa: E501
-        f"{rl_result.delay_related_min_violation_count + rl_result.delay_related_max_violation_count}"  # noqa: E501
+        + f"{dp_result.delay_related_min_violation_count + dp_result.delay_related_max_violation_count}/"  # noqa: E501
+        + f"{rl_result.delay_related_min_violation_count + rl_result.delay_related_max_violation_count}"  # noqa: E501
     )
 
 
@@ -718,7 +725,7 @@ def _plot_sps_main_figure(
     safeguard: SafeGuardUtility | None,
 ) -> None:
     apply_rl_curve_plot_style()
-    fig, ax = plt.subplots(figsize=(10, 6))
+    _, ax = plt.subplots(figsize=(10, 6))
 
     if not no_safeguard:
         resolved_safeguard = (
@@ -726,7 +733,7 @@ def _plot_sps_main_figure(
         )
         resolved_safeguard.render(ax=ax, layers=SafeGuardUtility.DANGER_VIEW_LAYERS)
 
-    ax.plot(
+    _ = ax.plot(
         dp_pos_arr,
         dp_speed_arr * 3.6,
         color="tab:red",
@@ -735,7 +742,7 @@ def _plot_sps_main_figure(
         label="DP trajectory",
         zorder=4,
     )
-    ax.plot(
+    _ = ax.plot(
         rl_pos_arr,
         rl_speed_arr * 3.6,
         color="tab:blue",
@@ -762,9 +769,9 @@ def _plot_sps_main_figure(
         max_text_annotations=max_text_annotations,
     )
 
-    ax.set_title("DP/RL SPS compliance (speed-position)")
-    ax.set_xlabel("Position (m)")
-    ax.set_ylabel("Speed (km/h)")
+    _ = ax.set_title("DP/RL SPS compliance (speed-position)")
+    _ = ax.set_xlabel("Position (m)")
+    _ = ax.set_ylabel("Speed (km/h)")
     ax.grid(True, alpha=0.3)
     _deduplicate_legend(ax)
 
@@ -785,7 +792,7 @@ def _plot_sps_single_figure(
     safeguard: SafeGuardUtility | None,
 ) -> None:
     apply_rl_curve_plot_style()
-    fig, ax = plt.subplots(figsize=(10, 6))
+    _, ax = plt.subplots(figsize=(10, 6))
 
     if not no_safeguard:
         resolved_safeguard = (
@@ -802,7 +809,7 @@ def _plot_sps_single_figure(
         curve_label = "RL trajectory"
         marker_label = "RL"
 
-    ax.plot(
+    _ = ax.plot(
         pos_arr,
         speed_arr * 3.6,
         color=curve_color,
@@ -820,9 +827,9 @@ def _plot_sps_single_figure(
         max_text_annotations=max_text_annotations,
     )
 
-    ax.set_title(f"{marker_label} SPS compliance (speed-position)")
-    ax.set_xlabel("Position (m)")
-    ax.set_ylabel("Speed (km/h)")
+    _ = ax.set_title(f"{marker_label} SPS compliance (speed-position)")
+    _ = ax.set_xlabel("Position (m)")
+    _ = ax.set_ylabel("Speed (km/h)")
     ax.grid(True, alpha=0.3)
     _deduplicate_legend(ax)
 
@@ -912,8 +919,8 @@ def main() -> None:
         except FileNotFoundError as exc:
             parser.error(str(exc))
 
-        dp_pos_arr, dp_speed_arr, _dp_cum_time_arr, dp_metrics = (
-            load_dp_curve_artifact(dp_artifact)
+        dp_pos_arr, dp_speed_arr, _dp_cum_time_arr, dp_metrics = load_dp_curve_artifact(
+            dp_artifact
         )
         rl_pos_arr, rl_speed_arr, rl_metrics = load_rl_curve_artifact(rl_artifact)
 
@@ -972,7 +979,7 @@ def main() -> None:
             if args.json_output_path:
                 output_path = Path(args.json_output_path)
                 output_path.parent.mkdir(parents=True, exist_ok=True)
-                output_path.write_text(payload_text, encoding="utf-8")
+                _ = output_path.write_text(payload_text, encoding="utf-8")
                 print(f"JSON report saved to: {output_path}")
             else:
                 print(payload_text)
@@ -1052,7 +1059,7 @@ def main() -> None:
         if args.json_output_path:
             output_path = Path(args.json_output_path)
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_text(payload_text, encoding="utf-8")
+            _ = output_path.write_text(payload_text, encoding="utf-8")
             print(f"JSON report saved to: {output_path}")
         else:
             print(payload_text)

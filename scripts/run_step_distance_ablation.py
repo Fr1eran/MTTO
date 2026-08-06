@@ -9,6 +9,7 @@ from typing import Any, SupportsFloat, TypeGuard
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.figure import Figure
 
 from rl.experiment_utils import (
     DEFAULT_REWARD_DISCOUNT,
@@ -100,61 +101,61 @@ def build_arg_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     train_parser = subparsers.add_parser("train", help="Run the ablation matrix.")
-    train_parser.add_argument(
+    _ = train_parser.add_argument(
         "--output-root",
         "--ablation-output-root",
         dest="output_root",
         default=DEFAULT_OUTPUT_ROOT,
         help="Root directory for step-distance ablation outputs.",
     )
-    train_parser.add_argument(
+    _ = train_parser.add_argument(
         "--ablation-tag",
         default=None,
         help="Optional batch tag appended to each run experiment tag.",
     )
-    train_parser.add_argument(
+    _ = train_parser.add_argument(
         "--max-step-distances",
         nargs="+",
         type=float,
         default=list(DEFAULT_STEP_DISTANCES),
         help="Max simulation displacement values to compare.",
     )
-    train_parser.add_argument(
+    _ = train_parser.add_argument(
         "--seed-list",
         nargs="+",
         type=int,
         default=list(DEFAULT_SEEDS),
         help="Seeds to run for every max-step-distance value.",
     )
-    train_parser.add_argument(
+    _ = train_parser.add_argument(
         "--total-timesteps",
         type=int,
         default=1_000_000,
         help="Maximum simulation training timesteps.",
     )
-    train_parser.add_argument("--schedule-time-s", type=float, default=430.0)
-    train_parser.add_argument(
+    _ = train_parser.add_argument("--schedule-time-s", type=float, default=430.0)
+    _ = train_parser.add_argument(
         "--reward-discount", type=float, default=DEFAULT_REWARD_DISCOUNT
     )
-    train_parser.add_argument("--num-envs", type=int, default=1)
-    train_parser.add_argument(
+    _ = train_parser.add_argument("--num-envs", type=int, default=1)
+    _ = train_parser.add_argument(
         "--vec-env-type",
         choices=("dummy", "subproc"),
         default="subproc",
     )
-    train_parser.add_argument(
+    _ = train_parser.add_argument(
         "--rollout-steps-per-update", type=int, default=DEFAULT_ROLLOUT_STEPS_PER_UPDATE
     )
-    train_parser.add_argument("--n-steps-per-env", type=int, default=None)
-    train_parser.add_argument("--log-interval", type=int, default=None)
-    train_parser.add_argument(
+    _ = train_parser.add_argument("--n-steps-per-env", type=int, default=None)
+    _ = train_parser.add_argument("--log-interval", type=int, default=None)
+    _ = train_parser.add_argument(
         "--best-eval-trigger-interval",
         type=int,
         default=DEFAULT_BEST_EVAL_TRIGGER_INTERVAL,
         help="Training-step interval for best trajectory evaluation.",
     )
-    train_parser.add_argument("--device", default="cpu")
-    train_parser.add_argument(
+    _ = train_parser.add_argument("--device", default="cpu")
+    _ = train_parser.add_argument(
         "--dry-run",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -164,44 +165,47 @@ def build_arg_parser() -> argparse.ArgumentParser:
     show_parser = subparsers.add_parser(
         "show", help="Plot episode-metrics learning curves."
     )
-    show_parser.add_argument(
+    _ = show_parser.add_argument(
         "--output-root",
         "--ablation-root",
         dest="output_root",
         default=DEFAULT_OUTPUT_ROOT,
         help="Root directory containing the step-distance manifest.",
     )
-    show_parser.add_argument(
+    _ = show_parser.add_argument(
         "--max-step-distances",
         nargs="+",
         type=float,
         default=None,
         help="Optional subset/order of max-step-distance values to display.",
     )
-    show_parser.add_argument(
+    _ = show_parser.add_argument(
         "--output-file",
         type=Path,
         default=None,
-        help="Path for saving a compact paper-ready figure. If omitted, only display the figure.",
+        help=(
+            "Path for saving a compact paper-ready figure. "
+            "If omitted, only display the figure."
+        ),
     )
-    show_parser.add_argument(
+    _ = show_parser.add_argument(
         "--dpi",
         type=float,
         default=300.0,
         help="DPI used when saving the figure.",
     )
-    show_parser.add_argument(
+    _ = show_parser.add_argument(
         "--pad-inches",
         type=float,
         default=0.03,
         help="Padding around the tight saved figure.",
     )
-    show_parser.add_argument(
+    _ = show_parser.add_argument(
         "--no-show",
         action="store_true",
         help="Save without opening the interactive display window.",
     )
-    show_parser.add_argument(
+    _ = show_parser.add_argument(
         "--dry-run",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -332,18 +336,20 @@ def build_step_distance_manifest(
             {"status": "pending"},
         )
         spec = entry.training_run_spec
-        runs.append({
-            "max_step_distance": float(entry.max_step_distance),
-            "repeat_index": int(entry.repeat_index),
-            "seed": int(entry.seed),
-            "experiment_tag": entry.experiment_tag,
-            "output_dir": spec.output_dir,
-            "final_output_dir": spec.final_output_dir,
-            "best_eval_output_dir": spec.best_eval_output_dir,
-            "episode_metrics_path": entry.episode_metrics_path,
-            "run_metadata_path": spec.run_metadata_path,
-            **status_payload,
-        })
+        runs.append(
+            {
+                "max_step_distance": float(entry.max_step_distance),
+                "repeat_index": int(entry.repeat_index),
+                "seed": int(entry.seed),
+                "experiment_tag": entry.experiment_tag,
+                "output_dir": spec.output_dir,
+                "final_output_dir": spec.final_output_dir,
+                "best_eval_output_dir": spec.best_eval_output_dir,
+                "episode_metrics_path": entry.episode_metrics_path,
+                "run_metadata_path": spec.run_metadata_path,
+                **status_payload,
+            }
+        )
 
     return {
         "output_root": args.output_root,
@@ -410,10 +416,10 @@ def _load_episode_metrics_run(
     if not isinstance(final_output_dir, str) or not final_output_dir:
         raise ValueError(
             "Step-distance curve loading requires a valid final_output_dir, "
-            f"but got missing/invalid value for max_step_distance={
+            + f"but got missing/invalid value for max_step_distance={
                 run_entry.get('max_step_distance')
             }, "
-            f"repeat={run_entry.get('repeat_index')}."
+            + f"repeat={run_entry.get('repeat_index')}."
         )
 
     episode_metrics_path = Path(str(run_entry["episode_metrics_path"]))
@@ -429,16 +435,16 @@ def _load_episode_metrics_run(
     if not isinstance(run_record_mode, str):
         raise ValueError(
             "Step-distance curve loading requires "
-            "run_metadata.rollout_record_trigger_mode='steps', but got "
-            f"missing/invalid value for max_step_distance={max_step_distance:g}, "
-            f"repeat={repeat_index}, episode_metrics={episode_metrics_path}."
+            + "run_metadata.rollout_record_trigger_mode='steps', but got "
+            + f"missing/invalid value for max_step_distance={max_step_distance:g}, "
+            + f"repeat={repeat_index}, episode_metrics={episode_metrics_path}."
         )
     if run_record_mode != "steps":
         raise ValueError(
             "Step-distance ablation no longer supports episodes-based curve artifacts. "
-            "Expected run_metadata.rollout_record_trigger_mode='steps', got "
-            f"'{run_record_mode}' for max_step_distance={max_step_distance:g}, "
-            f"repeat={repeat_index}, episode_metrics={episode_metrics_path}."
+            + "Expected run_metadata.rollout_record_trigger_mode='steps', got "
+            + f"'{run_record_mode}' for max_step_distance={max_step_distance:g}, "
+            + f"repeat={repeat_index}, episode_metrics={episode_metrics_path}."
         )
 
     with np.load(episode_metrics_path) as data:
@@ -551,8 +557,8 @@ def _resolve_best_eval_output_dir(
 
     return None, [
         "Skipped best trajectory metrics due to missing best_eval_output_dir for "
-        f"max_step_distance={run_entry.get('max_step_distance')}, "
-        f"repeat={run_entry.get('repeat_index')}."
+        + f"max_step_distance={run_entry.get('max_step_distance')}, "
+        + f"repeat={run_entry.get('repeat_index')}."
     ]
 
 
@@ -584,9 +590,9 @@ def _print_run_matrix(run_entries: list[StepDistanceRunEntry]) -> None:
     for index, entry in enumerate(run_entries, start=1):
         print(
             f"[{index}] max_step_distance={entry.max_step_distance:g} "
-            f"repeat={entry.repeat_index + 1} seed={entry.seed} "
-            f"output_dir={entry.training_run_spec.output_dir} "
-            f"total_timesteps={entry.training_run_spec.total_timesteps}"
+            + f"repeat={entry.repeat_index + 1} seed={entry.seed} "
+            + f"output_dir={entry.training_run_spec.output_dir} "
+            + f"total_timesteps={entry.training_run_spec.total_timesteps}"
         )
 
 
@@ -619,8 +625,8 @@ def build_curve_aggregates(
             if str(run_entry.get("status", "pending")) != "completed":
                 warnings.append(
                     f"Skipped max_step_distance={max_step_distance:g}, "
-                    f"repeat={run_entry.get('repeat_index')} due to "
-                    f"status={run_entry.get('status', 'pending')}."
+                    + f"repeat={run_entry.get('repeat_index')} due to "
+                    + f"status={run_entry.get('status', 'pending')}."
                 )
                 continue
             try:
@@ -638,26 +644,30 @@ def build_curve_aggregates(
             continue
 
         reference = np.unique(np.concatenate([run.index for run in metrics_runs]))
-        aligned_rewards = np.vstack([
-            np.interp(
-                reference,
-                run.index,
-                run.episode_reward,
-                left=np.nan,
-                right=np.nan,
-            )
-            for run in metrics_runs
-        ])
-        aligned_lengths = np.vstack([
-            np.interp(
-                reference,
-                run.index,
-                run.episode_length,
-                left=np.nan,
-                right=np.nan,
-            )
-            for run in metrics_runs
-        ])
+        aligned_rewards = np.vstack(
+            [
+                np.interp(
+                    reference,
+                    run.index,
+                    run.episode_reward,
+                    left=np.nan,
+                    right=np.nan,
+                )
+                for run in metrics_runs
+            ]
+        )
+        aligned_lengths = np.vstack(
+            [
+                np.interp(
+                    reference,
+                    run.index,
+                    run.episode_length,
+                    left=np.nan,
+                    right=np.nan,
+                )
+                for run in metrics_runs
+            ]
+        )
 
         aggregates.append(
             StepDistanceCurveAggregate(
@@ -703,8 +713,8 @@ def build_best_metric_aggregates(
                 warnings.append(
                     f"Skipped best metrics for max_step_distance={
                         max_step_distance:g}, "
-                    f"repeat={run_entry.get('repeat_index')} due to "
-                    f"status={run_entry.get('status', 'pending')}."
+                    + f"repeat={run_entry.get('repeat_index')} due to "
+                    + f"status={run_entry.get('status', 'pending')}."
                 )
                 continue
 
@@ -721,7 +731,7 @@ def build_best_metric_aggregates(
         if valid_run_count == 0:
             warnings.append(
                 "No valid best trajectory metrics for "
-                f"max_step_distance={max_step_distance:g}."
+                + f"max_step_distance={max_step_distance:g}."
             )
             continue
 
@@ -819,7 +829,7 @@ def plot_curve_aggregates(
         clip_on=False,
     )
     handles, labels = ax_reward.get_legend_handles_labels()
-    fig.legend(
+    _ = fig.legend(
         handles,
         labels,
         loc="upper center",
@@ -836,7 +846,7 @@ def plot_curve_aggregates(
 
 
 def save_compact_figure(
-    fig,
+    fig: Figure,
     output_file: Path,
     dpi: float,
     pad_inches: float,
@@ -866,10 +876,10 @@ def _print_curve_summary(aggregates: list[StepDistanceCurveAggregate]) -> None:
         )
         print(
             "  - "
-            f"max_step_distance={aggregate.max_step_distance:g} "
-            f"valid_runs={aggregate.valid_run_count} "
-            f"steps_points={aggregate.reference_steps.size} "
-            f"step_end={step_end:g}"
+            + f"max_step_distance={aggregate.max_step_distance:g} "
+            + f"valid_runs={aggregate.valid_run_count} "
+            + f"steps_points={aggregate.reference_steps.size} "
+            + f"step_end={step_end:g}"
         )
 
 
@@ -937,12 +947,12 @@ def _run_train_command(args: argparse.Namespace) -> int:
     for index, entry in enumerate(run_entries, start=1):
         print(
             f"Running step-distance job {index}/{len(run_entries)}: "
-            f"max_step_distance={entry.max_step_distance:g}, "
-            f"repeat={entry.repeat_index + 1}, seed={entry.seed}, "
-            f"total_timesteps={entry.training_run_spec.total_timesteps}"
+            + f"max_step_distance={entry.max_step_distance:g}, "
+            + f"repeat={entry.repeat_index + 1}, seed={entry.seed}, "
+            + f"total_timesteps={entry.training_run_spec.total_timesteps}"
         )
         try:
-            train_step_distance_run(entry)
+            _ = train_step_distance_run(entry)
             statuses[(entry.max_step_distance, entry.repeat_index)] = {
                 "status": "completed"
             }
@@ -951,13 +961,13 @@ def _run_train_command(args: argparse.Namespace) -> int:
                 "status": "failed",
                 "error_message": str(exc),
             }
-            _write_manifest(
+            _ = _write_manifest(
                 args.output_root,
                 build_step_distance_manifest(args, run_entries, statuses=statuses),
             )
             raise
 
-        _write_manifest(
+        _ = _write_manifest(
             args.output_root,
             build_step_distance_manifest(args, run_entries, statuses=statuses),
         )
@@ -1014,7 +1024,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "show":
         return _run_show_command(args)
     parser.error(f"Unknown command: {args.command}")
-    return 2
 
 
 if __name__ == "__main__":

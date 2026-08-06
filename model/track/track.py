@@ -4,7 +4,9 @@ from dataclasses import dataclass, field
 from typing import overload
 
 import numpy as np
-from numba import njit
+from numba import (
+    njit,
+)
 from numpy.typing import ArrayLike, DTypeLike, NDArray
 
 from utils.indexing_utils import get_interval_index, get_interval_index_scalar_numba
@@ -81,7 +83,9 @@ def get_speed_limit_array_numba(
     out = np.empty(pos_arr.size, dtype=np.float64)
     for i in range(pos_arr.size):
         out[i] = get_speed_limit_scalar_numba(
-            pos_arr[i], speed_limits, speed_limit_intervals
+            pos_arr[i],
+            speed_limits,
+            speed_limit_intervals,
         )
     return out
 
@@ -101,7 +105,7 @@ def get_slope(
 
 @overload
 def get_slope(
-    pos: ArrayLike,
+    pos: NDArray[np.floating],
     slopes: ArrayLike,
     slope_intervals: ArrayLike,
     *,
@@ -110,7 +114,7 @@ def get_slope(
 
 
 def get_slope(
-    pos: ScalarNumeric | ArrayLike,
+    pos: ScalarNumeric | NDArray[np.floating],
     slopes: ArrayLike,
     slope_intervals: ArrayLike,
     *,
@@ -141,7 +145,7 @@ def get_next_slope_and_distance(
 
 @overload
 def get_next_slope_and_distance(
-    pos: ArrayLike,
+    pos: NDArray[np.floating],
     direction: int,
     slopes: ArrayLike,
     slope_intervals: ArrayLike,
@@ -151,7 +155,7 @@ def get_next_slope_and_distance(
 
 
 def get_next_slope_and_distance(
-    pos: ScalarNumeric | ArrayLike,
+    pos: ScalarNumeric | NDArray[np.floating],
     direction: int,
     slopes: ArrayLike,
     slope_intervals: ArrayLike,
@@ -200,7 +204,7 @@ def get_speed_limit(
 
 @overload
 def get_speed_limit(
-    pos: ArrayLike,
+    pos: NDArray[np.floating],
     speed_limits: ArrayLike,
     speed_limit_intervals: ArrayLike,
     *,
@@ -209,7 +213,7 @@ def get_speed_limit(
 
 
 def get_speed_limit(
-    pos: ScalarNumeric | ArrayLike,
+    pos: ScalarNumeric | NDArray[np.floating],
     speed_limits: ArrayLike,
     speed_limit_intervals: ArrayLike,
     *,
@@ -240,7 +244,7 @@ def get_next_speed_limit_and_distance(
 
 @overload
 def get_next_speed_limit_and_distance(
-    pos: ArrayLike,
+    pos: NDArray[np.floating],
     direction: int,
     speed_limits: ArrayLike,
     speed_limit_intervals: ArrayLike,
@@ -250,7 +254,7 @@ def get_next_speed_limit_and_distance(
 
 
 def get_next_speed_limit_and_distance(
-    pos: ScalarNumeric | ArrayLike,
+    pos: ScalarNumeric | NDArray[np.floating],
     direction: int,
     speed_limits: ArrayLike,
     speed_limit_intervals: ArrayLike,

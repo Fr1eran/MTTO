@@ -17,78 +17,78 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="复现变间距动态规划速度曲线，并支持状态转移图并行预计算。"
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--output-root",
         type=str,
         default="output/optimal/dp",
         help="优化结果输出根目录。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--schedule-time-s",
         type=float,
         default=430.0,
         help="规划运行时间(s)。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--delta-speed-mps",
         type=float,
         default=0.1,
         help="速度搜索步长(m/s)。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--max-outer-iterations",
         type=int,
         default=100,
         help="外层二分搜索最大迭代次数。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--precompute-mode",
         choices=("serial", "parallel"),
         default="parallel",
         help="状态转移图预计算模式。serial 为单进程，parallel 为多进程。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--precompute-workers",
         type=int,
         default=4,
         help="并行模式下的进程数。默认值为4",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--precompute-chunk-size",
         type=int,
         default=None,
         help="并行模式下每个任务块包含的阶段数。未指定时自动估计。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--mp-start-method",
         choices=("spawn", "fork", "forkserver"),
         default=None,
         help="多进程启动方式。Windows 默认使用 spawn。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--hide-precompute-progress",
         action="store_true",
         help="关闭状态转移图预计算进度显示。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--stage-division",
         choices=("variable", "uniform"),
         default="uniform",
         help="阶段划分方式。variable 为基于临界点的变间距划分，uniform 为等间距划分。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--uniform-step-size",
         type=float,
         default=30.0,
         help="等间距划分时的阶段步长(m)，仅 --stage-division uniform 时生效。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--sub-stage-count",
         type=int,
         default=30,
         help="变间距划分时每个临界区间的子阶段数量。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--skip-disk-cache",
         action="store_true",
         help="跳过磁盘缓存，每次强制重新计算状态转移图。",
@@ -223,9 +223,9 @@ def _run_optimization(*, cli_args: argparse.Namespace, output_dir: str) -> int:
         print(f"性能指标已保存到: {saved_metrics_path}")
         print(
             "舒适度指标: "
-            f"TAV={comfort_metrics['comfort_tav']:.4f} m/s^2, "
-            f"ER={comfort_metrics['comfort_er_pct']:.2f} %, "
-            f"RMS={comfort_metrics['comfort_rms']:.4f} m/s^2"
+            + f"TAV={comfort_metrics['comfort_tav']:.4f} m/s^2, "
+            + f"ER={comfort_metrics['comfort_er_pct']:.2f} %, "
+            + f"RMS={comfort_metrics['comfort_rms']:.4f} m/s^2"
         )
 
     return 0

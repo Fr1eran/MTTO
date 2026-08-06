@@ -4,6 +4,8 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.axes import Axes
+from numpy.typing import NDArray
 
 from dp.experiment_utils import (
     DP_DEFAULT_SEARCH_DIR,
@@ -42,7 +44,7 @@ def _resolve_curve_and_metrics_paths(curve_dir: str) -> tuple[str, str]:
     return str(curve_path), str(metrics_path)
 
 
-def _print_metrics(metrics: dict) -> None:
+def _print_metrics(metrics: dict[str, object]) -> None:
     if not metrics:
         print("No metrics file found.")
         return
@@ -65,14 +67,14 @@ def _print_metrics(metrics: dict) -> None:
             print(f"  {key}: {metrics[key]}")
 
 
-def _metric_as_float(metrics: dict, key: str) -> float | None:
+def _metric_as_float(metrics: dict[str, object], key: str) -> float | None:
     value = metrics.get(key)
     if isinstance(value, (int, float, np.integer, np.floating)):
         return float(value)
     return None
 
 
-def _require_metric_float(metrics: dict, key: str) -> float:
+def _require_metric_float(metrics: dict[str, object], key: str) -> float:
     value = _metric_as_float(metrics, key)
     if value is None:
         raise ValueError(f"DP metrics must contain numeric '{key}'")
@@ -81,9 +83,9 @@ def _require_metric_float(metrics: dict, key: str) -> float:
 
 def _calc_redundant_operation_time_arr(
     *,
-    pos_arr,
-    speed_arr,
-    cum_time_arr,
+    pos_arr: NDArray[np.float64],
+    speed_arr: NDArray[np.float64],
+    cum_time_arr: NDArray[np.float64],
     schedule_time_s: float,
     target_position: float,
     target_speed: float,
@@ -119,10 +121,10 @@ def _calc_redundant_operation_time_arr(
 
 def _build_dp_redundant_operation_time_arr(
     *,
-    pos_arr,
-    speed_arr,
-    cum_time_arr,
-    metrics: dict,
+    pos_arr: NDArray[np.float64],
+    speed_arr: NDArray[np.float64],
+    cum_time_arr: NDArray[np.float64],
+    metrics: dict[str, object],
 ) -> np.ndarray:
     schedule_time_s = _require_metric_float(metrics, "target_time_s")
     vehicle, track, safeguard_utility, train_service = build_scenario(
@@ -150,18 +152,18 @@ def _build_dp_redundant_operation_time_arr(
 
 def _render_redundant_operation_time_on_axes(
     *,
-    ax,
-    pos_arr,
-    redundant_operation_time_arr,
+    ax: Axes,
+    pos_arr: NDArray[np.float64],
+    redundant_operation_time_arr: NDArray[np.float64],
 ) -> None:
-    ax.plot(
+    _ = ax.plot(
         pos_arr,
         redundant_operation_time_arr,
         color="#16a34a",
         linewidth=1.5,
         label="DP redundant operation time",
     )
-    ax.axhline(
+    _ = ax.axhline(
         0.0,
         color="black",
         linewidth=1.0,
@@ -169,28 +171,28 @@ def _render_redundant_operation_time_on_axes(
         alpha=0.6,
         label="No redundancy",
     )
-    ax.set_title("DP redundant operation time over position")
-    ax.set_xlabel("Position (m)")
-    ax.set_ylabel("Redundant operation time (s)")
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc="best")
+    _ = ax.set_title("DP redundant operation time over position")
+    _ = ax.set_xlabel("Position (m)")
+    _ = ax.set_ylabel("Redundant operation time (s)")
+    _ = ax.grid(True, alpha=0.3)
+    _ = ax.legend(loc="best")
 
 
 def _build_cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Load and display saved DP optimized speed curve."
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--curve-dir",
         default=DP_DEFAULT_SEARCH_DIR,
         help="Directory to recursively search for the optimized speed curve.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--no-safeguard",
         action="store_true",
         help="Do not draw safeguard background.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--factor",
         type=float,
         default=0.99,
@@ -229,7 +231,7 @@ def main() -> None:
     except ValueError as exc:
         parser.error(str(exc))
 
-    set_global_plot_style(
+    _ = set_global_plot_style(
         font_preset="sci",
         preferred_font="Calibri",
         title_font_size=8.0,
@@ -240,7 +242,7 @@ def main() -> None:
         savefig_dpi=300.0,
     )
 
-    fig, (ax_speed, ax_redundant) = plt.subplots(
+    _, (ax_speed, ax_redundant) = plt.subplots(
         2,
         1,
         figsize=(12, 9),

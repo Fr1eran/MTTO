@@ -1,11 +1,16 @@
+from __future__ import annotations
+
 import os
+from collections.abc import Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast, override
 
 import numpy as np
 import torch as th
+from numpy.typing import NDArray
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.policies import ActorCriticPolicy
 
 from rl.evaluation import (
     PolicyEvaluationResult,
@@ -15,7 +20,7 @@ from rl.evaluation import (
 )
 
 
-def _safe_mean(values):
+def _safe_mean(values: Sequence[float]) -> float:
     if not values:
         return 0.0
     return float(np.mean(values))
@@ -51,26 +56,27 @@ class FixedReverseCurriculumCallback(BaseCallback):
             raise ValueError("total_timesteps must be positive")
         if getattr(profile, "controller_kind", None) != "fixed_reverse":
             raise ValueError("profile must use the fixed_reverse controller")
-        self._remaining_distances_m = remaining
-        self._whole_distance_m = float(whole_distance_m)
-        self._total_timesteps = int(total_timesteps)
-        self._profile = profile
-        self._version = 0
-        self._rollout_index = 0
-        self._start_index = int(np.argmax(remaining))
-        self._current_weights = self._weights_for_progress(0.0)
+        self._remaining_distances_m: NDArray[np.float64] = remaining
+        self._whole_distance_m: float = float(whole_distance_m)
+        self._total_timesteps: int = int(total_timesteps)
+        self._profile: Any = profile
+        self._version: int = 0
+        self._rollout_index: int = 0
+        self._start_index: int = int(np.argmax(remaining))
+        self._current_weights: NDArray[np.float64] = self._weights_for_progress(0.0)
 
     def initial_weights(self) -> np.ndarray:
         """Return the distribution required before SB3's first environment reset."""
         return self._current_weights.copy()
 
+    @override
     def _on_rollout_start(self) -> None:
         if self._rollout_index > 0:
             progress = min(1.0, float(self.num_timesteps) / self._total_timesteps)
             weights = self._weights_for_progress(progress)
             if not np.array_equal(weights, self._current_weights):
                 self._version += 1
-                self.training_env.env_method(
+                _ = self.training_env.env_method(
                     "set_reference_initial_state_distribution",
                     weights,
                     version=self._version,
@@ -78,9 +84,11 @@ class FixedReverseCurriculumCallback(BaseCallback):
                 self._current_weights = weights
         self._rollout_index += 1
 
+    @override
     def _on_step(self) -> bool:
         return True
 
+    @override
     def _on_training_end(self) -> None:
         # Do not alter workers here: only release the schedule data retained by
         # the callback after learning has finished.
@@ -141,8 +149,8 @@ class _SPDLContextSample:
 class SPDLReferenceCurriculumCallback(BaseCallback):
     """Discrete SPDL driven by Critic values over the full reference-context pool."""
 
-    _KL_TOLERANCE = 1e-10
-    _TARGET_KL_TOLERANCE = 1e-8
+    _KL_TOLERANCE: float = 1e-10
+    _TARGET_KL_TOLERANCE: float = 1e-8
 
     def __init__(
         self,
@@ -171,17 +179,17 @@ class SPDLReferenceCurriculumCallback(BaseCallback):
         if getattr(profile, "controller_kind", None) != "spdl":
             raise ValueError("profile must use the spdl controller")
 
-        self._remaining_distances_m = remaining
-        self._reference_observations = observations
-        self._gamma = float(gamma)
-        self._profile = profile
-        self._start_index = int(np.argmax(remaining))
+        self._remaining_distances_m: NDArray[np.float64] = remaining
+        self._reference_observations: NDArray[np.float32] = observations
+        self._gamma: float = float(gamma)
+        self._profile: Any = profile
+        self._start_index: int = int(np.argmax(remaining))
         self._validate_profile()
-        self._target_weights = self._build_target_weights()
-        self._current_weights = self._build_initial_weights()
-        self._version = 0
-        self._rollout_index = 0
-        self._context_update_count = 0
+        self._target_weights: NDArray[np.float64] = self._build_target_weights()
+        self._current_weights: NDArray[np.float64] = self._build_initial_weights()
+        self._version: int = 0
+        self._rollout_index: int = 0
+        self._context_update_count: int = 0
         self._context_samples: list[_SPDLContextSample] = []
         self._completed_returns: list[float] = []
         self._active_context_by_env: dict[int, tuple[int, int, float, float]] = {}
@@ -194,11 +202,13 @@ class SPDLReferenceCurriculumCallback(BaseCallback):
     def target_weights(self) -> np.ndarray:
         return self._target_weights.copy()
 
+    @override
     def _on_rollout_start(self) -> None:
         if self._rollout_index > 0:
             self._maybe_update_distribution()
         self._rollout_index += 1
 
+    @override
     def _on_step(self) -> bool:
         infos = self.locals.get("infos", [])
         rewards = self.locals.get("rewards", [])
@@ -236,9 +246,10 @@ class SPDLReferenceCurriculumCallback(BaseCallback):
             )
             if env_index < len(dones) and bool(dones[env_index]):
                 self._completed_returns.append(total_return)
-                self._active_context_by_env.pop(env_index, None)
+                _ = self._active_context_by_env.pop(env_index, None)
         return True
 
+    @override
     def _on_training_end(self) -> None:
         self._context_samples.clear()
         self._completed_returns.clear()
@@ -261,11 +272,7 @@ class SPDLReferenceCurriculumCallback(BaseCallback):
             if target_kl <= self._TARGET_KL_TOLERANCE:
                 self._clear_update_buffers()
                 return
-            alpha = (
-                float(self._profile.spdl_zeta)
-                * max(0.0, mean_return)
-                / target_kl
-            )
+            alpha = float(self._profile.spdl_zeta) * max(0.0, mean_return) / target_kl
 
         coefficients = self._all_context_critic_values()
         candidate = self._solve_distribution(coefficients, alpha)
@@ -275,7 +282,7 @@ class SPDLReferenceCurriculumCallback(BaseCallback):
             return
 
         self._version += 1
-        self.training_env.env_method(
+        _ = self.training_env.env_method(
             "set_reference_initial_state_distribution",
             candidate,
             version=self._version,
@@ -290,8 +297,10 @@ class SPDLReferenceCurriculumCallback(BaseCallback):
     def _critic_values(self, indices: np.ndarray) -> np.ndarray:
         if indices.size == 0:
             return np.empty(0, dtype=np.float64)
-        observations = np.asarray(self._reference_observations[indices], dtype=np.float32)
-        policy = self.model.policy
+        observations = np.asarray(
+            self._reference_observations[indices], dtype=np.float32
+        )
+        policy = cast(ActorCriticPolicy, self.model.policy)
         observation_tensor, _ = policy.obs_to_tensor(observations)
         with th.no_grad():
             values = policy.predict_values(observation_tensor)
@@ -401,11 +410,11 @@ class SPDLReferenceCurriculumCallback(BaseCallback):
             raise ValueError("SPDL minimum completed episode count must be positive")
 
     @staticmethod
-    def _context_from_info(info: dict[str, Any]) -> tuple[int, int] | None:
+    def _context_from_info(info: dict[str, object]) -> tuple[int, int] | None:
         try:
             return (
-                int(info["reference_context_sample_id"]),
-                int(info["reference_context_index"]),
+                int(cast(int | float | str, info["reference_context_sample_id"])),
+                int(cast(int | float | str, info["reference_context_index"])),
             )
         except KeyError, TypeError, ValueError:
             return None
@@ -432,13 +441,13 @@ class TensorboardCallback(BaseCallback):
         async_dump: bool = True,
     ):
         super().__init__(verbose)
-        self.min_tb_sample_interval_steps = max(1, int(tb_sample_interval_steps))
-        self.force_dump_interval_steps = (
+        self.min_tb_sample_interval_steps: int = max(1, int(tb_sample_interval_steps))
+        self.force_dump_interval_steps: int | None = (
             None
             if force_dump_interval_steps is None or int(force_dump_interval_steps) <= 0
             else int(force_dump_interval_steps)
         )
-        self.batch_dump_records = (
+        self.batch_dump_records: int | None = (
             None
             if batch_dump_records is None or int(batch_dump_records) <= 0
             else int(batch_dump_records)
@@ -449,10 +458,11 @@ class TensorboardCallback(BaseCallback):
         self._pending_events: list[BufferedScalarEvent] = []
         self._episode_ids_by_env: list[int] = []
         self._tb_writer: Any = None
-        self._async_dump = bool(async_dump)
+        self._async_dump: bool = bool(async_dump)
         self._async_executor: ThreadPoolExecutor | None = None
         self._async_futures: list[Future[None]] = []
 
+    @override
     def _init_callback(self) -> None:
         self._tb_writer = self._resolve_tensorboard_writer()
         if self._tb_writer is not None and self._async_dump:
@@ -479,7 +489,9 @@ class TensorboardCallback(BaseCallback):
         )
 
     def _write_events_to_writer(
-        self, writer: Any, events: tuple[BufferedScalarEvent, ...]
+        self,
+        writer: Any,
+        events: tuple[BufferedScalarEvent, ...],
     ) -> None:
         for event in events:
             for tag, value in event.scalars.items():
@@ -698,6 +710,7 @@ class TensorboardCallback(BaseCallback):
 
         return False
 
+    @override
     def _on_step(self) -> bool:
         current_step = int(self.num_timesteps)
 
@@ -728,6 +741,7 @@ class TensorboardCallback(BaseCallback):
 
         return True
 
+    @override
     def _on_training_end(self) -> None:
         if self._pending_events:
             self._flush_pending_events()
@@ -748,14 +762,14 @@ class BestTrajectoryRecorder:
         self,
         *,
         output_dir: str,
-        artifact_metadata: dict[str, Any] | None = None,
+        artifact_metadata: Mapping[str, object] | None = None,
     ):
-        self.output_dir = output_dir
-        self.artifact_metadata = dict(artifact_metadata or {})
+        self.output_dir: str = output_dir
+        self.artifact_metadata: dict[str, object] = dict(artifact_metadata or {})
         self.best_result: PolicyEvaluationResult | None = None
         self.best_trigger_interval: int | None = None
 
-    def init_callback(self, callback: BaseCallback) -> None:
+    def init_callback(self, _callback: BaseCallback) -> None:
         os.makedirs(self.output_dir, exist_ok=True)
 
     def _save_best_artifacts(
@@ -779,7 +793,7 @@ class BestTrajectoryRecorder:
         extra_metrics.update(self.artifact_metadata)
         extra_metrics["trajectory_source"] = "best"
         extra_metrics["best_update_reason"] = best_update_reason
-        save_policy_evaluation_curve(
+        _ = save_policy_evaluation_curve(
             result,
             trajectory_path,
             extra_metrics=extra_metrics,
@@ -832,16 +846,16 @@ class BestTrajectoryRecorder:
         if callback.verbose > 0:
             print(
                 "New best trajectory saved: "
-                f"mode={getattr(callback, 'eval_trigger_mode', None)}, "
-                f"trigger_interval={eval_trigger_interval}, "
-                f"success={result.success}, "
-                f"total_reward={result.total_reward:.6f}"
+                + f"mode={getattr(callback, 'eval_trigger_mode', None)}, "
+                + f"trigger_interval={eval_trigger_interval}, "
+                + f"success={result.success}, "
+                + f"total_reward={result.total_reward:.6f}"
             )
 
 
 class SafetyViolationPositionRecorder(BaseCallback):
-    SPEED_LOW_VIOLATION_CODE = 2
-    SPEED_HIGH_VIOLATION_CODE = 3
+    SPEED_LOW_VIOLATION_CODE: int = 2
+    SPEED_HIGH_VIOLATION_CODE: int = 3
 
     def __init__(
         self,
@@ -851,8 +865,8 @@ class SafetyViolationPositionRecorder(BaseCallback):
         verbose: int = 0,
     ):
         super().__init__(verbose)
-        self.output_path = str(output_path)
-        self.position_bin_size_m = max(1.0, float(position_bin_size_m))
+        self.output_path: str = str(output_path)
+        self.position_bin_size_m: float = max(1.0, float(position_bin_size_m))
         self._sample_exposure_by_bin: dict[int, int] = {}
         self._sample_violation_by_bin: dict[int, int] = {}
         self._episode_exposure_by_bin: dict[int, int] = {}
@@ -861,6 +875,7 @@ class SafetyViolationPositionRecorder(BaseCallback):
         self._episode_bins_by_env: list[set[int]] = []
         self._episode_violation_bins_by_env: list[set[int]] = []
 
+    @override
     def _init_callback(self) -> None:
         output_dir = os.path.dirname(self.output_path)
         if output_dir:
@@ -886,8 +901,10 @@ class SafetyViolationPositionRecorder(BaseCallback):
         counter[bin_index] = counter.get(bin_index, 0) + int(value)
 
     @classmethod
-    def _is_safety_violation(cls, constraint: dict[str, Any]) -> bool:
-        violation_code = int(round(float(constraint.get("violation_code", 0.0))))
+    def _is_safety_violation(cls, constraint: dict[str, object]) -> bool:
+        violation_code = int(
+            round(float(cast(int | float | str, constraint.get("violation_code", 0.0))))
+        )
         if violation_code in {
             cls.SPEED_LOW_VIOLATION_CODE,
             cls.SPEED_HIGH_VIOLATION_CODE,
@@ -896,14 +913,16 @@ class SafetyViolationPositionRecorder(BaseCallback):
 
         margin_to_vmax = constraint.get("margin_to_vmax_mps")
         margin_to_vmin = constraint.get("margin_to_vmin_mps")
+        if margin_to_vmax is None or margin_to_vmin is None:
+            return False
         try:
-            margin_high = float(margin_to_vmax)
-            margin_low = float(margin_to_vmin)
+            margin_high = float(cast(int | float | str, margin_to_vmax))
+            margin_low = float(cast(int | float | str, margin_to_vmin))
         except TypeError, ValueError:
             return False
         return bool(margin_high < 0.0 or margin_low < 0.0)
 
-    def _extract_position(self, info: dict[str, Any]) -> float | None:
+    def _extract_position(self, info: dict[str, object]) -> float | None:
         basic = info.get("basic")
         if isinstance(basic, dict) and "position" in basic:
             return float(basic["position"])
@@ -913,7 +932,7 @@ class SafetyViolationPositionRecorder(BaseCallback):
         if isinstance(state, dict) and "position" in state:
             return float(state["position"])
         if "position" in info:
-            return float(info["position"])
+            return float(cast(int | float | str, info["position"]))
         return None
 
     def _flush_episode(self, env_idx: int) -> None:
@@ -926,6 +945,7 @@ class SafetyViolationPositionRecorder(BaseCallback):
         self._episode_bins_by_env[env_idx] = set()
         self._episode_violation_bins_by_env[env_idx] = set()
 
+    @override
     def _on_step(self) -> bool:
         infos = self.locals.get("infos", [])
         if not isinstance(infos, (list, tuple)):
@@ -973,6 +993,7 @@ class SafetyViolationPositionRecorder(BaseCallback):
 
         return True
 
+    @override
     def _on_training_end(self) -> None:
         for env_idx in range(len(self._episode_bins_by_env)):
             self._flush_episode(env_idx)
@@ -1052,8 +1073,8 @@ class PeriodicEvalCallback(BaseCallback):
         *,
         eval_env: Any,
         output_dir: str | None = None,
-        artifact_metadata: dict[str, Any] | None = None,
-        recorders: list[Any] | tuple[Any, ...] | None = None,
+        artifact_metadata: Mapping[str, object] | None = None,
+        recorders: Sequence[object] | None = None,
         eval_trigger_mode: str = "steps",
         eval_trigger_interval: int = 10_000,
         deterministic: bool = True,
@@ -1065,16 +1086,16 @@ class PeriodicEvalCallback(BaseCallback):
         if eval_trigger_interval <= 0:
             raise ValueError("trigger_interval must be positive")
 
-        self.eval_env = eval_env
-        self.eval_trigger_mode = eval_trigger_mode
-        self.trigger_interval = int(eval_trigger_interval)
-        self.deterministic = deterministic
+        self.eval_env: Any = eval_env
+        self.eval_trigger_mode: str = eval_trigger_mode
+        self.trigger_interval: int = int(eval_trigger_interval)
+        self.deterministic: bool = deterministic
         if recorders is None:
             if output_dir is None:
                 raise ValueError(
                     "output_dir is required when recorders are not provided"
                 )
-            self.recorders = [
+            self.recorders: list[object] = [
                 BestTrajectoryRecorder(
                     output_dir=output_dir,
                     artifact_metadata=artifact_metadata,
@@ -1082,8 +1103,8 @@ class PeriodicEvalCallback(BaseCallback):
             ]
         else:
             self.recorders = list(recorders)
-        self._episodes_seen = 0
-        self._next_trigger_value = self.trigger_interval
+        self._episodes_seen: int = 0
+        self._next_trigger_value: int = self.trigger_interval
 
     @property
     def best_recorder(self) -> BestTrajectoryRecorder | None:
@@ -1102,11 +1123,12 @@ class PeriodicEvalCallback(BaseCallback):
         recorder = self.best_recorder
         return None if recorder is None else recorder.best_trigger_interval
 
+    @override
     def _init_callback(self) -> None:
         for recorder in self.recorders:
             init_fn = getattr(recorder, "init_callback", None)
             if callable(init_fn):
-                init_fn(self)
+                _ = init_fn(self)
 
     def _count_completed_episodes(self) -> int:
         dones_raw = self.locals.get("dones")
@@ -1132,12 +1154,13 @@ class PeriodicEvalCallback(BaseCallback):
         for recorder in self.recorders:
             on_evaluation = getattr(recorder, "on_evaluation", None)
             if callable(on_evaluation):
-                on_evaluation(
+                _ = on_evaluation(
                     self,
                     result,
                     eval_trigger_interval=eval_trigger_interval,
                 )
 
+    @override
     def _on_step(self) -> bool:
         if self.eval_trigger_mode == "episodes":
             self._episodes_seen += self._count_completed_episodes()
@@ -1152,15 +1175,16 @@ class PeriodicEvalCallback(BaseCallback):
         self._advance_trigger_threshold(current_value)
         return True
 
+    @override
     def _on_training_end(self) -> None:
         for recorder in self.recorders:
             on_training_end = getattr(recorder, "on_training_end", None)
             if callable(on_training_end):
-                on_training_end(self)
+                _ = on_training_end(self)
 
         close_fn = getattr(self.eval_env, "close", None)
         if callable(close_fn):
-            close_fn()
+            _ = close_fn()
 
 
 class EpisodeMetricsCollector(BaseCallback):
@@ -1174,18 +1198,19 @@ class EpisodeMetricsCollector(BaseCallback):
         super().__init__(verbose)
         if record_trigger_mode not in ("steps", "episodes"):
             raise ValueError(
-                f"record_trigger_mode must be 'steps' or 'episodes', "
-                f"got '{record_trigger_mode}'"
+                "record_trigger_mode must be 'steps' or 'episodes', "
+                + f"got '{record_trigger_mode}'"
             )
-        self._output_path = output_path
-        self._record_trigger_mode = record_trigger_mode
-        self._collect_interval = max(1, int(collect_interval_steps))
+        self._output_path: str = output_path
+        self._record_trigger_mode: str = record_trigger_mode
+        self._collect_interval: int = max(1, int(collect_interval_steps))
         self._last_collect_step: int = -self._collect_interval
         self._steps: list[int] = []
         self._rewards: list[float] = []
         self._lengths: list[float] = []
         self._episode_indices: list[int] = []
 
+    @override
     def _on_step(self) -> bool:
         if self._record_trigger_mode == "episodes":
             return self._on_step_episodes_mode()
@@ -1245,6 +1270,7 @@ class EpisodeMetricsCollector(BaseCallback):
 
         return True
 
+    @override
     def _on_training_end(self) -> None:
         if self._record_trigger_mode == "episodes":
             if self._episode_indices:

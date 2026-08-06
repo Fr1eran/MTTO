@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -30,10 +32,10 @@ def test_transform_operation_curve_arrays_maps_endpoints_and_midpoint() -> None:
     np.testing.assert_allclose(position_m[1], expected_mid)
 
     np.testing.assert_allclose(result["speed_mps"], [10.0, 10.0, 20.0])
-    assert result["time_s"][0] == pytest.approx(0.0)
-    assert result["time_s"][-1] > 433.8
-    assert result["acc_mps2"][0] == pytest.approx(0.0)
-    assert result["acc_mps2"][1] == pytest.approx(0.0)
+    assert np.asarray(result["time_s"])[0] == pytest.approx(0.0)
+    assert np.asarray(result["time_s"])[-1] > 433.8
+    assert np.asarray(result["acc_mps2"])[0] == pytest.approx(0.0)
+    assert np.asarray(result["acc_mps2"])[1] == pytest.approx(0.0)
     np.testing.assert_allclose(result["source_position_m"], [900.0, 1500.0, 29240.0])
     np.testing.assert_allclose(result["source_time_s"], [0.0, 10.0, 433.8])
     np.testing.assert_allclose(result["source_acc_mps2"], [0.0, 1.0, -0.5])
@@ -43,7 +45,9 @@ def test_transform_operation_curve_arrays_maps_endpoints_and_midpoint() -> None:
     )
 
 
-def test_save_transformed_operation_curve_writes_expected_npz_keys(tmp_path) -> None:
+def test_save_transformed_operation_curve_writes_expected_npz_keys(
+    tmp_path: Path,
+) -> None:
     result = transform_operation_curve_arrays(
         source_position_m=[900.0, 29240.0],
         speed_kmh=[36.0, 36.0],
@@ -105,7 +109,7 @@ def test_recompute_time_and_acceleration_falls_back_for_duplicate_positions() ->
 
 def test_transform_operation_curve_rejects_invalid_spans() -> None:
     with pytest.raises(ValueError, match="source position span must be positive"):
-        transform_operation_curve_arrays(
+        _ = transform_operation_curve_arrays(
             source_position_m=[900.0, 900.0],
             speed_kmh=[0.0, 36.0],
             acc_mps2=[0.0, 1.0],
@@ -117,7 +121,7 @@ def test_transform_operation_curve_rejects_invalid_spans() -> None:
     with pytest.raises(
         ValueError, match="target_position_m must be greater than start_position_m"
     ):
-        transform_operation_curve_arrays(
+        _ = transform_operation_curve_arrays(
             source_position_m=[900.0, 29240.0],
             speed_kmh=[0.0, 36.0],
             acc_mps2=[0.0, 1.0],
@@ -129,7 +133,7 @@ def test_transform_operation_curve_rejects_invalid_spans() -> None:
 
 def test_transform_operation_curve_rejects_mismatched_lengths() -> None:
     with pytest.raises(ValueError, match="must have the same length"):
-        transform_operation_curve_arrays(
+        _ = transform_operation_curve_arrays(
             source_position_m=[900.0, 29240.0],
             speed_kmh=[0.0],
             acc_mps2=[0.0, 1.0],

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import matplotlib.pyplot as plt
-from matplotlib.ticker import FuncFormatter
 import numpy as np
+from matplotlib.axes import Axes
+from matplotlib.ticker import FuncFormatter
 
 from model.common.energy_consumption_calculator import ECC
 from model.ocs import SafeGuardUtility
@@ -27,9 +28,12 @@ from utils.scenario import build_safeguard_utility
 ALIGNED_CURVE_REQUIRED_KEYS = ("position_m", "speed_mps", "acc_mps2", "time_s")
 
 
-def _format_meter_axis_as_km(ax) -> None:
-    ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _pos: f"{x / 1000:g}"))
-    ax.set_xlabel(r"里程($km$)")
+def _format_meter_axis_as_km(ax: Axes) -> None:
+    def _km_formatter(x: float, _pos: object) -> str:
+        return f"{x / 1000:g}"
+
+    ax.xaxis.set_major_formatter(FuncFormatter(_km_formatter))
+    _ = ax.set_xlabel(r"里程($km$)")
 
 
 def load_operation_samples() -> tuple[
@@ -42,7 +46,9 @@ def load_operation_samples() -> tuple[
     if aligned_curve_path.is_file():
         with np.load(aligned_curve_path, allow_pickle=False) as curve_data:
             missing_keys = [
-                key for key in ALIGNED_CURVE_REQUIRED_KEYS if key not in curve_data.files
+                key
+                for key in ALIGNED_CURVE_REQUIRED_KEYS
+                if key not in curve_data.files
             ]
             if missing_keys:
                 raise ValueError(
@@ -118,7 +124,7 @@ def main() -> None:
     safeguardutility = build_safeguard_utility()
 
     fig1, ax1 = plt.subplots(figsize=(10, 6))
-    ax1.plot(
+    _ = ax1.plot(
         distance_m,
         speed_kmh,
         label="重标定后实际运行速度随里程变化曲线",
@@ -126,23 +132,23 @@ def main() -> None:
     )
     safeguardutility.render(ax=ax1, layers=SafeGuardUtility.DANGER_VIEW_LAYERS)
     _format_meter_axis_as_km(ax1)
-    ax1.set_ylabel(r"速度($km/h$)")
-    ax1.set_title("龙阳路到浦东国际机场重标定后实际运行速度-里程曲线")
+    _ = ax1.set_ylabel(r"速度($km/h$)")
+    _ = ax1.set_title("龙阳路到浦东国际机场重标定后实际运行速度-里程曲线")
     ax1.grid(True, alpha=0.3)
-    ax1.legend()
+    _ = ax1.legend()
 
     fig2, ax2 = plt.subplots(figsize=(10, 6))
-    ax2.plot(
+    _ = ax2.plot(
         distance_m,
         acceleration,
         label="重标定后实际加速度随里程变化曲线",
         color="green",
     )
     _format_meter_axis_as_km(ax2)
-    ax2.set_ylabel(r"加速度($m/s^2$)")
-    ax2.set_title("龙阳路到浦东国际机场重标定后实际加速度-里程曲线")
+    _ = ax2.set_ylabel(r"加速度($m/s^2$)")
+    _ = ax2.set_title("龙阳路到浦东国际机场重标定后实际加速度-里程曲线")
     ax2.grid(True, alpha=0.3)
-    ax2.legend()
+    _ = ax2.legend()
 
     track = build_track()
     vehicle = VehicleInfo(mass=317.5, numoftrainsets=5, length=128.5)
@@ -176,23 +182,23 @@ def main() -> None:
     )
 
     fig3, ax3 = plt.subplots(figsize=(10, 6))
-    ax3.plot(
+    _ = ax3.plot(
         distance_m,
         propulsion_energy_consumption,
         label="重标定后实际牵引能耗随里程变化曲线",
         color="red",
     )
-    ax3.plot(
+    _ = ax3.plot(
         distance_m,
         leviation_energy_consumption,
         label="重标定后实际悬浮能耗随里程变化曲线",
         color="green",
     )
     _format_meter_axis_as_km(ax3)
-    ax3.set_ylabel(r"能耗($kJ$)")
-    ax3.legend()
+    _ = ax3.set_ylabel(r"能耗($kJ$)")
+    _ = ax3.legend()
     ax3.grid(True, alpha=0.3)
-    ax3.set_title("龙阳路到浦东国际机场重标定后实际能耗-里程曲线")
+    _ = ax3.set_title("龙阳路到浦东国际机场重标定后实际能耗-里程曲线")
 
     for fig in (fig1, fig2, fig3):
         fig.tight_layout()

@@ -17,25 +17,25 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="使用可配置的日志记录和分析开关训练 MTTO PPO 策略",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--output-root",
         type=str,
         default="output/optimal/rl/",
         help="训练结果输出根目录。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--schedule-time-s",
         type=float,
         default=430.0,
         help="规划运行时间(s)",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--max-step-distance",
         type=float,
         default=30.0,
         help="训练环境相邻状态转移间的最大移动距离。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--reward-profile",
         type=str,
         choices=tuple(reward_profile_names()),
@@ -45,26 +45,26 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "其余预设仅沿 safety/stopping 两个 shaping 维度逐级打开。"
         ),
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--curriculum-profile",
         type=str,
         choices=tuple(curriculum_profile_names()),
         default=DEFAULT_CURRICULUM_PROFILE_NAME,
         help="初态课程预设。none 保持真实起点训练；fixed_reverse 启用固定逆向课程。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--reference-curve-dir",
         type=str,
         default=None,
         help="启用课程时必填：包含任务匹配 DP 参考轨迹的目录。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--experiment-tag",
         type=str,
         default=None,
         help="附加实验标签，用于隔离输出目录与日志命名。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--run-mode",
         type=str,
         choices=["tune", "reproduce", "monitor_best", "best_only"],
@@ -77,181 +77,181 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "best_only=仅保留best-eval。"
         ),
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--enable-tb",
         action=argparse.BooleanOptionalAction,
         default=None,
         help="启用 Tensorboard 日志记录。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--enable-callback",
         action=argparse.BooleanOptionalAction,
         default=None,
         help="启用 Tensorboard 回调。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--enable-monitor",
         action=argparse.BooleanOptionalAction,
         default=None,
         help="启用 VecMonitor 包装器。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--enable-env-diagnostics",
         action=argparse.BooleanOptionalAction,
         default=None,
         help="启用训练过程诊断信息收集功能。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--enable-auto-analysis",
         action=argparse.BooleanOptionalAction,
         default=None,
         help="启用训练后自动分析。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--enable-best-eval",
         action=argparse.BooleanOptionalAction,
         default=None,
         help="启用最佳轨迹评估。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--analysis-output-root",
         type=str,
         default="mtto_train_reports",
         help="训练后分析结果的输出目录。仅在启用日志记录功能时生效。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--analysis-min-points-per-10k-steps",
         type=float,
         default=5.0,
         help="每1万步最低可接受平均样本数。仅在启用日志记录功能时生效。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--analysis-min-unique-episodes",
         type=int,
         default=100,
         help="最低可接受唯一回合数。仅在启用日志记录功能时生效。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--analysis-sampling-quality-mode",
         type=str,
         choices=["warn_only", "strict_fail"],
         default="warn_only",
         help="自动分析的采样质量门控模式。仅在启用日志记录功能时生效。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--reward-discount",
         type=float,
         default=DEFAULT_REWARD_DISCOUNT,
         help="回报折扣因子。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--num-envs",
         type=int,
         default=1,
         help="训练环境数量。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--vec-env-type",
         type=str,
         choices=["dummy", "subproc"],
         default="subproc",
         help="向量化环境后端。subproc 在 num_envs > 1 时启用并行采样。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--rollout-steps-per-update",
         type=int,
         default=DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
         help="PPO rollout 步数。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--n-steps-per-env",
         type=int,
         default=None,
         help="PPO n_steps 步数。如果未指定，\
              则根据 rollout-steps-per-update 和 num-envs 计算得出。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--total-timesteps",
         type=int,
         default=200_000,
         help="PPO 总训练步数。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--tensorboard-log-dir",
         type=str,
         default="mtto_ppo_tb_logs",
         help="TensorBoard 日志输出根目录。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--tb-log-name",
         type=str,
         default=None,
         help="TensorBoard 运行名称；未指定时会根据运行模式和实验标识自动生成。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--log-interval",
         type=int,
         default=None,
         help="PPO log_interval。仅在启用日志记录功能时生效。`tune`模式下默认为1。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--tb-sample-interval-steps",
         type=int,
         default=1,
         help="Tensorboard 回调记录数据的最小间隔步数。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--env-diagnostics-interval-steps",
         type=int,
         default=None,
         help="环境诊断信息的记录间隔。默认与 tb-sample-interval-steps 一致。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--force-dump-interval-steps",
         type=int,
         default=0,
         help="(legacy)Tensorboard 回调中强制刷新数据缓存的间隔步数。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--tb-batch-dump-records",
         type=int,
         default=0,
         help="Tensorboard 事件缓冲区的记录上限。\
              达到上限后，将刷写文件；如果设置为0，则会在训练结束后一次刷写全部内容。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--best-eval-trigger-mode",
         type=str,
         choices=["steps", "episodes"],
         default="steps",
         help="最优评估回调的触发模式。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--best-eval-trigger-interval",
         type=int,
         default=100_000,
         help="根据 best-eval-trigger-mode 的设置，\
              以步数或回合数为单位的最佳评估触发间隔。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--best-eval-deterministic",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="在运行最佳评估回放时，使用确定性策略。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--enable-safety-violation-bins",
         action=argparse.BooleanOptionalAction,
         default=False,
         help="是否在训练过程中按位置区段记录安全约束违规率。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--safety-position-bin-size-m",
         type=float,
         default=5000.0,
         help="安全违规位置统计使用的位置分桶长度(m)。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--rollout-record-trigger-mode",
         type=str,
         choices=["steps", "episodes"],
@@ -262,16 +262,16 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "episodes=每个回合终止时记录该回合的原始 reward 与长度。"
         ),
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--seed", type=int, default=None, help="Random seed for reproducibility."
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--device",
         type=str,
         default="cpu",
         help="指定运行 PPO 算法的硬件设备，例如 'cpu' 或 'cuda'。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--dry-run",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -334,13 +334,13 @@ def print_training_run_spec(spec: TrainingRunSpec) -> None:
     if spec.enable_auto_analysis and not spec.enable_tb:
         print(
             "- warning: enable_auto_analysis=True while enable_tb=False; "
-            f"analysis will use existing logs in \
+            + f"analysis will use existing logs in \
             {spec.tensorboard_log_dir} if available."
         )
     if spec.enable_auto_analysis and not spec.enable_callback:
         print(
             "- warning: enable_auto_analysis=True while enable_callback=False; "
-            "analysis may miss high-frequency state/constraint diagnostics."
+            + "analysis may miss high-frequency state/constraint diagnostics."
         )
 
 
@@ -356,7 +356,7 @@ def main() -> None:
         )
         return
 
-    train_single_experiment(args, spec=spec)
+    _ = train_single_experiment(args, spec=spec)
 
 
 if __name__ == "__main__":

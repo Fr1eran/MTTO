@@ -1,8 +1,9 @@
+import json
 import os
 from argparse import Namespace
+from pathlib import Path
 from types import SimpleNamespace
 
-import json
 import pytest
 
 from scripts.reproduce_dp import (
@@ -38,20 +39,22 @@ def test_reproduce_dp_cli_defaults() -> None:
 
 def test_reproduce_dp_cli_accepts_explicit_args() -> None:
     parser = _build_cli_parser()
-    args = parser.parse_args([
-        "--output-root",
-        "output/custom",
-        "--schedule-time-s",
-        "500.5",
-        "--delta-speed-mps",
-        "0.05",
-        "--max-outer-iterations",
-        "50",
-        "--precompute-mode",
-        "parallel",
-        "--precompute-workers",
-        "4",
-    ])
+    args = parser.parse_args(
+        [
+            "--output-root",
+            "output/custom",
+            "--schedule-time-s",
+            "500.5",
+            "--delta-speed-mps",
+            "0.05",
+            "--max-outer-iterations",
+            "50",
+            "--precompute-mode",
+            "parallel",
+            "--precompute-workers",
+            "4",
+        ]
+    )
 
     assert args.output_root == "output/custom"
     assert args.schedule_time_s == pytest.approx(500.5)
@@ -63,15 +66,17 @@ def test_reproduce_dp_cli_accepts_explicit_args() -> None:
 
 def test_reproduce_dp_cli_stage_division_uniform() -> None:
     parser = _build_cli_parser()
-    args = parser.parse_args([
-        "--stage-division",
-        "uniform",
-        "--uniform-step-size",
-        "25.0",
-        "--sub-stage-count",
-        "50",
-        "--skip-disk-cache",
-    ])
+    args = parser.parse_args(
+        [
+            "--stage-division",
+            "uniform",
+            "--uniform-step-size",
+            "25.0",
+            "--sub-stage-count",
+            "50",
+            "--skip-disk-cache",
+        ]
+    )
 
     assert args.stage_division == "uniform"
     assert args.uniform_step_size == pytest.approx(25.0)
@@ -81,12 +86,14 @@ def test_reproduce_dp_cli_stage_division_uniform() -> None:
 
 def test_reproduce_dp_cli_stage_division_variable() -> None:
     parser = _build_cli_parser()
-    args = parser.parse_args([
-        "--stage-division",
-        "variable",
-        "--sub-stage-count",
-        "20",
-    ])
+    args = parser.parse_args(
+        [
+            "--stage-division",
+            "variable",
+            "--sub-stage-count",
+            "20",
+        ]
+    )
 
     assert args.stage_division == "variable"
     assert args.sub_stage_count == 20
@@ -225,17 +232,17 @@ class TestValidateCliArgs:
 )
 def test_main_rejects_invalid_args(argv: list[str]) -> None:
     with pytest.raises(SystemExit) as exc_info:
-        main(argv)
+        _ = main(argv)
 
     assert exc_info.value.code == 2
 
 
 def test_run_optimization_metrics_include_start_and_target_speed(
-    tmp_path,
-    monkeypatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeOptimizer:
-        def __init__(self, **kwargs):
+        def __init__(self, **kwargs: object):
             del kwargs
 
         def optimize(self, *, max_speed: float, delta_speed: float, max_iters: int):
@@ -255,23 +262,38 @@ def test_run_optimization_metrics_include_start_and_target_speed(
         target_position=20.0,
         max_acc_change=0.75,
     )
-    monkeypatch.setattr(
-        "scripts.reproduce_dp.build_scenario",
-        lambda *, schedule_time_s: (
+
+    def _fake_build_scenario(
+        *, schedule_time_s: float
+    ) -> tuple[SimpleNamespace, object, object, SimpleNamespace]:
+        del schedule_time_s
+        return (
             SimpleNamespace(max_speed=30.0),
             object(),
             object(),
             train_service,
-        ),
-    )
-    monkeypatch.setattr("scripts.reproduce_dp.VariableSpacingDPOptimizer", FakeOptimizer)
-    monkeypatch.setattr(
-        "scripts.reproduce_dp.compute_comfort_metrics_from_trajectory",
-        lambda **kwargs: {
+        )
+
+    def _fake_compute_comfort_metrics(
+        **kwargs: object,
+    ) -> dict[str, float]:
+        del kwargs
+        return {
             "comfort_tav": 0.0,
             "comfort_er_pct": 0.0,
             "comfort_rms": 0.0,
-        },
+        }
+
+    monkeypatch.setattr(
+        "scripts.reproduce_dp.build_scenario",
+        _fake_build_scenario,
+    )
+    monkeypatch.setattr(
+        "scripts.reproduce_dp.VariableSpacingDPOptimizer", FakeOptimizer
+    )
+    monkeypatch.setattr(
+        "scripts.reproduce_dp.compute_comfort_metrics_from_trajectory",
+        _fake_compute_comfort_metrics,
     )
 
     args = Namespace(

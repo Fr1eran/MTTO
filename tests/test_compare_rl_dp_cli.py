@@ -4,28 +4,28 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from rl.experiment_utils import DEFAULT_SCHEDULE_TIME_S
 from scripts.compare_rl_dp import (
     _build_cli_parser,
     _compute_segment_midpoints,
     _resolve_curve_artifacts,
     _resolve_target_schedule_time,
 )
-from rl.experiment_utils import DEFAULT_SCHEDULE_TIME_S
 
 
 def _write_dp_artifact(run_dir: Path) -> tuple[Path, Path]:
     curve_path = run_dir / "optimized_speed_curve.npz"
     metrics_path = run_dir / "optimized_speed_curve_metrics.json"
-    curve_path.write_bytes(b"dp")
-    metrics_path.write_text("{}", encoding="utf-8")
+    _ = curve_path.write_bytes(b"dp")
+    _ = metrics_path.write_text("{}", encoding="utf-8")
     return curve_path, metrics_path
 
 
 def _write_rl_artifact(run_dir: Path, *, file_name: str) -> tuple[Path, Path]:
     curve_path = run_dir / file_name
     metrics_path = run_dir / f"{curve_path.stem}_metrics.json"
-    curve_path.write_bytes(b"rl")
-    metrics_path.write_text("{}", encoding="utf-8")
+    _ = curve_path.write_bytes(b"rl")
+    _ = metrics_path.write_text("{}", encoding="utf-8")
     return curve_path, metrics_path
 
 
@@ -42,17 +42,19 @@ def test_compare_rl_dp_cli_defaults() -> None:
 
 def test_compare_rl_dp_cli_accepts_explicit_args() -> None:
     parser = _build_cli_parser()
-    args = parser.parse_args([
-        "--dp-curve-dir",
-        "output/custom/dp",
-        "--rl-curve-dir",
-        "output/custom/rl",
-        "--trajectory-source",
-        "final",
-        "--no-safeguard",
-        "--factor",
-        "0.95",
-    ])
+    args = parser.parse_args(
+        [
+            "--dp-curve-dir",
+            "output/custom/dp",
+            "--rl-curve-dir",
+            "output/custom/rl",
+            "--trajectory-source",
+            "final",
+            "--no-safeguard",
+            "--factor",
+            "0.95",
+        ]
+    )
 
     assert args.dp_curve_dir == "output/custom/dp"
     assert args.rl_curve_dir == "output/custom/rl"
@@ -107,10 +109,10 @@ def test_resolve_curve_artifacts_raises_when_dp_missing(tmp_path: Path) -> None:
     dp_root.mkdir(parents=True)
     rl_dir = rl_root / "430p0_100p0__basic" / "best_steps"
     rl_dir.mkdir(parents=True)
-    _write_rl_artifact(rl_dir, file_name="best_trajectory.npz")
+    _ = _write_rl_artifact(rl_dir, file_name="best_trajectory.npz")
 
     with pytest.raises(FileNotFoundError, match="optimized_speed_curve.npz"):
-        _resolve_curve_artifacts(
+        _ = _resolve_curve_artifacts(
             dp_curve_dir=str(dp_root),
             rl_curve_dir=str(rl_root),
             trajectory_source="best",
@@ -146,4 +148,4 @@ def test_compute_segment_midpoints_returns_empty_when_insufficient_points() -> N
 
 def test_compute_segment_midpoints_rejects_non_1d_input() -> None:
     with pytest.raises(ValueError, match="1-D"):
-        _compute_segment_midpoints(np.asarray([[0.0, 1.0], [2.0, 3.0]]))
+        _ = _compute_segment_midpoints(np.asarray([[0.0, 1.0], [2.0, 3.0]]))

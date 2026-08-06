@@ -1,5 +1,7 @@
 """Pure conversion from an operational state to the agent observation."""
 
+from collections.abc import Callable
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -10,7 +12,7 @@ from rl.operational_state import OperationalState
 
 
 class ObservationBuilder:
-    target_attraction_domain_radius_m = 3000.0
+    target_attraction_domain_radius_m: float = 3000.0
 
     def __init__(
         self,
@@ -21,12 +23,17 @@ class ObservationBuilder:
         max_step_distance_m: float,
         direction: int,
         whole_distance_m: float,
-        get_upper_speed_or_zero,
+        get_upper_speed_or_zero: Callable[[float], float],
     ) -> None:
-        self.vehicle, self.track, self.train_service = vehicle, track, train_service
-        self.max_step_distance_m, self.direction = max_step_distance_m, direction
-        self.whole_distance_m = max(whole_distance_m, 1e-12)
-        self._get_upper_speed_or_zero = get_upper_speed_or_zero
+        self.vehicle: VehicleInfo = vehicle
+        self.track: TrackInfo = track
+        self.train_service: TrainService = train_service
+        self.max_step_distance_m: float = max_step_distance_m
+        self.direction: int = direction
+        self.whole_distance_m: float = max(whole_distance_m, 1e-12)
+        self._get_upper_speed_or_zero: Callable[[float], float] = (
+            get_upper_speed_or_zero
+        )
 
     def build(self, state: OperationalState) -> NDArray[np.float32]:
         distance = self.train_service.target_position - state.position_m

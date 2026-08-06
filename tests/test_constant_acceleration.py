@@ -1,13 +1,22 @@
 import math
 from types import SimpleNamespace
+from typing import cast
 
+import numpy as np
 import pytest
+from numpy.typing import NDArray
 
-from dp.core import _calculate_transition_with_context
+from dp.core import (
+    _calculate_transition_with_context,
+)
 from model.common import (
     calc_transition_from_acc_scalar_numba,
     calc_transition_to_speed_scalar_numba,
 )
+from model.common.energy_consumption_calculator import ECC
+from model.ocs import SafeGuardUtility
+from model.track import TrackInfo
+from model.vehicle import VehicleInfo
 
 
 @pytest.mark.parametrize(
@@ -60,7 +69,9 @@ def test_calc_transition_to_speed_scalar_numba(
 def test_dp_transition_uses_shared_end_speed_transition() -> None:
     class FakeSafeguardUtility:
         @staticmethod
-        def detect_any_danger(*, pos, speed) -> bool:
+        def detect_any_danger(
+            *, pos: NDArray[np.floating], speed: NDArray[np.floating]
+        ) -> bool:
             assert pos.size == speed.size
             return False
 
@@ -68,7 +79,7 @@ def test_dp_transition_uses_shared_end_speed_transition() -> None:
         def __init__(self) -> None:
             self.kwargs: dict[str, object] = {}
 
-        def calc_energy(self, **kwargs) -> tuple[float, float]:
+        def calc_energy(self, **kwargs: object) -> tuple[float, float]:
             self.kwargs = kwargs
             return 2.0, 3.0
 
@@ -78,10 +89,12 @@ def test_dp_transition_uses_shared_end_speed_transition() -> None:
         speed_k=10.0,
         displacement=30.0,
         speed_k_1=12.0,
-        vehicle=SimpleNamespace(max_acc=1.0, max_dec=-1.0),
-        safeguard_utility=FakeSafeguardUtility(),
-        ecc=ecc,
-        track=object(),
+        vehicle=cast(
+            VehicleInfo, cast(object, SimpleNamespace(max_acc=1.0, max_dec=-1.0))
+        ),
+        safeguard_utility=cast(SafeGuardUtility, cast(object, FakeSafeguardUtility())),
+        ecc=cast(ECC, cast(object, ecc)),
+        track=cast(TrackInfo, object()),
     )
 
     assert is_valid is True

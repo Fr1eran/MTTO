@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import math
 
-from numba import njit
+from numba import (
+    njit,
+)
 
 __all__ = [
     "calc_transition_from_acc_scalar_numba",
@@ -43,9 +45,9 @@ def calc_transition_from_acc_scalar_numba(
     actual_distance_m = requested_distance_m
     if next_speed_squared < speed_tolerance:
         next_speed_mps = 0.0
-        actual_distance_m = -(
-            begin_speed_mps * begin_speed_mps
-        ) / (2.0 * acceleration_mps2)
+        actual_distance_m = -(begin_speed_mps * begin_speed_mps) / (
+            2.0 * acceleration_mps2
+        )
     else:
         next_speed_mps = math.sqrt(next_speed_squared)
 

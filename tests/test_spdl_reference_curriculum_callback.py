@@ -1,18 +1,24 @@
 from types import SimpleNamespace
+from typing import cast
 
 import numpy as np
 import pytest
 import torch as th
+from numpy.typing import NDArray
+from stable_baselines3.common.base_class import BaseAlgorithm
 
-from rl.callbacks import SPDLReferenceCurriculumCallback, _SPDLContextSample
+from rl.callbacks import (
+    SPDLReferenceCurriculumCallback,
+    _SPDLContextSample,
+)
 from rl.experiment_utils import resolve_curriculum_profile
 
 
 class _Policy:
-    def obs_to_tensor(self, observations):
+    def obs_to_tensor(self, observations: np.ndarray) -> tuple[th.Tensor, bool]:
         return th.as_tensor(observations, dtype=th.float32), True
 
-    def predict_values(self, observation_tensor):
+    def predict_values(self, observation_tensor: th.Tensor) -> th.Tensor:
         return observation_tensor[:, :1]
 
 
@@ -20,7 +26,13 @@ class _VecEnv:
     def __init__(self) -> None:
         self.calls: list[tuple[str, np.ndarray, int]] = []
 
-    def env_method(self, method_name, weights, *, version):
+    def env_method(
+        self,
+        method_name: str,
+        weights: NDArray[np.floating] | list[float],
+        *,
+        version: int,
+    ):
         self.calls.append((method_name, np.asarray(weights), version))
 
 
@@ -35,7 +47,10 @@ def _build_callback() -> tuple[SPDLReferenceCurriculumCallback, _VecEnv]:
         profile=resolve_curriculum_profile("spdl"),
     )
     env = _VecEnv()
-    callback.model = SimpleNamespace(policy=_Policy(), get_env=lambda: env)
+    callback.model = cast(
+        BaseAlgorithm,
+        cast(object, SimpleNamespace(policy=_Policy(), get_env=lambda: env)),
+    )
     return callback, env
 
 
@@ -101,10 +116,7 @@ def test_spdl_warmup_broadcasts_kl_bounded_distribution_after_first_rollout() ->
     assert version == 1
     assert weights.sum() == pytest.approx(1.0)
     assert np.all(weights > 0.0)
-    assert (
-        callback._kl_divergence(weights, callback.initial_weights())
-        <= 0.05 + 1e-8
-    )
+    assert callback._kl_divergence(weights, callback.initial_weights()) <= 0.05 + 1e-8
 
 
 def test_spdl_post_warmup_clips_negative_return_alpha_and_updates(
@@ -128,10 +140,7 @@ def test_spdl_post_warmup_clips_negative_return_alpha_and_updates(
     assert captured_alphas == [0.0]
     assert len(env.calls) == 1
     _, weights, _ = env.calls[0]
-    assert (
-        callback._kl_divergence(weights, callback.initial_weights())
-        <= 0.05 + 1e-8
-    )
+    assert callback._kl_divergence(weights, callback.initial_weights()) <= 0.05 + 1e-8
     assert callback._context_samples == []
 
 
@@ -143,7 +152,4 @@ def test_spdl_closed_form_solver_returns_feasible_distribution() -> None:
 
     assert candidate.sum() == pytest.approx(1.0)
     assert np.all(candidate > 0.0)
-    assert (
-        callback._kl_divergence(candidate, callback.initial_weights())
-        <= 0.05 + 1e-8
-    )
+    assert callback._kl_divergence(candidate, callback.initial_weights()) <= 0.05 + 1e-8

@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from numpy.typing import NDArray
 
 from model.force.numpy.brake import (
     sledge_frictional_brake_force,
@@ -23,11 +24,11 @@ from model.vehicle.vehicle import (
 
 
 @pytest.fixture
-def v_sample():
+def v_sample() -> NDArray[np.float64]:
     return np.arange(0.0, 600.0, 0.01)
 
 
-def test_total_resis_force_shape(v_sample):
+def test_total_resis_force_shape(v_sample: NDArray[np.float64]) -> None:
     total_resis_force = (
         air_resis_force(v_sample, 5)
         + guideway_vortex_resis_force(v_sample, 5)
@@ -41,7 +42,7 @@ def test_total_resis_force_shape(v_sample):
     assert total_resis_force.shape == v_sample.shape
 
 
-def test_total_resis_force_nonnegative(v_sample):
+def test_total_resis_force_nonnegative(v_sample: NDArray[np.float64]) -> None:
     total_resis_force = (
         air_resis_force(v_sample, 5)
         + guideway_vortex_resis_force(v_sample, 5)
@@ -69,9 +70,7 @@ def test_vehicle_module_scalar_interfaces_are_consistent():
         speed=speed,
         slope=slope,
     )
-    levi_nb = calc_levi_deceleration_scalar_numba(
-        speed, slope, mass, numoftrainsets
-    )
+    levi_nb = calc_levi_deceleration_scalar_numba(speed, slope, mass, numoftrainsets)
     brake_np = calc_brake_deceleration(
         mass=mass,
         numoftrainsets=numoftrainsets,

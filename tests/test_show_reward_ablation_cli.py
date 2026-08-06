@@ -71,7 +71,7 @@ def _write_safety_violation_bins(
         payload["episode_violation_count"] = np.asarray(
             episode_violation_count, dtype=np.float64
         )
-    np.savez(output_path, **payload)
+    np.savez(output_path, allow_pickle=True, **payload)
     return output_path
 
 
@@ -83,8 +83,8 @@ def _write_trajectory_artifact(
 ) -> None:
     run_dir = output_dir / source_dir_name
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "best_trajectory.npz").write_bytes(b"curve")
-    (run_dir / "best_trajectory_metrics.json").write_text(
+    _ = (run_dir / "best_trajectory.npz").write_bytes(b"curve")
+    _ = (run_dir / "best_trajectory_metrics.json").write_text(
         json.dumps(metrics),
         encoding="utf-8",
     )
@@ -96,25 +96,25 @@ def _build_manifest(tmp_path: Path) -> tuple[dict[str, object], Path]:
     run_basic_r2 = ablation_root / "430p0_100p0__basic__r02"
     run_safety_r1 = ablation_root / "430p0_100p0__basic_safety__r01"
 
-    _write_episode_metrics(
+    _ = _write_episode_metrics(
         run_basic_r1 / "final",
         steps=[0, 100, 200],
         rewards=[1.0, 2.0, 3.0],
         lengths=[10.0, 9.0, 8.0],
     )
-    _write_episode_metrics(
+    _ = _write_episode_metrics(
         run_basic_r2 / "final",
         steps=[0, 200],
         rewards=[2.0, 6.0],
         lengths=[12.0, 6.0],
     )
-    _write_episode_metrics(
+    _ = _write_episode_metrics(
         run_safety_r1 / "final",
         steps=[0, 100, 200],
         rewards=[3.0, 4.0, 5.0],
         lengths=[8.0, 7.0, 6.0],
     )
-    _write_safety_violation_bins(
+    _ = _write_safety_violation_bins(
         run_basic_r1 / "final",
         bin_start_m=[0, 250, 500, 750, 1000],
         bin_end_m=[250, 500, 750, 1000, 1500],
@@ -125,7 +125,7 @@ def _build_manifest(tmp_path: Path) -> tuple[dict[str, object], Path]:
         episode_exposure_count=[10, 10, 10, 10, 10],
         episode_violation_count=[1, 3, 4, 6, 0],
     )
-    _write_safety_violation_bins(
+    _ = _write_safety_violation_bins(
         run_basic_r2 / "final",
         bin_start_m=[0, 1000],
         bin_end_m=[500, 1500],
@@ -136,7 +136,7 @@ def _build_manifest(tmp_path: Path) -> tuple[dict[str, object], Path]:
         episode_exposure_count=[10, 10],
         episode_violation_count=[3, 1],
     )
-    _write_safety_violation_bins(
+    _ = _write_safety_violation_bins(
         run_safety_r1 / "final",
         bin_start_m=[0, 500, 1000],
         bin_end_m=[500, 1000, 1500],
@@ -148,15 +148,15 @@ def _build_manifest(tmp_path: Path) -> tuple[dict[str, object], Path]:
         episode_violation_count=[0, 1, 0],
     )
 
-    _write_run_metadata(
+    _ = _write_run_metadata(
         run_basic_r1 / "final",
         {"rollout_record_trigger_mode": "steps"},
     )
-    _write_run_metadata(
+    _ = _write_run_metadata(
         run_basic_r2 / "final",
         {"rollout_record_trigger_mode": "steps"},
     )
-    _write_run_metadata(
+    _ = _write_run_metadata(
         run_safety_r1 / "final",
         {"rollout_record_trigger_mode": "steps"},
     )
@@ -204,7 +204,7 @@ def _build_manifest(tmp_path: Path) -> tuple[dict[str, object], Path]:
         },
     )
 
-    manifest = {
+    manifest: dict[str, object] = {
         "ablation_output_root": str(ablation_root),
         "reward_profiles": ["basic", "basic_safety"],
         "runs": [
@@ -239,7 +239,7 @@ def _build_manifest(tmp_path: Path) -> tuple[dict[str, object], Path]:
     }
     manifest_path = ablation_root / ABLATION_MANIFEST_FILENAME
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    _ = manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     return manifest, manifest_path
 
 
@@ -345,7 +345,9 @@ def test_build_safety_violation_bin_aggregates_warns_for_missing_artifact(
 
     assert aggregates == []
     assert any("artifact is missing" in warning for warning in warnings)
-    assert any("No valid safety violation bin artifacts" in warning for warning in warnings)
+    assert any(
+        "No valid safety violation bin artifacts" in warning for warning in warnings
+    )
 
 
 def test_select_representative_trajectory_candidates_uses_existing_comparison_key(
@@ -374,7 +376,7 @@ def _write_run_metadata(
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = output_dir / "run_metadata.json"
-    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    _ = metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
     return metadata_path
 
 
@@ -382,13 +384,13 @@ def test_build_curve_aggregates_rejects_episode_mode_artifacts(tmp_path: Path) -
     ablation_root = tmp_path / "ablation_ep"
     run_dir = ablation_root / "430p0_100p0__basic__r01"
 
-    _write_episode_metrics(
+    _ = _write_episode_metrics(
         run_dir / "final",
         steps=[0, 1, 2],
         rewards=[1.0, 3.0, 5.0],
         lengths=[10.0, 9.0, 8.0],
     )
-    _write_run_metadata(
+    _ = _write_run_metadata(
         run_dir / "final",
         {"rollout_record_trigger_mode": "episodes"},
     )
@@ -409,20 +411,20 @@ def test_build_curve_aggregates_rejects_episode_mode_artifacts(tmp_path: Path) -
     }
 
     with pytest.raises(ValueError, match="no longer supports episodes-based"):
-        build_curve_aggregates(manifest)
+        _ = build_curve_aggregates(manifest)
 
 
 def test_build_curve_aggregates_rejects_missing_record_mode(tmp_path: Path) -> None:
     ablation_root = tmp_path / "ablation_missing_mode"
     run_dir = ablation_root / "430p0_100p0__basic__r01"
 
-    _write_episode_metrics(
+    _ = _write_episode_metrics(
         run_dir / "final",
         steps=[0, 100, 200],
         rewards=[1.0, 2.0, 3.0],
         lengths=[10.0, 9.0, 8.0],
     )
-    _write_run_metadata(run_dir / "final", {"reward_profile_name": "basic"})
+    _ = _write_run_metadata(run_dir / "final", {"reward_profile_name": "basic"})
 
     manifest = {
         "ablation_output_root": str(ablation_root),
@@ -440,20 +442,20 @@ def test_build_curve_aggregates_rejects_missing_record_mode(tmp_path: Path) -> N
     }
 
     with pytest.raises(ValueError, match="rollout_record_trigger_mode='steps'"):
-        build_curve_aggregates(manifest)
+        _ = build_curve_aggregates(manifest)
 
 
 def test_build_curve_aggregates_rejects_invalid_record_mode(tmp_path: Path) -> None:
     ablation_root = tmp_path / "ablation_invalid_mode"
     run_dir = ablation_root / "430p0_100p0__basic__r01"
 
-    _write_episode_metrics(
+    _ = _write_episode_metrics(
         run_dir / "final",
         steps=[0, 100, 200],
         rewards=[1.0, 2.0, 3.0],
         lengths=[10.0, 9.0, 8.0],
     )
-    _write_run_metadata(
+    _ = _write_run_metadata(
         run_dir / "final",
         {"rollout_record_trigger_mode": "invalid"},
     )
@@ -474,7 +476,7 @@ def test_build_curve_aggregates_rejects_invalid_record_mode(tmp_path: Path) -> N
     }
 
     with pytest.raises(ValueError, match="rollout_record_trigger_mode='steps'"):
-        build_curve_aggregates(manifest)
+        _ = build_curve_aggregates(manifest)
 
 
 def test_panel_label_for_index_uses_sci_style() -> None:

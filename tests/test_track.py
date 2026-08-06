@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+
 from model.track import (
     TrackInfo,
     get_next_slope_and_distance,

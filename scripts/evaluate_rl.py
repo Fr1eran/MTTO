@@ -5,7 +5,7 @@ from datetime import datetime
 
 import numpy as np
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv, VecVideoRecorder
+from stable_baselines3.common.vec_env import DummyVecEnv, VecEnv, VecVideoRecorder
 
 from rl.env_factory import make_env
 from rl.evaluation import (
@@ -25,11 +25,12 @@ from rl.experiment_utils import (
     resolve_reward_profile,
     reward_profile_names,
 )
+from rl.operational_state import OperationalState
 from utils.io_utils import save_curve_and_metrics
 from utils.scenario import build_scenario
 
 
-def _get_initial_state(venv):
+def _get_initial_state(venv: VecEnv) -> OperationalState:
     values = venv.get_attr("state")
     if not values:
         raise RuntimeError("Could not read environment state")
@@ -37,7 +38,7 @@ def _get_initial_state(venv):
 
 
 def build_initial_rollout_series(
-    venv,
+    venv: VecEnv,
 ) -> tuple[
     list[float],
     list[float],
@@ -60,7 +61,8 @@ def plot_operation_time_series(
 ) -> None:
     if len(operation_time_seq) != len(redundant_operation_time_seq):
         raise ValueError(
-            "operation_time_seq and redundant_operation_time_seq must have the same length"
+            "operation_time_seq and redundant_operation_time_seq must have "
+            "the same length"
         )
     if len(operation_time_seq) == 0:
         print("No operation-time samples collected; skipped time-series plot.")
@@ -131,98 +133,98 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="评估 MTTO PPO 策略",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--load-dir",
         type=str,
         default="output/optimal/rl/final/",
         help="PPO 模型文件所在目录",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--reward-discount",
         type=float,
         default=None,
         help="评估环境的折扣因子",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--schedule-time-s",
         type=float,
         default=None,
         help="规划运行时间；未指定时优先从训练元数据读取。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--step-distance",
         type=float,
         default=None,
         help="评估环境的最大仿真位移步长",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--reward-profile",
         type=str,
         choices=tuple(reward_profile_names()),
         default=None,
         help="奖励配置预设；未指定时优先从训练元数据读取。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--device",
         type=str,
         default="cpu",
         help="部署 PPO 模型的硬件设备",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--deterministic",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="评估时使用确定性策略",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--record-video",
         action=argparse.BooleanOptionalAction,
         default=False,
         help="记录评估过程视频",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--save-trajectory",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="保存轨迹数据",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--video-folder",
         type=str,
         default="mtto_eval_video",
         help="评估视频保存路径",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--output-dir",
         type=str,
         default=None,
         help="轨迹文件保存路径",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--video-length",
         type=int,
         default=10000,
         help="视频的最大状态转移步数",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--video-trigger-step",
         type=int,
         default=0,
         help="当状态转移至该步时，开始保存视频",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--enable-env-diagnostics",
         action=argparse.BooleanOptionalAction,
         default=False,
         help="评估时收集诊断信息",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--plot-operation-time-series",
         action=argparse.BooleanOptionalAction,
         default=False,
         help="评估后展示运行时间、冗余运行时间和 e_r 随智能体步数变化的曲线。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--dry-run",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -285,20 +287,22 @@ def main() -> None:
         schedule_time_s=schedule_time_s
     )
 
-    venv_eval = DummyVecEnv([
-        lambda: make_env(
-            vehicle=vehicle,
-            track=track,
-            safeguard_utility=safeguard_utility,
-            train_service=train_service,
-            gamma=reward_discount,
-            max_step_distance=ds,
-            enable_diagnostics=args.enable_env_diagnostics,
-            enable_trajectory_tracking=args.record_video,
-            render_mode="rgb_array" if args.record_video else None,
-            reward_config=reward_config,
-        )
-    ])
+    venv_eval = DummyVecEnv(
+        [
+            lambda: make_env(
+                vehicle=vehicle,
+                track=track,
+                safeguard_utility=safeguard_utility,
+                train_service=train_service,
+                gamma=reward_discount,
+                max_step_distance=ds,
+                enable_diagnostics=args.enable_env_diagnostics,
+                enable_trajectory_tracking=args.record_video,
+                render_mode="rgb_array" if args.record_video else None,
+                reward_config=reward_config,
+            )
+        ]
+    )
 
     if args.record_video:
         eval_name_prefix = f"eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -334,21 +338,20 @@ def main() -> None:
         episode_steps += 1
         episode_over = bool(dones[0])
         last_info = infos[0]
-        if isinstance(last_info, dict):
-            basic = last_info.get("basic")
-            if isinstance(basic, dict):
-                trajectory_position_seq.append(float(basic.get("position", 0.0)))
-                trajectory_speed_seq.append(float(basic.get("speed", 0.0)))
-                operation_time_seq.append(float(basic.get("operation_time", 0.0)))
-                redundant_operation_time_seq.append(
-                    float(basic.get("redundant_operation_time", 0.0))
-                )
+        basic = last_info.get("basic")
+        if isinstance(basic, dict):
+            trajectory_position_seq.append(float(basic.get("position", 0.0)))
+            trajectory_speed_seq.append(float(basic.get("speed", 0.0)))
+            operation_time_seq.append(float(basic.get("operation_time", 0.0)))
+            redundant_operation_time_seq.append(
+                float(basic.get("redundant_operation_time", 0.0))
+            )
 
     target_time_s = float(train_service.schedule_time)
     start_position_m = float(train_service.start_position)
     target_position_m = float(train_service.target_position)
     # VecEnv 在 done 后会自动 reset；终态指标优先从最后一步 info 快照读取。
-    basic_info = last_info.get("basic") if isinstance(last_info, dict) else None
+    basic_info = last_info.get("basic")
     basic_snapshot = basic_info if isinstance(basic_info, dict) else {}
 
     # 提取性能指标
@@ -363,14 +366,12 @@ def main() -> None:
     comfort_tav = float(basic_snapshot.get("comfort_tav", 0.0))
     comfort_er_pct = float(basic_snapshot.get("comfort_er_pct", 0.0))
     comfort_rms = float(basic_snapshot.get("comfort_rms", 0.0))
-    outcome_info = last_info.get("outcome") if isinstance(last_info, dict) else None
+    outcome_info = last_info.get("outcome")
     outcome_snapshot = outcome_info if isinstance(outcome_info, dict) else {}
     truncated = bool(
         outcome_snapshot.get(
             "truncated",
-            last_info.get("TimeLimit.truncated", False)
-            if isinstance(last_info, dict)
-            else False,
+            last_info.get("TimeLimit.truncated", False),
         )
     )
     terminated = bool(

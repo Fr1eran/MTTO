@@ -9,109 +9,111 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Analyze MTTO training logs and generate LLM-ready reports.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--log-root",
         type=str,
         default="mtto_ppo_tb_logs",
         help="TensorBoard logs root directory.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--run-name",
         type=str,
         default=None,
         help="Run directory name under log-root. If omitted, the latest run is used.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--output-root",
         type=str,
         default="mtto_train_reports",
         help="Output directory for analysis artifacts.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--step-window-size",
         type=int,
         default=5000,
         help="Step-based snapshot window size.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--episode-window-size",
         type=int,
         default=20,
         help="Episode-based snapshot window size.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--ema-alpha",
         type=float,
         default=0.1,
         help="EMA alpha used in convergence analysis.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--kl-threshold",
         type=float,
         default=0.03,
         help="Approx KL safety threshold.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--near-miss-threshold-mps",
         type=float,
         default=1.0,
         help="Near-miss threshold for safety margin diagnostics.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--position-bin-size-m",
         type=float,
         default=500.0,
         help="Position bin size for geographic failure distribution.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--critical-point-radius-m",
         type=float,
         default=300.0,
         help="Radius for SPS zone-center neighborhood risk attribution.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--top-k-spatial-bins",
         type=int,
         default=8,
         help="Top-K spatial risk bins rendered in report.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--top-k-critical-points",
         type=int,
         default=8,
         help="Top-K critical points rendered in report.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--report-bar-width",
         type=int,
         default=24,
         help="ASCII bar width used in report charts.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--training-log-interval",
         type=int,
         default=None,
         help="Training log interval used for this run, stored into analysis metadata.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--min-points-per-10k-steps",
         type=float,
         default=5.0,
         help="Minimum acceptable mean samples per 10k steps for sampling quality.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--min-unique-episodes",
         type=int,
         default=100,
         help="Minimum acceptable unique episodes for sampling quality.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--rollout-steps-per-update",
         type=int,
         default=2048,
-        help="PPO rollout steps per update used as the maximum acceptable mean step gap.",
+        help=(
+            "PPO rollout steps per update used as the maximum acceptable mean step gap."
+        ),
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--sampling-quality-mode",
         type=str,
         choices=["warn_only", "strict_fail"],
@@ -119,19 +121,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Sampling quality gate mode: warn_only logs warning, \
              strict_fail aborts analysis.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--export-csv",
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Export CSV artifacts. Disabled by default.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--include-snapshots",
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Include raw step/episode snapshots in analysis payload.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--dry-run",
         action=argparse.BooleanOptionalAction,
         default=False,

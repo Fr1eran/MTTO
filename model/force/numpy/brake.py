@@ -5,7 +5,7 @@ from typing import overload
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from utils.type_utils import ScalarNumeric, restore_output_type
+from utils.type_utils import NumericArray, ScalarNumeric, restore_output_type
 
 
 @overload
@@ -19,17 +19,26 @@ def sledge_frictional_brake_force(
 
 @overload
 def sledge_frictional_brake_force(
-    speed: ArrayLike,
+    speed: ScalarNumeric | NumericArray,
     mass: ScalarNumeric,
-    slope: ArrayLike,
+    slope: NumericArray,
+    k: ScalarNumeric = 0.1,
+) -> NDArray[np.float64]: ...
+
+
+@overload
+def sledge_frictional_brake_force(
+    speed: NumericArray,
+    mass: ScalarNumeric,
+    slope: ScalarNumeric,
     k: ScalarNumeric = 0.1,
 ) -> NDArray[np.float64]: ...
 
 
 def sledge_frictional_brake_force(
-    speed: ScalarNumeric | ArrayLike,
+    speed: ScalarNumeric | NumericArray | ArrayLike,
     mass: ScalarNumeric,
-    slope: ScalarNumeric | ArrayLike,
+    slope: ScalarNumeric | NumericArray | ArrayLike,
     k: ScalarNumeric = 0.1,
 ) -> np.float64 | NDArray[np.float64]:
     """
@@ -70,14 +79,14 @@ def vortex_brake_force(
 
 @overload
 def vortex_brake_force(
-    speed: ArrayLike,
+    speed: NumericArray,
     numoftrainsets: int,
     level: int,
 ) -> NDArray[np.float64]: ...
 
 
 def vortex_brake_force(
-    speed: ScalarNumeric | ArrayLike,
+    speed: ScalarNumeric | NumericArray | ArrayLike,
     numoftrainsets: int,
     level: int,
 ) -> np.float64 | NDArray[np.float64]:
@@ -123,13 +132,13 @@ def wear_plate_frictional_brake_force(
 
 @overload
 def wear_plate_frictional_brake_force(
-    speed: ArrayLike,
+    speed: NumericArray,
     numoftrainsets: int,
 ) -> NDArray[np.float64]: ...
 
 
 def wear_plate_frictional_brake_force(
-    speed: ScalarNumeric | ArrayLike,
+    speed: ScalarNumeric | NumericArray | ArrayLike,
     numoftrainsets: int,
 ) -> np.float64 | NDArray[np.float64]:
     """

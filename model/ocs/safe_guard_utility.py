@@ -3,7 +3,9 @@ from typing import overload
 
 import numpy as np
 from matplotlib.axes import Axes
-from numba import njit
+from numba import (
+    njit,
+)
 from numpy.typing import ArrayLike, NDArray
 
 from utils.curve_geometry import cal_regions, pad_2curve_lists
@@ -185,18 +187,22 @@ class SafeGuardUtility:
         "max_curve_full",
         "idp_points",
     )
-    _REGION_RENDER_LAYERS: frozenset[str] = frozenset({
-        "danger_region",
-        "min_curve_part",
-        "max_curve_part",
-        "idp_points",
-    })
-    _FULL_CURVE_RENDER_LAYERS: frozenset[str] = frozenset({
-        "levi_curve_full",
-        "brake_curve_full",
-        "min_curve_full",
-        "max_curve_full",
-    })
+    _REGION_RENDER_LAYERS: frozenset[str] = frozenset(
+        {
+            "danger_region",
+            "min_curve_part",
+            "max_curve_part",
+            "idp_points",
+        }
+    )
+    _FULL_CURVE_RENDER_LAYERS: frozenset[str] = frozenset(
+        {
+            "levi_curve_full",
+            "brake_curve_full",
+            "min_curve_full",
+            "max_curve_full",
+        }
+    )
     # 同名曲线“局部段”和“全量曲线”互斥, 避免语义冲突与重复绘制。
     _MUTUALLY_EXCLUSIVE_LAYER_PAIRS: tuple[tuple[str, str], ...] = (
         ("min_curve_part", "min_curve_full"),
@@ -209,55 +215,67 @@ class SafeGuardUtility:
         *,
         speed_limits: Sequence[float] | NDArray[np.floating],
         speed_limit_intervals: Sequence[float] | NDArray[np.floating],
-        levi_curves_list: list[NDArray],
-        brake_curves_list: list[NDArray],
-        min_curves_list: list[NDArray],
-        max_curves_list: list[NDArray],
+        levi_curves_list: list[NDArray[np.float64]],
+        brake_curves_list: list[NDArray[np.float64]],
+        min_curves_list: list[NDArray[np.float64]],
+        max_curves_list: list[NDArray[np.float64]],
         factor: float,
     ):
-        self.speed_limits = np.asarray(speed_limits, dtype=np.float64)
-        self.speed_limit_intervals = np.asarray(speed_limit_intervals, dtype=np.float64)
-        self.levi_curves_list = self._sanitize_curve_list(
+        self.speed_limits: NDArray[np.float64] = np.asarray(
+            speed_limits, dtype=np.float64
+        )
+        self.speed_limit_intervals: NDArray[np.float64] = np.asarray(
+            speed_limit_intervals, dtype=np.float64
+        )
+        self.levi_curves_list: list[NDArray[np.float64]] = self._sanitize_curve_list(
             levi_curves_list, curve_name="levi_curves_list"
         )
-        self.brake_curves_list = self._sanitize_curve_list(
+        self.brake_curves_list: list[NDArray[np.float64]] = self._sanitize_curve_list(
             brake_curves_list, curve_name="brake_curves_list"
         )
-        self.min_curves_list = self._sanitize_curve_list(
+        self.min_curves_list: list[NDArray[np.float64]] = self._sanitize_curve_list(
             min_curves_list, curve_name="min_curves_list"
         )
-        self.max_curves_list = self._sanitize_curve_list(
+        self.max_curves_list: list[NDArray[np.float64]] = self._sanitize_curve_list(
             max_curves_list, curve_name="max_curves_list"
         )
-        self._min_curve_pos_list = [
+        self._min_curve_pos_list: list[NDArray[np.float64]] = [
             np.asarray(curve[0, :], dtype=np.float64) for curve in self.min_curves_list
         ]
-        self._min_curve_speed_list = [
+        self._min_curve_speed_list: list[NDArray[np.float64]] = [
             np.asarray(curve[1, :], dtype=np.float64) for curve in self.min_curves_list
         ]
-        self._max_curve_pos_list = [
+        self._max_curve_pos_list: list[NDArray[np.float64]] = [
             np.asarray(curve[0, :], dtype=np.float64) for curve in self.max_curves_list
         ]
-        self._max_curve_speed_list = [
+        self._max_curve_speed_list: list[NDArray[np.float64]] = [
             np.asarray(curve[1, :], dtype=np.float64) for curve in self.max_curves_list
         ]
 
-        self.gamma = factor
-        self._speed_query_cache_ready = False
+        self.gamma: float = factor
+        self._speed_query_cache_ready: bool = False
 
-        self._min_curves_pos_packed = np.zeros((0, 1), dtype=np.float64)
-        self._min_curves_speed_packed = np.zeros((0, 1), dtype=np.float64)
-        self._min_curves_lengths = np.zeros((0,), dtype=np.int32)
-        self._max_curves_pos_packed = np.zeros((0, 1), dtype=np.float64)
-        self._max_curves_speed_packed = np.zeros((0, 1), dtype=np.float64)
-        self._max_curves_lengths = np.zeros((0,), dtype=np.int32)
+        self._min_curves_pos_packed: NDArray[np.float64] = np.zeros(
+            (0, 1), dtype=np.float64
+        )
+        self._min_curves_speed_packed: NDArray[np.float64] = np.zeros(
+            (0, 1), dtype=np.float64
+        )
+        self._min_curves_lengths: NDArray[np.int32] = np.zeros((0,), dtype=np.int32)
+        self._max_curves_pos_packed: NDArray[np.float64] = np.zeros(
+            (0, 1), dtype=np.float64
+        )
+        self._max_curves_speed_packed: NDArray[np.float64] = np.zeros(
+            (0, 1), dtype=np.float64
+        )
+        self._max_curves_lengths: NDArray[np.int32] = np.zeros((0,), dtype=np.int32)
 
         self._build_speed_query_cache()
 
         # render/detect 所需的区域缓存, 首次使用时按需计算
-        self._region_cache_ready = False
-        self._idp_points_x = np.asarray([], dtype=np.float64)
-        self._idp_points_y = np.asarray([], dtype=np.float64)
+        self._region_cache_ready: bool = False
+        self._idp_points_x: NDArray[np.float64] = np.asarray([], dtype=np.float64)
+        self._idp_points_y: NDArray[np.float64] = np.asarray([], dtype=np.float64)
         self._min_curves_part_list: list[NDArray[np.float64]] = []
         self._max_curves_part_list: list[NDArray[np.float64]] = []
         self._min_curves_part_list_padded: list[NDArray[np.float64]] = []
@@ -266,22 +284,42 @@ class SafeGuardUtility:
         self._min_curves_part_y_padded: list[NDArray[np.float64]] = []
         self._max_curves_part_x_padded: list[NDArray[np.float64]] = []
         self._max_curves_part_y_padded: list[NDArray[np.float64]] = []
-        self._min_curves_parts_pos_con = np.asarray([], dtype=np.float64)
-        self._min_curves_parts_speed_con = np.asarray([], dtype=np.float64)
-        self._max_curves_parts_pos_con = np.asarray([], dtype=np.float64)
-        self._max_curves_parts_speed_con = np.asarray([], dtype=np.float64)
-        self._num_regions = 0
+        self._min_curves_parts_pos_con: NDArray[np.float64] = np.asarray(
+            [], dtype=np.float64
+        )
+        self._min_curves_parts_speed_con: NDArray[np.float64] = np.asarray(
+            [], dtype=np.float64
+        )
+        self._max_curves_parts_pos_con: NDArray[np.float64] = np.asarray(
+            [], dtype=np.float64
+        )
+        self._max_curves_parts_speed_con: NDArray[np.float64] = np.asarray(
+            [], dtype=np.float64
+        )
+        self._num_regions: int = 0
 
         # 完整曲线渲染缓存, 首次渲染完整曲线时按需计算
-        self._full_curve_cache_ready = False
-        self._levi_curves_pos_con = np.asarray([], dtype=np.float64)
-        self._levi_curves_speed_con = np.asarray([], dtype=np.float64)
-        self._brake_curves_pos_con = np.asarray([], dtype=np.float64)
-        self._brake_curves_speed_con = np.asarray([], dtype=np.float64)
-        self._min_curves_pos_con = np.asarray([], dtype=np.float64)
-        self._min_curves_speed_con = np.asarray([], dtype=np.float64)
-        self._max_curves_pos_con = np.asarray([], dtype=np.float64)
-        self._max_curves_speed_con = np.asarray([], dtype=np.float64)
+        self._full_curve_cache_ready: bool = False
+        self._levi_curves_pos_con: NDArray[np.float64] = np.asarray(
+            [], dtype=np.float64
+        )
+        self._levi_curves_speed_con: NDArray[np.float64] = np.asarray(
+            [], dtype=np.float64
+        )
+        self._brake_curves_pos_con: NDArray[np.float64] = np.asarray(
+            [], dtype=np.float64
+        )
+        self._brake_curves_speed_con: NDArray[np.float64] = np.asarray(
+            [], dtype=np.float64
+        )
+        self._min_curves_pos_con: NDArray[np.float64] = np.asarray([], dtype=np.float64)
+        self._min_curves_speed_con: NDArray[np.float64] = np.asarray(
+            [], dtype=np.float64
+        )
+        self._max_curves_pos_con: NDArray[np.float64] = np.asarray([], dtype=np.float64)
+        self._max_curves_speed_con: NDArray[np.float64] = np.asarray(
+            [], dtype=np.float64
+        )
 
     @staticmethod
     def _sanitize_curve(curve: NDArray[np.floating]) -> NDArray[np.float64]:
@@ -398,7 +436,7 @@ class SafeGuardUtility:
         if unknown_layers:
             raise ValueError(
                 "Unknown render layers: "
-                f"{unknown_layers}. Supported layers: \
+                + f"{unknown_layers}. Supported layers: \
                   {sorted(self._VALID_RENDER_LAYERS)}"
             )
 
@@ -491,7 +529,7 @@ class SafeGuardUtility:
         alpha: float = 0.7,
         linewidth: float = 2.0,
     ) -> None:
-        ax.plot(
+        _ = ax.plot(
             pos,
             speed * speed_scale,
             label=label,
@@ -501,7 +539,7 @@ class SafeGuardUtility:
             linewidth=linewidth,
         )
 
-    def get_intersecting_dangerous_point(self) -> NDArray:
+    def get_intersecting_dangerous_point(self) -> NDArray[np.float64]:
         self._ensure_region_cache()
         return self._idp_points_x
 
@@ -732,12 +770,14 @@ class SafeGuardUtility:
     def detect_danger(self, pos: ScalarNumeric, speed: ScalarNumeric) -> bool: ...
 
     @overload
-    def detect_danger(self, pos: ArrayLike, speed: ArrayLike) -> NDArray[np.bool]: ...
+    def detect_danger(
+        self, pos: NDArray[np.floating], speed: NDArray[np.floating]
+    ) -> NDArray[np.bool]: ...
 
     def detect_danger(
         self,
-        pos: ScalarNumeric | ArrayLike,
-        speed: ScalarNumeric | ArrayLike,
+        pos: ScalarNumeric | NDArray[np.floating],
+        speed: ScalarNumeric | NDArray[np.floating],
     ) -> bool | NDArray[np.bool]:
         """
         检查速度是否超出限速或落入危险速度域
@@ -775,7 +815,9 @@ class SafeGuardUtility:
             return True
         return self._detect_dangerous_region_enter_any(pos_arr, speed_arr)
 
-    def _detect_speed_exceed(self, pos: NDArray, speed: NDArray):
+    def _detect_speed_exceed(
+        self, pos: NDArray[np.floating], speed: NDArray[np.floating]
+    ):
         speed_limit = self.speed_limits[
             np.clip(
                 get_interval_index(pos, self.speed_limit_intervals),
@@ -785,7 +827,9 @@ class SafeGuardUtility:
         ]
         return speed >= speed_limit * self.gamma
 
-    def _detect_speed_exceed_any(self, pos: NDArray, speed: NDArray) -> bool:
+    def _detect_speed_exceed_any(
+        self, pos: NDArray[np.floating], speed: NDArray[np.floating]
+    ) -> bool:
         if pos.ndim == 0:
             idx = int(get_interval_index(float(pos), self.speed_limit_intervals))
             idx = min(max(idx, 0), len(self.speed_limits) - 1)
@@ -800,7 +844,9 @@ class SafeGuardUtility:
         ]
         return bool(np.any(speed >= speed_limit * self.gamma))
 
-    def _detect_dangerous_region_enter(self, pos: NDArray, speed: NDArray):
+    def _detect_dangerous_region_enter(
+        self, pos: NDArray[np.floating], speed: NDArray[np.floating]
+    ):
         self._ensure_region_cache()
 
         if pos.ndim == 0:
@@ -855,7 +901,9 @@ class SafeGuardUtility:
             result[mask] |= (speed_masked <= above_v) & (speed_masked >= below_v)
         return result
 
-    def _detect_dangerous_region_enter_any(self, pos: NDArray, speed: NDArray) -> bool:
+    def _detect_dangerous_region_enter_any(
+        self, pos: NDArray[np.floating], speed: NDArray[np.floating]
+    ) -> bool:
         self._ensure_region_cache()
 
         if pos.ndim == 0:
@@ -920,7 +968,7 @@ class SafeGuardUtility:
                 continue
 
             if layer == "speed_limit":
-                ax.step(
+                _ = ax.step(
                     self.speed_limit_intervals[:-1],
                     self.speed_limits * speed_scale,
                     where="post",
@@ -1001,7 +1049,7 @@ class SafeGuardUtility:
                     linewidth=1.2,
                 )
             elif layer == "idp_points":
-                ax.scatter(
+                _ = ax.scatter(
                     x=self._idp_points_x,
                     y=self._idp_points_y * speed_scale,
                     color="black",

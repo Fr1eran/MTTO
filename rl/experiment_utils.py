@@ -6,7 +6,7 @@ import math
 import multiprocessing as mp
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -36,13 +36,13 @@ from rl.callbacks import (
 from rl.dp_trajectory_reader import DPTrajectoryReader
 from rl.env_factory import make_env
 from rl.evaluation import build_single_eval_env
-from rl.mtto_env import RewardConfig
 from rl.observation_builder import ObservationBuilder
 from rl.operational_stepper import OperationalStepper
 from rl.reference_trajectory_sampler import (
     ReferenceTrajectory,
     ReferenceTrajectorySampler,
 )
+from rl.reward_calculator import RewardConfig
 from rl.training_analysis import AnalysisConfig, run_training_analysis
 from utils.io_utils import format_float_token, load_optimized_curve_and_metrics
 from utils.plot_utils import set_global_plot_style
@@ -380,7 +380,7 @@ def resolve_curriculum_profile(
         available = ", ".join(curriculum_profile_names())
         raise ValueError(
             "Unknown curriculum profile "
-            f"'{profile_name}'. Available profiles: {available}"
+            + f"'{profile_name}'. Available profiles: {available}"
         )
     return profile
 
@@ -623,11 +623,13 @@ def build_run_metadata(
         ),
     }
 
-    metadata.update({
-        "schedule_time_s": float(schedule_time_s),
-        "max_step_distance": float(max_step_distance),
-        "reward_discount": float(reward_discount),
-    })
+    metadata.update(
+        {
+            "schedule_time_s": float(schedule_time_s),
+            "max_step_distance": float(max_step_distance),
+            "reward_discount": float(reward_discount),
+        }
+    )
 
     metadata["experiment_token"] = _build_experiment_token(
         schedule_time_s=schedule_time_s,
@@ -690,7 +692,8 @@ def build_run_metadata(
 
 
 def save_run_metadata(
-    output_dir: str | os.PathLike[str], metadata: dict[str, Any]
+    output_dir: str | os.PathLike[str],
+    metadata: dict[str, Any],
 ) -> str:
     """将实验元数据保存为 JSON 文件。
 
@@ -973,7 +976,8 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
     final_output_dir = os.path.join(output_dir, "final")
     final_model_save_path = os.path.join(final_output_dir, RL_FINAL_MODEL_FILENAME)
     best_eval_output_dir = os.path.join(
-        output_dir, f"best_{args.best_eval_trigger_mode}"
+        output_dir,
+        f"best_{args.best_eval_trigger_mode}",
     )
 
     (
@@ -1112,13 +1116,6 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
 # =============================================================================
 # 训练执行
 # =============================================================================
-
-
-def _linear_schedule(initial_value: float) -> Callable[[float], float]:
-    def func(progress_remaining: float) -> float:
-        return (0.1 + 0.9 * progress_remaining) * initial_value
-
-    return func
 
 
 def _cosine_annealing_schedule(
@@ -1260,13 +1257,15 @@ def train_single_experiment(
             raise RuntimeError("unsupported enabled curriculum controller")
         initial_reference_weights = curriculum_callback.initial_weights()
         curriculum_metadata = dict(resolved_spec.run_metadata["curriculum"])
-        curriculum_metadata.update({
-            "reference_curve_artifact_path": artifact.npz_path,
-            "reference_curve_metrics_path": artifact.metrics_path,
-            "rl_max_step_distance_m": resolved_spec.max_step_distance,
-            "eligible_reference_node_count": parent_sampler.eligible_node_count,
-            "initial_sampling_distribution_version": 0,
-        })
+        curriculum_metadata.update(
+            {
+                "reference_curve_artifact_path": artifact.npz_path,
+                "reference_curve_metrics_path": artifact.metrics_path,
+                "rl_max_step_distance_m": resolved_spec.max_step_distance,
+                "eligible_reference_node_count": parent_sampler.eligible_node_count,
+                "initial_sampling_distribution_version": 0,
+            }
+        )
         resolved_metadata = dict(resolved_spec.run_metadata)
         resolved_metadata["curriculum"] = curriculum_metadata
         resolved_spec = replace(
@@ -1278,7 +1277,7 @@ def train_single_experiment(
 
     os.makedirs(resolved_spec.output_dir, exist_ok=True)
     os.makedirs(resolved_spec.final_output_dir, exist_ok=True)
-    save_run_metadata(resolved_spec.output_dir, resolved_spec.run_metadata)
+    _ = save_run_metadata(resolved_spec.output_dir, resolved_spec.run_metadata)
 
     env_initializers: list[Callable[[], Any]] = [
         _build_env_initializer(
@@ -1398,7 +1397,7 @@ def train_single_experiment(
 
     callback = CallbackList(callbacks) if callbacks else None
 
-    model.learn(
+    _ = model.learn(
         total_timesteps=resolved_spec.total_timesteps,
         callback=callback,
         log_interval=resolved_spec.log_interval,
@@ -1480,7 +1479,7 @@ def _find_latest_matching_file(
     if len(matches) > 1:
         print(
             f"Found {len(matches)} '{glob_pattern}' files under '{search_dir}', "
-            f"using latest: {matches[0]}"
+            + f"using latest: {matches[0]}"
         )
     return matches[0]
 
@@ -1621,7 +1620,7 @@ def _metric_as_float(value: object) -> float | None:
 
 
 def build_rl_trajectory_comparison_key(
-    metrics: dict[str, object],
+    metrics: Mapping[str, object],
 ) -> tuple[float, ...]:
     """构建用于多轨迹排序对比的键。
 
@@ -1714,7 +1713,7 @@ def build_rl_trajectory_comparison_key(
 
 def apply_rl_curve_plot_style() -> None:
     """设置 RL 轨迹曲线绘图的全局 matplotlib 样式。"""
-    set_global_plot_style(
+    _ = set_global_plot_style(
         font_preset="sci",
         preferred_font="Times New Roman",
         title_font_size=8.0,

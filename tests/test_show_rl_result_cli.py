@@ -1,17 +1,17 @@
 import os
 from pathlib import Path
 
+from rl.experiment_utils import resolve_rl_curve_artifact
 from scripts.show_rl_result import (
     _build_cli_parser,
-    resolve_rl_curve_artifact,
 )
 
 
 def _write_artifact(run_dir: Path, file_name: str) -> tuple[Path, Path]:
     curve_path = run_dir / file_name
     metrics_path = run_dir / f"{curve_path.stem}_metrics.json"
-    curve_path.write_bytes(b"curve")
-    metrics_path.write_text("{}", encoding="utf-8")
+    _ = curve_path.write_bytes(b"curve")
+    _ = metrics_path.write_text("{}", encoding="utf-8")
     return curve_path, metrics_path
 
 
@@ -25,12 +25,14 @@ def test_show_rl_result_cli_defaults() -> None:
 
 def test_show_rl_result_cli_accepts_trajectory_source() -> None:
     parser = _build_cli_parser()
-    args = parser.parse_args([
-        "--trajectory-source",
-        "final",
-        "--curve-dir",
-        "output/custom/rl",
-    ])
+    args = parser.parse_args(
+        [
+            "--trajectory-source",
+            "final",
+            "--curve-dir",
+            "output/custom/rl",
+        ]
+    )
 
     assert args.trajectory_source == "final"
     assert args.curve_dir == "output/custom/rl"

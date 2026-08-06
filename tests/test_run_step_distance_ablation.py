@@ -1,8 +1,10 @@
 import json
 from pathlib import Path
+from typing import Protocol, cast
 
 import numpy as np
 import pytest
+from matplotlib.figure import Figure
 
 import scripts.run_step_distance_ablation as step_distance_ablation
 from scripts.run_step_distance_ablation import (
@@ -11,8 +13,8 @@ from scripts.run_step_distance_ablation import (
     DEFAULT_SEEDS,
     DEFAULT_STEP_DISTANCES,
     FIXED_REWARD_PROFILE,
-    StepDistanceCurveAggregate,
     STEP_DISTANCE_MANIFEST_FILENAME,
+    StepDistanceCurveAggregate,
     build_arg_parser,
     build_best_metric_aggregates,
     build_curve_aggregates,
@@ -23,6 +25,10 @@ from scripts.run_step_distance_ablation import (
     save_compact_figure,
     train_step_distance_run,
 )
+
+
+class _RunSpec(Protocol):
+    final_output_dir: str
 
 
 def _write_episode_metrics_npz(
@@ -55,15 +61,17 @@ def _write_trajectory_metrics_json(
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = output_dir / file_name
-    metrics_path.write_text(
-        json.dumps({
-            "stop_error_m": stop_error_m,
-            "time_error_s": time_error_s,
-            "total_energy_kj": total_energy_kj,
-            "comfort_tav": comfort_tav,
-            "comfort_rms": comfort_rms,
-            "comfort_er_pct": comfort_er_pct,
-        }),
+    _ = metrics_path.write_text(
+        json.dumps(
+            {
+                "stop_error_m": stop_error_m,
+                "time_error_s": time_error_s,
+                "total_energy_kj": total_energy_kj,
+                "comfort_tav": comfort_tav,
+                "comfort_rms": comfort_rms,
+                "comfort_er_pct": comfort_er_pct,
+            }
+        ),
         encoding="utf-8",
     )
     return metrics_path
@@ -75,10 +83,10 @@ def _write_run_metadata(
 ) -> Path:
     final_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = final_dir / "run_metadata.json"
-    payload = {"rollout_record_trigger_mode": "steps"}
+    payload: dict[str, object] = {"rollout_record_trigger_mode": "steps"}
     if metadata:
         payload.update(metadata)
-    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+    _ = metadata_path.write_text(json.dumps(payload), encoding="utf-8")
     return metadata_path
 
 
@@ -96,16 +104,18 @@ def test_train_cli_defaults() -> None:
 
 def test_show_cli_accepts_compact_figure_options(tmp_path: Path) -> None:
     parser = build_arg_parser()
-    args = parser.parse_args([
-        "show",
-        "--output-file",
-        str(tmp_path / "curves"),
-        "--dpi",
-        "180",
-        "--pad-inches",
-        "0.05",
-        "--no-show",
-    ])
+    args = parser.parse_args(
+        [
+            "show",
+            "--output-file",
+            str(tmp_path / "curves"),
+            "--dpi",
+            "180",
+            "--pad-inches",
+            "0.05",
+            "--no-show",
+        ]
+    )
 
     assert args.output_file == tmp_path / "curves"
     assert args.dpi == 180.0
@@ -131,21 +141,23 @@ def test_resolve_run_matrix_expands_distances_and_seeds() -> None:
 
 def test_run_matrix_keeps_basic_reward_and_fixed_hyperparameters() -> None:
     parser = build_arg_parser()
-    args = parser.parse_args([
-        "train",
-        "--max-step-distances",
-        "50",
-        "100",
-        "--seed-list",
-        "42",
-        "43",
-        "--num-envs",
-        "2",
-        "--rollout-steps-per-update",
-        "4096",
-        "--best-eval-trigger-interval",
-        "123456",
-    ])
+    args = parser.parse_args(
+        [
+            "train",
+            "--max-step-distances",
+            "50",
+            "100",
+            "--seed-list",
+            "42",
+            "43",
+            "--num-envs",
+            "2",
+            "--rollout-steps-per-update",
+            "4096",
+            "--best-eval-trigger-interval",
+            "123456",
+        ]
+    )
 
     run_entries = resolve_step_distance_run_matrix(args)
     first = run_entries[0]
@@ -161,32 +173,46 @@ def test_run_matrix_keeps_basic_reward_and_fixed_hyperparameters() -> None:
     assert first.training_run_spec.best_eval_trigger_interval == 123456
     assert first.training_run_spec.best_eval_deterministic is True
 
-    assert first.training_run_spec.reward_discount == other_distance.training_run_spec.reward_discount
-    assert first.training_run_spec.schedule_time_s == other_distance.training_run_spec.schedule_time_s
+    assert (
+        first.training_run_spec.reward_discount
+        == other_distance.training_run_spec.reward_discount
+    )
+    assert (
+        first.training_run_spec.schedule_time_s
+        == other_distance.training_run_spec.schedule_time_s
+    )
     assert first.training_run_spec.num_envs == other_distance.training_run_spec.num_envs
-    assert first.training_run_spec.rollout_steps_per_update == other_distance.training_run_spec.rollout_steps_per_update
-    assert first.training_run_spec.max_step_distance != other_distance.training_run_spec.max_step_distance
+    assert (
+        first.training_run_spec.rollout_steps_per_update
+        == other_distance.training_run_spec.rollout_steps_per_update
+    )
+    assert (
+        first.training_run_spec.max_step_distance
+        != other_distance.training_run_spec.max_step_distance
+    )
     assert first.seed == other_distance.seed
 
 
 def test_build_and_load_manifest_records_step_distance_runs(tmp_path: Path) -> None:
     parser = build_arg_parser()
-    args = parser.parse_args([
-        "train",
-        "--output-root",
-        str(tmp_path),
-        "--max-step-distances",
-        "50",
-        "--seed-list",
-        "42",
-        "43",
-    ])
+    args = parser.parse_args(
+        [
+            "train",
+            "--output-root",
+            str(tmp_path),
+            "--max-step-distances",
+            "50",
+            "--seed-list",
+            "42",
+            "43",
+        ]
+    )
     run_entries = resolve_step_distance_run_matrix(args)
     statuses = {(50.0, 0): {"status": "completed"}}
 
     manifest = build_step_distance_manifest(args, run_entries, statuses=statuses)
     manifest_path = tmp_path / STEP_DISTANCE_MANIFEST_FILENAME
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    _ = manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     loaded = load_step_distance_manifest(str(tmp_path))
 
@@ -209,15 +235,17 @@ def test_manifest_uses_total_timesteps_training_budget(
     tmp_path: Path,
 ) -> None:
     parser = build_arg_parser()
-    args = parser.parse_args([
-        "train",
-        "--output-root",
-        str(tmp_path),
-        "--max-step-distances",
-        "50",
-        "--seed-list",
-        "42",
-    ])
+    args = parser.parse_args(
+        [
+            "train",
+            "--output-root",
+            str(tmp_path),
+            "--max-step-distances",
+            "50",
+            "--seed-list",
+            "42",
+        ]
+    )
     run_entries = resolve_step_distance_run_matrix(args)
 
     manifest = build_step_distance_manifest(args, run_entries)
@@ -232,20 +260,22 @@ def test_train_step_distance_run_delegates_to_train_single_experiment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     parser = build_arg_parser()
-    args = parser.parse_args([
-        "train",
-        "--output-root",
-        str(tmp_path),
-        "--max-step-distances",
-        "50",
-        "--seed-list",
-        "42",
-    ])
+    args = parser.parse_args(
+        [
+            "train",
+            "--output-root",
+            str(tmp_path),
+            "--max-step-distances",
+            "50",
+            "--seed-list",
+            "42",
+        ]
+    )
     entry = resolve_step_distance_run_matrix(args)[0]
 
     calls: list[tuple[object, object]] = []
 
-    def _fake_train_single_experiment(train_args, *, spec):
+    def _fake_train_single_experiment(train_args: object, *, spec: _RunSpec) -> object:
         calls.append((train_args, spec))
         final_output_dir = Path(spec.final_output_dir)
         final_output_dir.mkdir(parents=True, exist_ok=True)
@@ -263,7 +293,7 @@ def test_train_step_distance_run_delegates_to_train_single_experiment(
         _fake_train_single_experiment,
     )
 
-    train_step_distance_run(entry)
+    _ = train_step_distance_run(entry)
 
     assert len(calls) == 1
     assert calls[0][0] is entry.train_args
@@ -278,7 +308,7 @@ def test_train_command_does_not_run_final_policy_evaluation(
 ) -> None:
     calls: list[object] = []
 
-    def _fake_train_single_experiment(train_args, *, spec):
+    def _fake_train_single_experiment(train_args: object, *, spec: _RunSpec) -> object:
         calls.append((train_args, spec))
         final_output_dir = Path(spec.final_output_dir)
         final_output_dir.mkdir(parents=True, exist_ok=True)
@@ -296,17 +326,19 @@ def test_train_command_does_not_run_final_policy_evaluation(
         _fake_train_single_experiment,
     )
 
-    exit_code = step_distance_ablation.main([
-        "train",
-        "--output-root",
-        str(tmp_path),
-        "--max-step-distances",
-        "50",
-        "--seed-list",
-        "42",
-        "--total-timesteps",
-        "1",
-    ])
+    exit_code = step_distance_ablation.main(
+        [
+            "train",
+            "--output-root",
+            str(tmp_path),
+            "--max-step-distances",
+            "50",
+            "--seed-list",
+            "42",
+            "--total-timesteps",
+            "1",
+        ]
+    )
 
     assert exit_code == 0
     assert len(calls) == 1
@@ -340,9 +372,9 @@ def test_build_curve_aggregates_groups_monitor_data_by_step_distance(
         rewards=[10.0, 12.0],
         lengths=[5.0, 4.0],
     )
-    _write_run_metadata(run_50_r1)
-    _write_run_metadata(run_50_r2)
-    _write_run_metadata(run_100_r1)
+    _ = _write_run_metadata(run_50_r1)
+    _ = _write_run_metadata(run_50_r2)
+    _ = _write_run_metadata(run_100_r1)
 
     manifest = {
         "max_step_distances": [50.0, 100.0],
@@ -403,7 +435,7 @@ def test_build_best_metric_aggregates_groups_best_trajectory_metrics(
         run_100_output,
         {"best_eval_output_dir": str(run_100_best)},
     )
-    _write_trajectory_metrics_json(
+    _ = _write_trajectory_metrics_json(
         run_50_r1_best,
         stop_error_m=1.0,
         time_error_s=3.0,
@@ -412,7 +444,7 @@ def test_build_best_metric_aggregates_groups_best_trajectory_metrics(
         comfort_rms=0.20,
         comfort_er_pct=0.30,
     )
-    _write_trajectory_metrics_json(
+    _ = _write_trajectory_metrics_json(
         run_50_r2_best,
         stop_error_m=3.0,
         time_error_s=7.0,
@@ -421,7 +453,7 @@ def test_build_best_metric_aggregates_groups_best_trajectory_metrics(
         comfort_rms=0.60,
         comfort_er_pct=0.70,
     )
-    _write_trajectory_metrics_json(
+    _ = _write_trajectory_metrics_json(
         run_100_best,
         stop_error_m=5.0,
         time_error_s=11.0,
@@ -473,7 +505,7 @@ def test_best_metric_aggregates_do_not_fall_back_to_final_metrics(
     tmp_path: Path,
 ) -> None:
     final_dir = tmp_path / "run_50_r1" / "final"
-    _write_trajectory_metrics_json(
+    _ = _write_trajectory_metrics_json(
         final_dir,
         stop_error_m=1.0,
         time_error_s=3.0,
@@ -541,14 +573,14 @@ def test_save_compact_figure_appends_png_and_uses_tight_bbox(tmp_path: Path) -> 
         def __init__(self) -> None:
             self.savefig_calls: list[tuple[Path, dict[str, object]]] = []
 
-        def savefig(self, output_path: Path, **kwargs) -> None:
+        def savefig(self, output_path: Path, **kwargs: object) -> None:
             self.savefig_calls.append((output_path, kwargs))
-            output_path.write_bytes(b"fake image")
+            _ = output_path.write_bytes(b"fake image")
 
     figure = FakeFigure()
 
     output_path = save_compact_figure(
-        figure,
+        cast(Figure, cast(object, figure)),
         tmp_path / "nested" / "step_distance",
         dpi=180.0,
         pad_inches=0.05,
@@ -586,28 +618,54 @@ def test_show_command_saves_compact_figure_without_display(
     save_calls: list[tuple[object, Path, float, float]] = []
     show_calls: list[bool] = []
 
+    def _fake_load_step_distance_manifest(output_root: object) -> dict[str, object]:
+        del output_root
+        return {"max_step_distances": [50.0], "runs": []}
+
+    def _fake_build_curve_aggregates(
+        manifest: object, max_step_distances: object = None
+    ) -> tuple[list[StepDistanceCurveAggregate], list[str]]:
+        del manifest, max_step_distances
+        return ([aggregate], [])
+
+    def _fake_build_best_metric_aggregates(
+        manifest: object, max_step_distances: object = None
+    ) -> tuple[list[object], list[str]]:
+        del manifest, max_step_distances
+        return ([], [])
+
+    def _fake_plot_curve_aggregates(aggregates: object, *, show: bool = True) -> object:
+        del aggregates, show
+        return fake_figure
+
     monkeypatch.setattr(
         step_distance_ablation,
         "load_step_distance_manifest",
-        lambda output_root: {"max_step_distances": [50.0], "runs": []},
+        _fake_load_step_distance_manifest,
     )
     monkeypatch.setattr(
         step_distance_ablation,
         "build_curve_aggregates",
-        lambda manifest, max_step_distances=None: ([aggregate], []),
+        _fake_build_curve_aggregates,
     )
     monkeypatch.setattr(
         step_distance_ablation,
         "build_best_metric_aggregates",
-        lambda manifest, max_step_distances=None: ([], []),
+        _fake_build_best_metric_aggregates,
     )
     monkeypatch.setattr(
         step_distance_ablation,
         "plot_curve_aggregates",
-        lambda aggregates, *, show=True: fake_figure,
+        _fake_plot_curve_aggregates,
     )
 
-    def _fake_save_compact_figure(fig, output_file, *, dpi, pad_inches):
+    def _fake_save_compact_figure(
+        fig: Figure,
+        output_file: Path,
+        *,
+        dpi: float,
+        pad_inches: float,
+    ) -> Path:
         save_calls.append((fig, output_file, dpi, pad_inches))
         return output_file.with_suffix(".png")
 
@@ -616,20 +674,24 @@ def test_show_command_saves_compact_figure_without_display(
         "save_compact_figure",
         _fake_save_compact_figure,
     )
-    monkeypatch.setattr(step_distance_ablation.plt, "show", lambda: show_calls.append(True))
+    monkeypatch.setattr(
+        step_distance_ablation.plt, "show", lambda: show_calls.append(True)
+    )
 
-    exit_code = step_distance_ablation.main([
-        "show",
-        "--output-root",
-        str(tmp_path),
-        "--output-file",
-        str(tmp_path / "compact"),
-        "--dpi",
-        "180",
-        "--pad-inches",
-        "0.05",
-        "--no-show",
-    ])
+    exit_code = step_distance_ablation.main(
+        [
+            "show",
+            "--output-root",
+            str(tmp_path),
+            "--output-file",
+            str(tmp_path / "compact"),
+            "--dpi",
+            "180",
+            "--pad-inches",
+            "0.05",
+            "--no-show",
+        ]
+    )
 
     assert exit_code == 0
     assert save_calls == [(fake_figure, tmp_path / "compact", 180.0, 0.05)]
@@ -639,7 +701,9 @@ def test_show_command_saves_compact_figure_without_display(
 def test_plot_curve_aggregates_uses_step_axis_and_deduped_legend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(step_distance_ablation, "apply_rl_curve_plot_style", lambda: None)
+    monkeypatch.setattr(
+        step_distance_ablation, "apply_rl_curve_plot_style", lambda: None
+    )
     monkeypatch.setattr(step_distance_ablation.plt, "show", lambda: None)
 
     aggregates = [

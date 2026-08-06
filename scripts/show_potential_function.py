@@ -5,7 +5,10 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.axes import Axes
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
+from numpy.typing import NDArray
 
 from utils.data_loader import load_safeguard_curves, load_speed_limits
 from utils.plot_utils import set_global_plot_style
@@ -27,31 +30,12 @@ class _SeventhAuxiliaryStopField:
     feasible_mask: np.ndarray
 
 
-def _potential_safety_speed(pos, speed, min_speed, max_speed, target_pos):
-    """
-    向量化安全势能函数
-
-    速度带中间位置势能最大
-    """
-    distance_to_target = abs(target_pos - pos)
-    center_speed = (max_speed + min_speed) / 2.0
-    safe_margin = np.maximum((max_speed - min_speed) / 2.0, 0.5)
-
-    # 基础偏离惩罚(四次方项, 引导列车走中间)
-    norm_speed_diff = (speed - center_speed) / safe_margin
-    speed_log_arg = 1.01 - norm_speed_diff**2
-    in_speed_band = (speed >= min_speed) & (speed <= max_speed)
-    valid_mask_speed = in_speed_band & (speed_log_arg > 0.0)
-    phi_base = np.full_like(norm_speed_diff, np.nan, dtype=np.float64)
-    phi_base[valid_mask_speed] = 2.0 * np.log(speed_log_arg[valid_mask_speed])
-
-    # 靠近目标位置时，适当增大惩罚力度
-    scale = 1.0 + 1.0 * np.exp(-0.001 * distance_to_target)
-
-    return scale * phi_base
-
-
-def _potential_safety_position(pos, min_pos, max_pos, target_pos):
+def _potential_safety_position(
+    pos: NDArray[np.floating],
+    min_pos: NDArray[np.floating],
+    max_pos: NDArray[np.floating],
+    target_pos: float,
+) -> NDArray[np.float64]:
     distance_to_target = np.abs(target_pos - pos)
     center_pos = (max_pos + min_pos) / 2.0
     safe_margin = (max_pos - min_pos) / 2.0
@@ -68,103 +52,10 @@ def _potential_safety_position(pos, min_pos, max_pos, target_pos):
     return scale * phi_base
 
 
-def _potential_safety_speed_adaptive(pos, speed, min_speed, max_speed, target_pos):
-    distance_to_target = np.abs(target_pos - pos)
-    scale = 1.0 + 1.0 * np.exp(-0.001 * distance_to_target)
-
-    v_star = np.where(min_speed > 0.0, (max_speed + min_speed) / 2.0, 0.0)
-    L = np.where(
-        min_speed > 0,
-        np.clip((max_speed - min_speed) / 2.0, 1.0, None),
-        np.clip(max_speed, 1.0, None),
-    )
-
-    norm_speed_diff = (speed - v_star) / L
-    speed_log_arg = 1.01 - norm_speed_diff**2
-
-    in_speed_band = (speed >= min_speed) & (speed <= max_speed)
-    valid_mask_speed = in_speed_band & (speed_log_arg > 0.0)
-
-    phi_base = np.full_like(norm_speed_diff, np.nan, dtype=np.float64)
-    phi_base[valid_mask_speed] = 2.0 * np.log(speed_log_arg[valid_mask_speed])
-
-    return scale * phi_base
-
-
-def _potential_safety_speed_asymmetric_v1(
-    pos,
-    speed,
-    min_speed,
-    max_speed,
-    target_pos,
-) -> float:
-    distance_to_target = np.abs(target_pos - pos)
-
-    # 设定一个危险缓冲距离 (m/s)，仅当距离边界小于该值时才触发惩罚
-    upper_bound = 8.0
-    lower_bound = 5.0
-
-    # 1. 上限惩罚 (始终激活)
-    margin_max = max_speed - speed
-    phi_max = np.where(
-        margin_max < upper_bound,
-        2.0 * np.log(1.01 - (1.0 - np.maximum(margin_max, 0.0) / upper_bound) ** 2),
-        0.0,
-    )
-
-    # 2. 下限惩罚 (条件激活：仅当存在实质性的最小速度约束时才惩罚)
-    margin_min = speed - min_speed
-    # 当 min_speed 极小 (例如接近 0) 时，说明当前允许停车，直接关闭下限惩罚
-    activate_min = (min_speed > 0.0) & (margin_min < lower_bound)
-    phi_min = np.where(
-        activate_min,
-        2.0 * np.log(1.01 - (1.0 - np.maximum(margin_min, 0.0) / lower_bound) ** 2),
-        0.0,
-    )
-
-    # 距离缩放系数
-    scale = 1.0 + 1.0 * np.exp(-0.001 * distance_to_target)
-
-    # 最终势能为两侧惩罚之和
-    return scale * (phi_max + phi_min)
-
-
-def _potential_safety_speed_asymmetric_v2(
-    pos,
-    speed,
-    min_speed,
-    max_speed,
-    target_pos,
-) -> float:
-    distance_to_target = np.abs(target_pos - pos)
-
-    # 设定一个危险缓冲距离 (m/s)，仅当距离边界小于该值时才触发惩罚
-    upper_bound = 8.0
-    lower_bound = 5.0
-
-    # 1. 上限惩罚 (始终激活)
-    margin_max = max_speed - speed
-    norm_margin_max = np.maximum(1.0 - margin_max / upper_bound, 0.0)
-    phi_max = -(norm_margin_max**2)
-
-    # 2. 下限惩罚 (条件激活：仅当存在实质性的最小速度约束时才惩罚)
-    margin_min = speed - min_speed
-    norm_margin_min = np.maximum(1.0 - margin_min / lower_bound, 0.0)
-    # 当 min_speed 极小 (例如接近 0) 时，说明当前允许停车，直接关闭下限惩罚
-    phi_min = np.where(
-        min_speed > 0.0,
-        -(norm_margin_min**2),
-        0.0,
-    )
-
-    # 距离缩放系数
-    scale = 1.0 + 1.0 * np.exp(-0.001 * distance_to_target)
-
-    # 最终势能为两侧惩罚之和
-    return scale * (phi_max + phi_min) * 4.0
-
-
-def _smooth_softplus_risk(z, alpha):
+def _smooth_softplus_risk(
+    z: NDArray[np.floating] | float,
+    alpha: float,
+) -> NDArray[np.float64] | float:
     x = alpha * z
     return np.where(
         x > 20.0,
@@ -174,12 +65,12 @@ def _smooth_softplus_risk(z, alpha):
 
 
 def _potential_safety_speed_asymmetric_v3(
-    pos,
-    speed,
-    min_speed,
-    max_speed,
-    target_pos,
-) -> float:
+    pos: NDArray[np.floating],
+    speed: NDArray[np.floating],
+    min_speed: NDArray[np.floating],
+    max_speed: NDArray[np.floating],
+    target_pos: float,
+) -> NDArray[np.float64]:
     del pos, target_pos
 
     K_Safety = 1.0
@@ -205,57 +96,14 @@ def _potential_safety_speed_asymmetric_v3(
     return K_Safety * (phi_upper + phi_lower)
 
 
-def _potential_stopping_v1(
-    pos,
-    speed,
-    target_pos,
-):
-    """
-    向量化停站势函数
-    """
-    K_weak = 5.0
-    K_strong = 50.0
-    P_weak = 3000.0
-    P_strong = 300.0
-    V_weak = 0.7 * 500.0 / 3.6
-    V_strong = 0.1 * 500.0 / 3.6
-
-    dist_error_abs = np.abs(pos - target_pos)
-    speed_abs = np.abs(speed)
-
-    phi_weak = K_weak * np.exp(-dist_error_abs / P_weak - speed_abs / V_weak)
-    phi_strong = K_strong * np.exp(-dist_error_abs / P_strong - speed_abs / V_strong)
-
-    return phi_weak + phi_strong
-
-
-def _potential_stopping_v2(
-    pos,
-    speed,
-    target_pos,
-):
-    stop_error_abs = np.abs(target_pos - pos)
-
-    x_hat = stop_error_abs / 3000.0
-    v_hat = np.abs(speed * 3.6 / 500.0)
-
-    phi_far = 2.0 * np.exp(-x_hat)
-
-    phi_mid = 8.0 * np.exp(-x_hat / 0.1 - v_hat / 0.2)
-
-    phi_near = 20.0 * np.exp(-x_hat / 0.01 - v_hat / 0.01)
-
-    return phi_far + phi_mid + phi_near
-
-
 def _potential_stopping_v3(
-    pos,
-    speed,
-    target_pos,
-    max_speed_mps,
+    pos: NDArray[np.floating] | float,
+    speed: NDArray[np.floating] | float,
+    target_pos: float,
+    max_speed_mps: NDArray[np.floating] | float,
     *,
     target_attraction_domain_radius_m: float = 3000.0,
-):
+) -> NDArray[np.float64]:
     """停站势函数，与 :class:`RewardCalculator` 的实现保持一致。"""
     distance = np.abs(pos - target_pos)
     sigma_distance = 0.1 * target_attraction_domain_radius_m
@@ -264,7 +112,11 @@ def _potential_stopping_v3(
     return np.where(distance <= target_attraction_domain_radius_m, potential, 0.0)
 
 
-def infer_position_from_speed(curve_pos, curve_speed, target_speed):
+def infer_position_from_speed(
+    curve_pos: NDArray[np.floating],
+    curve_speed: NDArray[np.floating],
+    target_speed: NDArray[np.floating] | float,
+) -> NDArray[np.floating] | np.floating:
     """在速度曲线单调递减时，根据目标速度反推对应位置。"""
     return np.interp(
         target_speed,
@@ -275,7 +127,13 @@ def infer_position_from_speed(curve_pos, curve_speed, target_speed):
     )
 
 
-def interp_with_constant_fill(x, y, query, left_value, right_value):
+def interp_with_constant_fill(
+    x: NDArray[np.floating],
+    y: NDArray[np.floating],
+    query: NDArray[np.floating] | float,
+    left_value: float,
+    right_value: float,
+) -> NDArray[np.floating] | np.floating:
     """使用 numpy.interp 做线性插值，并在区间外用常量填充。"""
     return np.interp(
         query,
@@ -335,15 +193,13 @@ def _build_seventh_auxiliary_stop_field(
         0.0,
     )
     speed_array_mps = np.linspace(
-        0.0, float(np.max(max_speed_profile_mps)), speed_points
+        0.0,
+        float(np.max(max_speed_profile_mps)),
+        speed_points,
     )
     position_grid, speed_grid_mps = np.meshgrid(pos_array, speed_array_mps)
-    min_speed_grid_mps = np.broadcast_to(
-        min_speed_profile_mps, position_grid.shape
-    )
-    max_speed_grid_mps = np.broadcast_to(
-        max_speed_profile_mps, position_grid.shape
-    )
+    min_speed_grid_mps = np.broadcast_to(min_speed_profile_mps, position_grid.shape)
+    max_speed_grid_mps = np.broadcast_to(max_speed_profile_mps, position_grid.shape)
     feasible_mask = (speed_grid_mps >= min_speed_grid_mps) & (
         speed_grid_mps <= max_speed_grid_mps
     )
@@ -383,7 +239,9 @@ def _calculate_guidance_potentials(
     return safety_potential, stopping_potential
 
 
-def _plot_guidance_boundaries(ax, field: _SeventhAuxiliaryStopField):
+def _plot_guidance_boundaries(
+    ax: Axes, field: _SeventhAuxiliaryStopField
+) -> tuple[Line2D, Line2D, Line2D]:
     """绘制与联合图一致的速度边界与目标位置。"""
     min_speed_line = ax.plot(
         field.pos_array,
@@ -403,8 +261,8 @@ def _plot_guidance_boundaries(ax, field: _SeventhAuxiliaryStopField):
         linestyle="--",
         linewidth=1.0,
     )
-    ax.set_xlim(field.pos_array[0], field.pos_array[-1])
-    ax.set_ylim(0.0, field.speed_array_mps[-1] * 3.6)
+    _ = ax.set_xlim(field.pos_array[0], field.pos_array[-1])
+    _ = ax.set_ylim(0.0, field.speed_array_mps[-1] * 3.6)
     return min_speed_line, max_speed_line, target_position_line
 
 
@@ -447,19 +305,19 @@ def plot_guidance_potentials_wide(*, minimal: bool = False) -> Figure:
     min_speed_line, max_speed_line, target_position_line = _plot_guidance_boundaries(
         ax_safety, field
     )
-    _plot_guidance_boundaries(ax_stopping, field)
+    _ = _plot_guidance_boundaries(ax_stopping, field)
 
     if minimal:
         _apply_minimal_axis_style(ax_safety)
         _apply_minimal_axis_style(ax_stopping)
     else:
-        ax_safety.set_xlabel("Position (m)")
-        ax_stopping.set_xlabel("Position (m)")
-        ax_safety.set_ylabel("Velocity (km/h)")
+        _ = ax_safety.set_xlabel("Position (m)")
+        _ = ax_stopping.set_xlabel("Position (m)")
+        _ = ax_safety.set_ylabel("Velocity (km/h)")
         ax_stopping.tick_params(axis="y", which="both", left=False, labelleft=False)
         for ax in (ax_safety, ax_stopping):
             ax.grid(True, alpha=0.3, linestyle=":")
-        fig.legend(
+        _ = fig.legend(
             (min_speed_line, max_speed_line, target_position_line),
             (r"$v_{\min}(x)$", r"$v_{\max}(x)$", "Target position"),
             loc="upper center",
@@ -467,14 +325,14 @@ def plot_guidance_potentials_wide(*, minimal: bool = False) -> Figure:
             frameon=False,
             bbox_to_anchor=(0.5, 0.925),
         )
-        fig.colorbar(
+        _ = fig.colorbar(
             safety_mesh,
             ax=ax_safety,
             orientation="vertical",
             pad=0.02,
             fraction=0.046,
         )
-        fig.colorbar(
+        _ = fig.colorbar(
             stopping_mesh,
             ax=ax_stopping,
             orientation="vertical",
@@ -483,7 +341,7 @@ def plot_guidance_potentials_wide(*, minimal: bool = False) -> Figure:
         )
         for panel_label, ax in (("(a)", ax_safety), ("(b)", ax_stopping)):
             bounds = ax.get_position()
-            fig.text(
+            _ = fig.text(
                 (bounds.x0 + bounds.x1) / 2.0,
                 bounds.y0 - 0.11,
                 panel_label,
@@ -495,7 +353,7 @@ def plot_guidance_potentials_wide(*, minimal: bool = False) -> Figure:
     return fig
 
 
-def _apply_minimal_axis_style(ax) -> None:
+def _apply_minimal_axis_style(ax: Axes) -> None:
     ax.grid(False)
     ax.set_axis_on()
     ax.axison = True
@@ -508,8 +366,7 @@ def _apply_transparent_background(fig: Figure) -> None:
 
     for ax in fig.axes:
         ax.set_facecolor("none")
-        if ax.patch is not None:
-            ax.patch.set_alpha(0.0)
+        ax.patch.set_alpha(0.0)
 
         # 3D 坐标轴 pane 默认非透明，需单独处理。
         for axis_name in ("xaxis", "yaxis", "zaxis"):
@@ -542,10 +399,10 @@ def plot_safety_potential_heatmap_speed(*, minimal: bool = False) -> Figure:
         _apply_minimal_axis_style(ax)
     else:
         fig.subplots_adjust(top=0.85, bottom=0.13, left=0.13, right=0.88)
-        ax.set_xlabel("Position (m)")
-        ax.set_ylabel("Velocity (km/h)")
+        _ = ax.set_xlabel("Position (m)")
+        _ = ax.set_ylabel("Velocity (km/h)")
         ax.grid(True, alpha=0.3, linestyle=":")
-        fig.legend(
+        _ = fig.legend(
             (min_speed_line, max_speed_line, target_position_line),
             (r"$v_{\min}(x)$", r"$v_{\max}(x)$", "Target position"),
             loc="upper center",
@@ -553,7 +410,7 @@ def plot_safety_potential_heatmap_speed(*, minimal: bool = False) -> Figure:
             frameon=False,
             bbox_to_anchor=(0.5, 0.925),
         )
-        fig.colorbar(
+        _ = fig.colorbar(
             safety_mesh,
             ax=ax,
             orientation="vertical",
@@ -622,17 +479,17 @@ def plot_safety_potential_heatmap_position(*, minimal: bool = False) -> Figure:
         vmax=0.0,
     )
 
-    ax.set_xlim(pos_left_bound - 1000, pos_right_bound + 1000)
-    ax.set_ylim(lower_speed * 3.6, upper_speed * 3.6)
+    _ = ax.set_xlim(pos_left_bound - 1000, pos_right_bound + 1000)
+    _ = ax.set_ylim(lower_speed * 3.6, upper_speed * 3.6)
 
     if minimal:
-        ax.plot(
+        _ = ax.plot(
             pos_from_max_curve,
             speed_array_ms * 3.6,
             color="red",
             linewidth=1,
         )
-        ax.plot(
+        _ = ax.plot(
             pos_from_min_curve,
             speed_array_ms * 3.6,
             color="blue",
@@ -640,21 +497,21 @@ def plot_safety_potential_heatmap_position(*, minimal: bool = False) -> Figure:
         )
         _apply_minimal_axis_style(ax)
     else:
-        ax.plot(
+        _ = ax.plot(
             pos_from_max_curve,
             speed_array_ms * 3.6,
             color="red",
             linewidth=1,
             label="maximum speed curve",
         )
-        ax.plot(
+        _ = ax.plot(
             pos_from_min_curve,
             speed_array_ms * 3.6,
             color="blue",
             linewidth=1,
             label="minimum speed curve",
         )
-        ax.plot(
+        _ = ax.plot(
             safe_center_pos_array,
             speed_array_ms * 3.6,
             color="black",
@@ -663,11 +520,11 @@ def plot_safety_potential_heatmap_position(*, minimal: bool = False) -> Figure:
             label="safe center",
         )
 
-        fig.colorbar(c, ax=ax, extend="min")
+        _ = fig.colorbar(c, ax=ax, extend="min")
 
-        ax.set_xlabel("Position (m)")
-        ax.set_ylabel("Speed (km/h)")
-        ax.legend(loc="lower left", framealpha=0.9)
+        _ = ax.set_xlabel("Position (m)")
+        _ = ax.set_ylabel("Speed (km/h)")
+        _ = ax.legend(loc="lower left", framealpha=0.9)
         ax.grid(True, alpha=0.3, linestyle=":")
 
     _apply_transparent_background(fig)
@@ -692,7 +549,7 @@ def plot_stopping_potential_heatmap(
         fig = plt.figure(figsize=(8.0, 5.9))
         ax = fig.add_subplot(111, projection="3d")
         surface_step = 4
-        ax.plot_surface(
+        _ = ax.plot_surface(
             field.position_grid[::surface_step, ::surface_step],
             (field.speed_grid_mps * 3.6)[::surface_step, ::surface_step],
             stopping_potential[::surface_step, ::surface_step],
@@ -702,14 +559,14 @@ def plot_stopping_potential_heatmap(
             vmin=0.0,
             vmax=10.0,
         )
-        ax.plot(
+        _ = ax.plot(
             field.pos_array,
             field.min_speed_profile_mps * 3.6,
             np.zeros_like(field.pos_array),
             color="tab:blue",
             linewidth=1.2,
         )
-        ax.plot(
+        _ = ax.plot(
             field.pos_array,
             field.max_speed_profile_mps * 3.6,
             np.zeros_like(field.pos_array),
@@ -723,9 +580,9 @@ def plot_stopping_potential_heatmap(
         if minimal:
             _apply_minimal_axis_style(ax)
         else:
-            ax.set_xlabel("Position (m)")
-            ax.set_ylabel("Velocity (km/h)")
-            ax.set_zlabel("Stopping potential")
+            _ = ax.set_xlabel("Position (m)")
+            _ = ax.set_ylabel("Velocity (km/h)")
+            _ = ax.set_zlabel("Stopping potential")
         _apply_transparent_background(fig)
         return fig
 
@@ -747,10 +604,10 @@ def plot_stopping_potential_heatmap(
         _apply_minimal_axis_style(ax)
     else:
         fig.subplots_adjust(top=0.85, bottom=0.13, left=0.13, right=0.88)
-        ax.set_xlabel("Position (m)")
-        ax.set_ylabel("Velocity (km/h)")
+        _ = ax.set_xlabel("Position (m)")
+        _ = ax.set_ylabel("Velocity (km/h)")
         ax.grid(True, alpha=0.3, linestyle=":")
-        fig.legend(
+        _ = fig.legend(
             (min_speed_line, max_speed_line, target_position_line),
             (r"$v_{\min}(x)$", r"$v_{\max}(x)$", "Target position"),
             loc="upper center",
@@ -758,7 +615,7 @@ def plot_stopping_potential_heatmap(
             frameon=False,
             bbox_to_anchor=(0.5, 0.925),
         )
-        fig.colorbar(
+        _ = fig.colorbar(
             stopping_mesh,
             ax=ax,
             orientation="vertical",
@@ -830,12 +687,10 @@ def plot_stopping_potential_slices(*, minimal: bool = False) -> Figure:
         axes[1].axvline(scale_speed * 3.6, color="gray", linestyle=":", linewidth=1.2)
         axes[1].set_xlabel("speed (km/h)")
         axes[1].set_ylabel(r"$\Phi_D$")
-        axes[1].set_title(
-            rf"d = 0, $v_{{\max}}={max_speed_mps * 3.6:.1f}$ km/h"
-        )
+        axes[1].set_title(rf"d = 0, $v_{{\max}}={max_speed_mps * 3.6:.1f}$ km/h")
         axes[1].grid(True, alpha=0.3, linestyle=":")
 
-        fig.suptitle(
+        _ = fig.suptitle(
             r"$\Phi_D$ slice",
             fontsize=13,
         )
@@ -855,25 +710,25 @@ PLOT_TYPE_CHOICES: tuple[str, ...] = (
 
 def _build_cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="展示并可选保存势函数图。")
-    parser.add_argument(
+    _ = parser.add_argument(
         "--plot-type",
         choices=PLOT_TYPE_CHOICES,
         default="stopping-heatmap",
         help="选择展示哪种势函数图。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--output-file",
         type=Path,
         default=None,
         help="输出紧凑版图像路径（如 output/potential.png）。不传时仅展示图像。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--minimal",
         action=argparse.BooleanOptionalAction,
         default=False,
         help="极简图形模式：仅保留核心数据图元，移除文字与辅助标注。",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--no-show",
         action="store_true",
         help="保存图像但不打开交互式展示窗口。",
@@ -903,7 +758,7 @@ def _resolve_plotter(plot_type: str, *, minimal: bool) -> Callable[[], Figure]:
 
 
 def _apply_plot_style() -> None:
-    set_global_plot_style(
+    _ = set_global_plot_style(
         font_preset="sci",
         preferred_font="Times New Roman",
         title_font_size=12.0,

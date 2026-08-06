@@ -50,13 +50,17 @@ class ReferenceTrajectory:
             and np.all(np.isfinite(speed))
             and np.all(np.isfinite(cumulative_time))
         ):
-            raise ValueError("reference trajectory arrays must contain only finite values")
+            raise ValueError(
+                "reference trajectory arrays must contain only finite values"
+            )
         if np.any(speed < 0.0):
             raise ValueError("reference trajectory speeds must be non-negative")
 
         delta_position = np.diff(position)
         if not (np.all(delta_position > 0.0) or np.all(delta_position < 0.0)):
-            raise ValueError("reference trajectory positions must be strictly monotonic")
+            raise ValueError(
+                "reference trajectory positions must be strictly monotonic"
+            )
         if np.any(np.diff(cumulative_time) <= 0.0):
             raise ValueError("reference trajectory cumulative times must increase")
 
@@ -102,12 +106,14 @@ class ReferenceTrajectorySampler:
     ) -> None:
         if not isinstance(trajectory, ReferenceTrajectory):
             raise TypeError("trajectory must be a ReferenceTrajectory")
-        self._trajectory = trajectory
-        self._stepper = stepper
+        self._trajectory: ReferenceTrajectory = trajectory
+        self._stepper: OperationalStepper = stepper
         self._validate_task_coverage()
         self._validate_source_timing()
         position, speed, operation_time = self._resample_on_rl_grid()
-        self._states = self._replay_states(position, speed, operation_time)
+        self._states: tuple[ReferenceTrajectoryState, ...] = self._replay_states(
+            position, speed, operation_time
+        )
 
     @classmethod
     def from_arrays(
@@ -202,23 +208,35 @@ class ReferenceTrajectorySampler:
         cumulative_time = self._trajectory.cumulative_time_s
         direction = self._stepper.direction
         if not np.isclose(
-            position[0], service.start_position, atol=_POSITION_ATOL_M, rtol=0.0
+            position[0],
+            service.start_position,
+            atol=_POSITION_ATOL_M,
+            rtol=0.0,
         ):
             raise ValueError("reference trajectory start position does not match task")
         if not np.isclose(
-            position[-1], service.target_position, atol=_POSITION_ATOL_M, rtol=0.0
+            position[-1],
+            service.target_position,
+            atol=_POSITION_ATOL_M,
+            rtol=0.0,
         ):
             raise ValueError("reference trajectory target position does not match task")
         if np.any(direction * np.diff(position) <= 0.0):
             raise ValueError("reference trajectory direction does not match task")
         if not np.isclose(
-            speed[0], service.start_speed, atol=_SPEED_ATOL_MPS, rtol=0.0
+            speed[0],
+            service.start_speed,
+            atol=_SPEED_ATOL_MPS,
+            rtol=0.0,
         ):
             raise ValueError("reference trajectory start speed does not match task")
         if not np.isclose(speed[-1], 0.0, atol=_SPEED_ATOL_MPS, rtol=0.0):
             raise ValueError("reference trajectory must end at zero speed")
         if not np.isclose(
-            cumulative_time[0], 0.0, atol=_TIME_ATOL_S, rtol=0.0
+            cumulative_time[0],
+            0.0,
+            atol=_TIME_ATOL_S,
+            rtol=0.0,
         ):
             raise ValueError("reference trajectory must start at operation time zero")
 
@@ -229,15 +247,17 @@ class ReferenceTrajectorySampler:
         for index in range(position.size - 1):
             distance = abs(float(position[index + 1] - position[index]))
             duration = self._duration_to_speed(
-                float(speed[index]), float(speed[index + 1]), distance
+                float(speed[index]),
+                float(speed[index + 1]),
+                distance,
             )
-            recorded_duration = float(cumulative_time[index + 1] - cumulative_time[index])
-            if not np.isclose(
-                duration, recorded_duration, atol=_TIME_ATOL_S, rtol=0.0
-            ):
+            recorded_duration = float(
+                cumulative_time[index + 1] - cumulative_time[index]
+            )
+            if not np.isclose(duration, recorded_duration, atol=_TIME_ATOL_S, rtol=0.0):
                 raise ValueError(
                     "reference trajectory cumulative time is inconsistent with "
-                    f"constant-acceleration segment {index}"
+                    + f"constant-acceleration segment {index}"
                 )
 
     def _resample_on_rl_grid(
@@ -259,7 +279,9 @@ class ReferenceTrajectorySampler:
         for index in range(node_count - 1):
             distance = float(travelled[index + 1] - travelled[index])
             duration = self._duration_to_speed(
-                float(speed[index]), float(speed[index + 1]), distance
+                float(speed[index]),
+                float(speed[index + 1]),
+                distance,
             )
             operation_time[index + 1] = operation_time[index] + duration
 
@@ -287,7 +309,7 @@ class ReferenceTrajectorySampler:
             speed_sq = begin_speed**2 + 2.0 * acceleration * (
                 float(distance) - begin_distance
             )
-            if speed_sq < -_SPEED_ATOL_MPS**2:
+            if speed_sq < -(_SPEED_ATOL_MPS**2):
                 raise ValueError("reference interpolation produced an invalid speed")
             result[index] = float(np.sqrt(max(speed_sq, 0.0)))
         return result
@@ -299,15 +321,21 @@ class ReferenceTrajectorySampler:
         operation_time: NDArray[np.float64],
     ) -> tuple[ReferenceTrajectoryState, ...]:
         state = self._stepper.reset()
-        self._validate_replayed_state(state, position[0], speed[0], operation_time[0], 0)
+        self._validate_replayed_state(
+            state, position[0], speed[0], operation_time[0], 0
+        )
         states: list[ReferenceTrajectoryState] = [
-            self._make_reference_state(0, state, position[0], speed[0], operation_time[0])
+            self._make_reference_state(
+                0, state, position[0], speed[0], operation_time[0]
+            )
         ]
 
         for index in range(position.size - 1):
             distance = abs(float(position[index + 1] - position[index]))
             acceleration, _ = calc_transition_to_speed_scalar_numba(
-                float(speed[index]), float(speed[index + 1]), distance
+                float(speed[index]),
+                float(speed[index + 1]),
+                distance,
             )
             self._validate_action_acceleration(float(acceleration), index)
             transition = self._stepper.advance(
@@ -397,15 +425,20 @@ class ReferenceTrajectorySampler:
             or acceleration > float(vehicle.max_acc) + _ACC_ATOL_MPS2
         ):
             raise ValueError(
-                f"reference action acceleration is outside RL action bounds at grid node {index}"
+                "reference action acceleration is outside RL action bounds "
+                f"at grid node {index}"
             )
 
     @staticmethod
-    def _duration_to_speed(begin_speed: float, end_speed: float, distance: float) -> float:
+    def _duration_to_speed(
+        begin_speed: float, end_speed: float, distance: float
+    ) -> float:
         if not np.isfinite(distance) or distance <= 0.0:
             raise ValueError("reference segment distance must be finite and positive")
         if begin_speed + end_speed <= _SPEED_ATOL_MPS:
-            raise ValueError("reference trajectory cannot traverse a segment at zero speed")
+            raise ValueError(
+                "reference trajectory cannot traverse a segment at zero speed"
+            )
         _, duration = calc_transition_to_speed_scalar_numba(
             begin_speed, end_speed, distance
         )
@@ -464,5 +497,7 @@ class ReferenceTrajectorySampler:
         selected = all_weights[candidates]
         total = float(np.sum(selected))
         if total <= 0.0:
-            raise ValueError("weights over the requested sampling range must sum to > 0")
+            raise ValueError(
+                "weights over the requested sampling range must sum to > 0"
+            )
         return selected / total

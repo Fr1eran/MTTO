@@ -1,9 +1,12 @@
 import os
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pytest
 
+from model.ocs import SafeGuardUtility
+from rl.experiment_utils import DEFAULT_SCHEDULE_TIME_S
 from scripts.analyze_sps_compliance import (
     _build_cli_parser,
     _parse_output_mode,
@@ -13,7 +16,6 @@ from scripts.analyze_sps_compliance import (
     _validate_cli_args,
     replay_sps_compliance,
 )
-from rl.experiment_utils import DEFAULT_SCHEDULE_TIME_S
 
 
 class _StubSafeGuard:
@@ -24,15 +26,16 @@ class _StubSafeGuard:
         max_speed_pre_step: float = 5.0,
         max_speed_post_step: float = 5.0,
     ) -> None:
-        self.trigger_min_speed = trigger_min_speed
-        self.max_speed_pre_step = max_speed_pre_step
-        self.max_speed_post_step = max_speed_post_step
+        self.trigger_min_speed: float = trigger_min_speed
+        self.max_speed_pre_step: float = max_speed_pre_step
+        self.max_speed_post_step: float = max_speed_post_step
 
     def get_min_and_max_speed(
         self,
         current_pos: float,
         current_sp: int,
     ) -> tuple[float, float]:
+        del current_pos
         if current_sp < 0:
             return 0.0, self.max_speed_pre_step
         return self.trigger_min_speed, self.max_speed_post_step
@@ -53,7 +56,7 @@ def _write_dp_artifact(run_dir: Path) -> tuple[Path, Path]:
         pos_m=np.asarray([0.0, 1.0], dtype=np.float32),
         speed_mps=np.asarray([0.0, 0.0], dtype=np.float32),
     )
-    metrics_path.write_text("{}", encoding="utf-8")
+    _ = metrics_path.write_text("{}", encoding="utf-8")
     return curve_path, metrics_path
 
 
@@ -65,7 +68,7 @@ def _write_rl_artifact(run_dir: Path, *, file_name: str) -> tuple[Path, Path]:
         pos_m=np.asarray([0.0, 1.0], dtype=np.float32),
         speed_mps=np.asarray([0.0, 0.0], dtype=np.float32),
     )
-    metrics_path.write_text("{}", encoding="utf-8")
+    _ = metrics_path.write_text("{}", encoding="utf-8")
     return curve_path, metrics_path
 
 
@@ -85,14 +88,16 @@ def test_analyze_sps_compliance_cli_defaults() -> None:
 
 def test_analyze_sps_compliance_cli_accepts_marker_only_and_json() -> None:
     parser = _build_cli_parser()
-    args = parser.parse_args([
-        "--output-mode",
-        "json",
-        "--event-annotation",
-        "marker-only",
-        "--step-delay-s",
-        "1.5",
-    ])
+    args = parser.parse_args(
+        [
+            "--output-mode",
+            "json",
+            "--event-annotation",
+            "marker-only",
+            "--step-delay-s",
+            "1.5",
+        ]
+    )
 
     assert args.output_mode == "json"
     assert args.event_annotation == "marker-only"
@@ -101,12 +106,14 @@ def test_analyze_sps_compliance_cli_accepts_marker_only_and_json() -> None:
 
 def test_analyze_sps_compliance_cli_accepts_single_mode_and_kind() -> None:
     parser = _build_cli_parser()
-    args = parser.parse_args([
-        "--analysis-mode",
-        "single",
-        "--trajectory-kind",
-        "rl",
-    ])
+    args = parser.parse_args(
+        [
+            "--analysis-mode",
+            "single",
+            "--trajectory-kind",
+            "rl",
+        ]
+    )
     _validate_cli_args(parser, args)
     assert args.analysis_mode == "single"
     assert args.trajectory_kind == "rl"
@@ -133,12 +140,10 @@ def test_parse_output_mode_supports_text_plot_and_csv_like_list() -> None:
 
 def test_parse_output_mode_rejects_unknown_mode() -> None:
     with pytest.raises(ValueError, match="Unknown output mode"):
-        _parse_output_mode("text,invalid")
+        _ = _parse_output_mode("text,invalid")
 
 
-def test_resolve_target_schedule_time_prefers_override_then_rl_then_dp_then_default() -> (
-    None
-):
+def test_resolve_target_schedule_precedence() -> None:
     assert _resolve_target_schedule_time(
         dp_metrics={"target_time_s": 420.0},
         rl_metrics={"target_time_s": 430.0},
@@ -306,7 +311,7 @@ def test_replay_sps_compliance_main_cases(
         label=name,
         pos_arr=pos_arr,
         speed_arr=speed_arr,
-        sgu=guard,  # type: ignore[arg-type]
+        sgu=cast(SafeGuardUtility, cast(object, guard)),
         asa_ap_list=[1000.0],
         asa_dp_list=[1010.0],
         step_delay_s=1.0,

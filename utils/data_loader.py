@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from numpy.typing import NDArray
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -29,14 +30,17 @@ def load_pickle(relative_path: str | Path) -> Any:
         return pickle.load(f)
 
 
-def load_excel(relative_path: str | Path, **kwargs: Any):
+def load_excel(
+    relative_path: str | Path,
+    **kwargs: Any,
+):
     import pandas as pd
 
     file_path = resolve_project_path(relative_path)
     return pd.read_excel(file_path, **kwargs)
 
 
-def load_slopes() -> tuple[np.ndarray, np.ndarray]:
+def load_slopes() -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     data = load_json("data/rail/raw/slopes.json")
     return np.asarray(data["slopes"], dtype=np.float64), np.asarray(
         data["intervals"], dtype=np.float64
@@ -46,7 +50,7 @@ def load_slopes() -> tuple[np.ndarray, np.ndarray]:
 def load_speed_limits(
     to_mps: bool = True,
     dtype: np.dtype | type = np.float64,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     data = load_json("data/rail/raw/speed_limits.json")
     speed_limits = np.asarray(data["speed_limits"], dtype=dtype)
     if to_mps:
@@ -67,11 +71,13 @@ def load_acceleration_zones() -> dict[str, Any]:
     return load_json("data/rail/raw/acceleration_zones.json")
 
 
-def load_safeguard_curve(curve_name: str):
+def load_safeguard_curve(curve_name: str) -> list[NDArray[np.float64]]:
     return load_pickle(f"output/safeguardcurves/{curve_name}.pkl")
 
 
-def load_safeguard_curves(*curve_names: str) -> tuple[Any, ...]:
+def load_safeguard_curves(
+    *curve_names: str,
+) -> tuple[list[NDArray[np.float64]], ...]:
     return tuple(load_safeguard_curve(name) for name in curve_names)
 
 

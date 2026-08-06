@@ -47,4 +47,4 @@ def test_sigmoid_variant_list_input_returns_ndarray_with_same_dimension():
 
 def test_sigmoid_variant_rejects_invalid_thresholds():
     with pytest.raises(AssertionError, match="x2"):
-        SigmoidVariant(x1=1.0, x2=1.0)
+        _ = SigmoidVariant(x1=1.0, x2=1.0)

@@ -1,22 +1,27 @@
-import pytest
 from types import SimpleNamespace
+from typing import cast
+
+import pytest
+from stable_baselines3.common.vec_env import VecEnv
 
 from scripts.evaluate_rl import build_arg_parser, build_initial_rollout_series
 
 
 def test_evaluate_rl_cli_accepts_dry_run_and_shared_args() -> None:
     parser = build_arg_parser()
-    args = parser.parse_args([
-        "--dry-run",
-        "--schedule-time-s",
-        "430.0",
-        "--reward-profile",
+    args = parser.parse_args(
+        [
+            "--dry-run",
+            "--schedule-time-s",
+            "430.0",
+            "--reward-profile",
             "basic",
-        "--reward-discount",
-        "0.95",
-        "--device",
-        "cuda",
-    ])
+            "--reward-discount",
+            "0.95",
+            "--device",
+            "cuda",
+        ]
+    )
 
     assert args.dry_run is True
     assert args.schedule_time_s == 430.0
@@ -27,19 +32,21 @@ def test_evaluate_rl_cli_accepts_dry_run_and_shared_args() -> None:
 
 def test_evaluate_rl_cli_rejects_removed_punctuality_dense_reward_option() -> None:
     with pytest.raises(SystemExit):
-        build_arg_parser().parse_args(["--plot-punctuality-dense-reward"])
+        _ = build_arg_parser().parse_args(["--plot-punctuality-dense-reward"])
 
 
 def test_build_initial_rollout_series_reads_reset_environment_state() -> None:
     class FakeVecEnv:
-        values = {"state": [
-            SimpleNamespace(
-                position_m=123.0,
-                speed_mps=4.5,
-                operation_time_s=0.0,
-                redundant_operation_time_s=26.0,
-            )
-        ]}
+        values: dict[str, list[object]] = {
+            "state": [
+                SimpleNamespace(
+                    position_m=123.0,
+                    speed_mps=4.5,
+                    operation_time_s=0.0,
+                    redundant_operation_time_s=26.0,
+                )
+            ]
+        }
 
         def get_attr(self, attr_name: str):
             return self.values[attr_name]
@@ -49,7 +56,7 @@ def test_build_initial_rollout_series_reads_reset_environment_state() -> None:
         speed_seq,
         operation_time_seq,
         redundant_operation_time_seq,
-    ) = build_initial_rollout_series(FakeVecEnv())
+    ) = build_initial_rollout_series(cast(VecEnv, cast(object, FakeVecEnv())))
 
     assert position_seq == [123.0]
     assert speed_seq == [4.5]

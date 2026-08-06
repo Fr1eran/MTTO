@@ -1,9 +1,10 @@
-import numpy as np
-import pytest
 import argparse
+import warnings
 from pathlib import Path
 from typing import Any, cast
-import warnings
+
+import numpy as np
+import pytest
 
 from rl.callbacks import TensorboardCallback
 from rl.experiment_utils import (
@@ -19,8 +20,8 @@ from rl.training_analysis.analyze import (
     compute_reward_component_impact,
 )
 from rl.training_analysis.collect import ScalarSeries, compute_sampling_health
-from rl.training_analysis.pipeline import AnalysisConfig, run_training_analysis
 from rl.training_analysis.output import build_analysis_payload, write_analysis_outputs
+from rl.training_analysis.pipeline import AnalysisConfig, run_training_analysis
 from rl.training_analysis.process import build_episode_snapshots
 from scripts.analyze_training_data import build_arg_parser as build_analyze_arg_parser
 from scripts.train_rl import build_cli_parser as build_train_rl_arg_parser
@@ -166,9 +167,7 @@ def test_best_eval_metrics_empty():
 
 def test_constraint_diagnostic_basic():
     series_map = {
-        "state/position": _make_series(
-            "state/position", [0.0, 500.0, 1000.0, 1500.0]
-        ),
+        "state/position": _make_series("state/position", [0.0, 500.0, 1000.0, 1500.0]),
         "constraint/is_truncated": _make_series(
             "constraint/is_truncated",
             [0.0, 1.0, 0.0, 1.0],
@@ -209,9 +208,7 @@ def test_constraint_diagnostic_basic():
 
 def test_constraint_diagnostic_accepts_new_state_tags():
     series_map = {
-        "state/position": _make_series(
-            "state/position", [0.0, 500.0, 1000.0, 1500.0]
-        ),
+        "state/position": _make_series("state/position", [0.0, 500.0, 1000.0, 1500.0]),
         "constraint/is_truncated": _make_series(
             "constraint/is_truncated",
             [0.0, 1.0, 0.0, 1.0],
@@ -410,7 +407,8 @@ def test_evolution_metrics_maps_step_limit_to_terminal_failure_state():
     terminal_state_ratio = evolution["overall_terminal_state_ratio"]
     assert terminal_state_ratio["terminal_failure"] == pytest.approx(1.0)
 
-def test_write_outputs_default_no_csv(tmp_path):
+
+def test_write_outputs_default_no_csv(tmp_path: Path):
     payload = build_analysis_payload(
         run_name="unit_test_run",
         run_directory="dummy",
@@ -440,7 +438,7 @@ def test_write_outputs_default_no_csv(tmp_path):
     assert list(output_dir.glob("*.csv")) == []
 
 
-def test_markdown_best_eval_uses_arrival_layers(tmp_path):
+def test_markdown_best_eval_uses_arrival_layers(tmp_path: Path):
     payload = build_analysis_payload(
         run_name="layered_best_eval",
         run_directory="dummy",
@@ -511,7 +509,7 @@ def test_markdown_best_eval_uses_arrival_layers(tmp_path):
 
 class _FakeEnv:
     def __init__(self):
-        self._attrs = {
+        self._attrs: dict[str, list[dict[str, float]]] = {
             "rewards_info": [{"total": 999.0}],
             "state_info": [{"episode_id": 999.0}],
             "constraint_info": [{"is_truncated": 999.0}],
@@ -548,18 +546,20 @@ class _FakeTensorboardWriter:
 
 class _FakeTensorboardOutputFormat:
     def __init__(self, writer: _FakeTensorboardWriter):
-        self.writer = writer
+        self.writer: _FakeTensorboardWriter = writer
 
 
 class _FakeTensorboardLogger:
     def __init__(self, writer: _FakeTensorboardWriter):
-        self.output_formats = [_FakeTensorboardOutputFormat(writer)]
+        self.output_formats: list[_FakeTensorboardOutputFormat] = [
+            _FakeTensorboardOutputFormat(writer)
+        ]
 
 
 class _FakeModel:
-    def __init__(self, env: _FakeEnv, logger: Any):
-        self._env = env
-        self.logger = logger
+    def __init__(self, env: _FakeEnv, logger: object):
+        self._env: _FakeEnv = env
+        self.logger: object = logger
 
     def get_env(self):
         return self._env
@@ -694,7 +694,7 @@ def test_callback_tracks_episode_id_from_dones():
         "infos": [
             {
                 "rewards": {},
-                    "basic": {},
+                "basic": {},
                 "constraint": {},
                 "event": {},
             }
@@ -708,7 +708,7 @@ def test_callback_tracks_episode_id_from_dones():
         "infos": [
             {
                 "rewards": {},
-                    "basic": {},
+                "basic": {},
                 "constraint": {},
                 "event": {},
             }
@@ -722,7 +722,7 @@ def test_callback_tracks_episode_id_from_dones():
         "infos": [
             {
                 "rewards": {},
-                    "basic": {},
+                "basic": {},
                 "constraint": {},
                 "event": {},
             }
@@ -789,19 +789,30 @@ def _build_sparse_series_map() -> dict[str, ScalarSeries]:
     }
 
 
-def test_sampling_gate_strict_mode(monkeypatch, tmp_path):
+def test_sampling_gate_strict_mode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     import rl.training_analysis.pipeline as pipeline_module
 
     sparse_map = _build_sparse_series_map()
+
+    def _fake_resolve_run_directory(log_root: object, run_name: object = None) -> Path:
+        del log_root, run_name
+        return Path("fake_run")
+
+    def _fake_load_scalar_series(
+        run_dir: object,
+    ) -> dict[str, ScalarSeries]:
+        del run_dir
+        return sparse_map
+
     monkeypatch.setattr(
         pipeline_module,
         "resolve_run_directory",
-        lambda log_root, run_name=None: Path("fake_run"),
+        _fake_resolve_run_directory,
     )
     monkeypatch.setattr(
         pipeline_module,
         "load_scalar_series_from_run",
-        lambda run_dir: sparse_map,
+        _fake_load_scalar_series,
     )
 
     config = AnalysisConfig(
@@ -813,22 +824,35 @@ def test_sampling_gate_strict_mode(monkeypatch, tmp_path):
     )
 
     with pytest.raises(ValueError, match="rollout_steps_per_update"):
-        run_training_analysis(log_root="unused", run_name="unused", config=config)
+        _ = run_training_analysis(log_root="unused", run_name="unused", config=config)
 
 
-def test_sampling_gate_warn_mode_outputs_data_quality(monkeypatch, tmp_path):
+def test_sampling_gate_warn_mode_outputs_data_quality(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
     import rl.training_analysis.pipeline as pipeline_module
 
     sparse_map = _build_sparse_series_map()
+
+    def _fake_resolve_run_directory(log_root: object, run_name: object = None) -> Path:
+        del log_root, run_name
+        return Path("fake_run")
+
+    def _fake_load_scalar_series(
+        run_dir: object,
+    ) -> dict[str, ScalarSeries]:
+        del run_dir
+        return sparse_map
+
     monkeypatch.setattr(
         pipeline_module,
         "resolve_run_directory",
-        lambda log_root, run_name=None: Path("fake_run"),
+        _fake_resolve_run_directory,
     )
     monkeypatch.setattr(
         pipeline_module,
         "load_scalar_series_from_run",
-        lambda run_dir: sparse_map,
+        _fake_load_scalar_series,
     )
 
     config = AnalysisConfig(
@@ -857,19 +881,32 @@ def test_sampling_gate_warn_mode_outputs_data_quality(monkeypatch, tmp_path):
     )
 
 
-def test_sampling_gate_accepts_rollout_sized_mean_gap(monkeypatch, tmp_path):
+def test_sampling_gate_accepts_rollout_sized_mean_gap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
     import rl.training_analysis.pipeline as pipeline_module
 
     sparse_map = _build_sparse_series_map()
+
+    def _fake_resolve_run_directory(log_root: object, run_name: object = None) -> Path:
+        del log_root, run_name
+        return Path("fake_run")
+
+    def _fake_load_scalar_series(
+        run_dir: object,
+    ) -> dict[str, ScalarSeries]:
+        del run_dir
+        return sparse_map
+
     monkeypatch.setattr(
         pipeline_module,
         "resolve_run_directory",
-        lambda log_root, run_name=None: Path("fake_run"),
+        _fake_resolve_run_directory,
     )
     monkeypatch.setattr(
         pipeline_module,
         "load_scalar_series_from_run",
-        lambda run_dir: sparse_map,
+        _fake_load_scalar_series,
     )
 
     config = AnalysisConfig(
@@ -892,16 +929,18 @@ def test_sampling_gate_accepts_rollout_sized_mean_gap(monkeypatch, tmp_path):
 
 def test_analyze_cli_sampling_quality_args():
     parser = build_analyze_arg_parser()
-    args = parser.parse_args([
-        "--min-points-per-10k-steps",
-        "6.5",
-        "--min-unique-episodes",
-        "80",
-        "--rollout-steps-per-update",
-        "8192",
-        "--sampling-quality-mode",
-        "strict_fail",
-    ])
+    args = parser.parse_args(
+        [
+            "--min-points-per-10k-steps",
+            "6.5",
+            "--min-unique-episodes",
+            "80",
+            "--rollout-steps-per-update",
+            "8192",
+            "--sampling-quality-mode",
+            "strict_fail",
+        ]
+    )
 
     assert args.min_points_per_10k_steps == 6.5
     assert args.min_unique_episodes == 80
@@ -913,7 +952,7 @@ def test_analyze_cli_rejects_removed_max_mean_step_gap() -> None:
     parser = build_analyze_arg_parser()
 
     with pytest.raises(SystemExit):
-        parser.parse_args(["--max-mean-step-gap", "1500"])
+        _ = parser.parse_args(["--max-mean-step-gap", "1500"])
 
 
 def test_analyze_cli_accepts_dry_run() -> None:
@@ -940,12 +979,12 @@ def test_resolve_log_interval_defaults_and_override():
 
 @pytest.mark.parametrize(
     "run_mode, expected",
-        [
-            ("tune", (True, True, True, True, True, True)),
-            ("reproduce", (False, False, True, False, False, False)),
-            ("monitor_best", (True, False, True, False, False, True)),
-            ("best_only", (False, False, False, False, False, True)),
-        ],
+    [
+        ("tune", (True, True, True, True, True, True)),
+        ("reproduce", (False, False, True, False, False, False)),
+        ("monitor_best", (True, False, True, False, False, True)),
+        ("best_only", (False, False, False, False, False, True)),
+    ],
 )
 def test_resolve_run_mode_defaults(run_mode: str, expected: tuple[bool, ...]) -> None:
     args = argparse.Namespace(
@@ -996,7 +1035,7 @@ def test_resolve_run_mode_forces_callback_off_when_tb_disabled() -> None:
 def test_train_rl_cli_rejects_removed_eval_mode() -> None:
     parser = build_train_rl_arg_parser()
     with pytest.raises(SystemExit):
-        parser.parse_args(["--run-mode", "eval"])
+        _ = parser.parse_args(["--run-mode", "eval"])
 
 
 def test_train_rl_cli_accepts_new_run_modes() -> None:
@@ -1008,12 +1047,14 @@ def test_train_rl_cli_accepts_new_run_modes() -> None:
 
 def test_train_rl_cli_accepts_reward_profile_and_experiment_tag() -> None:
     parser = build_train_rl_arg_parser()
-    args = parser.parse_args([
-        "--reward-profile",
-        "basic_safety_stopping",
-        "--experiment-tag",
-        "trial_a",
-    ])
+    args = parser.parse_args(
+        [
+            "--reward-profile",
+            "basic_safety_stopping",
+            "--experiment-tag",
+            "trial_a",
+        ]
+    )
 
     assert args.reward_profile == "basic_safety_stopping"
     assert args.experiment_tag == "trial_a"
@@ -1021,13 +1062,15 @@ def test_train_rl_cli_accepts_reward_profile_and_experiment_tag() -> None:
 
 def test_train_rl_cli_validates_curriculum_reference_directory(tmp_path: Path) -> None:
     parser = build_train_rl_arg_parser()
-    args = parser.parse_args([
-        "--curriculum-profile",
-        "fixed_reverse",
-        "--reference-curve-dir",
-        str(tmp_path),
-        "--dry-run",
-    ])
+    args = parser.parse_args(
+        [
+            "--curriculum-profile",
+            "fixed_reverse",
+            "--reference-curve-dir",
+            str(tmp_path),
+            "--dry-run",
+        ]
+    )
 
     spec = resolve_training_run_spec(args)
     assert spec.curriculum_profile.name == "fixed_reverse"
@@ -1038,13 +1081,15 @@ def test_train_rl_cli_validates_curriculum_reference_directory(tmp_path: Path) -
 
 def test_train_rl_cli_resolves_spdl_profile(tmp_path: Path) -> None:
     parser = build_train_rl_arg_parser()
-    args = parser.parse_args([
-        "--curriculum-profile",
-        "spdl",
-        "--reference-curve-dir",
-        str(tmp_path),
-        "--dry-run",
-    ])
+    args = parser.parse_args(
+        [
+            "--curriculum-profile",
+            "spdl",
+            "--reference-curve-dir",
+            str(tmp_path),
+            "--dry-run",
+        ]
+    )
 
     spec = resolve_training_run_spec(args)
     assert spec.curriculum_profile.controller_kind == "spdl"
@@ -1056,16 +1101,18 @@ def test_train_rl_curriculum_requires_existing_reference_directory() -> None:
     parser = build_train_rl_arg_parser()
     args = parser.parse_args(["--curriculum-profile", "fixed_reverse"])
     with pytest.raises(ValueError, match="reference_curve_dir is required"):
-        resolve_training_run_spec(args)
+        _ = resolve_training_run_spec(args)
 
 
 def test_train_rl_cli_accepts_dry_run() -> None:
     parser = build_train_rl_arg_parser()
-    args = parser.parse_args([
-        "--dry-run",
-        "--reward-profile",
-        "basic",
-    ])
+    args = parser.parse_args(
+        [
+            "--dry-run",
+            "--reward-profile",
+            "basic",
+        ]
+    )
 
     assert args.dry_run is True
     assert args.reward_profile == "basic"
@@ -1074,20 +1121,22 @@ def test_train_rl_cli_accepts_dry_run() -> None:
 def test_train_rl_cli_rejects_removed_subproc_start_method_option() -> None:
     parser = build_train_rl_arg_parser()
     with pytest.raises(SystemExit):
-        parser.parse_args(["--subproc-start-method", "spawn"])
+        _ = parser.parse_args(["--subproc-start-method", "spawn"])
 
 
 def test_resolve_training_run_spec_plans_paths_and_switches() -> None:
     parser = build_train_rl_arg_parser()
-    args = parser.parse_args([
-        "--run-mode",
-        "monitor_best",
-        "--reward-profile",
-        "basic_safety",
-        "--experiment-tag",
-        "batch_a",
-        "--dry-run",
-    ])
+    args = parser.parse_args(
+        [
+            "--run-mode",
+            "monitor_best",
+            "--reward-profile",
+            "basic_safety",
+            "--experiment-tag",
+            "batch_a",
+            "--dry-run",
+        ]
+    )
 
     spec = resolve_training_run_spec(args)
 
@@ -1108,13 +1157,15 @@ def test_resolve_training_run_spec_auto_selects_forkserver_when_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     parser = build_train_rl_arg_parser()
-    args = parser.parse_args([
-        "--num-envs",
-        "2",
-        "--vec-env-type",
-        "subproc",
-        "--dry-run",
-    ])
+    args = parser.parse_args(
+        [
+            "--num-envs",
+            "2",
+            "--vec-env-type",
+            "subproc",
+            "--dry-run",
+        ]
+    )
     monkeypatch.setattr(
         "rl.experiment_utils.mp.get_all_start_methods",
         lambda: ["spawn", "forkserver"],
@@ -1131,13 +1182,15 @@ def test_resolve_training_run_spec_falls_back_to_spawn_when_needed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     parser = build_train_rl_arg_parser()
-    args = parser.parse_args([
-        "--num-envs",
-        "2",
-        "--vec-env-type",
-        "subproc",
-        "--dry-run",
-    ])
+    args = parser.parse_args(
+        [
+            "--num-envs",
+            "2",
+            "--vec-env-type",
+            "subproc",
+            "--dry-run",
+        ]
+    )
     monkeypatch.setattr(
         "rl.experiment_utils.mp.get_all_start_methods",
         lambda: ["spawn"],
@@ -1153,10 +1206,10 @@ def test_resolve_training_run_spec_falls_back_to_spawn_when_needed(
 def test_train_rl_cli_rejects_removed_monitor_log_dir_option() -> None:
     parser = build_train_rl_arg_parser()
     with pytest.raises(SystemExit):
-        parser.parse_args(["--monitor-log-dir", "output/tmp/monitor"])
+        _ = parser.parse_args(["--monitor-log-dir", "output/tmp/monitor"])
 
 
-def test_write_outputs_includes_extended_risk_columns(tmp_path):
+def test_write_outputs_includes_extended_risk_columns(tmp_path: Path):
     payload = build_analysis_payload(
         run_name="unit_test_run",
         run_directory="dummy",
@@ -1226,4 +1279,3 @@ def test_write_outputs_includes_extended_risk_columns(tmp_path):
     assert "near_miss_risk" in report_text
     assert "violation_risk" in report_text
     assert "failure_risk" in report_text
-

@@ -182,68 +182,68 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "evaluate",
         help="Run batch evaluation with an in-run schedule-time change.",
     )
-    evaluate_parser.add_argument(
+    _ = evaluate_parser.add_argument(
         "--load-dir",
         type=str,
         default=DEFAULT_EVALUATE_LOAD_DIR,
         help="PPO model directory.",
     )
-    evaluate_parser.add_argument(
+    _ = evaluate_parser.add_argument(
         "--output-dir",
         type=str,
         default=DEFAULT_OUTPUT_DIR,
         help="Root directory for schedule-time-change evaluation outputs.",
     )
-    evaluate_parser.add_argument(
+    _ = evaluate_parser.add_argument(
         "--reward-discount",
         type=float,
         default=None,
         help="Evaluation environment discount factor.",
     )
-    evaluate_parser.add_argument(
+    _ = evaluate_parser.add_argument(
         "--schedule-time-s",
         type=float,
         default=None,
         help="Initial schedule time; falls back to run metadata.",
     )
-    evaluate_parser.add_argument(
+    _ = evaluate_parser.add_argument(
         "--step-distance",
         type=float,
         default=None,
         help="Maximum simulation step distance.",
     )
-    evaluate_parser.add_argument(
+    _ = evaluate_parser.add_argument(
         "--reward-profile",
         type=str,
         choices=tuple(reward_profile_names()),
         default=None,
         help="Reward profile preset; falls back to run metadata.",
     )
-    evaluate_parser.add_argument(
+    _ = evaluate_parser.add_argument(
         "--device",
         type=str,
         default="cpu",
         help="Device used to load PPO.",
     )
-    evaluate_parser.add_argument(
+    _ = evaluate_parser.add_argument(
         "--deterministic",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Use deterministic policy actions.",
     )
-    evaluate_parser.add_argument(
+    _ = evaluate_parser.add_argument(
         "--change-distance-m",
         type=float,
         default=800.0,
         help="Track position at which the schedule time changes.",
     )
-    evaluate_parser.add_argument(
+    _ = evaluate_parser.add_argument(
         "--delta-times-s",
         type=parse_delta_times,
         default=DEFAULT_DELTA_TIMES_S,
         help="Comma-separated schedule-time deltas, e.g. 0,-10,10,-20,20.",
     )
-    evaluate_parser.add_argument(
+    _ = evaluate_parser.add_argument(
         "--dry-run",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -254,31 +254,31 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "show",
         help="Show a saved schedule-time-change evaluation result.",
     )
-    show_parser.add_argument(
+    _ = show_parser.add_argument(
         "--load-dir",
         type=str,
         default=DEFAULT_OUTPUT_DIR,
         help="Saved result directory or root containing timestamped result dirs.",
     )
-    show_parser.add_argument(
+    _ = show_parser.add_argument(
         "--save-figure",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Save the comparison figure into the experiment directory.",
     )
-    show_parser.add_argument(
+    _ = show_parser.add_argument(
         "--show",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Display the comparison figure window.",
     )
-    show_parser.add_argument(
+    _ = show_parser.add_argument(
         "--figure-name",
         type=str,
         default=DEFAULT_FIGURE_FILENAME,
         help="Figure filename used when --save-figure is enabled.",
     )
-    show_parser.add_argument(
+    _ = show_parser.add_argument(
         "--factor",
         type=float,
         default=0.99,
@@ -328,19 +328,21 @@ def _run_one_case(
         schedule_time_s=schedule_time_s
     )
 
-    venv_eval = DummyVecEnv([
-        lambda: make_env(
-            vehicle=vehicle,
-            track=track,
-            safeguard_utility=safeguard_utility,
-            train_service=train_service,
-            gamma=reward_discount,
-            max_step_distance=max_step_distance,
-            enable_diagnostics=False,
-            enable_trajectory_tracking=False,
-            reward_config=reward_config,
-        )
-    ])
+    venv_eval = DummyVecEnv(
+        [
+            lambda: make_env(
+                vehicle=vehicle,
+                track=track,
+                safeguard_utility=safeguard_utility,
+                train_service=train_service,
+                gamma=reward_discount,
+                max_step_distance=max_step_distance,
+                enable_diagnostics=False,
+                enable_trajectory_tracking=False,
+                reward_config=reward_config,
+            )
+        ]
+    )
     total_reward = 0.0
     episode_steps = 0
     start_position_m = float(train_service.start_position)
@@ -393,15 +395,12 @@ def _run_one_case(
             last_info = infos[0]
 
             previous_position_m = current_position_m
-            if isinstance(last_info, dict):
-                basic = last_info.get("basic")
-                if isinstance(basic, dict):
-                    current_position_m = float(
-                        basic.get("position", current_position_m)
-                    )
-                    current_speed_mps = float(basic.get("speed", current_speed_mps))
-                    trajectory_position_seq.append(current_position_m)
-                    trajectory_speed_seq.append(current_speed_mps)
+            basic = last_info.get("basic")
+            if isinstance(basic, dict):
+                current_position_m = float(basic.get("position", current_position_m))
+                current_speed_mps = float(basic.get("speed", current_speed_mps))
+                trajectory_position_seq.append(current_position_m)
+                trajectory_speed_seq.append(current_speed_mps)
 
             if (not episode_over) and should_trigger_schedule_change(
                 previous_position_m=previous_position_m,
@@ -426,7 +425,7 @@ def _run_one_case(
         venv_eval.close()
 
     target_time_s = float(train_service.schedule_time)
-    basic_info = last_info.get("basic") if isinstance(last_info, dict) else None
+    basic_info = last_info.get("basic")
     basic_snapshot = basic_info if isinstance(basic_info, dict) else {}
 
     final_position_m = float(basic_snapshot.get("position", current_position_m))
@@ -436,14 +435,12 @@ def _run_one_case(
     total_energy_j = total_energy_kj * 1000.0
     stop_error_m = abs(target_position_m - final_position_m)
     time_error_s = total_time_s - target_time_s
-    outcome_info = last_info.get("outcome") if isinstance(last_info, dict) else None
+    outcome_info = last_info.get("outcome")
     outcome_snapshot = outcome_info if isinstance(outcome_info, dict) else {}
     truncated = bool(
         outcome_snapshot.get(
             "truncated",
-            last_info.get("TimeLimit.truncated", False)
-            if isinstance(last_info, dict)
-            else False,
+            last_info.get("TimeLimit.truncated", False),
         )
     )
     terminated = bool(
@@ -664,13 +661,13 @@ def run_evaluate(args: argparse.Namespace) -> None:
     for result in results:
         print(
             f"  {result.case.label:<10} "
-            f"success={result.success} "
-            f"precise={result.precise_arrival} "
-            f"punctual={result.punctual_arrival} "
-            f"target={result.final_schedule_time_s:.2f}s "
-            f"actual={result.total_time_s:.2f}s "
-            f"error={result.time_error_s:.2f}s "
-            f"energy={result.total_energy_kj:.2f}kJ"
+            + f"success={result.success} "
+            + f"precise={result.precise_arrival} "
+            + f"punctual={result.punctual_arrival} "
+            + f"target={result.final_schedule_time_s:.2f}s "
+            + f"actual={result.total_time_s:.2f}s "
+            + f"error={result.time_error_s:.2f}s "
+            + f"energy={result.total_energy_kj:.2f}kJ"
         )
     print("=====================================================")
 
@@ -777,7 +774,7 @@ def plot_schedule_change_result(
         label = str(case.get("label", f"{delta:g}s")) if isinstance(case, dict) else ""
         speed_kmh = np.asarray(speed_arr, dtype=np.float64) * 3.6
         style = _style_for_delta(delta)
-        ax.plot(pos_arr, speed_kmh, label=label, **style)
+        _ = ax.plot(pos_arr, speed_kmh, label=label, **style)
         all_pos.append(np.asarray(pos_arr, dtype=np.float64))
         all_speed_kmh.append(speed_kmh)
         if delta == 0.0:
@@ -801,7 +798,7 @@ def plot_schedule_change_result(
                 if case_payload.get("schedule_change_speed_mps") is not None
             ]
             trigger_speed = trigger_speeds[0] if trigger_speeds else 0.0
-        ax.scatter(
+        _ = ax.scatter(
             [trigger_pos],
             [trigger_speed],
             marker="*",
@@ -815,15 +812,15 @@ def plot_schedule_change_result(
         pos_min = min(float(np.nanmin(pos)) for pos in all_pos)
         pos_max = max(float(np.nanmax(pos)) for pos in all_pos)
         margin = max((pos_max - pos_min) * 0.03, 1.0)
-        ax.set_xlim(pos_min - margin, pos_max + margin)
+        _ = ax.set_xlim(pos_min - margin, pos_max + margin)
 
     if all_speed_kmh:
         curve_ymax = max(float(np.nanmax(speed)) for speed in all_speed_kmh)
         speed_limit_ymax = float(np.nanmax(safeguard.speed_limits) * 3.6)
-        ax.set_ylim(0.0, max(curve_ymax, speed_limit_ymax) * 1.08)
+        _ = ax.set_ylim(0.0, max(curve_ymax, speed_limit_ymax) * 1.08)
 
-    ax.set_xlabel("Distance(m)")
-    ax.set_ylabel("Velocity(km/h)")
+    _ = ax.set_xlabel("Distance(m)")
+    _ = ax.set_ylabel("Velocity(km/h)")
     ax.grid(True, alpha=0.35)
     _deduplicate_legend(ax, loc="lower center")
     fig.tight_layout()

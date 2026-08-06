@@ -80,19 +80,19 @@ def _pick_selected_or_first_available_font(
                 tried_fonts = (preferred_font,) + fallback_candidates
                 raise ValueError(
                     f"preferred_font={preferred_font!r} "
-                    f"不在候选字体中: {tuple(font_candidates)!r}, "
-                    f"且已尝试替代字体仍不可用: {tried_fonts!r}"
+                    + f"不在候选字体中: {tuple(font_candidates)!r}, "
+                    + f"且已尝试替代字体仍不可用: {tried_fonts!r}"
                 )
             raise ValueError(
                 f"preferred_font={preferred_font!r} "
-                f"不在候选字体中: {tuple(font_candidates)!r}"
+                + f"不在候选字体中: {tuple(font_candidates)!r}"
             )
 
         if fallback_candidates:
             tried_fonts = (preferred_font,) + fallback_candidates
             raise ValueError(
                 f"preferred_font={preferred_font!r} 在当前系统不可用，"
-                f"且已尝试替代字体仍不可用: {tried_fonts!r}"
+                + f"且已尝试替代字体仍不可用: {tried_fonts!r}"
             )
 
         raise ValueError(

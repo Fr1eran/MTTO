@@ -2,8 +2,8 @@ import json
 import os
 from pathlib import Path
 
-import pytest
 import numpy as np
+import pytest
 
 from scripts.run_schedule_time_change import (
     DEFAULT_DELTA_TIMES_S,
@@ -113,7 +113,7 @@ def test_should_trigger_schedule_change_when_crossing_backward() -> None:
 
 def _write_summary(path: Path) -> None:
     path.mkdir(parents=True)
-    (path / SUMMARY_FILENAME).write_text(
+    _ = (path / SUMMARY_FILENAME).write_text(
         json.dumps({"cases": []}),
         encoding="utf-8",
     )
@@ -139,4 +139,4 @@ def test_resolve_experiment_dir_selects_latest_child(tmp_path: Path) -> None:
 
 def test_resolve_experiment_dir_errors_without_summary(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match=SUMMARY_FILENAME):
-        resolve_schedule_change_experiment_dir(tmp_path)
+        _ = resolve_schedule_change_experiment_dir(tmp_path)

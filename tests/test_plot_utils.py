@@ -1,9 +1,10 @@
 import matplotlib
 
 matplotlib.use("Agg")
+from types import SimpleNamespace
+
 import matplotlib.pyplot as plt
 import pytest
-from types import SimpleNamespace
 
 from utils import plot_utils
 
@@ -52,7 +53,7 @@ def test_pick_selected_font_raises_after_all_fallbacks_fail(
     _set_available_fonts(monkeypatch, [])
 
     with pytest.raises(ValueError, match="已尝试替代字体仍不可用"):
-        plot_utils._pick_selected_or_first_available_font(
+        _ = plot_utils._pick_selected_or_first_available_font(
             plot_utils.SCI_ENGLISH_FONT_CANDIDATES,
             preferred_font="Calibri",
         )
@@ -62,7 +63,7 @@ def test_pick_selected_font_raises_for_unknown_font(monkeypatch: pytest.MonkeyPa
     _set_available_fonts(monkeypatch, ["DejaVu Sans"])
 
     with pytest.raises(ValueError, match="不在候选字体中"):
-        plot_utils._pick_selected_or_first_available_font(
+        _ = plot_utils._pick_selected_or_first_available_font(
             plot_utils.SCI_ENGLISH_FONT_CANDIDATES,
             preferred_font="MyCommercialFont",
         )
