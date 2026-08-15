@@ -23,7 +23,7 @@ def test_reproduce_dp_cli_defaults() -> None:
     args = parser.parse_args([])
 
     assert args.output_root == "output/optimal/dp"
-    assert args.schedule_time_s == pytest.approx(430.0)
+    assert args.schedule_time_s == pytest.approx(465.0)
     assert args.delta_speed_mps == pytest.approx(0.1)
     assert args.max_outer_iterations == 100
     assert args.precompute_mode == "parallel"

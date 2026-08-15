@@ -277,14 +277,14 @@ def test_safety_speed_asymmetric_v3_is_position_decoupled() -> None:
     min_speed = np.asarray([5.0, 5.0, 5.0], dtype=np.float64)
     max_speed = np.asarray([25.0, 25.0, 25.0], dtype=np.float64)
 
-    near_target = show_potential_function._potential_safety_speed_asymmetric_v3(
+    near_target = show_potential_function._potential_safety_speed(
         np.asarray([990.0, 995.0, 1000.0], dtype=np.float64),
         speed,
         min_speed,
         max_speed,
         1000.0,
     )
-    far_target = show_potential_function._potential_safety_speed_asymmetric_v3(
+    far_target = show_potential_function._potential_safety_speed(
         np.asarray([0.0, 100.0, 200.0], dtype=np.float64),
         speed,
         min_speed,
@@ -414,18 +414,38 @@ def test_final_stop_field_masks_values_outside_both_speed_bounds(
     assert np.any(field.speed_grid_mps > field.max_speed_grid_mps)
 
 
-def test_stopping_potential_v3_uses_state_local_speed_limit() -> None:
-    pos = np.asarray([100.0, 100.0], dtype=np.float64)
-    speed = np.asarray([10.0, 10.0], dtype=np.float64)
-    potential = show_potential_function._potential_stopping_v3(
+def test_stopping_potential_is_symmetric_and_uses_state_local_speed_limit() -> None:
+    pos = np.asarray([1600.0, -1400.0, 100.0, 100.0], dtype=np.float64)
+    speed = np.asarray([0.0, 0.0, 10.0, 10.0], dtype=np.float64)
+    potential = show_potential_function._potential_stopping(
         pos,
         speed,
         target_pos=100.0,
-        max_speed_mps=np.asarray([10.0, 100.0], dtype=np.float64),
+        max_speed_mps=np.asarray([20.0, 20.0, 10.0, 100.0], dtype=np.float64),
     )
 
-    assert potential[0] == pytest.approx(10.0 * np.exp(-10.0 / 3.0))
-    assert potential[1] > potential[0]
+    assert potential[0] == pytest.approx(-(1.0 - np.exp(-1.0)))
+    assert potential[1] == pytest.approx(potential[0])
+    assert potential[3] > potential[2]
+
+
+def test_stopping_potential_clips_the_exponential_at_exp_minus_two() -> None:
+    potential = show_potential_function._potential_stopping(
+        np.asarray([100.0, 1600.0, 3100.0, 4600.0]),
+        np.zeros(4),
+        target_pos=100.0,
+        max_speed_mps=20.0,
+    )
+
+    np.testing.assert_allclose(
+        potential,
+        [
+            0.0,
+            -(1.0 - np.exp(-1.0)),
+            -(1.0 - np.exp(-2.0)),
+            -(1.0 - np.exp(-2.0)),
+        ],
+    )
 
 
 def test_apply_minimal_axis_style_keeps_3d_axis_on() -> None:

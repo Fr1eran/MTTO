@@ -15,15 +15,15 @@ from rl.evaluation import (
     get_strict_time_error_limit_s,
 )
 from rl.experiment_utils import (
-    DEFAULT_MAX_STEP_DISTANCE,
     DEFAULT_REWARD_DISCOUNT,
-    DEFAULT_REWARD_PROFILE_NAME,
+    DEFAULT_REWARD_PRESET_NAME,
     DEFAULT_SCHEDULE_TIME_S,
+    DEFAULT_STEP_DISTANCE,
     RL_FINAL_MODEL_FILENAME,
     build_run_metadata,
     load_run_metadata,
-    resolve_reward_profile,
-    reward_profile_names,
+    resolve_reward_preset,
+    reward_preset_names,
 )
 from rl.operational_state import OperationalState
 from utils.io_utils import save_curve_and_metrics
@@ -153,14 +153,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     _ = parser.add_argument(
         "--step-distance",
+        "--max-step-distance",
+        dest="step_distance",
         type=float,
         default=None,
-        help="评估环境的最大仿真位移步长",
+        help="评估环境的固定空间控制步长；--max-step-distance 为兼容别名。",
     )
     _ = parser.add_argument(
-        "--reward-profile",
+        "--reward-preset",
         type=str,
-        choices=tuple(reward_profile_names()),
+        choices=tuple(reward_preset_names()),
         default=None,
         help="奖励配置预设；未指定时优先从训练元数据读取。",
     )
@@ -213,12 +215,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="当状态转移至该步时，开始保存视频",
     )
     _ = parser.add_argument(
-        "--enable-env-diagnostics",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="评估时收集诊断信息",
-    )
-    _ = parser.add_argument(
         "--plot-operation-time-series",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -252,13 +248,16 @@ def main() -> None:
     ds = float(
         args.step_distance
         if args.step_distance is not None
-        else run_metadata.get("max_step_distance", DEFAULT_MAX_STEP_DISTANCE)
+        else run_metadata.get(
+            "step_distance",
+            run_metadata.get("max_step_distance", DEFAULT_STEP_DISTANCE),
+        )
     )
-    reward_profile = resolve_reward_profile(
-        args.reward_profile
-        or str(run_metadata.get("reward_profile_name", DEFAULT_REWARD_PROFILE_NAME))
+    reward_preset = resolve_reward_preset(
+        args.reward_preset
+        or str(run_metadata.get("reward_preset_name", DEFAULT_REWARD_PRESET_NAME))
     )
-    reward_config = reward_profile.to_reward_config()
+    reward_config = reward_preset.config
     output_dir = args.output_dir if args.output_dir is not None else load_dir
 
     model_zip_path = os.path.join(load_dir, RL_FINAL_MODEL_FILENAME)
@@ -266,7 +265,7 @@ def main() -> None:
         print("========== Evaluation Dry Run ==========")
         print(f"  load_dir:            {load_dir}")
         print(f"  output_dir:          {output_dir}")
-        print(f"  reward_profile:      {reward_profile.name}")
+        print(f"  reward_preset:      {reward_preset.name}")
         print(f"  reward_config:       {reward_config}")
         print(f"  schedule_time_s:     {schedule_time_s:.2f}")
         print(f"  step_distance:       {ds:.2f}")
@@ -295,8 +294,7 @@ def main() -> None:
                 safeguard_utility=safeguard_utility,
                 train_service=train_service,
                 gamma=reward_discount,
-                max_step_distance=ds,
-                enable_diagnostics=args.enable_env_diagnostics,
+                step_distance=ds,
                 enable_trajectory_tracking=args.record_video,
                 render_mode="rgb_array" if args.record_video else None,
                 reward_config=reward_config,
@@ -392,9 +390,9 @@ def main() -> None:
     if args.save_trajectory:
         npz_path = os.path.join(output_dir, "final_trajectory.npz")
         trajectory_metadata = build_run_metadata(
-            reward_profile=reward_profile,
+            reward_preset=reward_preset,
             schedule_time_s=schedule_time_s,
-            max_step_distance=ds,
+            step_distance=ds,
             reward_discount=reward_discount,
             run_mode=str(run_metadata.get("run_mode")),
             experiment_tag=str(run_metadata.get("experiment_tag")),
@@ -449,7 +447,7 @@ def main() -> None:
     print(f"  success:            {success}")
     print(f"  precise_arrival:    {precise_arrival}")
     print(f"  punctual_arrival:   {punctual_arrival}")
-    print(f"  reward_profile:     {reward_profile.name}")
+    print(f"  reward_preset:     {reward_preset.name}")
     print(f"  target_time_s:      {target_time_s:.2f}")
     print(f"  total_time_s:       {total_time_s:.2f}")
     print(f"  time_error_s:       {time_error_s:.2f}")

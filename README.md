@@ -10,7 +10,7 @@
 - [快速开始](#快速开始)
 - [脚本详解](#脚本详解)
   - [RL 训练 · `train_rl`](#rl-训练--train_rl)
-  - [RL 消融训练 · `train_reward_ablation`](#rl-消融训练--train_reward_ablation)
+  - [奖励消融实验 · `run_reward_ablation`](#奖励消融实验--run_reward_ablation)
   - [RL 评估 · `evaluate_rl`](#rl-评估--evaluate_rl)
   - [RL 中途计划时间突变实验 · `run_schedule_time_change`](#rl-中途计划时间突变实验--run_schedule_time_change)
   - [训练日志分析 · `analyze_training_data`](#训练日志分析--analyze_training_data)
@@ -19,7 +19,6 @@
   - [RL 结果可视化 · `show_rl_result`](#rl-结果可视化--show_rl_result)
   - [DP 与 RL 对比可视化 · `compare_rl_dp`](#dp-与-rl-对比可视化--compare_rl_dp)
     - [SPS 合规分析 · `analyze_sps_compliance`](#sps-合规分析--analyze_sps_compliance)
-  - [RL 消融结果可视化 · `show_reward_ablation`](#rl-消融结果可视化--show_reward_ablation)
   - [防护曲线 · `show_safeguard_curves`](#防护曲线--show_safeguard_curves)
   - [计算并保存防护曲线 · `calc_and_save_safeguard_curves`](#计算并保存防护曲线--calc_and_save_safeguard_curves)
   - [最短运行时间曲线 · `calc_min_operation_time_curve`](#最短运行时间曲线--calc_min_operation_time_curve)
@@ -34,16 +33,19 @@
 ```
 MTTO/
 ├── model/                  # 核心模型
-│   ├── common/             #   能耗计算 (ECC)、最短运行时间参考 (ORS)
+│   ├── common/             #   能耗计算 (ECC)、最短运行时间参考函数 (ORS)
 │   ├── force/              #   制动力、运行阻力
 │   ├── ocs/                #   防护曲线、安全工具、停车点步进、运营任务
 │   ├── track/              #   线路信息
 │   └── vehicle/            #   车辆参数
 ├── rl/                     # 强化学习
 │   ├── callbacks.py        #   训练回调（TensorBoard 日志 & 最优轨迹评估）
+│   ├── context_pool.py     #   DP 参考轨迹与不可变上下文池构建
+│   ├── context_sampler.py  #   持有版本化分布的上下文采样器
+│   ├── dspdl.py            #   DSPDL 配置、统计器、分布求解器与回调
 │   ├── env_factory.py      #   环境工厂
 │   ├── evaluation.py       #   评估辅助
-│   ├── experiment_utils.py #   reward profile、运行元数据、输出命名
+│   ├── experiment_utils.py #   reward preset、运行元数据、输出命名
 │   ├── mtto_env.py         #   Gym 环境
 │   └── training_analysis/  #   训练日志分析流水线
 ├── scripts/                # 可执行入口
@@ -62,23 +64,23 @@ MTTO/
 | 用途 | 命令 |
 |------|------|
 | RL 训练 | `python -m scripts.train_rl` |
-| RL 消融训练 | `python -m scripts.train_reward_ablation` |
+| 奖励消融训练 | `python -m scripts.run_reward_ablation train` |
 | RL 评估 | `python -m scripts.evaluate_rl` |
 | RL 中途计划时间突变实验 | `python -m scripts.run_schedule_time_change evaluate` / `python -m scripts.run_schedule_time_change show` |
 | 训练日志分析 | `python -m scripts.analyze_training_data` |
 | DP 基线复现 | `python -m scripts.reproduce_dp` |
 | DP 结果可视化 | `python -m scripts.show_dp_result` |
 | RL 结果可视化 | `python -m scripts.show_rl_result` |
-| DP 与 RL 对比可视化 | `python -m scripts.compare_rl_dp` |
+| 速度曲线对比可视化 | `python -m scripts.compare_speed_profiles` |
 | SPS 合规分析 | `python -m scripts.analyze_sps_compliance` |
-| RL 消融结果可视化 | `python -m scripts.show_reward_ablation` |
+| 奖励消融结果展示 | `python -m scripts.run_reward_ablation show` |
 | 防护曲线可视化 | `python -m scripts.show_safeguard_curves` |
 | 计算并保存防护曲线 | `python -m scripts.calc_and_save_safeguard_curves` |
 | 最短运行时间曲线 | `python -m scripts.calc_min_operation_time_curve` |
 | 实际运营数据展示 | `python -m scripts.show_real_operation_data` |
 | 势函数可视化 | `python -m scripts.show_potential_function` |
 
-RL 工作流脚本 `train_rl`、`train_reward_ablation`、`evaluate_rl`、`run_schedule_time_change evaluate`、`analyze_training_data`、`show_rl_result`、`show_reward_ablation` 统一支持 `--dry-run`，用于预览有效配置、路径解析结果、运行矩阵或展示计划，而不执行训练/评估/分析/绘图。
+RL 工作流脚本 `train_rl`、`run_reward_ablation train/show`、`evaluate_rl`、`run_schedule_time_change evaluate`、`analyze_training_data` 和 `show_rl_result` 统一支持 `--dry-run`，用于预览有效配置、路径解析结果、运行矩阵或展示计划，而不执行训练、评估、分析或绘图。
 
 ---
 
@@ -103,15 +105,29 @@ RL 工作流脚本 `train_rl`、`train_reward_ablation`、`evaluate_rl`、`run_s
 |------|------|--------|------|
 | `--num-envs` | `int` | `1` | 并行采样环境数量 |
 | `--vec-env-type` | `str` | `subproc` | 向量化后端：`dummy` / `subproc`（仅 `num-envs>1` 时 `subproc` 生效 |
-| `--max-step-distance` | `float` | `100.0` | 相邻状态转移间的最大移动距离 (m) |
+| `--step-distance` | `float` | `30.0` | 固定空间控制步长 (m)，`--max-step-distance` 为兼容别名 |
 | `--schedule-time-s` | `float` | `430.0` | 规划运行时间 (s) |
+
+#### DSPDL 课程学习
+
+通过 `--curriculum-profile dspdl --reference-curve-dir <dp-output-dir>` 启用离散型
+SPDL 课程。代码层统一使用 DSPDL 命名：父进程读取 `ReferenceTrajectory`，由
+`ContextPoolBuilder` 对 DP 轨迹采样并重建为只读 `ContextPool`，再将同一逻辑任务池
+交给所有训练环境。并行 worker 只创建轻量的 `ContextSampler` 和
+`DSPDLEpisodeAccumulator`，不会重复读取或重建 DP 轨迹。
+
+每个环境在本地累计当前分布版本的上下文计数与折扣回报；`DSPDLCallback` 仅在课程
+更新时统一拉取统计，使用缓存的完整任务 observation tensor 估值，再调用
+`DSPDLDistributionSolver` 更新分布。采样器的 `sample()` 只负责按内部权重抽样，权重
+及版本校验集中在更新接口中。达到目标分布阈值后，课程分布永久冻结，并释放各环境的
+统计缓冲区。
 
 
 #### 奖励配置与实验标识
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `--reward-profile` | `str` | `basic_safety_stopping` | 奖励预设：`basic`、`basic_safety`、`basic_safety_stopping` |
+| `--reward-preset` | `str` | `basic_safety_stopping` | 奖励预设：`basic`、`basic_safety`、`basic_stopping`、`basic_safety_stopping` |
 | `--experiment-tag` | `str` | `None` | 附加实验标签，用于隔离输出目录与 TensorBoard 运行名 |
 
 `basic` 固定包含 `energy + comfort`；其余预设仅沿 `safety / stopping` 两个 shaping 维度逐级打开。准点要求仅通过成功到站后的终端奖励和评估指标表达。
@@ -131,31 +147,28 @@ RL 工作流脚本 `train_rl`、`train_reward_ablation`、`evaluate_rl`、`run_s
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `--tensorboard-log-dir` | `str` | `mtto_ppo_tensorboard_logs` | TensorBoard 日志根目录 |
-| `--tb-log-name` | `str` | 自动生成 | TensorBoard 运行名称；未指定时会拼接 run-mode、reward-profile、时间参数和 experiment-tag |
+| `--tb-log-name` | `str` | 自动生成 | TensorBoard 运行名称；未指定时会拼接 run-mode、reward-preset、时间参数和 experiment-tag |
 | `--log-interval` | `int` | `1`（tune）/ `5`（reproduce）/ `1`（monitor_best）/ `10`（best_only） | PPO 日志打印间隔 |
-| `--tb-sample-interval-steps` | `int` | `1` | 回调最小采样步长 |
-| `--env-diagnostics-interval-steps` | `int` | 同 `--tb-sample-interval-steps` | 环境诊断快照记录间隔 |
-| `--force-dump-interval-steps` | `int` | `0`（关闭） | 按步长强制刷新 TensorBoard 缓冲区 |
-| `--tb-batch-dump-records` | `int` | `0`（关闭） | 按采样记录数批量刷新 TensorBoard 缓冲区 |
 | `--output-root` | `str` | `output/optimal/rl/` | 训练结果输出根目录 |
 | `--run-mode` | `str` | `tune` | `tune` / `reproduce` / `monitor_best` / `best_only` |
 | `--enable-tb` | `bool` | 取决于 run-mode | 启用 TensorBoard 日志 |
-| `--enable-callback` | `bool` | 取决于 run-mode | 启用 TensorBoard 回调 |
 | `--enable-monitor` | `bool` | 取决于 run-mode | 启用 VecMonitor 包装器 |
-| `--enable-env-diagnostics` | `bool` | 取决于 run-mode | 启用环境诊断信息采集 |
 | `--enable-auto-analysis` | `bool` | 取决于 run-mode | 启用训练后自动分析 |
+| `--enable-safety-truncation-histogram` | `bool` | tune 模式启用 | 按 rollout 汇总安全截断位置并保存直方图 |
 | `--dry-run` | `bool` | `False` | 仅解析有效训练配置、输出路径和运行元数据预览，不创建环境或启动训练 |
 
-每次训练会在实验输出根目录写入 `run_metadata.json`，记录 reward profile、run-mode、TensorBoard 运行名、schedule_time_s、max_step_distance 等信息，供评估与轨迹展示脚本复用。
+每次训练会写入 `run_metadata.json`，并在 `final/` 下生成 `reward_diagnostics.npz`。该二进制产物保存完整 episode 奖励分量累计值及 rollout 级 transition 充分统计量；奖励占比与相关性由训练后分析模块计算，不再写入 TensorBoard event。
 
 #### Best-Eval（训练期最优轨迹评估）
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `--enable-best-eval` | `bool` | 取决于 run-mode | 启用训练期最优轨迹评估 |
-| `--best-eval-trigger-mode` | `str` | `steps` | 触发模式：`steps`（按训练步数）/ `episodes`（按完成回合数） |
-| `--best-eval-trigger-interval` | `int` | `100000` | 评估触发间隔 |
-| `--best-eval-deterministic` | `bool` | `True` | 是否使用确定性策略推理 |
+| `--enable-best-evaluation-artifacts` | `bool` | 取决于 run-mode | 启用训练期最优模型与轨迹产物 |
+| `--evaluation-interval-rollouts` | `int` | `12` | 每完成指定数量的 PPO rollouts 执行一次评估 |
+| `--evaluation-deterministic` | `bool` | `True` | 是否使用确定性策略推理 |
+| `--evaluation-history-path` | `str` | `None` | 可选的完整评估历史 NPZ 输出路径 |
+
+评估仅在 rollout 边界触发，不再在每个训练 step 中检查，也不再支持按完成 episode 数调度。评估历史使用 `rollout_indices` 与 `training_steps` 同时标记评估时点；最优轨迹 metrics 使用 `evaluation_rollout_index`。
 
 成功判定使用 `TrainService.max_stop_error` 与 `TrainService.max_arr_time_error_ratio`：
 - `stop_error_m <= max_stop_error`
@@ -167,11 +180,11 @@ Best-eval 排序规则：
 - 如果当前还没有成功轨迹，才回退到按总 reward 比较
 - 停站误差与绝对时间误差仅作为稳定 tie-break
 
-每次刷新最优时，在实验目录下的 `best_{trigger_mode}/` 中保存模型、`best_trajectory.npz` 与 `best_trajectory_metrics.json`。
+每次刷新最优时，在实验目录下的 `best_rollouts/` 中保存模型、`best_trajectory.npz` 与 `best_trajectory_metrics.json`。
 
 如果后续要执行 PBRS 消融实验，建议统一使用 `monitor_best` 模式，以保留 rollout 基础监控和训练期最优轨迹评估，同时避免高频诊断采样带来的额外开销。
 
-当前 PBRS 仅包含安全势函数与停站势函数：`basic` 不启用势函数，`basic_safety` 启用安全势函数，`basic_safety_stopping` 同时启用安全与停站势函数。准点仅在成功到站时通过终端奖励计分，不包含准点势函数或准点稠密奖励。
+当前 PBRS 仅包含安全势函数与停站势函数：`basic` 不启用势函数，`basic_safety` 仅启用安全势函数，`basic_stopping` 仅启用停站势函数，`basic_safety_stopping` 同时启用两者。准点仅在成功到站时通过终端奖励计分，不包含准点势函数或准点稠密奖励。
 
 #### 训练后自动分析
 
@@ -198,94 +211,71 @@ python -m scripts.train_rl --run-mode reproduce
 python -m scripts.train_rl --run-mode monitor_best
 
 # 使用 basic+safety+stopping 预设，并附加实验标签
-python -m scripts.train_rl --run-mode monitor_best --reward-profile basic_safety_stopping --experiment-tag exp_a
+python -m scripts.train_rl --run-mode monitor_best --reward-preset basic_safety_stopping --experiment-tag exp_a
 
 # 仅预览 monitor_best 训练配置与输出路径
-python -m scripts.train_rl --run-mode monitor_best --reward-profile basic_safety --dry-run
+python -m scripts.train_rl --run-mode monitor_best --reward-preset basic_safety --dry-run
 
 # 低开销训练，仅保留 best-eval
 python -m scripts.train_rl --run-mode best_only
 
-# 430s tune + steps 触发 best-eval
-python -m scripts.train_rl --output-root output/optimal/rl/ --schedule-time-s 430.0 --max-step-distance 100.0 --run-mode tune --total-timesteps 1000000 --num-envs 4 --vec-env-type subproc --tb-sample-interval-steps 10 --env-diagnostics-interval-steps 10 --tb-batch-dump-records 10240 --best-eval-trigger-mode steps --best-eval-trigger-interval 100000 --best-eval-deterministic --device cpu
+# 430s tune，每 12 个 rollouts 触发一次 best-eval
+python -m scripts.train_rl --output-root output/optimal/rl/ --schedule-time-s 430.0 --step-distance 100.0 --run-mode tune --total-timesteps 1000000 --num-envs 4 --vec-env-type subproc --evaluation-interval-rollouts 12 --evaluation-deterministic --device cpu
 
-# 430s tune + episodes 触发 best-eval
-python -m scripts.train_rl --output-root output/optimal/rl/ --schedule-time-s 440.0 --max-step-distance 100.0 --run-mode tune --total-timesteps 1000000 --num-envs 4 --vec-env-type subproc --tb-sample-interval-steps 10 --env-diagnostics-interval-steps 10 --tb-batch-dump-records 10240 --best-eval-trigger-mode episodes --best-eval-trigger-interval 1000 --best-eval-deterministic --device cpu
-
-# 430s monitor_best + safety_speed 输出
-python -m scripts.train_rl --output-root output/optimal/rl/safety_speed/ --schedule-time-s 430.0 --max-step-distance 100.0 --run-mode monitor_best --total-timesteps 1000000 --num-envs 4 --vec-env-type subproc --best-eval-trigger-mode episodes --best-eval-trigger-interval 1000 --best-eval-deterministic --device cpu
+# 430s monitor_best，每 6 个 rollouts 评估一次
+python -m scripts.train_rl --output-root output/optimal/rl/safety_speed/ --schedule-time-s 430.0 --step-distance 100.0 --run-mode monitor_best --total-timesteps 1000000 --num-envs 4 --vec-env-type subproc --evaluation-interval-rollouts 6 --evaluation-deterministic --device cpu
 ```
 
 ---
 
-### RL 消融训练 · `train_reward_ablation`
+### 奖励消融实验 · `run_reward_ablation`
 
-按三种 PBRS 奖励方案批量串行训练 PPO，并强制运行在 `monitor_best` 语义下。该脚本不是 `train_rl` 的全量参数代理，而是一个精简入口：只暴露 `monitor_best` 仍然有意义的训练参数；`--run-mode`、`--reward-profile`、`--output-root`、`--tb-log-name`、所有 `--enable-*` 开关、高频 callback flush 参数和自动分析参数都被隐藏并由脚本内部固定。
+统一完成奖励消融的训练、断点恢复、固定起点评估和结果展示。实验固定关闭 DSPDL，避免课程分布与奖励设计混杂；四组全因子配置分别为 `basic`、`basic_safety`、`basic_stopping` 和 `basic_safety_stopping`，每组默认使用固定种子 `11 / 131 / 239 / 359 / 443`。
 
-默认 reward case 顺序如下：
-- `basic`
-- `basic_safety`
-- `basic_safety_stopping`
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `--ablation-output-root` | `str` | `output/optimal/rl/ablation` | 消融批次输出根目录 |
-| `--ablation-tag` | `str` | `None` | 批次标签；若存在重复训练，会自动附加 repeat 标识 |
-| `--reward-profiles` | `list[str]` | 上述三种默认 case | 指定 reward case 子集或重排顺序 |
-| `--repeats` | `int` | `1` | 每种情形的重复训练次数 |
-| `--seed-list` | `list[int]` | `None` | 显式指定每次重复的 seed；指定后优先于 `--repeats` / `--base-seed` |
-| `--base-seed` | `int` | `None` | 当 `repeats > 1` 时按 `base-seed + repeat_index` 推导各轮 seed |
-| `--schedule-time-s` | `float` | `430.0` | 规划运行时间 |
-| `--max-step-distance` | `float` | `100.0` | 相邻状态转移最大移动距离 |
-| `--reward-discount` | `float` | `0.995` | 回报折扣因子 |
-| `--num-envs` | `int` | `1` | 训练环境数量 |
-| `--vec-env-type` | `str` | `subproc` | 向量化环境后端（启动方式自动选择） |
-| `--rollout-steps-per-update` | `int` | `2048` | PPO rollout 步数 |
-| `--n-steps-per-env` | `int` | 自动推导 | 每个环境的步数 |
-| `--total-timesteps` | `int` | `200000` | 总训练步数 |
-| `--tensorboard-log-dir` | `str` | `mtto_ppo_tb_logs` | TensorBoard 日志根目录 |
-| `--log-interval` | `int` | 沿用 `monitor_best` 默认 | PPO 日志打印间隔 |
-| `--best-eval-trigger-mode` | `str` | `steps` | 训练期 best-eval 触发模式 |
-| `--best-eval-trigger-interval` | `int` | `100000` | 训练期 best-eval 触发间隔 |
-| `--best-eval-deterministic` | `bool` | `True` | best-eval 是否使用确定性策略 |
-| `--device` | `str` | `cpu` | 运行设备 |
-| `--dry-run` | `bool` | `False` | 仅展开 reward case × repeat × seed 的运行矩阵，不启动训练 |
-
-消融脚本沿用相同策略：当启用 `subproc` 且并行环境数大于 1 时，自动优先 `forkserver`，否则使用 `spawn`。
-
-批次执行过程中会在 `--ablation-output-root` 下维护 `ablation_manifest.json`，记录每个 case / repeat 的输出路径、TensorBoard 运行名、run metadata 路径和执行状态，供后续 `show_reward_ablation` 直接消费。
+训练采用低开销 `reproduce` 配置，保留 VecMonitor 和回合指标采集，关闭 TensorBoard、高频环境诊断、best-eval 与自动分析。每隔 `--evaluation-interval-rollouts` 个 rollouts 执行一次确定性真实起点评估，并在训练结束后保存最终策略评估。
 
 ```bash
-# 默认四种 case，各跑一次
-python -m scripts.train_reward_ablation --base-seed 42
+# 展开默认 4 × 5 运行矩阵，不写文件
+python -m scripts.run_reward_ablation train --dry-run
 
-# 两次重复训练，按同一基准 seed 派生 42 / 43
-python -m scripts.train_reward_ablation \
-    --ablation-output-root output/optimal/rl/ablation_exp_1 \
-    --ablation-tag exp_1 \
-    --repeats 2 \
-    --base-seed 42
+# 训练全部奖励组；中断后执行同一命令会跳过产物完整的 completed 运行
+python -m scripts.run_reward_ablation train \
+    --output-root output/optimal/rl/reward_ablation \
+    --total-timesteps 1000000 \
+    --num-envs 4
 
-# 只跑两个 case，并预览运行矩阵
-python -m scripts.train_reward_ablation \
-    --reward-profiles basic basic_safety_stopping \
-    --seed-list 7 8 \
-    --dry-run
+# 只补跑基础奖励与仅停站 PBRS
+python -m scripts.run_reward_ablation train \
+    --reward-presets basic basic_stopping
+```
+
+批次根目录中的 `reward_ablation_manifest.json` 记录完整训练参数、每个 profile/seed 的产物路径和 `pending/running/completed/failed` 状态。重复运行仅跳过状态为 `completed` 且回合、周期评估、最终评估三类产物完整的任务；失败任务会被记录，但不会阻止其余组合继续运行。
+
+`show` 子命令生成六面板学习图：回合奖励、固定起点成功率、停站误差、绝对时间误差、总能耗和舒适性，并可额外输出按 5 km 区间统计的安全违规箱线图。终端同时打印最终策略的均值、标准差和成功率。
+
+```bash
+python -m scripts.run_reward_ablation show \
+    --output-file output/optimal/rl/reward_ablation/learning_curves.png \
+    --safety-output-file output/optimal/rl/reward_ablation/safety_violations.png \
+    --no-show
+
+# 只检查 manifest 与可用产物
+python -m scripts.run_reward_ablation show --dry-run
 ```
 
 ---
 
 ### RL 评估 · `evaluate_rl`
 
-加载训练好的 PPO 模型，在单环境中执行评估 rollout，可选录制视频。若 `--load-dir` 所在实验目录存在 `run_metadata.json`，评估会优先复用其中的 `schedule_time_s`、`reward_discount`、`max_step_distance` 与 `reward_profile`；只有在显式传参时才覆盖这些值。
+加载训练好的 PPO 模型，在单环境中执行评估 rollout，可选录制视频。若 `--load-dir` 所在实验目录存在 `run_metadata.json`，评估会优先复用其中的 `schedule_time_s`、`reward_discount`、`step_distance` 与 `reward_preset`；只有在显式传参时才覆盖这些值。
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `--load-dir` | `str` | `output/optimal/rl/final/` | PPO 模型所在目录 |
 | `--reward-discount` | `float` | 从 `run_metadata.json` 读取，否则 `0.995` | 折扣因子（重建环境用） |
 | `--schedule-time-s` | `float` | 从 `run_metadata.json` 读取，否则 `430.0` | 规划运行时间 |
-| `--step-distance` | `float` | 从 `run_metadata.json` 读取，否则 `100.0` | 环境最大步距 (m) |
-| `--reward-profile` | `str` | 从 `run_metadata.json` 读取，否则 `basic_safety_stopping` | 评估所使用的奖励预设 |
+| `--step-distance` | `float` | 从 `run_metadata.json` 读取，否则 `30.0` | 环境固定空间控制步长 (m) |
+| `--reward-preset` | `str` | 从 `run_metadata.json` 读取，否则 `basic_safety_stopping` | 评估所使用的奖励预设 |
 | `--device` | `str` | `cpu` | 推理设备 |
 | `--deterministic` | `bool` | `True` | 是否使用确定性策略 |
 | `--record-video` | `bool` | `False` | 是否录制评估视频 |
@@ -294,7 +284,6 @@ python -m scripts.train_reward_ablation \
 | `--output-dir` | `str` | `None` | 轨迹文件输出目录（默认回退到 `--load-dir`） |
 | `--video-length` | `int` | `10000` | 最大录制步数 |
 | `--video-trigger-step` | `int` | `0` | 视频录制触发步数 |
-| `--enable-env-diagnostics` | `bool` | `False` | 启用环境诊断信息采集 |
 | `--dry-run` | `bool` | `False` | 仅解析有效评估配置、训练元数据回填结果与输入输出路径，不加载模型或运行 rollout |
 
 评估成功后可保存 `final_trajectory.npz` 与 `final_trajectory_metrics.json`。最终轨迹指标会显式写入 `trajectory_source=final`，并与训练期的最优轨迹共用同一套 selection metadata 结构。
@@ -311,10 +300,10 @@ python -m scripts.evaluate_rl \
     --load-dir output/optimal/rl/.../final/ \
     --device cuda
 
-# 覆盖训练元数据中的 reward profile 与时间参数
+# 覆盖训练元数据中的 reward preset 与时间参数
 python -m scripts.evaluate_rl \
     --load-dir output/optimal/rl/.../final/ \
-    --reward-profile basic_safety_stopping \
+    --reward-preset basic_safety_stopping \
     --schedule-time-s 430.0
 
 # 仅预览有效评估配置
@@ -340,8 +329,8 @@ python -m scripts.evaluate_rl --load-dir output/optimal/rl/.../final/ --dry-run
 | `--output-dir` | `str` | `output/optimal/rl/schedule_time_change_eval/` | 突变实验输出根目录；每次运行会创建时间戳子目录 |
 | `--reward-discount` | `float` | 从 `run_metadata.json` 读取，否则 `0.995` | 折扣因子（重建环境用） |
 | `--schedule-time-s` | `float` | 从 `run_metadata.json` 读取，否则 `430.0` | 突变前的初始规划运行时间 |
-| `--step-distance` | `float` | 从 `run_metadata.json` 读取，否则 `100.0` | 环境最大步距 (m) |
-| `--reward-profile` | `str` | 从 `run_metadata.json` 读取，否则 `basic_safety_stopping` | 评估所使用的奖励预设 |
+| `--step-distance` | `float` | 从 `run_metadata.json` 读取，否则 `30.0` | 环境固定空间控制步长 (m) |
+| `--reward-preset` | `str` | 从 `run_metadata.json` 读取，否则 `basic_safety_stopping` | 评估所使用的奖励预设 |
 | `--device` | `str` | `cpu` | 推理设备 |
 | `--deterministic` | `bool` | `True` | 是否使用确定性策略 |
 | `--change-distance-m` | `float` | `800.0` | 触发计划时间变化的位置 (m) |
@@ -566,22 +555,20 @@ python -m scripts.show_dp_result --no-safeguard
 ### RL 结果可视化 · `show_rl_result`
 
 加载已保存的 RL 单条轨迹及指标，叠加防护曲线背景渲染。该入口统一支持：
-- 训练期间按步数评估得到的 `best_steps`
-- 训练期间按回合评估得到的 `best_episodes`
+- 训练期间按 rollout 周期评估得到的 `best_rollouts`
 - 训练结束后单独评估得到的 `final`
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `--curve-dir` | `str` | `output/optimal/rl` | RL 输出根目录或任一实验子目录 |
-| `--trajectory-source` | `str` | `best` | 轨迹来源：`best` / `best_steps` / `best_episodes` / `final` |
+| `--trajectory-source` | `str` | `best` | 轨迹来源：`best` / `best_rollouts` / `final` |
 | `--no-safeguard` | `flag` | — | 不绘制防护曲线背景 |
 | `--factor` | `float` | `0.99` | 防护曲线渲染因子 |
 | `--dry-run` | `bool` | `False` | 仅解析将加载的轨迹产物与 metrics 路径，不读取数据或显示图窗 |
 
 ```bash
 python -m scripts.show_rl_result
-python -m scripts.show_rl_result --curve-dir output/optimal/rl --trajectory-source best_steps
-python -m scripts.show_rl_result --curve-dir output/optimal/rl --trajectory-source best_episodes
+python -m scripts.show_rl_result --curve-dir output/optimal/rl --trajectory-source best_rollouts
 python -m scripts.show_rl_result --curve-dir output/optimal/rl --trajectory-source final
 python -m scripts.show_rl_result --curve-dir output/optimal/rl --trajectory-source final --dry-run
 python -m scripts.show_rl_result --no-safeguard
@@ -589,40 +576,47 @@ python -m scripts.show_rl_result --no-safeguard
 
 ---
 
-### DP 与 RL 对比可视化 · `compare_rl_dp`
+### 三基线速度曲线对比 · `compare_speed_profiles`
 
-在同一窗口内对比展示 DP 与 RL 所选最优轨迹，包含三联图：
-- 速度-位置最优轨迹叠加
-- 加速度随位置变化曲线
-- 累计总能耗（牵引+悬浮）随位置变化曲线
+在同一窗口内对比展示 DP、RL 与实际运行的速度曲线，包含三联图：
+- 速度-位置轨迹叠加（含安全防护背景）
+- 加速度-位置曲线
+- 累计总能耗（牵引+悬浮）-位置曲线
+
+终端会以统一评价口径输出时间误差、停站误差、总能耗和 `comfort_tav` 的三基线对比表。实际运行曲线默认读取 `output/real_operation/aligned_real_operation_curve.npz`；首次使用前请先运行 `python -m scripts.transform_real_operation_curve`。
 
 该脚本默认行为：
 - DP 轨迹从 `output/optimal/dp` 递归搜索最新 `optimized_speed_curve.npz`
 - RL 轨迹从 `output/optimal/rl` 递归搜索，默认 `trajectory_source=best`
+- 实际运行轨迹从 `output/real_operation/aligned_real_operation_curve.npz` 读取
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `--dp-curve-dir` | `str` | `output/optimal/dp` | DP 输出根目录，递归搜索最新曲线产物 |
 | `--rl-curve-dir` | `str` | `output/optimal/rl` | RL 输出根目录，递归搜索匹配轨迹产物 |
-| `--trajectory-source` | `str` | `best` | RL 轨迹来源：`best` / `best_steps` / `best_episodes` / `final` |
+| `--real-curve` | `str` | `output/real_operation/aligned_real_operation_curve.npz` | 重标定后的实际运行曲线 NPZ |
+| `--trajectory-source` | `str` | `best` | RL 轨迹来源：`best` / `best_rollouts` / `final` |
 | `--no-safeguard` | `flag` | — | 速度图不渲染 safeguard 背景 |
 | `--factor` | `float` | `0.99` | safeguard 背景渲染因子 |
 
 ```bash
-# 默认：自动选择最新 DP 与 RL(best) 轨迹并显示三联图
-python -m scripts.compare_rl_dp
+# 默认：自动选择最新 DP、RL(best) 与实际运行轨迹，显示三联图和终端对比表
+python -m scripts.compare_speed_profiles
 
 # 指定 RL 轨迹来源为最终评估轨迹
-python -m scripts.compare_rl_dp --trajectory-source final
+python -m scripts.compare_speed_profiles --trajectory-source final
 
-# 指定 DP/RL 搜索目录
-python -m scripts.compare_rl_dp \
+# 指定 DP/RL 搜索目录与实际运行曲线
+python -m scripts.compare_speed_profiles \
     --dp-curve-dir output/optimal/dp \
-    --rl-curve-dir output/optimal/rl
+    --rl-curve-dir output/optimal/rl \
+    --real-curve output/real_operation/aligned_real_operation_curve.npz
 
 # 关闭 safeguard 背景并调整渲染因子
-python -m scripts.compare_rl_dp --no-safeguard --factor 0.97
+python -m scripts.compare_speed_profiles --no-safeguard --factor 0.97
 ```
+
+`python -m scripts.compare_rl_dp` 暂保留为兼容命令，但会提示迁移至新脚本。
 
 ---
 
@@ -642,7 +636,7 @@ python -m scripts.compare_rl_dp --no-safeguard --factor 0.97
 |------|------|--------|------|
 | `--dp-curve-dir` | `str` | `output/optimal/dp` | DP 输出根目录，递归搜索最新曲线产物 |
 | `--rl-curve-dir` | `str` | `output/optimal/rl` | RL 输出根目录，递归搜索匹配轨迹产物 |
-| `--trajectory-source` | `str` | `best` | RL 轨迹来源：`best` / `best_steps` / `best_episodes` / `final` |
+| `--trajectory-source` | `str` | `best` | RL 轨迹来源：`best` / `best_rollouts` / `final` |
 | `--schedule-time-s` | `float` | `None` | 可选覆盖场景构建使用的计划运行时间 |
 | `--step-delay-s` | `float` | `2.0` | SPS 回放中的步进平均时延 `T_s` |
 | `--boundary-eps` | `float` | `1e-6` | 边界违规判定数值容差 |
@@ -676,53 +670,6 @@ python -m scripts.analyze_sps_compliance \
 
 ---
 
-### RL 消融结果可视化 · `show_reward_ablation`
-
-读取 `train_reward_ablation` 生成的 `ablation_manifest.json`，并完成两类展示：
-- 平均回合奖励与平均回合长度曲线
-- 最终或“最优”轨迹
-
-曲线数据直接来自每个 run 的 `final/episode_metrics.npz`，即训练期间由 `EpisodeMetricsCollector` 收集的 `steps`、`ep_mean_reward`、`ep_mean_len`。轨迹展示默认按 reward profile 分子图绘制，且每个子图标题不承载详细指标，而是在左上角使用 SCI 风格的 panel label，例如 `(a)`、`(b)`、`(c)`、`(d)`。与轨迹有关的详细指标会统一输出到终端摘要，包括 panel label 与 reward profile 的映射、选中的 repeat/seed、success、total_reward、total_energy_j、time_error_s、stop_error_m 以及 artifact 路径。
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `--ablation-root` | `str` | `output/optimal/rl/ablation` | 消融批次输出根目录，必须包含 `ablation_manifest.json` |
-| `--trajectory-source` | `str` | `best` | 轨迹来源：`best` / `best_steps` / `best_episodes` / `final` |
-| `--curve-layout` | `str` | `overlay` | 曲线布局：`overlay` / `separate` |
-| `--trajectory-layout` | `str` | `separate` | 轨迹布局：首版固定按 reward profile 分子图展示 |
-| `--reward-profiles` | `list[str]` | `None` | 仅展示指定 reward profile 子集 |
-| `--no-safeguard` | `flag` | — | 轨迹图不绘制 safeguard 背景 |
-| `--factor` | `float` | `0.99` | safeguard 背景渲染因子 |
-| `--dry-run` | `bool` | `False` | 仅解析 manifest、episode_metrics 路径、候选轨迹与代表 repeat 选择结果，不加载数组或弹图窗 |
-
-代表轨迹的 repeat 选择规则复用训练期“最优轨迹”的既有语义：
-- 成功轨迹优先于未成功轨迹
-- 成功轨迹之间按总能耗更低优先
-- 若都未成功，则按总 reward 更高优先
-
-```bash
-# 默认展示：曲线叠加 + best 轨迹分子图
-python -m scripts.show_reward_ablation --ablation-root output/optimal/rl/ablation
-
-# 展示最终轨迹
-python -m scripts.show_reward_ablation \
-    --ablation-root output/optimal/rl/ablation \
-    --trajectory-source final
-
-# 只展示两个 reward profile，并把曲线切为 separate 布局
-python -m scripts.show_reward_ablation \
-    --ablation-root output/optimal/rl/ablation \
-    --reward-profiles basic basic_safety \
-    --curve-layout separate
-
-# 仅预览将加载的曲线文件与代表轨迹，不弹图窗
-python -m scripts.show_reward_ablation \
-    --ablation-root output/optimal/rl/ablation \
-    --dry-run
-```
-
----
-
 ### 防护曲线 · `show_safeguard_curves`
 
 可视化展示磁浮列车运行安全防护曲线，包括 Levi 曲线、制动曲线、最小/最大速度约束、区间限速、辅助停车区、车站、加速区等。
@@ -745,7 +692,8 @@ python -m scripts.calc_and_save_safeguard_curves
 
 ### 最短运行时间曲线 · `calc_min_operation_time_curve`
 
-基于 ORS（Operation Reference System）计算从起点到终点的理论最短运行时间曲线。
+基于最短运行时间参考系统（Operation Reference System）的模块级函数计算
+从起点到终点的理论最短运行时间曲线。
 
 ```bash
 python -m scripts.calc_min_operation_time_curve

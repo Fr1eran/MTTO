@@ -14,7 +14,7 @@ def test_evaluate_rl_cli_accepts_dry_run_and_shared_args() -> None:
             "--dry-run",
             "--schedule-time-s",
             "430.0",
-            "--reward-profile",
+            "--reward-preset",
             "basic",
             "--reward-discount",
             "0.95",
@@ -25,7 +25,7 @@ def test_evaluate_rl_cli_accepts_dry_run_and_shared_args() -> None:
 
     assert args.dry_run is True
     assert args.schedule_time_s == 430.0
-    assert args.reward_profile == "basic"
+    assert args.reward_preset == "basic"
     assert args.reward_discount == 0.95
     assert args.device == "cuda"
 

@@ -1,32 +1,16 @@
 from __future__ import annotations
 
-import logging
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from utils.data_loader import load_auxiliary_stopping_areas_ap_and_dp, load_stations
-
-from .collect import ScalarSeries, with_legacy_info_tag_aliases
+from .collect import RewardDiagnosticsArtifact, ScalarSeries
 from .process import (
-    align_tags_to_reference_steps,
     coefficient_of_variation,
     exponential_moving_average,
     linear_slope,
 )
-
-logger = logging.getLogger(__name__)
-
-
-DEFAULT_REWARD_COMPONENT_TAGS = [
-    "rewards/safety",
-    "rewards/energy",
-    "rewards/comfort",
-    "rewards/punctuality",
-    "rewards/stopping",
-]
-
-VIOLATION_STATE_LABELS = ["normal", "terminal_failure", "speed_violation"]
 
 
 def _series_values(
@@ -42,175 +26,6 @@ def _safe_ratio(numerator: float, denominator: float) -> float:
     if abs(denominator) < 1e-12:
         return 0.0
     return float(numerator / denominator)
-
-
-def _lag1_autocorrelation(values: np.ndarray) -> float:
-    values = np.asarray(values, dtype=np.float64)
-    if values.size < 3:
-        return 0.0
-
-    left = values[:-1]
-    right = values[1:]
-    if float(np.std(left)) < 1e-12 or float(np.std(right)) < 1e-12:
-        return 0.0
-
-    corr = np.corrcoef(left, right)[0, 1]
-    if np.isnan(corr):
-        return 0.0
-    return float(corr)
-
-
-def _row_normalized(matrix: np.ndarray) -> np.ndarray:
-    matrix = np.asarray(matrix, dtype=np.float64)
-    if matrix.size == 0:
-        return matrix
-
-    row_sums = np.sum(matrix, axis=1, keepdims=True)
-    return np.divide(
-        matrix,
-        row_sums,
-        out=np.zeros_like(matrix, dtype=np.float64),
-        where=row_sums > 0,
-    )
-
-
-def _episode_ids_for_reference_steps(
-    series_map: dict[str, ScalarSeries],
-    reference_steps: np.ndarray,
-    episode_tag: str = "basic/episode_id",
-) -> np.ndarray:
-    episode_series = series_map.get(episode_tag)
-    if episode_series is None or reference_steps.size == 0:
-        return np.asarray([], dtype=np.int64)
-
-    episode_steps = episode_series.steps.astype(np.int64)
-    episode_ids = np.rint(episode_series.values).astype(np.int64)
-    if episode_steps.size == 0:
-        return np.asarray([], dtype=np.int64)
-
-    indices = np.searchsorted(episode_steps, reference_steps, side="right") - 1
-    indices = np.clip(indices, 0, episode_steps.size - 1)
-    return episode_ids[indices]
-
-
-def _build_episode_windows(
-    unique_episode_ids: np.ndarray,
-    window_size: int,
-) -> list[tuple[int, int, int, np.ndarray]]:
-    if unique_episode_ids.size == 0:
-        return []
-
-    window = max(1, int(window_size))
-    min_episode = int(np.min(unique_episode_ids))
-    max_episode = int(np.max(unique_episode_ids))
-    windows: list[tuple[int, int, int, np.ndarray]] = []
-    window_index = 0
-
-    for episode_start in range(min_episode, max_episode + 1, window):
-        episode_end = episode_start + window
-        members = unique_episode_ids[
-            (unique_episode_ids >= episode_start) & (unique_episode_ids < episode_end)
-        ]
-        if members.size == 0:
-            continue
-        windows.append((window_index, episode_start, episode_end, members))
-        window_index += 1
-
-    return windows
-
-
-def _to_violation_states(violation_codes: np.ndarray) -> np.ndarray:
-    rounded = np.rint(violation_codes).astype(np.int64)
-    states = np.zeros_like(rounded, dtype=np.int64)
-    # violation_code semantics from MTTOEnv:
-    # 0=ongoing, 1=failed_stop, 2=speed_low, 3=speed_high, 4=step_limit.
-    states[(rounded == 1) | (rounded == 4)] = 1
-    states[(rounded == 2) | (rounded == 3)] = 2
-    return states
-
-
-def _compute_component_sensitivity(
-    series_values_by_tag: dict[str, np.ndarray],
-    ordered_tags: list[str],
-) -> dict[str, dict[str, Any]]:
-    sensitivity: dict[str, dict[str, Any]] = {}
-
-    for tag in ordered_tags:
-        values = np.asarray(series_values_by_tag[tag], dtype=np.float64)
-        if values.size == 0:
-            sensitivity[tag] = {
-                "trigger_threshold": 0.0,
-                "trigger_frequency": 0.0,
-                "trigger_strength_mean": 0.0,
-                "persistence_lag1": 0.0,
-                "behavior": "rare_trigger",
-            }
-            continue
-
-        abs_values = np.abs(values)
-        trigger_threshold = max(float(np.quantile(abs_values, 0.75)) * 0.5, 1e-6)
-        trigger_mask = abs_values >= trigger_threshold
-        trigger_frequency = float(np.mean(trigger_mask))
-        persistence = _lag1_autocorrelation(values)
-
-        if persistence >= 0.55 and trigger_frequency >= 0.15:
-            behavior = "long_term_guidance"
-        elif trigger_frequency <= 0.05:
-            behavior = "rare_trigger"
-        else:
-            behavior = "instant_trigger"
-
-        sensitivity[tag] = {
-            "trigger_threshold": trigger_threshold,
-            "trigger_frequency": trigger_frequency,
-            "trigger_strength_mean": float(np.mean(abs_values[trigger_mask]))
-            if np.any(trigger_mask)
-            else 0.0,
-            "persistence_lag1": persistence,
-            "behavior": behavior,
-        }
-
-    return sensitivity
-
-
-def _compute_objective_correlation(
-    series_values_by_tag: dict[str, np.ndarray],
-    ordered_tags: list[str],
-) -> dict[str, Any]:
-    variable_tags: list[str] = []
-    for tag in ordered_tags:
-        values = np.asarray(series_values_by_tag[tag], dtype=np.float64)
-        if values.size >= 2 and float(np.std(values)) >= 1e-12:
-            variable_tags.append(tag)
-
-    if len(variable_tags) < 2:
-        return {"matrix": {}, "strong_negative_pairs": []}
-
-    matrix_values = np.column_stack(
-        [series_values_by_tag[tag] for tag in variable_tags]
-    )
-    corr_matrix = np.corrcoef(matrix_values, rowvar=False)
-    corr_matrix = np.nan_to_num(corr_matrix, nan=0.0)
-
-    corr_map: dict[str, dict[str, float]] = {}
-    strong_negative_pairs: list[dict[str, Any]] = []
-
-    for i, row_tag in enumerate(variable_tags):
-        row_data: dict[str, float] = {}
-        for j, col_tag in enumerate(variable_tags):
-            corr = float(corr_matrix[i, j])
-            row_data[col_tag] = corr
-            if i < j and corr <= -0.4:
-                strong_negative_pairs.append(
-                    {
-                        "left": row_tag,
-                        "right": col_tag,
-                        "pearson": corr,
-                    }
-                )
-        corr_map[row_tag] = row_data
-
-    return {"matrix": corr_map, "strong_negative_pairs": strong_negative_pairs}
 
 
 def compute_regular_training_metrics(
@@ -310,14 +125,22 @@ BEST_EVAL_TAGS = [
     "best_eval/last_total_reward",
     "best_eval/last_stop_error_m",
     "best_eval/last_time_error_s",
+    "best_eval/last_abs_time_error_s",
     "best_eval/last_total_energy_j",
+    "best_eval/last_comfort_tav",
+    "best_eval/last_comfort_er_pct",
+    "best_eval/last_comfort_rms",
     "best_eval/best_success",
     "best_eval/best_precise_arrival",
     "best_eval/best_punctual_arrival",
     "best_eval/best_total_reward",
     "best_eval/best_stop_error_m",
     "best_eval/best_time_error_s",
+    "best_eval/best_abs_time_error_s",
     "best_eval/best_total_energy_j",
+    "best_eval/best_comfort_tav",
+    "best_eval/best_comfort_er_pct",
+    "best_eval/best_comfort_rms",
 ]
 
 
@@ -343,844 +166,386 @@ def compute_best_eval_metrics(
             "final": float(values[-1]),
             "max": float(np.max(values)),
             "mean": float(np.mean(values)),
+            "trend_slope_per_step": float(linear_slope(_, values)),
         }
 
     return metrics
 
 
-def _compute_reward_component_impact_step_based(
-    series_map: dict[str, ScalarSeries],
-    component_tags: list[str],
+def _correlation_from_rows(
+    values: np.ndarray, names: tuple[str, ...]
 ) -> dict[str, Any]:
-    abs_contribution: dict[str, float] = {}
-    for tag in component_tags:
-        _, values = _series_values(series_map, tag)
-        abs_contribution[tag] = float(np.sum(np.abs(values)))
-
-    abs_total = float(sum(abs_contribution.values()))
-    dominance = {
-        tag: _safe_ratio(value, abs_total) for tag, value in abs_contribution.items()
-    }
-
-    values_by_tag = {tag: _series_values(series_map, tag)[1] for tag in component_tags}
-    sensitivity = _compute_component_sensitivity(values_by_tag, component_tags)
-
-    _, aligned = align_tags_to_reference_steps(series_map, component_tags)
-    objective_correlation = _compute_objective_correlation(
-        aligned, list(aligned.keys())
-    )
-
-    return {
-        "available": True,
-        "aggregation_order": "step_only_fallback",
-        "dominance": dominance,
-        "absolute_contribution": abs_contribution,
-        "sensitivity": sensitivity,
-        "objective_correlation": objective_correlation,
-        "episode_count": 0,
-        "stage_count": 0,
-        "episode_component_summary": {},
-        "stage_component_profile": [],
-    }
-
-
-def compute_reward_component_impact(
-    series_map: dict[str, ScalarSeries],
-    component_tags: list[str] | None = None,
-    episode_window_size: int = 20,
-    episode_tag: str = "basic/episode_id",
-) -> dict[str, Any]:
-    series_map = with_legacy_info_tag_aliases(series_map)
-    tags = component_tags or DEFAULT_REWARD_COMPONENT_TAGS
-    available = [tag for tag in tags if tag in series_map]
-
-    if not available:
+    if values.shape[0] < 2:
         return {
-            "available": False,
-            "dominance": {},
-            "sensitivity": {},
-            "objective_correlation": {},
-            "episode_component_summary": {},
-            "stage_component_profile": [],
+            "matrix": {},
+            "strong_negative_pairs": [],
+            "excluded_constant_components": list(names),
         }
-
-    reference_steps, aligned = align_tags_to_reference_steps(series_map, available)
-    if reference_steps.size == 0 or not aligned:
-        return _compute_reward_component_impact_step_based(series_map, available)
-
-    episode_ids = _episode_ids_for_reference_steps(
-        series_map,
-        reference_steps,
-        episode_tag=episode_tag,
-    )
-    valid_mask = episode_ids >= 0
-    if episode_ids.size == 0 or not np.any(valid_mask):
-        return _compute_reward_component_impact_step_based(series_map, available)
-
-    filtered_episode_ids = episode_ids[valid_mask]
-    filtered_values_by_tag = {
-        tag: np.asarray(aligned[tag], dtype=np.float64)[valid_mask] for tag in available
-    }
-
-    unique_episodes = np.unique(filtered_episode_ids)
-    if unique_episodes.size == 0:
-        return _compute_reward_component_impact_step_based(series_map, available)
-
-    episode_totals: dict[str, np.ndarray] = {
-        tag: np.zeros(unique_episodes.size, dtype=np.float64) for tag in available
-    }
-
-    for idx, episode_id in enumerate(unique_episodes):
-        episode_mask = filtered_episode_ids == episode_id
-        for tag in available:
-            episode_totals[tag][idx] = float(
-                np.sum(filtered_values_by_tag[tag][episode_mask])
-            )
-
-    abs_total_per_episode = np.zeros(unique_episodes.size, dtype=np.float64)
-    for tag in available:
-        abs_total_per_episode += np.abs(episode_totals[tag])
-
-    episode_ratio_by_tag: dict[str, np.ndarray] = {}
-    for tag in available:
-        episode_ratio_by_tag[tag] = np.divide(
-            np.abs(episode_totals[tag]),
-            abs_total_per_episode,
-            out=np.zeros_like(abs_total_per_episode),
-            where=abs_total_per_episode > 1e-12,
-        )
-
-    abs_contribution = {
-        tag: float(np.sum(np.abs(episode_totals[tag]))) for tag in available
-    }
-    abs_total = float(sum(abs_contribution.values()))
-    dominance = {
-        tag: _safe_ratio(value, abs_total) for tag, value in abs_contribution.items()
-    }
-
-    sensitivity = _compute_component_sensitivity(episode_totals, available)
-    objective_correlation = _compute_objective_correlation(episode_totals, available)
-
-    episode_component_summary: dict[str, dict[str, float]] = {}
-    for tag in available:
-        episode_component_summary[tag] = {
-            "mean_cumulative": float(np.mean(episode_totals[tag])),
-            "std_cumulative": float(np.std(episode_totals[tag])),
-            "mean_ratio": float(np.mean(episode_ratio_by_tag[tag])),
-            "p95_abs_cumulative": float(np.quantile(np.abs(episode_totals[tag]), 0.95)),
-        }
-
-    stage_component_profile: list[dict[str, Any]] = []
-    for window_index, episode_start, episode_end, members in _build_episode_windows(
-        unique_episodes,
-        episode_window_size,
-    ):
-        member_mask = np.isin(unique_episodes, members)
-        mean_cumulative = {
-            tag: float(np.mean(episode_totals[tag][member_mask])) for tag in available
-        }
-        std_cumulative = {
-            tag: float(np.std(episode_totals[tag][member_mask])) for tag in available
-        }
-        mean_ratio = {
-            tag: float(np.mean(episode_ratio_by_tag[tag][member_mask]))
-            for tag in available
-        }
-
-        stage_component_profile.append(
-            {
-                "window_index": window_index,
-                "episode_start": int(episode_start),
-                "episode_end": int(episode_end),
-                "episode_count": int(np.sum(member_mask)),
-                "mean_cumulative": mean_cumulative,
-                "std_cumulative": std_cumulative,
-                "mean_ratio": mean_ratio,
-            }
-        )
-
-    return {
-        "available": True,
-        "aggregation_order": "episode_then_stage",
-        "episode_count": int(unique_episodes.size),
-        "stage_count": int(len(stage_component_profile)),
-        "dominance": dominance,
-        "absolute_contribution": abs_contribution,
-        "sensitivity": sensitivity,
-        "objective_correlation": objective_correlation,
-        "episode_component_summary": episode_component_summary,
-        "stage_component_profile": stage_component_profile,
-    }
-
-
-def _load_critical_points() -> dict[str, np.ndarray]:
-    sps_zone_center_points = np.asarray([], dtype=np.float64)
-
-    try:
-        aps, dps = load_auxiliary_stopping_areas_ap_and_dp()
-        if len(aps) == len(dps) and len(aps) > 0:
-            sps_zone_center_points = np.asarray(
-                [
-                    (float(ap) + float(dp)) / 2.0
-                    for ap, dp in zip(aps, dps, strict=False)
-                ],
-                dtype=np.float64,
-            )
-
-            # 终点站停车区不应被当作 SPS 步进关键点。
-            stations = load_stations()
-            end_station = stations.get("end_station", {})
-            end_start = float(end_station.get("start"))
-            end_end = float(end_station.get("end"))
-            lower, upper = sorted((end_start, end_end))
-            sps_zone_center_points = sps_zone_center_points[
-                (sps_zone_center_points < lower) | (sps_zone_center_points > upper)
-            ]
-    except (FileNotFoundError, ValueError, OSError) as exc:
-        logger.warning("Failed to load critical points for risk attribution: %s", exc)
-        return {
-            "sps_zone_center_points_m": sps_zone_center_points,
-        }
-
-    return {
-        "sps_zone_center_points_m": sps_zone_center_points,
-    }
-
-
-def _build_critical_point_entries(
-    *,
-    positions: np.ndarray,
-    failure_mask: np.ndarray,
-    violation_mask: np.ndarray,
-    near_miss_mask: np.ndarray,
-    points_m: np.ndarray,
-    point_type: str,
-    radius_m: float,
-) -> list[dict[str, Any]]:
-    entries: list[dict[str, Any]] = []
-    if points_m.size == 0:
-        return entries
-
-    radius = max(float(radius_m), 1.0)
-    for point in points_m:
-        near_mask = np.abs(positions - point) <= radius
-        exposure_count = int(np.sum(near_mask))
-        if exposure_count <= 0:
-            continue
-
-        failure_count = int(np.sum(failure_mask & near_mask))
-        violation_count = int(np.sum(violation_mask & near_mask))
-        near_miss_count = int(np.sum(near_miss_mask & near_mask))
-        failure_risk = _safe_ratio(float(failure_count), float(exposure_count))
-        violation_risk = _safe_ratio(float(violation_count), float(exposure_count))
-        near_miss_risk = _safe_ratio(float(near_miss_count), float(exposure_count))
-
-        entries.append(
-            {
-                "type": point_type,
-                "point_m": float(point),
-                "radius_m": radius,
-                "exposure_count": exposure_count,
-                "near_miss_count": near_miss_count,
-                "failure_count": failure_count,
-                "violation_count": violation_count,
-                "near_miss_risk": near_miss_risk,
-                "violation_risk": violation_risk,
-                "failure_risk": failure_risk,
-                "risk": failure_risk,
-            }
-        )
-
-    entries.sort(
-        key=lambda item: (
-            item["failure_risk"],
-            item["violation_risk"],
-            item["near_miss_risk"],
-            item["failure_count"],
-            item["violation_count"],
-            item["near_miss_count"],
-        ),
-        reverse=True,
-    )
-    return entries
-
-
-def _build_episode_boundary_profiles(
-    *,
-    episode_ids: np.ndarray,
-    distance_weights: np.ndarray,
-    near_miss_mask: np.ndarray,
-    episode_window_size: int,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    valid_mask = episode_ids >= 0
-    if not np.any(valid_mask):
-        return [], []
-
-    filtered_episode_ids = episode_ids[valid_mask]
-    filtered_distance = distance_weights[valid_mask]
-    filtered_near_miss = near_miss_mask[valid_mask]
-    unique_episodes = np.unique(filtered_episode_ids)
-
-    episode_profile: list[dict[str, Any]] = []
-    episode_ratio_map: dict[int, float] = {}
-
-    for episode_id in unique_episodes:
-        mask = filtered_episode_ids == episode_id
-        total_distance = float(np.sum(filtered_distance[mask]))
-        near_miss_distance = float(
-            np.sum(filtered_distance[mask] * filtered_near_miss[mask])
-        )
-        ratio = _safe_ratio(near_miss_distance, total_distance)
-        episode_ratio_map[int(episode_id)] = ratio
-        episode_profile.append(
-            {
-                "episode_id": int(episode_id),
-                "total_distance_m": total_distance,
-                "near_miss_distance_m": near_miss_distance,
-                "near_miss_distance_ratio": ratio,
-            }
-        )
-
-    stage_profile: list[dict[str, Any]] = []
-    for window_index, episode_start, episode_end, members in _build_episode_windows(
-        unique_episodes,
-        episode_window_size,
-    ):
-        member_ratios = [episode_ratio_map[int(ep)] for ep in members]
-        stage_profile.append(
-            {
-                "window_index": window_index,
-                "episode_start": int(episode_start),
-                "episode_end": int(episode_end),
-                "episode_count": int(len(member_ratios)),
-                "mean_near_miss_distance_ratio": float(np.mean(member_ratios))
-                if member_ratios
-                else 0.0,
-                "max_near_miss_distance_ratio": float(np.max(member_ratios))
-                if member_ratios
-                else 0.0,
-            }
-        )
-
-    return episode_profile, stage_profile
-
-
-def compute_constraint_diagnostic(
-    series_map: dict[str, ScalarSeries],
-    near_miss_threshold_mps: float = 1.0,
-    position_bin_size_m: float = 500.0,
-    critical_point_radius_m: float = 300.0,
-    top_k_spatial_bins: int = 8,
-    top_k_critical_points: int = 8,
-    episode_window_size: int = 20,
-) -> dict[str, Any]:
-    series_map = with_legacy_info_tag_aliases(series_map)
-    required_tags = [
-        "basic/position",
-        "basic/stopping_point_index",
-        "outcome/truncated",
-        "constraint/speed_limit_segment",
-        "constraint/margin_to_vmax_mps",
-        "constraint/margin_to_vmin_mps",
+    variable = [
+        index
+        for index in range(values.shape[1])
+        if float(np.std(values[:, index])) >= 1e-12
     ]
-    if any(tag not in series_map for tag in required_tags):
+    excluded = [name for index, name in enumerate(names) if index not in variable]
+    if len(variable) < 2:
         return {
-            "available": False,
-            "geographic_failure_distribution": {},
-            "safety_band_tolerance": {},
-            "boundary_adhesion": {},
-            "critical_point_risk": {},
+            "matrix": {},
+            "strong_negative_pairs": [],
+            "excluded_constant_components": excluded,
         }
+    correlation = np.nan_to_num(np.corrcoef(values[:, variable], rowvar=False), nan=0.0)
+    selected_names = [names[index] for index in variable]
+    return _correlation_payload(correlation, selected_names, excluded)
 
-    optional_tags = []
-    if "constraint/violation_code" in series_map:
-        optional_tags.append("constraint/violation_code")
-    if "basic/episode_id" in series_map:
-        optional_tags.append("basic/episode_id")
 
-    _, aligned = align_tags_to_reference_steps(
-        series_map,
-        required_tags + optional_tags,
-        reference_tag="basic/position",
-    )
-
-    if "basic/position" not in aligned or "basic/stopping_point_index" not in aligned:
-        return {
-            "available": False,
-            "geographic_failure_distribution": {},
-            "safety_band_tolerance": {},
-            "boundary_adhesion": {},
-            "critical_point_risk": {},
+def _correlation_payload(
+    correlation: np.ndarray,
+    names: list[str],
+    excluded: list[str],
+) -> dict[str, Any]:
+    matrix: dict[str, dict[str, float]] = {}
+    strong_negative: list[dict[str, Any]] = []
+    for row_index, row_name in enumerate(names):
+        matrix[row_name] = {
+            name: float(correlation[row_index, col_index])
+            for col_index, name in enumerate(names)
         }
-
-    positions = aligned["basic/position"]
-    truncated_flags = aligned["outcome/truncated"]
-    sp_values = aligned["basic/stopping_point_index"]
-    speed_segment_values = aligned["constraint/speed_limit_segment"]
-    margin_to_vmax = aligned["constraint/margin_to_vmax_mps"]
-    margin_to_vmin = aligned["constraint/margin_to_vmin_mps"]
-    violation_codes = aligned.get("constraint/violation_code", np.zeros_like(positions))
-    episode_ids = np.rint(
-        aligned.get("basic/episode_id", np.full_like(positions, -1.0))
-    ).astype(np.int64)
-
-    if positions.size <= 1:
-        distance_weights = np.zeros_like(positions, dtype=np.float64)
-    else:
-        distance_weights = np.abs(np.diff(positions, append=positions[-1]))
-
-    truncated_mask = truncated_flags >= 0.5
-    failure_positions = positions[truncated_mask]
-    failure_sp = np.rint(sp_values[truncated_mask]).astype(np.int64)
-    failure_segments = np.rint(speed_segment_values[truncated_mask]).astype(np.int64)
-
-    margin_violation_mask = (margin_to_vmax < 0.0) | (margin_to_vmin < 0.0)
-    violation_mask = (
-        np.rint(violation_codes).astype(np.int64) > 0
-    ) | margin_violation_mask
-    near_miss_event_mask = (
-        np.isfinite(margin_to_vmax)
-        & np.isfinite(margin_to_vmin)
-        & (
-            (margin_to_vmax <= near_miss_threshold_mps)
-            | (margin_to_vmin <= near_miss_threshold_mps)
-        )
-    )
-
-    geographic_failure_distribution: dict[str, Any] = {
-        "truncated_count": int(np.sum(truncated_mask)),
-        "hotspots_by_position_bin": [],
-        "hotspots_by_asa_index": {},
-        "hotspots_by_speed_limit_segment": {},
-        "position_risk_bins": [],
-        "top_risk_bins": [],
-    }
-
-    if positions.size > 0:
-        bin_size = max(1.0, float(position_bin_size_m))
-        pos_min = float(np.floor(np.min(positions) / bin_size) * bin_size)
-        pos_max = float(np.ceil(np.max(positions) / bin_size) * bin_size + bin_size)
-        bins = np.arange(pos_min, pos_max + bin_size, bin_size)
-
-        exposure_hist, edges = np.histogram(positions, bins=bins)
-        failure_hist, _ = np.histogram(failure_positions, bins=bins)
-        violation_hist, _ = np.histogram(positions[violation_mask], bins=bins)
-        near_miss_hist, _ = np.histogram(positions[near_miss_event_mask], bins=bins)
-
-        hotspots = []
-        risk_bins: list[dict[str, Any]] = []
-        for idx, exposure_count in enumerate(exposure_hist):
-            failure_count = int(failure_hist[idx])
-            violation_count = int(violation_hist[idx])
-            near_miss_count = int(near_miss_hist[idx])
-            if failure_count > 0:
-                hotspots.append(
-                    {
-                        "bin_start_m": float(edges[idx]),
-                        "bin_end_m": float(edges[idx + 1]),
-                        "count": failure_count,
-                    }
+        for col_index in range(row_index + 1, len(names)):
+            value = float(correlation[row_index, col_index])
+            if value <= -0.4:
+                strong_negative.append(
+                    {"left": row_name, "right": names[col_index], "pearson": value}
                 )
-
-            if exposure_count <= 0:
-                continue
-
-            failure_risk = _safe_ratio(float(failure_count), float(exposure_count))
-            violation_risk = _safe_ratio(float(violation_count), float(exposure_count))
-            near_miss_risk = _safe_ratio(float(near_miss_count), float(exposure_count))
-            risk_bins.append(
-                {
-                    "bin_start_m": float(edges[idx]),
-                    "bin_end_m": float(edges[idx + 1]),
-                    "exposure_count": int(exposure_count),
-                    "near_miss_count": near_miss_count,
-                    "failure_count": failure_count,
-                    "violation_count": violation_count,
-                    "near_miss_risk": near_miss_risk,
-                    "violation_risk": violation_risk,
-                    "failure_risk": failure_risk,
-                }
-            )
-
-        risk_bins.sort(
-            key=lambda item: (
-                item["failure_risk"],
-                item["violation_risk"],
-                item["near_miss_risk"],
-                item["failure_count"],
-                item["violation_count"],
-                item["near_miss_count"],
-            ),
-            reverse=True,
-        )
-
-        asa_counts = {
-            str(int(sp)): int(np.sum(failure_sp == sp))
-            for sp in np.unique(failure_sp)
-            if sp >= 0
-        }
-        segment_counts = {
-            str(int(segment)): int(np.sum(failure_segments == segment))
-            for segment in np.unique(failure_segments)
-            if segment >= 0
-        }
-
-        geographic_failure_distribution = {
-            "truncated_count": int(np.sum(truncated_mask)),
-            "hotspots_by_position_bin": hotspots,
-            "hotspots_by_asa_index": asa_counts,
-            "hotspots_by_speed_limit_segment": segment_counts,
-            "position_risk_bins": risk_bins,
-            "top_risk_bins": risk_bins[: max(1, int(top_k_spatial_bins))],
-        }
-
-    finite_margin_mask = np.isfinite(margin_to_vmax) & np.isfinite(margin_to_vmin)
-    near_miss_mask = np.zeros_like(margin_to_vmax, dtype=np.float64)
-
-    if not np.any(finite_margin_mask):
-        safety_band_tolerance = {
-            "available": False,
-        }
-    else:
-        vmax_margin = margin_to_vmax[finite_margin_mask]
-        vmin_margin = margin_to_vmin[finite_margin_mask]
-        near_miss_local_mask = (vmax_margin <= near_miss_threshold_mps) | (
-            vmin_margin <= near_miss_threshold_mps
-        )
-        near_miss_mask[finite_margin_mask] = near_miss_local_mask.astype(np.float64)
-        violation_local_mask = (vmax_margin < 0.0) | (vmin_margin < 0.0)
-
-        total_distance = float(np.sum(distance_weights[finite_margin_mask]))
-        near_miss_distance = float(
-            np.sum(distance_weights[finite_margin_mask] * near_miss_local_mask)
-        )
-
-        safety_band_tolerance = {
-            "available": True,
-            "average_distance_to_vmax_mps": float(np.mean(vmax_margin)),
-            "average_distance_to_vmin_mps": float(np.mean(vmin_margin)),
-            "p05_distance_to_vmax_mps": float(np.quantile(vmax_margin, 0.05)),
-            "p05_distance_to_vmin_mps": float(np.quantile(vmin_margin, 0.05)),
-            "min_distance_to_vmax_mps": float(np.min(vmax_margin)),
-            "min_distance_to_vmin_mps": float(np.min(vmin_margin)),
-            "near_miss_threshold_mps": float(near_miss_threshold_mps),
-            "near_miss_ratio": float(np.mean(near_miss_local_mask)),
-            "violation_ratio": float(np.mean(violation_local_mask)),
-            "sample_count": int(vmax_margin.size),
-            "near_miss_distance_m": near_miss_distance,
-            "total_distance_m": total_distance,
-            "near_miss_distance_ratio": _safe_ratio(near_miss_distance, total_distance),
-        }
-
-    total_distance_all = float(np.sum(distance_weights))
-    near_miss_distance_all = float(np.sum(distance_weights * near_miss_mask))
-    boundary_ratio_by_distance = _safe_ratio(near_miss_distance_all, total_distance_all)
-
-    episode_boundary_profile, stage_boundary_profile = _build_episode_boundary_profiles(
-        episode_ids=episode_ids,
-        distance_weights=distance_weights,
-        near_miss_mask=near_miss_mask,
-        episode_window_size=episode_window_size,
-    )
-
-    boundary_adhesion = {
-        "near_miss_threshold_mps": float(near_miss_threshold_mps),
-        "total_distance_m": total_distance_all,
-        "near_miss_distance_m": near_miss_distance_all,
-        "near_miss_distance_ratio": boundary_ratio_by_distance,
-        "episode_profile": episode_boundary_profile,
-        "stage_profile": stage_boundary_profile,
-    }
-
-    critical_points = _load_critical_points()
-    radius_m = max(1.0, float(critical_point_radius_m))
-    sps_entries = _build_critical_point_entries(
-        positions=positions,
-        failure_mask=truncated_mask,
-        violation_mask=violation_mask,
-        near_miss_mask=near_miss_event_mask,
-        points_m=critical_points["sps_zone_center_points_m"],
-        point_type="sps_zone_center",
-        radius_m=radius_m,
-    )
-
-    combined_entries = sorted(
-        sps_entries,
-        key=lambda item: (
-            item["failure_risk"],
-            item["violation_risk"],
-            item["near_miss_risk"],
-            item["failure_count"],
-            item["violation_count"],
-            item["near_miss_count"],
-        ),
-        reverse=True,
-    )
-    top_k_points = max(1, int(top_k_critical_points))
-
-    critical_point_risk = {
-        "radius_m": radius_m,
-        "sps_zone_center_points": sps_entries[:top_k_points],
-        "top_risky_points": combined_entries[:top_k_points],
-    }
-
     return {
-        "available": True,
-        "geographic_failure_distribution": geographic_failure_distribution,
-        "safety_band_tolerance": safety_band_tolerance,
-        "boundary_adhesion": boundary_adhesion,
-        "critical_point_risk": critical_point_risk,
+        "matrix": matrix,
+        "strong_negative_pairs": strong_negative,
+        "excluded_constant_components": excluded,
     }
 
 
-def compute_evolution_metrics(
-    series_map: dict[str, ScalarSeries],
-    episode_window_size: int = 20,
+def _correlation_from_moments(
+    *, count: int, sums: np.ndarray, cross: np.ndarray, names: tuple[str, ...]
 ) -> dict[str, Any]:
-    series_map = with_legacy_info_tag_aliases(series_map)
-    required_tags = [
-        "basic/episode_id",
-        "basic/position",
-        "outcome/truncated",
-        "constraint/violation_code",
-    ]
-    if any(tag not in series_map for tag in required_tags):
+    if count < 2:
         return {
-            "available": False,
-            "state_labels": VIOLATION_STATE_LABELS,
-            "stage_profiles": [],
+            "matrix": {},
+            "strong_negative_pairs": [],
+            "excluded_constant_components": list(names),
         }
-
-    reference_steps, aligned = align_tags_to_reference_steps(
-        series_map,
-        required_tags,
-        reference_tag="basic/episode_id",
-    )
-    if any(tag not in aligned for tag in required_tags):
+    covariance_numerator = cross - np.outer(sums, sums) / float(count)
+    variance = np.diag(covariance_numerator)
+    variable = [index for index, value in enumerate(variance) if value > 1e-12]
+    excluded = [name for index, name in enumerate(names) if index not in variable]
+    if len(variable) < 2:
         return {
-            "available": False,
-            "state_labels": VIOLATION_STATE_LABELS,
-            "stage_profiles": [],
+            "matrix": {},
+            "strong_negative_pairs": [],
+            "excluded_constant_components": excluded,
         }
+    selected = covariance_numerator[np.ix_(variable, variable)]
+    scale = np.sqrt(np.maximum(np.diag(selected), 0.0))
+    correlation = selected / np.outer(scale, scale)
+    selected_names = [names[index] for index in variable]
+    return _correlation_payload(correlation, selected_names, excluded)
 
-    episode_ids = np.rint(aligned["basic/episode_id"]).astype(np.int64)
-    positions = aligned["basic/position"]
-    truncated_flags = aligned["outcome/truncated"] >= 0.5
-    violation_states = _to_violation_states(aligned["constraint/violation_code"])
 
-    valid_mask = episode_ids >= 0
-    if not np.any(valid_mask):
-        return {
-            "available": False,
-            "state_labels": VIOLATION_STATE_LABELS,
-            "stage_profiles": [],
+def _contribution_metrics(
+    *,
+    reward_sum: np.ndarray,
+    reward_abs_sum: np.ndarray,
+    nonzero_count: np.ndarray,
+    transition_count: int,
+    names: tuple[str, ...],
+) -> dict[str, dict[str, float]]:
+    component_count = len(names) - 1
+    total_sum = float(reward_sum[-1])
+    total_abs_sum = float(reward_abs_sum[-1])
+    component_abs_total = float(reward_abs_sum[:component_count].sum())
+    result: dict[str, dict[str, float]] = {}
+    for index, name in enumerate(names[:component_count]):
+        result[name] = {
+            "signed_sum": float(reward_sum[index]),
+            "absolute_sum": float(reward_abs_sum[index]),
+            "signed_return_ratio": _safe_ratio(float(reward_sum[index]), total_sum),
+            "absolute_activity_share": _safe_ratio(
+                float(reward_abs_sum[index]), component_abs_total
+            ),
+            "relative_total_magnitude": _safe_ratio(
+                float(reward_abs_sum[index]), total_abs_sum
+            ),
+            "nonzero_frequency": _safe_ratio(
+                float(nonzero_count[index]), float(transition_count)
+            ),
+            "active_mean_absolute_strength": _safe_ratio(
+                float(reward_abs_sum[index]), float(nonzero_count[index])
+            ),
         }
+    return result
 
-    episode_ids = episode_ids[valid_mask]
-    positions = positions[valid_mask]
-    truncated_flags = truncated_flags[valid_mask]
-    violation_states = violation_states[valid_mask]
-    reference_steps = reference_steps[valid_mask]
 
-    unique_episodes = np.unique(episode_ids)
-    episode_records: list[dict[str, Any]] = []
-    terminal_state_counts = np.zeros(3, dtype=np.int64)
-    global_start_pos = float(np.min(positions)) if positions.size > 0 else 0.0
+def compute_reward_component_analysis(
+    artifact: RewardDiagnosticsArtifact | None,
+) -> dict[str, Any]:
+    if artifact is None:
+        return {"available": False, "reason": "reward diagnostics artifact unavailable"}
+    names = artifact.reward_names
+    complete = artifact.episode_complete
+    complete_rewards = artifact.episode_reward_sums[complete]
+    rollout_sum = artifact.rollout_reward_sum.sum(axis=0)
+    rollout_abs_sum = artifact.rollout_reward_abs_sum.sum(axis=0)
+    rollout_nonzero = artifact.rollout_reward_nonzero_count.sum(axis=0)
+    rollout_cross = artifact.rollout_reward_cross_product.sum(axis=0)
+    transition_count = int(artifact.rollout_transition_count.sum())
 
-    for episode_id in unique_episodes:
-        episode_mask = episode_ids == episode_id
-        ep_steps = reference_steps[episode_mask]
-        ep_positions = positions[episode_mask]
-        ep_truncated = truncated_flags[episode_mask]
-        ep_states = violation_states[episode_mask]
-
-        if ep_steps.size == 0:
-            continue
-
-        trunc_indices = np.where(ep_truncated)[0]
-        if trunc_indices.size > 0:
-            end_idx = int(trunc_indices[0])
-            is_truncated_episode = True
-        else:
-            end_idx = int(ep_positions.size - 1)
-            is_truncated_episode = False
-
-        start_pos = float(ep_positions[0])
-        end_pos = float(ep_positions[end_idx])
-        if ep_positions.size <= 1:
-            # Sparse logger points: fallback to distance from route origin estimate.
-            survival_distance = abs(end_pos - global_start_pos)
-        else:
-            survival_distance = abs(end_pos - start_pos)
-        terminal_state = int(ep_states[end_idx])
-
-        transition_matrix = np.zeros((3, 3), dtype=np.int64)
-        if ep_states.size >= 2:
-            for left, right in zip(ep_states[:-1], ep_states[1:], strict=False):
-                transition_matrix[int(left), int(right)] += 1
-
-        terminal_state_counts[terminal_state] += 1
-
-        episode_records.append(
-            {
-                "episode_id": int(episode_id),
-                "step_start": int(ep_steps[0]),
-                "step_end": int(ep_steps[-1]) + 1,
-                "survival_distance_m": float(survival_distance),
-                "is_truncated": bool(is_truncated_episode),
-                "terminal_state": terminal_state,
-                "transition_matrix": transition_matrix,
-            }
-        )
-
-    if not episode_records:
-        return {
-            "available": False,
-            "state_labels": VIOLATION_STATE_LABELS,
-            "stage_profiles": [],
-        }
-
-    overall_transition = np.zeros((3, 3), dtype=np.int64)
-    if violation_states.size >= 2:
-        for left, right in zip(
-            violation_states[:-1], violation_states[1:], strict=False
-        ):
-            overall_transition[int(left), int(right)] += 1
-
-    episode_array = np.asarray(
-        [r["episode_id"] for r in episode_records], dtype=np.int64
-    )
-    survival_array = np.asarray(
-        [r["survival_distance_m"] for r in episode_records], dtype=np.float64
-    )
-    truncated_array = np.asarray(
-        [r["is_truncated"] for r in episode_records], dtype=bool
-    )
-    terminal_state_array = np.asarray(
-        [r["terminal_state"] for r in episode_records], dtype=np.int64
-    )
-    step_start_array = np.asarray(
-        [r["step_start"] for r in episode_records], dtype=np.int64
-    )
-    step_end_array = np.asarray(
-        [r["step_end"] for r in episode_records], dtype=np.int64
-    )
-    transition_stack = np.stack(
-        [np.asarray(r["transition_matrix"], dtype=np.int64) for r in episode_records],
-        axis=0,
-    )
-
-    stage_profiles: list[dict[str, Any]] = []
-    previous_avg_survival: float | None = None
-
-    for window_index, episode_start, episode_end, members in _build_episode_windows(
-        np.unique(episode_array),
-        episode_window_size,
-    ):
-        member_mask = np.isin(episode_array, members)
-        if not np.any(member_mask):
-            continue
-
-        stage_survival = survival_array[member_mask]
-        stage_truncated = truncated_array[member_mask]
-        stage_terminal_states = terminal_state_array[member_mask]
-        stage_matrix = np.sum(transition_stack[member_mask], axis=0)
-        if int(np.sum(stage_matrix)) == 0:
-            stage_indices = np.where(np.isin(episode_ids, members))[0]
-            if stage_indices.size >= 2:
-                for left_idx, right_idx in zip(
-                    stage_indices[:-1], stage_indices[1:], strict=False
-                ):
-                    if right_idx != left_idx + 1:
-                        continue
-                    left_state = int(violation_states[left_idx])
-                    right_state = int(violation_states[right_idx])
-                    stage_matrix[left_state, right_state] += 1
-        stage_probs = _row_normalized(stage_matrix)
-
-        avg_survival = float(np.mean(stage_survival))
-        growth_vs_prev = (
-            None
-            if previous_avg_survival is None
-            else _safe_ratio(
-                avg_survival - previous_avg_survival, previous_avg_survival
-            )
-        )
-
-        state_counts = np.bincount(stage_terminal_states, minlength=3)
-        state_total = float(np.sum(state_counts))
-        terminal_state_ratio = {
-            VIOLATION_STATE_LABELS[idx]: _safe_ratio(
-                float(state_counts[idx]),
-                state_total,
-            )
-            for idx in range(3)
-        }
-
-        stage_profiles.append(
-            {
-                "window_index": int(window_index),
-                "episode_start": int(episode_start),
-                "episode_end": int(episode_end),
-                "episode_count": int(np.sum(member_mask)),
-                "step_start": int(np.min(step_start_array[member_mask])),
-                "step_end": int(np.max(step_end_array[member_mask])),
-                "avg_survival_distance_m": avg_survival,
-                "survival_growth_rate_vs_prev": growth_vs_prev,
-                "truncated_episode_ratio": float(np.mean(stage_truncated)),
-                "terminal_state_ratio": terminal_state_ratio,
-                "transition_matrix": stage_matrix.astype(np.int64).tolist(),
-                "transition_probabilities": stage_probs.tolist(),
-                "normal_to_terminal_failure_transition_rate": float(stage_probs[0, 1]),
-                "normal_to_speed_violation_transition_rate": float(stage_probs[0, 2]),
-                "terminal_failure_to_speed_violation_transition_rate": float(
-                    stage_probs[1, 2]
-                ),
-                "speed_violation_to_terminal_failure_transition_rate": float(
-                    stage_probs[2, 1]
-                ),
-                # Backward-compatible aliases for older report templates.
-                "normal_to_low_transition_rate": float(stage_probs[0, 1]),
-                "normal_to_high_transition_rate": float(stage_probs[0, 2]),
-                "low_to_high_transition_rate": float(stage_probs[1, 2]),
-                "high_to_low_transition_rate": float(stage_probs[2, 1]),
-            }
-        )
-
-        previous_avg_survival = avg_survival
-
-    avg_survival_values = np.asarray(
-        [stage["avg_survival_distance_m"] for stage in stage_profiles], dtype=np.float64
-    )
-    if avg_survival_values.size >= 2:
-        stage_index = np.arange(avg_survival_values.size, dtype=np.float64)
-        survival_slope = float(np.polyfit(stage_index, avg_survival_values, 1)[0])
-    else:
-        survival_slope = 0.0
-
-    overall_probabilities = _row_normalized(overall_transition)
-    total_terminal = float(np.sum(terminal_state_counts))
-    overall_terminal_state_ratio = {
-        VIOLATION_STATE_LABELS[idx]: _safe_ratio(
-            float(terminal_state_counts[idx]),
-            total_terminal,
-        )
-        for idx in range(3)
+    episode_groups: dict[str, dict[str, Any]] = {}
+    group_masks = {
+        "complete": complete,
+        "terminated": complete & artifact.episode_terminated,
+        "truncated": complete & artifact.episode_truncated,
     }
+    for group_name, mask in group_masks.items():
+        values = artifact.episode_reward_sums[mask]
+        episode_groups[group_name] = {
+            "count": int(values.shape[0]),
+            "correlation": _correlation_from_rows(values, names),
+        }
+
+    phase_metrics: dict[str, dict[str, Any]] = {}
+    rollout_indices = np.array_split(
+        np.arange(artifact.rollout_transition_count.size), 3
+    )
+    for phase_name, indices in zip(
+        ("early", "middle", "late"), rollout_indices, strict=True
+    ):
+        if indices.size == 0:
+            phase_metrics[phase_name] = {
+                "transition_count": 0,
+                "components": {},
+                "correlation": {},
+            }
+            continue
+        count = int(artifact.rollout_transition_count[indices].sum())
+        sums = artifact.rollout_reward_sum[indices].sum(axis=0)
+        absolute_sums = artifact.rollout_reward_abs_sum[indices].sum(axis=0)
+        nonzero = artifact.rollout_reward_nonzero_count[indices].sum(axis=0)
+        cross = artifact.rollout_reward_cross_product[indices].sum(axis=0)
+        phase_metrics[phase_name] = {
+            "transition_count": count,
+            "components": _contribution_metrics(
+                reward_sum=sums,
+                reward_abs_sum=absolute_sums,
+                nonzero_count=nonzero,
+                transition_count=count,
+                names=names,
+            ),
+            "correlation": _correlation_from_moments(
+                count=count, sums=sums, cross=cross, names=names
+            ),
+        }
 
     return {
         "available": True,
-        "aggregation_order": "episode_then_stage",
-        "stage_basis": "episode_window",
-        "episode_window_size": max(1, int(episode_window_size)),
-        "state_labels": VIOLATION_STATE_LABELS,
-        "episode_count": int(len(episode_records)),
-        "stage_count": int(len(stage_profiles)),
-        "mean_survival_distance_m": float(np.mean(survival_array)),
-        "truncated_episode_ratio": float(np.mean(truncated_array)),
-        "survival_distance_slope_per_stage": survival_slope,
-        "overall_transition_matrix": overall_transition.astype(np.int64).tolist(),
-        "overall_transition_probabilities": overall_probabilities.tolist(),
-        "overall_terminal_state_ratio": overall_terminal_state_ratio,
-        "stage_profiles": stage_profiles,
+        "reward_names": list(names),
+        "transition_count": transition_count,
+        "complete_episode_count": int(complete_rewards.shape[0]),
+        "partial_episode_count": int(np.count_nonzero(~complete)),
+        "components": _contribution_metrics(
+            reward_sum=rollout_sum,
+            reward_abs_sum=rollout_abs_sum,
+            nonzero_count=rollout_nonzero,
+            transition_count=transition_count,
+            names=names,
+        ),
+        "episode_return_correlation": _correlation_from_rows(complete_rewards, names),
+        "episode_groups": episode_groups,
+        "transition_signal_correlation": _correlation_from_moments(
+            count=transition_count,
+            sums=rollout_sum,
+            cross=rollout_cross,
+            names=names,
+        ),
+        "transition_phases": phase_metrics,
+    }
+
+
+TRAJECTORY_EVALUATION_TAGS = [
+    "best_eval/last_stop_error_m",
+    "best_eval/last_time_error_s",
+    "best_eval/last_abs_time_error_s",
+    "best_eval/last_total_energy_j",
+    "best_eval/last_comfort_tav",
+    "best_eval/last_comfort_er_pct",
+    "best_eval/last_comfort_rms",
+]
+
+
+def compute_trajectory_evaluation_metrics(
+    series_map: dict[str, ScalarSeries],
+) -> dict[str, Any]:
+    """Summarize changes in task-quality measurements across evaluations."""
+    metrics: dict[str, Any] = {"available": False, "metrics": {}}
+    for tag in TRAJECTORY_EVALUATION_TAGS:
+        steps, values = _series_values(series_map, tag)
+        if values.size == 0:
+            continue
+        metrics["metrics"][tag.removeprefix("best_eval/last_")] = {
+            "final": float(values[-1]),
+            "mean": float(np.mean(values)),
+            "min": float(np.min(values)),
+            "max": float(np.max(values)),
+            "trend_slope_per_step": float(linear_slope(steps, values)),
+        }
+    metrics["available"] = bool(metrics["metrics"])
+    return metrics
+
+
+def compute_curriculum_distribution_metrics(
+    series_map: dict[str, ScalarSeries],
+) -> dict[str, Any]:
+    """Analyze DSPDL only when it emitted an actual-to-target KL series."""
+    steps, values = _series_values(series_map, "dspdl/empirical_to_target_kl")
+    if values.size == 0:
+        return {
+            "available": False,
+            "reason": "no DSPDL empirical sampling-distribution KL was logged",
+        }
+    current_steps, current_values = _series_values(
+        series_map, "dspdl/current_to_target_kl"
+    )
+    result: dict[str, Any] = {
+        "available": True,
+        "empirical_to_target_kl": {
+            "final": float(values[-1]),
+            "mean": float(np.mean(values)),
+            "min": float(np.min(values)),
+            "trend_slope_per_step": float(linear_slope(steps, values)),
+        },
+    }
+    if current_values.size:
+        result["current_to_target_kl"] = {
+            "final": float(current_values[-1]),
+            "mean": float(np.mean(current_values)),
+            "min": float(np.min(current_values)),
+            "trend_slope_per_step": float(linear_slope(current_steps, current_values)),
+        }
+    diagnostic_tags = {
+        "converged": "dspdl/converged",
+        "alpha": "dspdl/alpha",
+        "update_kl": "dspdl/update_kl",
+        "critic_values_duration_s": "dspdl/critic_values_duration_s",
+        "distribution_solve_duration_s": "dspdl/distribution_solve_duration_s",
+        "critic_return_mae": "dspdl/critic_return_mae",
+        "critic_return_pearson": "dspdl/critic_return_pearson",
+    }
+    diagnostics: dict[str, dict[str, float]] = {}
+    for name, tag in diagnostic_tags.items():
+        diag_steps, diag_values = _series_values(series_map, tag)
+        if diag_values.size == 0:
+            continue
+        diagnostics[name] = {
+            "final": float(diag_values[-1]),
+            "mean": float(np.mean(diag_values)),
+            "max": float(np.max(diag_values)),
+            "trend_slope_per_step": float(linear_slope(diag_steps, diag_values)),
+        }
+    result["diagnostics"] = diagnostics
+    return result
+
+
+def compute_safety_truncation_position_metrics(
+    *,
+    histogram_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Summarize worker-recorded safety truncations from the NPZ artifact."""
+    unavailable = {
+        "available": False,
+        "bins": [],
+        "highest_safety_truncation_bin": None,
+        "total_safety_truncation_count": 0,
+    }
+    if histogram_path is None:
+        return unavailable | {
+            "reason": "safety truncation histogram path was not provided"
+        }
+    path = Path(histogram_path)
+    if not path.is_file():
+        return unavailable | {"reason": f"safety bins artifact not found: {path}"}
+    with np.load(path) as data:
+        required = (
+            "bin_start_m",
+            "bin_end_m",
+            "safety_truncation_count",
+            "low_safety_truncation_count",
+            "high_safety_truncation_count",
+            "global_safety_truncation_share",
+            "position_bin_size_m",
+        )
+        if any(key not in data.files for key in required):
+            return unavailable | {
+                "reason": "safety bins artifact is missing required fields"
+            }
+        values = {
+            "bin_start_m": np.asarray(data["bin_start_m"], dtype=np.float64),
+            "bin_end_m": np.asarray(data["bin_end_m"], dtype=np.float64),
+            "safety_truncation_count": np.asarray(
+                data["safety_truncation_count"], dtype=np.int64
+            ),
+            "low_safety_truncation_count": np.asarray(
+                data["low_safety_truncation_count"], dtype=np.int64
+            ),
+            "high_safety_truncation_count": np.asarray(
+                data["high_safety_truncation_count"], dtype=np.int64
+            ),
+            "global_safety_truncation_share": np.asarray(
+                data["global_safety_truncation_share"], dtype=np.float64
+            ),
+        }
+        bin_size = np.asarray(data["position_bin_size_m"], dtype=np.float64)
+    count = values["bin_start_m"].size
+    if any(value.ndim != 1 or value.size != count for value in values.values()):
+        return unavailable | {"reason": "safety bins artifact has inconsistent arrays"}
+    if bin_size.shape != (1,) or not np.isfinite(bin_size[0]) or bin_size[0] <= 0.0:
+        return unavailable | {"reason": "safety bins artifact has an invalid bin size"}
+    starts = values["bin_start_m"]
+    ends = values["bin_end_m"]
+    totals = values["safety_truncation_count"]
+    low = values["low_safety_truncation_count"]
+    high = values["high_safety_truncation_count"]
+    shares = values["global_safety_truncation_share"]
+    if (
+        not np.all(np.isfinite(starts))
+        or not np.all(np.isfinite(ends))
+        or not np.all(np.isfinite(shares))
+        or np.any(ends <= starts)
+        or np.any(totals <= 0)
+        or np.any(low < 0)
+        or np.any(high < 0)
+        or np.any(low + high != totals)
+        or np.any(shares < 0.0)
+        or (count > 0 and not np.isclose(float(shares.sum()), 1.0))
+    ):
+        return unavailable | {"reason": "safety bins artifact contains invalid values"}
+    entries = [
+        {
+            "bin_start_m": float(starts[index]),
+            "bin_end_m": float(ends[index]),
+            "safety_truncation_count": int(totals[index]),
+            "low_safety_truncation_count": int(low[index]),
+            "high_safety_truncation_count": int(high[index]),
+            "global_safety_truncation_share": float(shares[index]),
+        }
+        for index in range(count)
+    ]
+    highest = max(
+        entries,
+        key=lambda entry: entry["safety_truncation_count"],
+        default=None,
+    )
+    return {
+        "available": True,
+        "bins": entries,
+        "highest_safety_truncation_bin": highest,
+        "total_safety_truncation_count": int(totals.sum()),
+        "position_bin_size_m": float(bin_size[0]),
+        "artifact_path": str(path),
     }

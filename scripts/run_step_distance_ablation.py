@@ -12,14 +12,21 @@ import numpy as np
 from matplotlib.figure import Figure
 
 from rl.experiment_utils import (
+    DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
     DEFAULT_REWARD_DISCOUNT,
     DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
+    DEFAULT_SCHEDULE_TIME_S,
     TrainingRunSpec,
     apply_rl_curve_plot_style,
     build_default_training_args,
+    evaluate_final_training_run,
     load_run_metadata,
     resolve_training_run_spec,
     train_single_experiment,
+)
+from rl.training_analysis.collect import (
+    extract_complete_episode_series,
+    load_reward_diagnostics_artifact,
 )
 from utils.io_utils import format_float_token
 
@@ -39,36 +46,35 @@ DEFAULT_SEEDS: tuple[int, ...] = (
 )  # 5个随机数种子
 DEFAULT_OUTPUT_ROOT = "output/optimal/rl/step_distance_ablation"
 STEP_DISTANCE_MANIFEST_FILENAME = "step_distance_ablation_manifest.json"
-FIXED_REWARD_PROFILE = "basic_safety_stopping"
+FIXED_REWARD_PRESET = "basic_safety_stopping"
+FINAL_TRAJECTORY_METRICS_FILENAME = "final_trajectory_metrics.json"
 BEST_TRAJECTORY_METRICS_FILENAME = "best_trajectory_metrics.json"
-DEFAULT_BEST_EVAL_TRIGGER_INTERVAL = 200_000
 TRAJECTORY_METRIC_KEYS: tuple[str, ...] = (
     "stop_error_m",
     "time_error_s",
     "total_energy_kj",
     "comfort_tav",
-    "comfort_rms",
-    "comfort_er_pct",
 )
 
 
 @dataclass(frozen=True)
 class StepDistanceRunEntry:
-    max_step_distance: float
+    step_distance: float
     repeat_index: int
     seed: int
     experiment_tag: str
-    episode_metrics_path: str
+    reward_diagnostics_path: str
+    final_metrics_path: str
     train_args: argparse.Namespace
     training_run_spec: TrainingRunSpec
 
 
 @dataclass(frozen=True)
-class EpisodeMetricsRunArtifact:
-    max_step_distance: float
+class RewardDiagnosticsRunArtifact:
+    step_distance: float
     repeat_index: int
     seed: int
-    episode_metrics_path: str
+    reward_diagnostics_path: str
     index: np.ndarray
     episode_reward: np.ndarray
     episode_length: np.ndarray
@@ -76,19 +82,19 @@ class EpisodeMetricsRunArtifact:
 
 @dataclass(frozen=True)
 class StepDistanceCurveAggregate:
-    max_step_distance: float
+    step_distance: float
     reference_steps: np.ndarray
     mean_reward: np.ndarray
     std_reward: np.ndarray
     mean_length: np.ndarray
     std_length: np.ndarray
     valid_run_count: int
-    episode_metrics_paths: tuple[str, ...]
+    reward_diagnostics_paths: tuple[str, ...]
 
 
 @dataclass(frozen=True)
-class StepDistanceBestMetricAggregate:
-    max_step_distance: float
+class StepDistanceMetricAggregate:
+    step_distance: float
     valid_run_count: int
     metric_means: dict[str, float]
     metric_vars: dict[str, float]
@@ -96,7 +102,7 @@ class StepDistanceBestMetricAggregate:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run max-step-distance ablation with basic reward + PBRS.",
+        description="Run fixed spatial control-step ablation with PBRS + DSPDL.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -109,23 +115,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Root directory for step-distance ablation outputs.",
     )
     _ = train_parser.add_argument(
-        "--ablation-tag",
-        default=None,
-        help="Optional batch tag appended to each run experiment tag.",
+        "--reference-curve-dir",
+        required=True,
+        help=(
+            "Directory containing the matching DP reference trajectory required "
+            "by DSPDL."
+        ),
     )
     _ = train_parser.add_argument(
-        "--max-step-distances",
-        nargs="+",
-        type=float,
-        default=list(DEFAULT_STEP_DISTANCES),
-        help="Max simulation displacement values to compare.",
-    )
-    _ = train_parser.add_argument(
-        "--seed-list",
-        nargs="+",
-        type=int,
-        default=list(DEFAULT_SEEDS),
-        help="Seeds to run for every max-step-distance value.",
+        "--enable-best-evaluation-artifacts",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Optionally retain periodic best-trajectory evaluation; final-policy "
+            "evaluation is always enabled."
+        ),
     )
     _ = train_parser.add_argument(
         "--total-timesteps",
@@ -133,7 +137,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=1_000_000,
         help="Maximum simulation training timesteps.",
     )
-    _ = train_parser.add_argument("--schedule-time-s", type=float, default=430.0)
+    _ = train_parser.add_argument(
+        "--schedule-time-s", type=float, default=DEFAULT_SCHEDULE_TIME_S
+    )
     _ = train_parser.add_argument(
         "--reward-discount", type=float, default=DEFAULT_REWARD_DISCOUNT
     )
@@ -146,13 +152,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     _ = train_parser.add_argument(
         "--rollout-steps-per-update", type=int, default=DEFAULT_ROLLOUT_STEPS_PER_UPDATE
     )
-    _ = train_parser.add_argument("--n-steps-per-env", type=int, default=None)
-    _ = train_parser.add_argument("--log-interval", type=int, default=None)
     _ = train_parser.add_argument(
-        "--best-eval-trigger-interval",
+        "--evaluation-interval-rollouts",
         type=int,
-        default=DEFAULT_BEST_EVAL_TRIGGER_INTERVAL,
-        help="Training-step interval for best trajectory evaluation.",
+        default=DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
+        help="Completed-rollout interval for best trajectory evaluation.",
     )
     _ = train_parser.add_argument("--device", default="cpu")
     _ = train_parser.add_argument(
@@ -171,13 +175,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         dest="output_root",
         default=DEFAULT_OUTPUT_ROOT,
         help="Root directory containing the step-distance manifest.",
-    )
-    _ = show_parser.add_argument(
-        "--max-step-distances",
-        nargs="+",
-        type=float,
-        default=None,
-        help="Optional subset/order of max-step-distance values to display.",
     )
     _ = show_parser.add_argument(
         "--output-file",
@@ -214,75 +211,52 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _dedupe_float_sequence(values: list[float]) -> tuple[float, ...]:
-    ordered: list[float] = []
-    seen: set[float] = set()
-    for value in values:
-        normalized = float(value)
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        ordered.append(normalized)
-    return tuple(ordered)
-
-
-def _resolve_seed_list(values: list[int]) -> tuple[int, ...]:
-    if not values:
-        raise ValueError("--seed-list must contain at least one seed.")
-    return tuple(int(seed) for seed in values)
-
-
 def _build_experiment_tag(
     *,
-    ablation_tag: str | None,
-    max_step_distance: float,
+    step_distance: float,
     repeat_index: int,
 ) -> str:
-    distance_token = format_float_token(max_step_distance)
-    run_token = f"ds{distance_token}__r{repeat_index + 1:02d}"
-    return f"{ablation_tag}__{run_token}" if ablation_tag else run_token
+    distance_token = format_float_token(step_distance)
+    return f"ds{distance_token}__r{repeat_index + 1:02d}"
 
 
 def _build_train_args(
     args: argparse.Namespace,
     *,
-    max_step_distance: float,
+    step_distance: float,
     repeat_index: int,
     seed: int,
 ) -> argparse.Namespace:
     train_args = argparse.Namespace(**vars(build_default_training_args()))
     train_args.output_root = args.output_root
     train_args.schedule_time_s = args.schedule_time_s
-    train_args.max_step_distance = max_step_distance
-    train_args.reward_profile = FIXED_REWARD_PROFILE
+    train_args.step_distance = step_distance
+    train_args.reward_preset = FIXED_REWARD_PRESET
+    train_args.curriculum_profile = "dspdl"
+    train_args.reference_curve_dir = args.reference_curve_dir
     train_args.experiment_tag = _build_experiment_tag(
-        ablation_tag=args.ablation_tag,
-        max_step_distance=max_step_distance,
+        step_distance=step_distance,
         repeat_index=repeat_index,
     )
     train_args.run_mode = "reproduce"
     train_args.enable_tb = False
-    train_args.enable_callback = False
     train_args.enable_monitor = True
-    train_args.enable_env_diagnostics = False
     train_args.enable_auto_analysis = False
-    train_args.enable_best_eval = True
-    train_args.best_eval_trigger_mode = "steps"
-    train_args.best_eval_trigger_interval = max(
-        1,
-        int(args.best_eval_trigger_interval),
+    train_args.enable_best_evaluation_artifacts = bool(
+        args.enable_best_evaluation_artifacts
     )
-    train_args.best_eval_deterministic = True
+    train_args.evaluation_interval_rollouts = max(
+        1,
+        int(args.evaluation_interval_rollouts),
+    )
+    train_args.evaluation_deterministic = True
     train_args.reward_discount = args.reward_discount
     train_args.num_envs = args.num_envs
     train_args.vec_env_type = args.vec_env_type
     train_args.rollout_steps_per_update = args.rollout_steps_per_update
-    train_args.n_steps_per_env = args.n_steps_per_env
     train_args.total_timesteps = args.total_timesteps
     train_args.tensorboard_log_dir = None
     train_args.tb_log_name = None
-    train_args.log_interval = args.log_interval
-    train_args.rollout_record_trigger_mode = "steps"
     train_args.seed = seed
     train_args.device = args.device
     train_args.dry_run = False
@@ -292,29 +266,30 @@ def _build_train_args(
 def resolve_step_distance_run_matrix(
     args: argparse.Namespace,
 ) -> list[StepDistanceRunEntry]:
-    step_distances = _dedupe_float_sequence(args.max_step_distances)
-    seeds = _resolve_seed_list(args.seed_list)
+    step_distances = DEFAULT_STEP_DISTANCES
+    seeds = DEFAULT_SEEDS
 
     run_entries: list[StepDistanceRunEntry] = []
-    for max_step_distance in step_distances:
+    for step_distance in step_distances:
         for repeat_index, seed in enumerate(seeds):
             train_args = _build_train_args(
                 args,
-                max_step_distance=max_step_distance,
+                step_distance=step_distance,
                 repeat_index=repeat_index,
                 seed=seed,
             )
             spec = resolve_training_run_spec(train_args)
-            episode_metrics_path = os.path.join(
-                spec.final_output_dir, "episode_metrics.npz"
-            )
             run_entries.append(
                 StepDistanceRunEntry(
-                    max_step_distance=max_step_distance,
+                    step_distance=step_distance,
                     repeat_index=repeat_index,
                     seed=seed,
                     experiment_tag=train_args.experiment_tag,
-                    episode_metrics_path=episode_metrics_path,
+                    reward_diagnostics_path=spec.reward_diagnostics_path,
+                    final_metrics_path=os.path.join(
+                        spec.final_output_dir,
+                        FINAL_TRAJECTORY_METRICS_FILENAME,
+                    ),
                     train_args=train_args,
                     training_run_spec=spec,
                 )
@@ -332,20 +307,25 @@ def build_step_distance_manifest(
     runs: list[dict[str, Any]] = []
     for entry in run_entries:
         status_payload = status_map.get(
-            (entry.max_step_distance, entry.repeat_index),
+            (entry.step_distance, entry.repeat_index),
             {"status": "pending"},
         )
         spec = entry.training_run_spec
         runs.append(
             {
-                "max_step_distance": float(entry.max_step_distance),
+                "step_distance": float(entry.step_distance),
                 "repeat_index": int(entry.repeat_index),
                 "seed": int(entry.seed),
                 "experiment_tag": entry.experiment_tag,
                 "output_dir": spec.output_dir,
                 "final_output_dir": spec.final_output_dir,
-                "best_eval_output_dir": spec.best_eval_output_dir,
-                "episode_metrics_path": entry.episode_metrics_path,
+                "best_eval_output_dir": (
+                    spec.best_eval_output_dir
+                    if spec.enable_best_evaluation_artifacts
+                    else None
+                ),
+                "reward_diagnostics_path": entry.reward_diagnostics_path,
+                "final_metrics_path": entry.final_metrics_path,
                 "run_metadata_path": spec.run_metadata_path,
                 **status_payload,
             }
@@ -353,31 +333,33 @@ def build_step_distance_manifest(
 
     return {
         "output_root": args.output_root,
-        "reward_profile": FIXED_REWARD_PROFILE,
-        "max_step_distances": [
-            float(value) for value in _dedupe_float_sequence(args.max_step_distances)
-        ],
-        "seed_list": [int(seed) for seed in _resolve_seed_list(args.seed_list)],
+        "reward_preset": FIXED_REWARD_PRESET,
+        "curriculum_profile": "dspdl",
+        "reference_curve_dir": args.reference_curve_dir,
+        "step_distances": [float(value) for value in DEFAULT_STEP_DISTANCES],
+        "seed_list": [int(seed) for seed in DEFAULT_SEEDS],
         "training": {
             "schedule_time_s": float(args.schedule_time_s),
             "reward_discount": float(args.reward_discount),
             "num_envs": int(args.num_envs),
             "vec_env_type": str(args.vec_env_type),
             "rollout_steps_per_update": int(args.rollout_steps_per_update),
-            "n_steps_per_env": args.n_steps_per_env,
+            "n_steps_per_env": None,
             "total_timesteps": int(args.total_timesteps),
             "device": str(args.device),
-            "enable_monitor": False,
-            "enable_callback": False,
-            "enable_env_diagnostics": False,
+            "enable_monitor": True,
             "enable_auto_analysis": False,
-            "enable_best_eval": True,
-            "best_eval_trigger_mode": "steps",
-            "best_eval_trigger_interval": max(
-                1,
-                int(args.best_eval_trigger_interval),
+            "enable_best_evaluation_artifacts": bool(
+                args.enable_best_evaluation_artifacts
             ),
-            "best_eval_deterministic": True,
+            "evaluation_interval_rollouts": (
+                max(1, int(args.evaluation_interval_rollouts))
+                if args.enable_best_evaluation_artifacts
+                else None
+            ),
+            "evaluation_deterministic": (
+                True if args.enable_best_evaluation_artifacts else None
+            ),
         },
         "runs": runs,
     }
@@ -408,60 +390,61 @@ def train_step_distance_run(
     )
 
 
-def _load_episode_metrics_run(
+def evaluate_final_step_distance_run(entry: StepDistanceRunEntry) -> str:
+    """Persist the deterministic real-start evaluation of a completed final model."""
+    _, metrics_path = evaluate_final_training_run(entry.training_run_spec)
+    return metrics_path
+
+
+def _entry_step_distance(run_entry: dict[str, Any]) -> float:
+    value = run_entry.get("step_distance", run_entry.get("max_step_distance"))
+    if not _is_numeric_scalar(value):
+        raise ValueError(f"Missing/invalid step distance in run entry: {value!r}")
+    return float(value)
+
+
+def _load_reward_diagnostics_run(
     *,
     run_entry: dict[str, Any],
-) -> EpisodeMetricsRunArtifact:
+) -> RewardDiagnosticsRunArtifact:
     final_output_dir = run_entry.get("final_output_dir")
     if not isinstance(final_output_dir, str) or not final_output_dir:
         raise ValueError(
             "Step-distance curve loading requires a valid final_output_dir, "
-            + f"but got missing/invalid value for max_step_distance={
-                run_entry.get('max_step_distance')
+            + f"but got missing/invalid value for step_distance={
+                run_entry.get('step_distance', run_entry.get('max_step_distance'))
             }, "
             + f"repeat={run_entry.get('repeat_index')}."
         )
 
-    episode_metrics_path = Path(str(run_entry["episode_metrics_path"]))
-    if not episode_metrics_path.is_file():
+    reward_diagnostics_path = Path(str(run_entry["reward_diagnostics_path"]))
+    if not reward_diagnostics_path.is_file():
         raise FileNotFoundError(
-            f"episode_metrics.npz not found: {episode_metrics_path}"
+            f"reward_diagnostics.npz not found: {reward_diagnostics_path}"
         )
 
-    run_metadata = load_run_metadata(final_output_dir)
-    run_record_mode = run_metadata.get("rollout_record_trigger_mode")
-    max_step_distance = float(run_entry["max_step_distance"])
+    step_distance = _entry_step_distance(run_entry)
     repeat_index = int(run_entry.get("repeat_index", 0))
-    if not isinstance(run_record_mode, str):
-        raise ValueError(
-            "Step-distance curve loading requires "
-            + "run_metadata.rollout_record_trigger_mode='steps', but got "
-            + f"missing/invalid value for max_step_distance={max_step_distance:g}, "
-            + f"repeat={repeat_index}, episode_metrics={episode_metrics_path}."
-        )
-    if run_record_mode != "steps":
-        raise ValueError(
-            "Step-distance ablation no longer supports episodes-based curve artifacts. "
-            + "Expected run_metadata.rollout_record_trigger_mode='steps', got "
-            + f"'{run_record_mode}' for max_step_distance={max_step_distance:g}, "
-            + f"repeat={repeat_index}, episode_metrics={episode_metrics_path}."
-        )
-
-    with np.load(episode_metrics_path) as data:
-        index = np.asarray(data["index"], dtype=np.float64)
-        rewards = np.asarray(data["ep_reward"], dtype=np.float64)
-        lengths = np.asarray(data["ep_len"], dtype=np.float64)
+    artifact = load_reward_diagnostics_artifact(reward_diagnostics_path)
+    episodes = extract_complete_episode_series(artifact)
+    index = episodes.end_step.astype(np.float64)
+    rewards = episodes.total_reward
+    lengths = episodes.length
 
     if index.size == 0 or rewards.size == 0 or lengths.size == 0:
-        raise ValueError(f"Empty episode metrics arrays: {episode_metrics_path}")
+        raise ValueError(
+            f"No complete episodes in reward diagnostics: {reward_diagnostics_path}"
+        )
     if rewards.size != lengths.size or rewards.size != index.size:
-        raise ValueError(f"Mismatched episode metrics arrays: {episode_metrics_path}")
+        raise ValueError(
+            f"Mismatched reward diagnostics arrays: {reward_diagnostics_path}"
+        )
 
-    return EpisodeMetricsRunArtifact(
-        max_step_distance=max_step_distance,
+    return RewardDiagnosticsRunArtifact(
+        step_distance=step_distance,
         repeat_index=repeat_index,
         seed=int(run_entry["seed"]),
-        episode_metrics_path=str(episode_metrics_path),
+        reward_diagnostics_path=str(reward_diagnostics_path),
         index=index,
         episode_reward=rewards,
         episode_length=lengths,
@@ -557,27 +540,47 @@ def _resolve_best_eval_output_dir(
 
     return None, [
         "Skipped best trajectory metrics due to missing best_eval_output_dir for "
-        + f"max_step_distance={run_entry.get('max_step_distance')}, "
+        + "step_distance="
+        + f"{run_entry.get('step_distance', run_entry.get('max_step_distance'))}, "
         + f"repeat={run_entry.get('repeat_index')}."
     ]
 
 
-def _ensure_best_metrics_for_run(
+def _ensure_metrics_for_run(
     *,
     run_entry: dict[str, Any],
+    metric_source: str,
 ) -> tuple[dict[str, float] | None, list[str]]:
     warnings: list[str] = []
-    best_eval_output_dir, output_dir_warnings = _resolve_best_eval_output_dir(run_entry)
-    warnings.extend(output_dir_warnings)
-    if best_eval_output_dir is None:
-        return None, warnings
-
-    metrics_path = Path(best_eval_output_dir) / BEST_TRAJECTORY_METRICS_FILENAME
+    if metric_source == "final":
+        raw_path = run_entry.get("final_metrics_path")
+        if not isinstance(raw_path, str) or not raw_path:
+            final_output_dir = run_entry.get("final_output_dir")
+            if not isinstance(final_output_dir, str) or not final_output_dir:
+                return None, [
+                    "Skipped final trajectory metrics due to missing "
+                    "final_output_dir for "
+                    + f"step_distance={_entry_step_distance(run_entry):g}."
+                ]
+            raw_path = str(Path(final_output_dir) / FINAL_TRAJECTORY_METRICS_FILENAME)
+        metrics_path = Path(raw_path)
+        payload_name = "Final trajectory"
+    elif metric_source == "best":
+        best_eval_output_dir, output_dir_warnings = _resolve_best_eval_output_dir(
+            run_entry
+        )
+        warnings.extend(output_dir_warnings)
+        if best_eval_output_dir is None:
+            return None, warnings
+        metrics_path = Path(best_eval_output_dir) / BEST_TRAJECTORY_METRICS_FILENAME
+        payload_name = "Best trajectory"
+    else:
+        raise ValueError(f"Unsupported metric source: {metric_source}")
     try:
-        payload = _load_metrics_file(metrics_path, payload_name="Best trajectory")
+        payload = _load_metrics_file(metrics_path, payload_name=payload_name)
         parsed = _parse_required_trajectory_metrics(
             payload,
-            payload_name="best trajectory",
+            payload_name=payload_name.lower(),
         )
         return parsed, warnings
     except (FileNotFoundError, ValueError, OSError, json.JSONDecodeError) as exc:
@@ -589,7 +592,7 @@ def _print_run_matrix(run_entries: list[StepDistanceRunEntry]) -> None:
     print("Resolved step-distance ablation run matrix:")
     for index, entry in enumerate(run_entries, start=1):
         print(
-            f"[{index}] max_step_distance={entry.max_step_distance:g} "
+            f"[{index}] step_distance={entry.step_distance:g} "
             + f"repeat={entry.repeat_index + 1} seed={entry.seed} "
             + f"output_dir={entry.training_run_spec.output_dir} "
             + f"total_timesteps={entry.training_run_spec.total_timesteps}"
@@ -598,39 +601,38 @@ def _print_run_matrix(run_entries: list[StepDistanceRunEntry]) -> None:
 
 def _resolve_display_distances(
     manifest: dict[str, Any],
-    requested_distances: list[float] | None,
+    requested_distances: list[float] | None = None,
 ) -> list[float]:
     if requested_distances:
-        return list(_dedupe_float_sequence(requested_distances))
-    return [float(value) for value in manifest.get("max_step_distances", [])]
+        return [float(value) for value in requested_distances]
+    values = manifest.get("step_distances", manifest.get("max_step_distances", []))
+    return [float(value) for value in values]
 
 
 def build_curve_aggregates(
     manifest: dict[str, Any],
-    max_step_distances: list[float] | None = None,
+    step_distances: list[float] | None = None,
 ) -> tuple[list[StepDistanceCurveAggregate], list[str]]:
     warnings: list[str] = []
     aggregates: list[StepDistanceCurveAggregate] = []
-    selected_distances = _resolve_display_distances(manifest, max_step_distances)
+    selected_distances = _resolve_display_distances(manifest, step_distances)
 
-    for max_step_distance in selected_distances:
-        metrics_runs: list[EpisodeMetricsRunArtifact] = []
+    for step_distance in selected_distances:
+        metrics_runs: list[RewardDiagnosticsRunArtifact] = []
         for run_entry in manifest.get("runs", []):
             if not isinstance(run_entry, dict):
                 continue
-            if float(run_entry.get("max_step_distance", -1.0)) != float(
-                max_step_distance
-            ):
+            if _entry_step_distance(run_entry) != float(step_distance):
                 continue
             if str(run_entry.get("status", "pending")) != "completed":
                 warnings.append(
-                    f"Skipped max_step_distance={max_step_distance:g}, "
+                    f"Skipped step_distance={step_distance:g}, "
                     + f"repeat={run_entry.get('repeat_index')} due to "
                     + f"status={run_entry.get('status', 'pending')}."
                 )
                 continue
             try:
-                metrics_runs.append(_load_episode_metrics_run(run_entry=run_entry))
+                metrics_runs.append(_load_reward_diagnostics_run(run_entry=run_entry))
             except ValueError:
                 raise
             except (FileNotFoundError, KeyError, OSError) as exc:
@@ -638,8 +640,8 @@ def build_curve_aggregates(
 
         if not metrics_runs:
             warnings.append(
-                f"No valid episode_metrics runs for max_step_distance={
-                    max_step_distance:g}."
+                "No valid reward diagnostics runs for "
+                + f"step_distance={step_distance:g}."
             )
             continue
 
@@ -671,15 +673,15 @@ def build_curve_aggregates(
 
         aggregates.append(
             StepDistanceCurveAggregate(
-                max_step_distance=float(max_step_distance),
+                step_distance=float(step_distance),
                 reference_steps=reference,
                 mean_reward=np.nanmean(aligned_rewards, axis=0),
                 std_reward=np.nanstd(aligned_rewards, axis=0),
                 mean_length=np.nanmean(aligned_lengths, axis=0),
                 std_length=np.nanstd(aligned_lengths, axis=0),
                 valid_run_count=len(metrics_runs),
-                episode_metrics_paths=tuple(
-                    run.episode_metrics_path for run in metrics_runs
+                reward_diagnostics_paths=tuple(
+                    run.reward_diagnostics_path for run in metrics_runs
                 ),
             )
         )
@@ -687,16 +689,17 @@ def build_curve_aggregates(
     return aggregates, warnings
 
 
-def build_best_metric_aggregates(
+def build_metric_aggregates(
     manifest: dict[str, Any],
     *,
-    max_step_distances: list[float] | None = None,
-) -> tuple[list[StepDistanceBestMetricAggregate], list[str]]:
+    step_distances: list[float] | None = None,
+    metric_source: str = "final",
+) -> tuple[list[StepDistanceMetricAggregate], list[str]]:
     warnings: list[str] = []
-    aggregates: list[StepDistanceBestMetricAggregate] = []
-    selected_distances = _resolve_display_distances(manifest, max_step_distances)
+    aggregates: list[StepDistanceMetricAggregate] = []
+    selected_distances = _resolve_display_distances(manifest, step_distances)
 
-    for max_step_distance in selected_distances:
+    for step_distance in selected_distances:
         metric_values: dict[str, list[float]] = {
             metric_key: [] for metric_key in TRAJECTORY_METRIC_KEYS
         }
@@ -705,21 +708,20 @@ def build_best_metric_aggregates(
         for run_entry in manifest.get("runs", []):
             if not isinstance(run_entry, dict):
                 continue
-            if float(run_entry.get("max_step_distance", -1.0)) != float(
-                max_step_distance
-            ):
+            if _entry_step_distance(run_entry) != float(step_distance):
                 continue
             if str(run_entry.get("status", "pending")) != "completed":
                 warnings.append(
-                    f"Skipped best metrics for max_step_distance={
-                        max_step_distance:g}, "
+                    f"Skipped {metric_source} metrics for step_distance={
+                        step_distance:g}, "
                     + f"repeat={run_entry.get('repeat_index')} due to "
                     + f"status={run_entry.get('status', 'pending')}."
                 )
                 continue
 
-            parsed_metrics, run_warnings = _ensure_best_metrics_for_run(
-                run_entry=run_entry
+            parsed_metrics, run_warnings = _ensure_metrics_for_run(
+                run_entry=run_entry,
+                metric_source=metric_source,
             )
             warnings.extend(run_warnings)
             if parsed_metrics is None:
@@ -730,8 +732,8 @@ def build_best_metric_aggregates(
 
         if valid_run_count == 0:
             warnings.append(
-                "No valid best trajectory metrics for "
-                + f"max_step_distance={max_step_distance:g}."
+                f"No valid {metric_source} trajectory metrics for "
+                + f"step_distance={step_distance:g}."
             )
             continue
 
@@ -743,8 +745,8 @@ def build_best_metric_aggregates(
             metric_vars[metric_key] = float(np.var(values, ddof=0))
 
         aggregates.append(
-            StepDistanceBestMetricAggregate(
-                max_step_distance=float(max_step_distance),
+            StepDistanceMetricAggregate(
+                step_distance=float(step_distance),
                 valid_run_count=valid_run_count,
                 metric_means=metric_means,
                 metric_vars=metric_vars,
@@ -752,6 +754,21 @@ def build_best_metric_aggregates(
         )
 
     return aggregates, warnings
+
+
+def resolve_metric_source(manifest: dict[str, Any]) -> str:
+    """Prefer best artifacts when the target batch actually contains them."""
+    for run_entry in manifest.get("runs", []):
+        if not isinstance(run_entry, dict):
+            continue
+        if str(run_entry.get("status", "pending")) != "completed":
+            continue
+        best_output_dir = run_entry.get("best_eval_output_dir")
+        if not isinstance(best_output_dir, str) or not best_output_dir:
+            continue
+        if (Path(best_output_dir) / BEST_TRAJECTORY_METRICS_FILENAME).is_file():
+            return "best"
+    return "final"
 
 
 def _color_for_index(index: int) -> Any:
@@ -776,7 +793,7 @@ def plot_curve_aggregates(
 
     for index, aggregate in enumerate(aggregates):
         color = _color_for_index(index)
-        label = f"{aggregate.max_step_distance:g} m"
+        label = f"{aggregate.step_distance:g} m"
         ax_reward.plot(
             aggregate.reference_steps,
             aggregate.mean_reward,
@@ -876,27 +893,29 @@ def _print_curve_summary(aggregates: list[StepDistanceCurveAggregate]) -> None:
         )
         print(
             "  - "
-            + f"max_step_distance={aggregate.max_step_distance:g} "
+            + f"step_distance={aggregate.step_distance:g} "
             + f"valid_runs={aggregate.valid_run_count} "
             + f"steps_points={aggregate.reference_steps.size} "
             + f"step_end={step_end:g}"
         )
 
 
-def _print_best_metric_table(
-    aggregates: list[StepDistanceBestMetricAggregate],
+def _print_metric_table(
+    aggregates: list[StepDistanceMetricAggregate],
+    *,
+    metric_source: str,
 ) -> None:
     if not aggregates:
-        print("Best trajectory evaluation summary: no valid step-distance metrics.")
+        print(
+            f"{metric_source.title()} trajectory evaluation summary: no valid metrics."
+        )
         return
 
-    columns: list[str] = ["max_step_distance", "runs"]
-    for metric_key in TRAJECTORY_METRIC_KEYS:
-        columns.append(metric_key)
+    columns = ["step_distance", *TRAJECTORY_METRIC_KEYS]
 
     rows: list[list[str]] = []
     for aggregate in aggregates:
-        row = [f"{aggregate.max_step_distance:g}", str(aggregate.valid_run_count)]
+        row = [f"{aggregate.step_distance:g}"]
         for metric_key in TRAJECTORY_METRIC_KEYS:
             std_value = float(np.sqrt(aggregate.metric_vars[metric_key]))
             row.append(f"{aggregate.metric_means[metric_key]:.6f}±{std_value:.6f}")
@@ -912,7 +931,7 @@ def _print_best_metric_table(
             value.ljust(widths[idx]) for idx, value in enumerate(row_values)
         )
 
-    print("Best trajectory evaluation summary (mean±std):")
+    print(f"{metric_source.title()} trajectory evaluation summary (mean±std):")
     print(_fmt(columns))
     print("-+-".join("-" * width for width in widths))
     for row in rows:
@@ -947,17 +966,19 @@ def _run_train_command(args: argparse.Namespace) -> int:
     for index, entry in enumerate(run_entries, start=1):
         print(
             f"Running step-distance job {index}/{len(run_entries)}: "
-            + f"max_step_distance={entry.max_step_distance:g}, "
+            + f"step_distance={entry.step_distance:g}, "
             + f"repeat={entry.repeat_index + 1}, seed={entry.seed}, "
             + f"total_timesteps={entry.training_run_spec.total_timesteps}"
         )
         try:
             _ = train_step_distance_run(entry)
-            statuses[(entry.max_step_distance, entry.repeat_index)] = {
-                "status": "completed"
+            final_metrics_path = evaluate_final_step_distance_run(entry)
+            statuses[(entry.step_distance, entry.repeat_index)] = {
+                "status": "completed",
+                "final_metrics_path": final_metrics_path,
             }
         except Exception as exc:
-            statuses[(entry.max_step_distance, entry.repeat_index)] = {
+            statuses[(entry.step_distance, entry.repeat_index)] = {
                 "status": "failed",
                 "error_message": str(exc),
             }
@@ -984,18 +1005,21 @@ def _run_show_command(args: argparse.Namespace) -> int:
 
     curve_aggregates, curve_warnings = build_curve_aggregates(
         manifest,
-        max_step_distances=args.max_step_distances,
     )
-    best_metric_aggregates, best_metric_warnings = build_best_metric_aggregates(
+    metric_source = resolve_metric_source(manifest)
+    metric_aggregates, metric_warnings = build_metric_aggregates(
         manifest,
-        max_step_distances=args.max_step_distances,
+        metric_source=metric_source,
     )
-    _print_warnings(curve_warnings + best_metric_warnings)
+    _print_warnings(curve_warnings + metric_warnings)
     _print_curve_summary(curve_aggregates)
-    _print_best_metric_table(best_metric_aggregates)
+    _print_metric_table(metric_aggregates, metric_source=metric_source)
 
     if args.dry_run:
-        print("Dry run completed: episode-metrics and best-evaluation inputs resolved.")
+        print(
+            "Dry run completed: episode-metrics and "
+            + f"{metric_source}-trajectory inputs resolved."
+        )
         return 0
     if not curve_aggregates:
         raise SystemExit("No valid monitor curves available for plotting.")

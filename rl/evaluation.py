@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import gymnasium as gym
@@ -59,13 +59,15 @@ class PolicyEvaluationResult:
     trajectory_speed_mps: NDArray[np.float32]
     min_safety_margin_mps: float = 0.0
     mean_safety_margin_mps: float = 0.0
+    safety_violation_positions_m: NDArray[np.float32] = field(
+        default_factory=lambda: np.empty(0, dtype=np.float32)
+    )
 
     def to_metrics(
         self,
         *,
         num_timesteps: int | None = None,
-        eval_trigger_mode: str | None = None,
-        eval_trigger_interval: int | None = None,
+        evaluation_rollout_index: int | None = None,
     ) -> dict[str, object]:
         metrics: dict[str, object] = {
             "total_reward": self.total_reward,
@@ -97,10 +99,8 @@ class PolicyEvaluationResult:
         metrics["selection_rule"] = BEST_TRAJECTORY_SELECTION_RULE
         if num_timesteps is not None:
             metrics["num_timesteps"] = int(num_timesteps)
-        if eval_trigger_mode is not None:
-            metrics["eval_trigger_mode"] = eval_trigger_mode
-        if eval_trigger_interval is not None:
-            metrics["eval_trigger_interval"] = int(eval_trigger_interval)
+        if evaluation_rollout_index is not None:
+            metrics["evaluation_rollout_index"] = int(evaluation_rollout_index)
 
         return metrics
 
@@ -112,8 +112,7 @@ def build_single_eval_env(
     safeguard_utility: SafeGuardUtility,
     train_service: TrainService,
     gamma: float,
-    max_step_distance: float,
-    enable_diagnostics: bool = False,
+    step_distance: float,
     enable_trajectory_tracking: bool = True,
     render_mode: str | None = None,
     reward_config: RewardConfig | None = None,
@@ -124,8 +123,7 @@ def build_single_eval_env(
         safeguard_utility=safeguard_utility,
         train_service=train_service,
         gamma=gamma,
-        max_step_distance=max_step_distance,
-        enable_diagnostics=enable_diagnostics,
+        step_distance=step_distance,
         enable_trajectory_tracking=enable_trajectory_tracking,
         render_mode=render_mode,
         reward_config=reward_config,
@@ -219,6 +217,7 @@ def evaluate_policy_once(
     terminated = False
     truncated = False
     safety_margins: list[float] = []
+    safety_violation_positions_m: list[float] = []
 
     while not (terminated or truncated):
         action, _ = model.predict(obs, deterministic=deterministic)
@@ -234,6 +233,8 @@ def evaluate_policy_once(
         )
         safety_margin = min(margin_to_vmax, margin_to_vmin)
         safety_margins.append(safety_margin)
+        if safety_margin < 0.0:
+            safety_violation_positions_m.append(float(mtto_env.state.position_m))
 
     basic_info = mtto_env.basic_info
     if safety_margins:
@@ -300,6 +301,9 @@ def evaluate_policy_once(
         trajectory_speed_mps=trajectory_speed,
         min_safety_margin_mps=min_safety_margin_mps,
         mean_safety_margin_mps=mean_safety_margin_mps,
+        safety_violation_positions_m=np.asarray(
+            safety_violation_positions_m, dtype=np.float32
+        ),
     )
 
 
@@ -325,6 +329,7 @@ def evaluate_operational_policy_once(
     positions = [state.position_m]
     speeds = [abs(state.speed_mps)]
     safety_margins: list[float] = []
+    safety_violation_positions_m: list[float] = []
     terminated = truncated = False
 
     while not (terminated or truncated):
@@ -349,12 +354,13 @@ def evaluate_operational_policy_once(
         terminated, truncated = transition.terminated, transition.truncated
         positions.append(state.position_m)
         speeds.append(abs(state.speed_mps))
-        safety_margins.append(
-            min(
-                state.max_speed_mps - state.speed_mps,
-                state.speed_mps - state.min_speed_mps,
-            )
+        safety_margin = min(
+            state.max_speed_mps - state.speed_mps,
+            state.speed_mps - state.min_speed_mps,
         )
+        safety_margins.append(safety_margin)
+        if safety_margin < 0.0:
+            safety_violation_positions_m.append(float(state.position_m))
 
     steps = state.step_count
     stop_error = state.stop_error_m
@@ -396,6 +402,9 @@ def evaluate_operational_policy_once(
         mean_safety_margin_mps=float(np.mean(safety_margins))
         if safety_margins
         else 0.0,
+        safety_violation_positions_m=np.asarray(
+            safety_violation_positions_m, dtype=np.float32
+        ),
     )
 
 
@@ -415,6 +424,36 @@ def save_policy_evaluation_curve(
         output_path=output_path,
         metrics=metrics,
     )
+
+
+def evaluate_and_save_final_policy(
+    model: Any,
+    env: gym.Env[np.ndarray, np.ndarray],
+    *,
+    output_path: str,
+    metadata: dict[str, object] | None = None,
+    deterministic: bool = True,
+) -> tuple[PolicyEvaluationResult, str, str]:
+    """Evaluate a final policy once and persist its canonical final artifacts.
+
+    The caller owns the environment lifecycle.  ``output_path`` should normally
+    be ``<final_output_dir>/final_trajectory.npz``; metrics are emitted next to
+    it as ``final_trajectory_metrics.json``.
+    """
+    result = evaluate_policy_once(model, env, deterministic=deterministic)
+    extra_metrics = dict(metadata or {})
+    extra_metrics.update(
+        {
+            "trajectory_source": "final",
+            "deterministic": bool(deterministic),
+        }
+    )
+    npz_path, metrics_path = save_policy_evaluation_curve(
+        result,
+        output_path,
+        extra_metrics=extra_metrics,
+    )
+    return result, npz_path, metrics_path
 
 
 def build_policy_evaluation_comparison_key(

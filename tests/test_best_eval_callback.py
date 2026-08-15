@@ -8,18 +8,19 @@ from stable_baselines3.common.base_class import BaseAlgorithm
 
 from model.ocs import TrainService
 from rl.callbacks import (
-    PeriodicEvalCallback,
-    SafetyViolationPositionRecorder,
+    BestEvaluationArtifactHandler,
+    EvaluationHistoryArtifactHandler,
+    RewardDiagnosticsArtifactCallback,
+    SafetyTruncationPositionHistogramCallback,
+    ScheduledPolicyEvaluationCallback,
 )
 from rl.evaluation import (
     BEST_TRAJECTORY_SELECTION_RULE,
     PolicyEvaluationResult,
     classify_arrival_status,
     describe_best_update_reason,
-    is_precise_arrival,
-    is_punctual_arrival,
-    is_successful_arrival,
 )
+from rl.reward_diagnostics import REWARD_NAMES, REWARD_SIGNAL_COUNT
 
 
 class DummyLogger:
@@ -29,24 +30,34 @@ class DummyLogger:
     def record(self, key: str, value: float, *_args: object, **_kwargs: object) -> None:
         self.records.append((key, value))
 
-    def values_for(self, key: str) -> list[float]:
-        return [value for record_key, value in self.records if record_key == key]
-
 
 class DummyModel:
-    def __init__(self, training_env: object, logger: DummyLogger):
-        self._training_env: object = training_env
-        self.logger: DummyLogger = logger
+    def __init__(self, training_env: object):
+        self._training_env = training_env
+        self.logger = DummyLogger()
 
     def get_env(self) -> object:
         return self._training_env
 
     def save(self, path: str) -> None:
-        _ = Path(f"{path}.zip").write_text("model", encoding="utf-8")
+        Path(f"{path}.zip").write_text("model", encoding="utf-8")
 
 
 class DummyTrainingEnv:
-    pass
+    def __init__(
+        self,
+        *,
+        batches: list[list[dict[str, object]]] | None = None,
+        method_name: str = "drain_safety_truncations",
+        num_envs: int = 1,
+    ) -> None:
+        self.batches = list(batches or [])
+        self.method_name = method_name
+        self.num_envs = num_envs
+
+    def env_method(self, method_name: str, *_args: object, **_kwargs: object):
+        assert method_name == self.method_name
+        return self.batches.pop(0)
 
 
 class DummyEvalEnv:
@@ -54,64 +65,40 @@ class DummyEvalEnv:
         return
 
 
-def _build_train_service(*, schedule_time: float = 440.0) -> TrainService:
-    return TrainService(
-        start_position=0.0,
-        start_speed=0.0,
-        target_position=100.0,
-        schedule_time=schedule_time,
-        max_acc_change=0.75,
-        max_arr_time_error_ratio=0.05,
-        max_stop_error=0.3,
-    )
-
-
 def _build_result(
     *,
     success: bool,
     total_reward: float,
     total_energy_j: float = 12_345.0,
-    stop_error_m: float | None = None,
-    time_error_s: float | None = None,
-    final_speed_mps: float | None = None,
-    min_safety_margin_mps: float = 0.0,
-    mean_safety_margin_mps: float = 0.0,
+    safety_positions: tuple[float, ...] = (),
 ) -> PolicyEvaluationResult:
-    resolved_stop_error = (
-        float(stop_error_m) if stop_error_m is not None else (0.0 if success else 12.0)
-    )
-    resolved_time_error_s = (
-        float(time_error_s) if time_error_s is not None else (0.0 if success else 20.0)
-    )
-    resolved_final_speed_mps = (
-        float(final_speed_mps)
-        if final_speed_mps is not None
-        else (0.0 if success else 3.0)
-    )
-    train_service = _build_train_service()
-    success, precise_arrival, punctual_arrival = classify_arrival_status(
-        stop_error_m=resolved_stop_error,
-        time_error_s=resolved_time_error_s,
-        final_speed_mps=resolved_final_speed_mps,
-        train_service=train_service,
+    stop_error = 0.0 if success else 12.0
+    time_error = 0.0 if success else 20.0
+    final_speed = 0.0 if success else 3.0
+    service = TrainService(0.0, 0.0, 100.0, 440.0, 0.75, 0.05, 0.3)
+    success, precise, punctual = classify_arrival_status(
+        stop_error_m=stop_error,
+        time_error_s=time_error,
+        final_speed_mps=final_speed,
+        train_service=service,
         terminated=success,
         truncated=not success,
     )
     return PolicyEvaluationResult(
         success=success,
-        precise_arrival=precise_arrival,
-        punctual_arrival=punctual_arrival,
+        precise_arrival=precise,
+        punctual_arrival=punctual,
         total_reward=total_reward,
-        total_time_s=440.0 + resolved_time_error_s,
+        total_time_s=440.0 + time_error,
         target_time_s=440.0,
         total_energy_j=total_energy_j,
         total_energy_kj=total_energy_j / 1000.0,
         start_position_m=0.0,
         target_position_m=100.0,
-        final_position_m=100.0 - resolved_stop_error,
-        final_speed_mps=resolved_final_speed_mps,
-        stop_error_m=resolved_stop_error,
-        time_error_s=resolved_time_error_s,
+        final_position_m=100.0 - stop_error,
+        final_speed_mps=final_speed,
+        stop_error_m=stop_error,
+        time_error_s=time_error,
         strict_stop_error_limit_m=0.3,
         strict_time_error_limit_s=10.0,
         comfort_tav=1.0,
@@ -120,532 +107,174 @@ def _build_result(
         terminated=success,
         truncated=not success,
         episode_steps=10,
-        trajectory_pos_m=np.asarray([0.0, 50.0, 100.0], dtype=np.float32),
-        trajectory_speed_mps=np.asarray([0.0, 10.0, 0.0], dtype=np.float32),
-        min_safety_margin_mps=min_safety_margin_mps,
-        mean_safety_margin_mps=mean_safety_margin_mps,
+        trajectory_pos_m=np.asarray([0.0, 100.0], dtype=np.float32),
+        trajectory_speed_mps=np.asarray([0.0, 0.0], dtype=np.float32),
+        min_safety_margin_mps=0.0,
+        mean_safety_margin_mps=0.0,
+        safety_violation_positions_m=np.asarray(safety_positions, dtype=np.float32),
     )
 
 
-def _prepare_callback(
-    tmp_path: Path,
-    *,
-    trigger_mode: str,
-    trigger_interval: int,
-    artifact_metadata: dict[str, object] | None = None,
-) -> PeriodicEvalCallback:
-    training_env = DummyTrainingEnv()
-    logger = DummyLogger()
-    callback = PeriodicEvalCallback(
+def _init(callback: object, training_env: object) -> None:
+    callback.init_callback(  # type: ignore[attr-defined]
+        cast(BaseAlgorithm, cast(object, DummyModel(training_env)))
+    )
+
+
+def test_scheduled_evaluation_shares_one_result_between_handlers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    best = BestEvaluationArtifactHandler(output_dir=str(tmp_path / "best"))
+    history_path = tmp_path / "evaluation_history.npz"
+    history = EvaluationHistoryArtifactHandler(output_path=str(history_path))
+    callback = ScheduledPolicyEvaluationCallback(
         eval_env=DummyEvalEnv(),
-        output_dir=str(tmp_path),
-        artifact_metadata=artifact_metadata,
-        eval_trigger_mode=trigger_mode,
-        eval_trigger_interval=trigger_interval,
-        deterministic=True,
+        handlers=[best, history],
+        evaluation_interval_rollouts=12,
     )
-    callback.init_callback(
-        cast(
-            BaseAlgorithm,
-            cast(object, DummyModel(training_env=training_env, logger=logger)),
-        )
-    )
-    callback.locals = {}
-    return callback
+    _init(callback, DummyTrainingEnv())
+    calls = 0
 
+    def evaluate(*_args: object, **_kwargs: object) -> PolicyEvaluationResult:
+        nonlocal calls
+        calls += 1
+        return _build_result(success=True, total_reward=5.0, safety_positions=(20.0,))
 
-def test_periodic_eval_callback_triggers_on_episode_interval(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    callback = _prepare_callback(
-        tmp_path,
-        trigger_mode="episodes",
-        trigger_interval=3,
-    )
-
-    def _fake_evaluate(*_args: object, **_kwargs: object) -> PolicyEvaluationResult:
-        return _build_result(success=True, total_reward=42.0)
-
-    monkeypatch.setattr("rl.callbacks.evaluate_policy_once", _fake_evaluate)
-
-    callback.locals = {"dones": np.asarray([True, False], dtype=bool)}
-    callback.num_timesteps = 10
-    assert callback._on_step() is True
-    assert callback.best_result is None
-
-    callback.locals = {"dones": np.asarray([True, True], dtype=bool)}
-    callback.num_timesteps = 20
-    assert callback._on_step() is True
-
-    assert callback.best_result is not None
-    assert callback.best_trigger_interval == 3
-    assert (tmp_path / "best_model.zip").exists()
-    assert (tmp_path / "best_trajectory.npz").exists()
-    metrics = json.loads(
-        (tmp_path / "best_trajectory_metrics.json").read_text(encoding="utf-8")
-    )
-    assert metrics["eval_trigger_mode"] == "episodes"
-    assert metrics["eval_trigger_interval"] == 3
-
-
-def test_periodic_eval_callback_prefers_success_over_reward(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    callback = _prepare_callback(
-        tmp_path,
-        trigger_mode="steps",
-        trigger_interval=1,
-    )
-    results = [
-        _build_result(success=False, total_reward=100.0),
-        _build_result(success=True, total_reward=1.0),
-    ]
-
-    def _fake_evaluate(*_args: object, **_kwargs: object) -> PolicyEvaluationResult:
-        return results.pop(0)
-
-    monkeypatch.setattr("rl.callbacks.evaluate_policy_once", _fake_evaluate)
-
-    callback.num_timesteps = 1
-    assert callback._on_step() is True
-    assert callback.best_result is not None
-    assert callback.best_result.success is False
-
-    callback.num_timesteps = 2
-    assert callback._on_step() is True
-    assert callback.best_result is not None
-    assert callback.best_result.success is True
-    assert callback.best_result.total_reward == 1.0
-
-    metrics = json.loads(
-        (tmp_path / "best_trajectory_metrics.json").read_text(encoding="utf-8")
-    )
-    assert metrics["success"] is True
-    assert metrics["total_reward"] == 1.0
-
-
-def test_periodic_eval_callback_persists_artifact_metadata(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    callback = _prepare_callback(
-        tmp_path,
-        trigger_mode="steps",
-        trigger_interval=1,
-        artifact_metadata={
-            "reward_profile_name": "basic_safety",
-            "experiment_tag": "trial_a",
-        },
-    )
-
-    def _fake_evaluate(*_args: object, **_kwargs: object) -> PolicyEvaluationResult:
-        return _build_result(success=True, total_reward=9.0)
-
-    monkeypatch.setattr("rl.callbacks.evaluate_policy_once", _fake_evaluate)
-
-    callback.num_timesteps = 1
-    assert callback._on_step() is True
-
-    metrics = json.loads(
-        (tmp_path / "best_trajectory_metrics.json").read_text(encoding="utf-8")
-    )
-    assert metrics["reward_profile_name"] == "basic_safety"
-    assert metrics["experiment_tag"] == "trial_a"
-    assert metrics["trajectory_source"] == "best"
-
-
-def test_periodic_eval_callback_prefers_lower_energy_after_arrival_requirements(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    callback = _prepare_callback(
-        tmp_path,
-        trigger_mode="steps",
-        trigger_interval=1,
-    )
-    results = [
-        _build_result(success=True, total_reward=50.0, total_energy_j=6_000.0),
-        _build_result(success=True, total_reward=10.0, total_energy_j=4_000.0),
-    ]
-
-    def _fake_evaluate(*_args: object, **_kwargs: object) -> PolicyEvaluationResult:
-        return results.pop(0)
-
-    monkeypatch.setattr("rl.callbacks.evaluate_policy_once", _fake_evaluate)
-
-    callback.num_timesteps = 1
-    assert callback._on_step() is True
-    callback.num_timesteps = 2
-    assert callback._on_step() is True
-
-    assert callback.best_result is not None
-    assert callback.best_result.total_energy_j == 4_000.0
-
-    metrics = json.loads(
-        (tmp_path / "best_trajectory_metrics.json").read_text(encoding="utf-8")
-    )
-    assert metrics["best_update_reason"] == "lower_energy_after_arrival_requirements"
-    assert metrics["success"] is True
-
-
-def test_periodic_eval_callback_evaluates_once_per_trigger(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    callback = _prepare_callback(
-        tmp_path,
-        trigger_mode="steps",
-        trigger_interval=1,
-    )
-    call_count = 0
-
-    def _fake_evaluate(*_args: object, **_kwargs: object):
-        nonlocal call_count
-        call_count += 1
-        return _build_result(success=True, total_reward=42.0)
-
-    monkeypatch.setattr("rl.callbacks.evaluate_policy_once", _fake_evaluate)
-
-    callback.num_timesteps = 1
-    assert callback._on_step() is True
-
-    assert call_count == 1
-    assert callback.best_result is not None
-
-
-def test_safety_violation_position_recorder_records_bins(
-    tmp_path: Path,
-) -> None:
-    output_path = tmp_path / "safety_violation_position_bins.npz"
-    recorder = SafetyViolationPositionRecorder(
-        output_path=str(output_path),
-        position_bin_size_m=500.0,
-    )
-    recorder.init_callback(
-        cast(
-            BaseAlgorithm,
-            cast(
-                object,
-                DummyModel(training_env=DummyTrainingEnv(), logger=DummyLogger()),
-            ),
-        )
-    )
-
-    recorder.locals = {
-        "infos": [
-            {
-                "basic": {"position": 100.0},
-                "outcome": {"truncated": False},
-                "constraint": {
-                    "margin_to_vmax_mps": 2.0,
-                    "margin_to_vmin_mps": 2.0,
-                    "violation_code": 0,
-                },
-            },
-            {
-                "basic": {"position": 600.0},
-                "outcome": {"truncated": False},
-                "constraint": {
-                    "margin_to_vmax_mps": -0.5,
-                    "margin_to_vmin_mps": 1.0,
-                    "violation_code": 3,
-                },
-            },
-        ],
-        "dones": np.asarray([False, False], dtype=bool),
-    }
-    assert recorder._on_step() is True
-
-    recorder.locals = {
-        "infos": [
-            {
-                "basic": {"position": 650.0},
-                "outcome": {"truncated": True},
-                "constraint": {
-                    "margin_to_vmax_mps": 1.0,
-                    "margin_to_vmin_mps": -0.2,
-                    "violation_code": 2,
-                },
-            },
-            {
-                # Legacy state / constraint payloads remain readable.
-                "state": {"position": 1100.0},
-                "constraint": {
-                    "margin_to_vmax_mps": 3.0,
-                    "margin_to_vmin_mps": 2.5,
-                    "violation_code": 1,
-                    "is_truncated": True,
-                },
-            },
-        ],
-        "dones": np.asarray([True, True], dtype=bool),
-    }
-    assert recorder._on_step() is True
-
-    recorder.locals = {
-        "infos": [
-            {
-                "basic": {"position": 1500.0},
-                "outcome": {"truncated": False},
-                "constraint": {
-                    "margin_to_vmax_mps": 4.0,
-                    "margin_to_vmin_mps": 4.0,
-                    "violation_code": 0,
-                },
-            }
-        ],
-        "dones": np.asarray([False], dtype=bool),
-    }
-    assert recorder._on_step() is True
-
-    recorder._on_training_end()
-
-    assert output_path.exists()
-    with np.load(output_path) as data:
-        np.testing.assert_allclose(
-            data["bin_start_m"],
-            [0.0, 500.0, 1000.0, 1500.0],
-        )
-        np.testing.assert_allclose(data["sample_exposure_count"], [1.0, 2.0, 1.0, 1.0])
-        np.testing.assert_allclose(data["sample_violation_count"], [0.0, 2.0, 0.0, 0.0])
-        np.testing.assert_allclose(
-            data["sample_violation_rate"],
-            [0.0, 1.0, 0.0, 0.0],
-        )
-        np.testing.assert_allclose(data["episode_exposure_count"], [1.0, 2.0, 1.0, 1.0])
-        np.testing.assert_allclose(
-            data["episode_violation_count"], [0.0, 2.0, 0.0, 0.0]
-        )
-        np.testing.assert_allclose(
-            data["episode_violation_rate"],
-            [0.0, 1.0, 0.0, 0.0],
-        )
-        np.testing.assert_allclose(
-            data["safety_truncation_count"], [0.0, 1.0, 0.0, 0.0]
-        )
-        np.testing.assert_allclose(data["position_bin_size_m"], [500.0])
-
-
-def test_periodic_eval_default_recorder_does_not_write_safety_violation_bins(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    callback = _prepare_callback(
-        tmp_path,
-        trigger_mode="steps",
-        trigger_interval=1,
-    )
-
-    def _fake_evaluate(*_args: object, **_kwargs: object) -> PolicyEvaluationResult:
-        return _build_result(success=True, total_reward=42.0)
-
-    monkeypatch.setattr("rl.callbacks.evaluate_policy_once", _fake_evaluate)
-
-    callback.num_timesteps = 1
-    assert callback._on_step() is True
+    monkeypatch.setattr("rl.callbacks.evaluate_policy_once", evaluate)
+    assert "_on_step" not in ScheduledPolicyEvaluationCallback.__dict__
+    for rollout_index in range(1, 12):
+        callback.num_timesteps = rollout_index * 10
+        callback._on_rollout_end()
+    assert calls == 0
+    callback.num_timesteps = 120
+    callback._on_rollout_end()
     callback._on_training_end()
 
-    assert not (tmp_path / "safety_violation_position_bins.npz").exists()
-
-
-def test_describe_best_update_reason_prefers_higher_reward_when_no_success() -> None:
-    higher_reward = _build_result(
-        success=False,
-        total_reward=12.0,
-        total_energy_j=20_000.0,
-        stop_error_m=12.0,
-        time_error_s=30.0,
+    assert calls == 1
+    assert best.best_result is not None
+    metrics = json.loads(
+        (tmp_path / "best" / "best_trajectory_metrics.json").read_text()
     )
-    lower_reward = _build_result(
-        success=False,
-        total_reward=11.0,
-        total_energy_j=1_000.0,
-        stop_error_m=12.5,
-        time_error_s=1.0,
-    )
+    assert metrics["evaluation_rollout_index"] == 12
+    with np.load(history_path) as data:
+        np.testing.assert_array_equal(data["training_steps"], [120])
+        np.testing.assert_array_equal(data["rollout_indices"], [12])
+        np.testing.assert_allclose(data["safety_violation_positions_m"], [20.0])
 
+
+def test_scheduled_evaluation_repeats_at_rollout_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    callback = ScheduledPolicyEvaluationCallback(
+        eval_env=DummyEvalEnv(),
+        handlers=[],
+        evaluation_interval_rollouts=12,
+    )
+    _init(callback, DummyTrainingEnv())
+    calls = 0
+
+    def evaluate(*_args: object, **_kwargs: object) -> PolicyEvaluationResult:
+        nonlocal calls
+        calls += 1
+        return _build_result(success=True, total_reward=5.0)
+
+    monkeypatch.setattr("rl.callbacks.evaluate_policy_once", evaluate)
+    for rollout_index in range(1, 25):
+        callback.num_timesteps = rollout_index * 10
+        callback._on_rollout_end()
+        assert calls == rollout_index // 12
+
+
+def test_scheduled_evaluation_rejects_nonpositive_rollout_interval() -> None:
+    with pytest.raises(ValueError, match="evaluation_interval_rollouts"):
+        _ = ScheduledPolicyEvaluationCallback(
+            eval_env=DummyEvalEnv(),
+            handlers=[],
+            evaluation_interval_rollouts=0,
+        )
+
+
+def test_safety_histogram_has_no_step_hook_and_saves_rollout_data(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "safety_truncation_position_histogram.npz"
+    env = DummyTrainingEnv(
+        batches=[
+            [
+                {
+                    "position_m": np.asarray([100.0, 650.0, 650.0]),
+                    "violation_code": np.asarray([2, 3, 2]),
+                }
+            ],
+            [
+                {
+                    "position_m": np.asarray([], dtype=np.float32),
+                    "violation_code": np.asarray([], dtype=np.int8),
+                }
+            ],
+        ]
+    )
+    callback = SafetyTruncationPositionHistogramCallback(
+        output_path=str(output), position_bin_size_m=500.0
+    )
+    _init(callback, env)
+    assert "_on_step" not in SafetyTruncationPositionHistogramCallback.__dict__
+    callback._on_rollout_end()
+    callback._on_training_end()
+    with np.load(output) as data:
+        np.testing.assert_allclose(data["bin_start_m"], [0.0, 500.0])
+        np.testing.assert_array_equal(data["safety_truncation_count"], [1, 2])
+
+
+def _reward_batch(*, count: int, complete: bool) -> dict[str, object]:
+    sums = np.arange(REWARD_SIGNAL_COUNT, dtype=np.float64)
+    sums[-1] = sums[:-1].sum()
+    return {
+        "transition_count": np.asarray([count], dtype=np.int64),
+        "reward_sum": sums,
+        "reward_abs_sum": np.abs(sums),
+        "reward_nonzero_count": np.full(REWARD_SIGNAL_COUNT, count, dtype=np.int64),
+        "reward_cross_product": np.outer(sums, sums),
+        "episode_end_worker_step": np.asarray([count], dtype=np.int64),
+        "episode_worker_rank": np.asarray([0], dtype=np.int16),
+        "episode_index": np.asarray([0], dtype=np.int64),
+        "episode_length": np.asarray([count], dtype=np.int32),
+        "episode_terminated": np.asarray([complete]),
+        "episode_truncated": np.asarray([False]),
+        "episode_complete": np.asarray([complete]),
+        "episode_reward_sums": sums.reshape(1, -1),
+    }
+
+
+def test_reward_artifact_callback_drains_on_rollout_and_training_end(
+    tmp_path: Path,
+) -> None:
+    empty = _reward_batch(count=0, complete=False)
+    for key in tuple(empty):
+        if key.startswith("episode_"):
+            value = np.asarray(empty[key])
+            empty[key] = value[:0]
+    env = DummyTrainingEnv(
+        method_name="drain_reward_diagnostics",
+        batches=[[_reward_batch(count=4, complete=True)], [empty]],
+    )
+    output = tmp_path / "reward_diagnostics.npz"
+    callback = RewardDiagnosticsArtifactCallback(output_path=str(output))
+    _init(callback, env)
+    callback.num_timesteps = 4
+    callback._on_rollout_end()
+    callback._on_training_end()
+    with np.load(output, allow_pickle=False) as data:
+        assert tuple(data["reward_names"].tolist()) == REWARD_NAMES
+        np.testing.assert_array_equal(data["rollout_transition_count"], [4])
+        np.testing.assert_array_equal(data["episode_complete"], [True])
+
+
+def test_best_selection_and_metrics_contract() -> None:
+    failed = _build_result(success=False, total_reward=100.0)
+    succeeded = _build_result(success=True, total_reward=1.0)
     assert (
-        describe_best_update_reason(higher_reward, lower_reward)
-        == "higher_total_reward_without_success"
-    )
-    assert describe_best_update_reason(lower_reward, higher_reward) is None
-
-
-def test_to_metrics_includes_selection_rule() -> None:
-    result = _build_result(success=True, total_reward=7.0, total_energy_j=3_000.0)
-
-    metrics = result.to_metrics()
-
-    assert metrics["selection_rule"] == BEST_TRAJECTORY_SELECTION_RULE
-    assert metrics["success"] is True
-    assert "terminated" not in metrics
-    assert "truncated" not in metrics
-    assert "violation_code" not in metrics
-    assert metrics["precise_arrival"] is True
-    assert metrics["punctual_arrival"] is True
-    assert metrics["strict_stop_error_limit_m"] == 0.3
-    assert metrics["strict_time_error_limit_s"] == 10.0
-    assert "strict_stop_requirement_met" not in metrics
-    assert "strict_time_requirement_met" not in metrics
-    assert metrics["selection_comparison_key"] == [
-        1.0,
-        1.0,
-        0.0,
-        1.0,
-        0.0,
-        -3000.0,
-    ]
-
-
-def test_describe_best_update_reason_reports_success_upgrade() -> None:
-    previous = _build_result(success=False, total_reward=100.0)
-    candidate = _build_result(success=True, total_reward=1.0)
-
-    assert (
-        describe_best_update_reason(candidate, previous)
+        describe_best_update_reason(succeeded, failed)
         == "success_replaces_reward_fallback"
     )
-
-
-def test_describe_best_update_reason_prefers_precise_arrival() -> None:
-    candidate = _build_result(
-        success=True,
-        total_reward=1.0,
-        total_energy_j=20_000.0,
-        stop_error_m=0.2,
-        time_error_s=0.0,
-    )
-    previous = _build_result(
-        success=True,
-        total_reward=100.0,
-        total_energy_j=1_000.0,
-        stop_error_m=0.5,
-        time_error_s=0.0,
-    )
-
-    assert describe_best_update_reason(candidate, previous) == "precise_arrival_reached"
-
-
-def test_describe_best_update_reason_stop_error_precedence() -> None:
-    candidate = _build_result(
-        success=True,
-        total_reward=1.0,
-        total_energy_j=20_000.0,
-        stop_error_m=0.6,
-        time_error_s=0.0,
-    )
-    previous = _build_result(
-        success=True,
-        total_reward=100.0,
-        total_energy_j=1_000.0,
-        stop_error_m=0.7,
-        time_error_s=0.0,
-    )
-
-    assert (
-        describe_best_update_reason(candidate, previous)
-        == "lower_stop_error_before_precise_arrival"
-    )
-
-
-def test_describe_best_update_reason_prefers_punctual_arrival() -> None:
-    candidate = _build_result(
-        success=True,
-        total_reward=1.0,
-        total_energy_j=20_000.0,
-        stop_error_m=0.2,
-        time_error_s=9.0,
-    )
-    previous = _build_result(
-        success=True,
-        total_reward=100.0,
-        total_energy_j=1_000.0,
-        stop_error_m=0.2,
-        time_error_s=30.0,
-    )
-
-    assert (
-        describe_best_update_reason(candidate, previous) == "punctual_arrival_reached"
-    )
-
-
-def test_describe_best_update_reason_time_error_precedence() -> None:
-    candidate = _build_result(
-        success=True,
-        total_reward=1.0,
-        total_energy_j=20_000.0,
-        stop_error_m=0.2,
-        time_error_s=-30.0,
-    )
-    previous = _build_result(
-        success=True,
-        total_reward=100.0,
-        total_energy_j=1_000.0,
-        stop_error_m=0.2,
-        time_error_s=40.0,
-    )
-
-    assert (
-        describe_best_update_reason(candidate, previous)
-        == "lower_time_error_before_punctual_arrival"
-    )
-
-
-def test_successful_arrival_uses_terminal_flags() -> None:
-    assert is_successful_arrival(
-        terminated=True,
-        truncated=False,
-    )
-    assert not is_successful_arrival(
-        terminated=False,
-        truncated=False,
-    )
-    assert not is_successful_arrival(
-        terminated=True,
-        truncated=True,
-    )
-
-
-def test_arrival_status_layers_require_previous_layer() -> None:
-    train_service = _build_train_service(schedule_time=100.0)
-    assert is_precise_arrival(
-        success=True,
-        stop_error_m=0.3,
-        train_service=train_service,
-    )
-    assert not is_precise_arrival(
-        success=False,
-        stop_error_m=0.0,
-        train_service=train_service,
-    )
-    assert is_punctual_arrival(
-        precise_arrival=True,
-        time_error_s=9.9999,
-        train_service=train_service,
-    )
-    assert not is_punctual_arrival(
-        precise_arrival=False,
-        time_error_s=0.0,
-        train_service=train_service,
-    )
-    assert not is_punctual_arrival(
-        precise_arrival=True,
-        time_error_s=10.0,
-        train_service=train_service,
-    )
-
-
-def test_punctual_arrival_uses_fixed_time_error_limit() -> None:
-    train_service = _build_train_service(schedule_time=0.0)
-    assert is_punctual_arrival(
-        precise_arrival=True,
-        time_error_s=-9.9999,
-        train_service=train_service,
-    )
-    assert not is_punctual_arrival(
-        precise_arrival=True,
-        time_error_s=-10.0,
-        train_service=train_service,
-    )
+    assert succeeded.to_metrics()["selection_rule"] == BEST_TRAJECTORY_SELECTION_RULE

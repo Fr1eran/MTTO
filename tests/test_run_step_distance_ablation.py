@@ -7,20 +7,22 @@ import pytest
 from matplotlib.figure import Figure
 
 import scripts.run_step_distance_ablation as step_distance_ablation
+from rl.reward_diagnostics import REWARD_NAMES
 from scripts.run_step_distance_ablation import (
-    DEFAULT_BEST_EVAL_TRIGGER_INTERVAL,
+    DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
     DEFAULT_OUTPUT_ROOT,
     DEFAULT_SEEDS,
     DEFAULT_STEP_DISTANCES,
-    FIXED_REWARD_PROFILE,
+    FIXED_REWARD_PRESET,
     STEP_DISTANCE_MANIFEST_FILENAME,
     StepDistanceCurveAggregate,
     build_arg_parser,
-    build_best_metric_aggregates,
     build_curve_aggregates,
+    build_metric_aggregates,
     build_step_distance_manifest,
     load_step_distance_manifest,
     plot_curve_aggregates,
+    resolve_metric_source,
     resolve_step_distance_run_matrix,
     save_compact_figure,
     train_step_distance_run,
@@ -31,21 +33,40 @@ class _RunSpec(Protocol):
     final_output_dir: str
 
 
-def _write_episode_metrics_npz(
+def _write_reward_diagnostics_npz(
     final_dir: Path,
     *,
     rewards: list[float],
     lengths: list[float],
 ) -> Path:
     final_dir.mkdir(parents=True, exist_ok=True)
-    episode_metrics_path = final_dir / "episode_metrics.npz"
+    reward_diagnostics_path = final_dir / "reward_diagnostics.npz"
+    episode_sums = np.zeros((len(rewards), len(REWARD_NAMES)), dtype=np.float64)
+    episode_sums[:, 0] = rewards
+    episode_sums[:, -1] = rewards
+    end_steps = np.arange(1, len(rewards) + 1, dtype=np.int64)
     np.savez(
-        episode_metrics_path,
-        index=np.asarray([float(i) for i in range(len(rewards))], dtype=np.float64),
-        ep_reward=np.asarray(rewards, dtype=np.float64),
-        ep_len=np.asarray(lengths, dtype=np.float64),
+        reward_diagnostics_path,
+        schema_version=np.asarray([1], dtype=np.int16),
+        reward_names=np.asarray(REWARD_NAMES),
+        rollout_end_step=np.asarray([end_steps[-1]]),
+        rollout_transition_count=np.asarray([int(sum(lengths))]),
+        rollout_reward_sum=episode_sums.sum(axis=0, keepdims=True),
+        rollout_reward_abs_sum=np.abs(episode_sums).sum(axis=0, keepdims=True),
+        rollout_reward_nonzero_count=np.count_nonzero(
+            episode_sums, axis=0, keepdims=True
+        ),
+        rollout_reward_cross_product=np.asarray([episode_sums.T @ episode_sums]),
+        episode_end_step=end_steps,
+        episode_worker_rank=np.zeros(len(rewards), dtype=np.int16),
+        episode_index=np.arange(len(rewards), dtype=np.int64),
+        episode_length=np.asarray(lengths, dtype=np.int32),
+        episode_terminated=np.ones(len(rewards), dtype=np.bool_),
+        episode_truncated=np.zeros(len(rewards), dtype=np.bool_),
+        episode_complete=np.ones(len(rewards), dtype=np.bool_),
+        episode_reward_sums=episode_sums,
     )
-    return episode_metrics_path
+    return reward_diagnostics_path
 
 
 def _write_trajectory_metrics_json(
@@ -92,12 +113,18 @@ def _write_run_metadata(
 
 def test_train_cli_defaults() -> None:
     parser = build_arg_parser()
-    args = parser.parse_args(["train"])
+    args = parser.parse_args(["train", "--reference-curve-dir", "."])
 
     assert args.output_root == DEFAULT_OUTPUT_ROOT
-    assert tuple(args.max_step_distances) == DEFAULT_STEP_DISTANCES
-    assert tuple(args.seed_list) == DEFAULT_SEEDS
-    assert args.best_eval_trigger_interval == DEFAULT_BEST_EVAL_TRIGGER_INTERVAL
+    assert not hasattr(args, "step_distances")
+    assert not hasattr(args, "seed_list")
+    assert not hasattr(args, "ablation_tag")
+    assert not hasattr(args, "n_steps_per_env")
+    assert not hasattr(args, "log_interval")
+    assert (
+        args.evaluation_interval_rollouts
+        == DEFAULT_EVALUATION_INTERVAL_ROLLOUTS
+    )
     assert not hasattr(args, "max_train_episodes")
     assert args.dry_run is False
 
@@ -123,15 +150,58 @@ def test_show_cli_accepts_compact_figure_options(tmp_path: Path) -> None:
     assert args.no_show is True
 
 
+@pytest.mark.parametrize(
+    ("command", "removed_option"),
+    (
+        ("train", "--ablation-tag"),
+        ("train", "--step-distances"),
+        ("train", "--seed-list"),
+        ("train", "--n-steps-per-env"),
+        ("train", "--log-interval"),
+        ("show", "--metric-source"),
+        ("show", "--step-distances"),
+    ),
+)
+def test_step_distance_ablation_rejects_removed_configuration_options(
+    command: str,
+    removed_option: str,
+) -> None:
+    argv = [command, removed_option, "value"]
+    if command == "train":
+        argv.extend(["--reference-curve-dir", "."])
+    with pytest.raises(SystemExit):
+        _ = build_arg_parser().parse_args(argv)
+
+
+def test_resolve_metric_source_prefers_existing_best_artifact(tmp_path: Path) -> None:
+    best_dir = tmp_path / "best_rollouts"
+    _ = _write_trajectory_metrics_json(
+        best_dir,
+        stop_error_m=1.0,
+        time_error_s=2.0,
+        total_energy_kj=3.0,
+    )
+    manifest = {
+        "runs": [
+            {
+                "status": "completed",
+                "best_eval_output_dir": str(best_dir),
+            }
+        ]
+    }
+    assert resolve_metric_source(manifest) == "best"
+    assert resolve_metric_source({"runs": []}) == "final"
+
+
 def test_resolve_run_matrix_expands_distances_and_seeds() -> None:
     parser = build_arg_parser()
-    args = parser.parse_args(["train"])
+    args = parser.parse_args(["train", "--reference-curve-dir", "."])
 
     run_entries = resolve_step_distance_run_matrix(args)
 
     assert len(run_entries) == len(DEFAULT_STEP_DISTANCES) * len(DEFAULT_SEEDS)
     first_distance_entries = run_entries[: len(DEFAULT_SEEDS)]
-    assert [entry.max_step_distance for entry in first_distance_entries] == [
+    assert [entry.step_distance for entry in first_distance_entries] == [
         DEFAULT_STEP_DISTANCES[0]
     ] * len(DEFAULT_SEEDS)
     assert [entry.seed for entry in first_distance_entries] == list(DEFAULT_SEEDS)
@@ -144,34 +214,30 @@ def test_run_matrix_keeps_basic_reward_and_fixed_hyperparameters() -> None:
     args = parser.parse_args(
         [
             "train",
-            "--max-step-distances",
-            "50",
-            "100",
-            "--seed-list",
-            "42",
-            "43",
+            "--reference-curve-dir",
+            ".",
             "--num-envs",
             "2",
             "--rollout-steps-per-update",
             "4096",
-            "--best-eval-trigger-interval",
-            "123456",
+            "--evaluation-interval-rollouts",
+            "7",
         ]
     )
 
     run_entries = resolve_step_distance_run_matrix(args)
     first = run_entries[0]
-    other_distance = run_entries[2]
+    other_distance = run_entries[len(DEFAULT_SEEDS)]
 
-    assert first.training_run_spec.reward_profile.name == FIXED_REWARD_PROFILE
+    assert first.training_run_spec.reward_preset.name == FIXED_REWARD_PRESET
     assert first.training_run_spec.enable_monitor is True
-    assert first.training_run_spec.enable_callback is False
-    assert first.training_run_spec.enable_env_diagnostics is False
     assert first.training_run_spec.enable_auto_analysis is False
-    assert first.training_run_spec.enable_best_eval is True
-    assert first.training_run_spec.best_eval_trigger_mode == "steps"
-    assert first.training_run_spec.best_eval_trigger_interval == 123456
-    assert first.training_run_spec.best_eval_deterministic is True
+    assert first.training_run_spec.curriculum_profile == "dspdl"
+    assert first.training_run_spec.reference_curve_dir == "."
+    assert first.training_run_spec.enable_best_evaluation_artifacts is False
+    assert first.training_run_spec.evaluation_interval_rollouts == 7
+    assert first.training_run_spec.run_metadata["evaluation_interval_rollouts"] == 7
+    assert first.training_run_spec.evaluation_deterministic is True
 
     assert (
         first.training_run_spec.reward_discount
@@ -187,8 +253,8 @@ def test_run_matrix_keeps_basic_reward_and_fixed_hyperparameters() -> None:
         == other_distance.training_run_spec.rollout_steps_per_update
     )
     assert (
-        first.training_run_spec.max_step_distance
-        != other_distance.training_run_spec.max_step_distance
+        first.training_run_spec.step_distance
+        != other_distance.training_run_spec.step_distance
     )
     assert first.seed == other_distance.seed
 
@@ -198,17 +264,14 @@ def test_build_and_load_manifest_records_step_distance_runs(tmp_path: Path) -> N
     args = parser.parse_args(
         [
             "train",
+            "--reference-curve-dir",
+            ".",
             "--output-root",
             str(tmp_path),
-            "--max-step-distances",
-            "50",
-            "--seed-list",
-            "42",
-            "43",
         ]
     )
     run_entries = resolve_step_distance_run_matrix(args)
-    statuses = {(50.0, 0): {"status": "completed"}}
+    statuses = {(DEFAULT_STEP_DISTANCES[0], 0): {"status": "completed"}}
 
     manifest = build_step_distance_manifest(args, run_entries, statuses=statuses)
     manifest_path = tmp_path / STEP_DISTANCE_MANIFEST_FILENAME
@@ -216,19 +279,19 @@ def test_build_and_load_manifest_records_step_distance_runs(tmp_path: Path) -> N
 
     loaded = load_step_distance_manifest(str(tmp_path))
 
-    assert loaded["reward_profile"] == FIXED_REWARD_PROFILE
-    assert loaded["max_step_distances"] == [50.0]
-    assert loaded["seed_list"] == [42, 43]
+    assert loaded["reward_preset"] == FIXED_REWARD_PRESET
+    assert loaded["step_distances"] == list(DEFAULT_STEP_DISTANCES)
+    assert loaded["seed_list"] == list(DEFAULT_SEEDS)
     assert loaded["runs"][0]["status"] == "completed"
     assert loaded["runs"][1]["status"] == "pending"
-    assert loaded["runs"][0]["episode_metrics_path"].endswith("episode_metrics.npz")
-    assert loaded["runs"][0]["best_eval_output_dir"].endswith("best_steps")
-    assert loaded["training"]["enable_best_eval"] is True
-    assert loaded["training"]["best_eval_trigger_mode"] == "steps"
-    assert loaded["training"]["best_eval_trigger_interval"] == int(
-        args.best_eval_trigger_interval
+    assert loaded["runs"][0]["reward_diagnostics_path"].endswith(
+        "reward_diagnostics.npz"
     )
-    assert loaded["training"]["best_eval_deterministic"] is True
+    assert loaded["runs"][0]["best_eval_output_dir"] is None
+    assert loaded["runs"][0]["final_metrics_path"].endswith(
+        "final_trajectory_metrics.json"
+    )
+    assert loaded["training"]["enable_best_evaluation_artifacts"] is False
 
 
 def test_manifest_uses_total_timesteps_training_budget(
@@ -238,12 +301,10 @@ def test_manifest_uses_total_timesteps_training_budget(
     args = parser.parse_args(
         [
             "train",
+            "--reference-curve-dir",
+            ".",
             "--output-root",
             str(tmp_path),
-            "--max-step-distances",
-            "50",
-            "--seed-list",
-            "42",
         ]
     )
     run_entries = resolve_step_distance_run_matrix(args)
@@ -263,12 +324,10 @@ def test_train_step_distance_run_delegates_to_train_single_experiment(
     args = parser.parse_args(
         [
             "train",
+            "--reference-curve-dir",
+            ".",
             "--output-root",
             str(tmp_path),
-            "--max-step-distances",
-            "50",
-            "--seed-list",
-            "42",
         ]
     )
     entry = resolve_step_distance_run_matrix(args)[0]
@@ -279,11 +338,10 @@ def test_train_step_distance_run_delegates_to_train_single_experiment(
         calls.append((train_args, spec))
         final_output_dir = Path(spec.final_output_dir)
         final_output_dir.mkdir(parents=True, exist_ok=True)
-        np.savez(
-            final_output_dir / "episode_metrics.npz",
-            index=np.asarray([0.0, 1.0], dtype=np.float64),
-            ep_reward=np.asarray([1.5, 2.5], dtype=np.float64),
-            ep_len=np.asarray([10.0, 20.0], dtype=np.float64),
+        _write_reward_diagnostics_npz(
+            final_output_dir,
+            rewards=[1.5, 2.5],
+            lengths=[10.0, 20.0],
         )
         return spec
 
@@ -298,25 +356,26 @@ def test_train_step_distance_run_delegates_to_train_single_experiment(
     assert len(calls) == 1
     assert calls[0][0] is entry.train_args
     assert calls[0][1] is entry.training_run_spec
-    episode_metrics_path = Path(entry.episode_metrics_path)
-    assert episode_metrics_path.is_file()
+    reward_diagnostics_path = Path(entry.reward_diagnostics_path)
+    assert reward_diagnostics_path.is_file()
 
 
-def test_train_command_does_not_run_final_policy_evaluation(
+def test_train_command_runs_final_policy_evaluation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(step_distance_ablation, "DEFAULT_STEP_DISTANCES", (50.0,))
+    monkeypatch.setattr(step_distance_ablation, "DEFAULT_SEEDS", (42,))
     calls: list[object] = []
 
     def _fake_train_single_experiment(train_args: object, *, spec: _RunSpec) -> object:
         calls.append((train_args, spec))
         final_output_dir = Path(spec.final_output_dir)
         final_output_dir.mkdir(parents=True, exist_ok=True)
-        np.savez(
-            final_output_dir / "episode_metrics.npz",
-            index=np.asarray([0.0], dtype=np.float64),
-            ep_reward=np.asarray([1.5], dtype=np.float64),
-            ep_len=np.asarray([10.0], dtype=np.float64),
+        _write_reward_diagnostics_npz(
+            final_output_dir,
+            rewards=[1.5],
+            lengths=[10.0],
         )
         return spec
 
@@ -325,16 +384,28 @@ def test_train_command_does_not_run_final_policy_evaluation(
         "train_single_experiment",
         _fake_train_single_experiment,
     )
+    evaluated: list[object] = []
+
+    def _fake_evaluate_final_training_run(spec: object) -> tuple[str, str]:
+        evaluated.append(spec)
+        final_output_dir = Path(cast(_RunSpec, spec).final_output_dir)
+        metrics_path = final_output_dir / "final_trajectory_metrics.json"
+        _ = metrics_path.write_text("{}", encoding="utf-8")
+        return str(final_output_dir / "final_trajectory.npz"), str(metrics_path)
+
+    monkeypatch.setattr(
+        step_distance_ablation,
+        "evaluate_final_training_run",
+        _fake_evaluate_final_training_run,
+    )
 
     exit_code = step_distance_ablation.main(
         [
             "train",
+            "--reference-curve-dir",
+            ".",
             "--output-root",
             str(tmp_path),
-            "--max-step-distances",
-            "50",
-            "--seed-list",
-            "42",
             "--total-timesteps",
             "1",
         ]
@@ -342,11 +413,11 @@ def test_train_command_does_not_run_final_policy_evaluation(
 
     assert exit_code == 0
     assert len(calls) == 1
+    assert len(evaluated) == 1
     manifest = load_step_distance_manifest(str(tmp_path))
     assert manifest["runs"][0]["status"] == "completed"
     final_output_dir = Path(str(manifest["runs"][0]["final_output_dir"]))
-    assert not (final_output_dir / "final_trajectory_metrics.json").exists()
-    assert not (final_output_dir / "final_trajectory.npz").exists()
+    assert (final_output_dir / "final_trajectory_metrics.json").exists()
 
 
 def test_build_curve_aggregates_groups_monitor_data_by_step_distance(
@@ -357,17 +428,17 @@ def test_build_curve_aggregates_groups_monitor_data_by_step_distance(
     run_50_r2 = root / "run_50_r2" / "final"
     run_100_r1 = root / "run_100_r1" / "final"
 
-    metrics_50_r1 = _write_episode_metrics_npz(
+    metrics_50_r1 = _write_reward_diagnostics_npz(
         run_50_r1,
         rewards=[1.0, 3.0, 5.0],
         lengths=[10.0, 9.0, 8.0],
     )
-    metrics_50_r2 = _write_episode_metrics_npz(
+    metrics_50_r2 = _write_reward_diagnostics_npz(
         run_50_r2,
         rewards=[2.0, 4.0],
         lengths=[12.0, 10.0],
     )
-    metrics_100_r1 = _write_episode_metrics_npz(
+    metrics_100_r1 = _write_reward_diagnostics_npz(
         run_100_r1,
         rewards=[10.0, 12.0],
         lengths=[5.0, 4.0],
@@ -377,30 +448,30 @@ def test_build_curve_aggregates_groups_monitor_data_by_step_distance(
     _ = _write_run_metadata(run_100_r1)
 
     manifest = {
-        "max_step_distances": [50.0, 100.0],
+        "step_distances": [50.0, 100.0],
         "runs": [
             {
-                "max_step_distance": 50.0,
+                "step_distance": 50.0,
                 "repeat_index": 0,
                 "seed": 42,
                 "final_output_dir": str(run_50_r1),
-                "episode_metrics_path": str(metrics_50_r1),
+                "reward_diagnostics_path": str(metrics_50_r1),
                 "status": "completed",
             },
             {
-                "max_step_distance": 50.0,
+                "step_distance": 50.0,
                 "repeat_index": 1,
                 "seed": 43,
                 "final_output_dir": str(run_50_r2),
-                "episode_metrics_path": str(metrics_50_r2),
+                "reward_diagnostics_path": str(metrics_50_r2),
                 "status": "completed",
             },
             {
-                "max_step_distance": 100.0,
+                "step_distance": 100.0,
                 "repeat_index": 0,
                 "seed": 42,
                 "final_output_dir": str(run_100_r1),
-                "episode_metrics_path": str(metrics_100_r1),
+                "reward_diagnostics_path": str(metrics_100_r1),
                 "status": "completed",
             },
         ],
@@ -409,10 +480,10 @@ def test_build_curve_aggregates_groups_monitor_data_by_step_distance(
     aggregates, warnings = build_curve_aggregates(manifest)
 
     assert warnings == []
-    assert [aggregate.max_step_distance for aggregate in aggregates] == [50.0, 100.0]
+    assert [aggregate.step_distance for aggregate in aggregates] == [50.0, 100.0]
     aggregate_50 = aggregates[0]
     assert aggregate_50.valid_run_count == 2
-    np.testing.assert_allclose(aggregate_50.reference_steps, [0.0, 1.0, 2.0])
+    np.testing.assert_allclose(aggregate_50.reference_steps, [1.0, 2.0, 3.0])
     np.testing.assert_allclose(
         aggregate_50.mean_reward,
         [1.5, 3.5, 5.0],
@@ -423,14 +494,14 @@ def test_build_curve_aggregates_groups_monitor_data_by_step_distance(
     )
 
 
-def test_build_best_metric_aggregates_groups_best_trajectory_metrics(
+def test_build_metric_aggregates_groups_best_trajectory_metrics(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "step_distance"
-    run_50_r1_best = root / "run_50_r1" / "best_steps"
-    run_50_r2_best = root / "run_50_r2" / "best_steps"
+    run_50_r1_best = root / "run_50_r1" / "best_rollouts"
+    run_50_r2_best = root / "run_50_r2" / "best_rollouts"
     run_100_output = root / "run_100_r1"
-    run_100_best = run_100_output / "best_steps"
+    run_100_best = run_100_output / "best_rollouts"
     run_100_metadata = _write_run_metadata(
         run_100_output,
         {"best_eval_output_dir": str(run_100_best)},
@@ -461,22 +532,22 @@ def test_build_best_metric_aggregates_groups_best_trajectory_metrics(
     )
 
     manifest = {
-        "max_step_distances": [50.0, 100.0],
+        "step_distances": [50.0, 100.0],
         "runs": [
             {
-                "max_step_distance": 50.0,
+                "step_distance": 50.0,
                 "repeat_index": 0,
                 "best_eval_output_dir": str(run_50_r1_best),
                 "status": "completed",
             },
             {
-                "max_step_distance": 50.0,
+                "step_distance": 50.0,
                 "repeat_index": 1,
                 "best_eval_output_dir": str(run_50_r2_best),
                 "status": "completed",
             },
             {
-                "max_step_distance": 100.0,
+                "step_distance": 100.0,
                 "repeat_index": 0,
                 "run_metadata_path": str(run_100_metadata),
                 "status": "completed",
@@ -484,10 +555,10 @@ def test_build_best_metric_aggregates_groups_best_trajectory_metrics(
         ],
     }
 
-    aggregates, warnings = build_best_metric_aggregates(manifest)
+    aggregates, warnings = build_metric_aggregates(manifest, metric_source="best")
 
     assert warnings == []
-    assert [aggregate.max_step_distance for aggregate in aggregates] == [50.0, 100.0]
+    assert [aggregate.step_distance for aggregate in aggregates] == [50.0, 100.0]
     aggregate_50 = aggregates[0]
     assert aggregate_50.valid_run_count == 2
     assert aggregate_50.metric_means["stop_error_m"] == pytest.approx(2.0)
@@ -514,10 +585,10 @@ def test_best_metric_aggregates_do_not_fall_back_to_final_metrics(
     )
 
     manifest = {
-        "max_step_distances": [50.0],
+        "step_distances": [50.0],
         "runs": [
             {
-                "max_step_distance": 50.0,
+                "step_distance": 50.0,
                 "repeat_index": 0,
                 "final_output_dir": str(final_dir),
                 "status": "completed",
@@ -525,18 +596,18 @@ def test_best_metric_aggregates_do_not_fall_back_to_final_metrics(
         ],
     }
 
-    aggregates, warnings = build_best_metric_aggregates(manifest)
+    aggregates, warnings = build_metric_aggregates(manifest, metric_source="best")
 
     assert aggregates == []
     assert any("missing best_eval_output_dir" in warning for warning in warnings)
     assert any("No valid best trajectory metrics" in warning for warning in warnings)
 
 
-def test_print_best_metric_table_shows_mean_plus_std_cells(
+def test_print_metric_table_shows_mean_plus_std_cells(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    aggregate = step_distance_ablation.StepDistanceBestMetricAggregate(
-        max_step_distance=50.0,
+    aggregate = step_distance_ablation.StepDistanceMetricAggregate(
+        step_distance=50.0,
         valid_run_count=2,
         metric_means={
             "stop_error_m": 2.0,
@@ -556,10 +627,10 @@ def test_print_best_metric_table_shows_mean_plus_std_cells(
         },
     )
 
-    step_distance_ablation._print_best_metric_table([aggregate])
+    step_distance_ablation._print_metric_table([aggregate], metric_source="final")
 
     output = capsys.readouterr().out
-    assert "Best trajectory evaluation summary (mean±std):" in output
+    assert "Final trajectory evaluation summary (mean±std):" in output
     assert "stop_error_m" in output
     assert "time_error_s" in output
     assert "stop_error_m_mean" not in output
@@ -605,14 +676,14 @@ def test_show_command_saves_compact_figure_without_display(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     aggregate = StepDistanceCurveAggregate(
-        max_step_distance=50.0,
+        step_distance=50.0,
         reference_steps=np.asarray([10.0], dtype=np.float64),
         mean_reward=np.asarray([1.0], dtype=np.float64),
         std_reward=np.asarray([0.1], dtype=np.float64),
         mean_length=np.asarray([12.0], dtype=np.float64),
         std_length=np.asarray([0.3], dtype=np.float64),
         valid_run_count=1,
-        episode_metrics_paths=("metrics.npz",),
+        reward_diagnostics_paths=("metrics.npz",),
     )
     fake_figure = object()
     save_calls: list[tuple[object, Path, float, float]] = []
@@ -620,18 +691,18 @@ def test_show_command_saves_compact_figure_without_display(
 
     def _fake_load_step_distance_manifest(output_root: object) -> dict[str, object]:
         del output_root
-        return {"max_step_distances": [50.0], "runs": []}
+        return {"step_distances": [50.0], "runs": []}
 
     def _fake_build_curve_aggregates(
-        manifest: object, max_step_distances: object = None
+        manifest: object, step_distances: object = None
     ) -> tuple[list[StepDistanceCurveAggregate], list[str]]:
-        del manifest, max_step_distances
+        del manifest, step_distances
         return ([aggregate], [])
 
-    def _fake_build_best_metric_aggregates(
-        manifest: object, max_step_distances: object = None
+    def _fake_build_metric_aggregates(
+        manifest: object, step_distances: object = None, metric_source: object = None
     ) -> tuple[list[object], list[str]]:
-        del manifest, max_step_distances
+        del manifest, step_distances, metric_source
         return ([], [])
 
     def _fake_plot_curve_aggregates(aggregates: object, *, show: bool = True) -> object:
@@ -650,8 +721,8 @@ def test_show_command_saves_compact_figure_without_display(
     )
     monkeypatch.setattr(
         step_distance_ablation,
-        "build_best_metric_aggregates",
-        _fake_build_best_metric_aggregates,
+        "build_metric_aggregates",
+        _fake_build_metric_aggregates,
     )
     monkeypatch.setattr(
         step_distance_ablation,
@@ -708,24 +779,24 @@ def test_plot_curve_aggregates_uses_step_axis_and_deduped_legend(
 
     aggregates = [
         StepDistanceCurveAggregate(
-            max_step_distance=50.0,
+            step_distance=50.0,
             reference_steps=np.asarray([10.0, 20.0, 30.0], dtype=np.float64),
             mean_reward=np.asarray([1.0, 2.0, 3.0], dtype=np.float64),
             std_reward=np.asarray([0.1, 0.2, 0.3], dtype=np.float64),
             mean_length=np.asarray([12.0, 11.0, 10.0], dtype=np.float64),
             std_length=np.asarray([0.3, 0.2, 0.1], dtype=np.float64),
             valid_run_count=2,
-            episode_metrics_paths=("a", "b"),
+            reward_diagnostics_paths=("a", "b"),
         ),
         StepDistanceCurveAggregate(
-            max_step_distance=100.0,
+            step_distance=100.0,
             reference_steps=np.asarray([10.0, 20.0, 30.0], dtype=np.float64),
             mean_reward=np.asarray([0.5, 1.0, 1.5], dtype=np.float64),
             std_reward=np.asarray([0.1, 0.1, 0.1], dtype=np.float64),
             mean_length=np.asarray([14.0, 13.0, 12.0], dtype=np.float64),
             std_length=np.asarray([0.2, 0.2, 0.2], dtype=np.float64),
             valid_run_count=2,
-            episode_metrics_paths=("c", "d"),
+            reward_diagnostics_paths=("c", "d"),
         ),
     ]
 

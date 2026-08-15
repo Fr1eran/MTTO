@@ -13,12 +13,14 @@ from numpy.typing import NDArray
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
+from rl.context_sampler import ContextSampler
+from rl.dspdl import DSPDLEpisodeAccumulator
 from rl.observation_builder import ObservationBuilder
-from rl.operational_state import OperationalState, OperationalTransition
+from rl.operational_state import OperationalState
 from rl.operational_stepper import OperationalStepper
-from rl.reference_initial_state_provider import ReferenceInitialStateProvider
-from rl.reward_calculator import RewardBreakdown, RewardCalculator, RewardConfig
-from utils.indexing_utils import get_interval_index
+from rl.reward_calculator import RewardCalculator, RewardConfig
+from rl.reward_diagnostics import RewardDiagnosticsAccumulator, RewardDiagnosticsBatch
+from rl.safety_statistics import SafetyTruncationBatch, SafetyTruncationBuffer
 from utils.plot_utils import set_chinese_font
 
 
@@ -39,19 +41,6 @@ class OutcomeInfo(TypedDict):
     truncated: bool
 
 
-class ConstraintInfo(TypedDict, total=False):
-    margin_to_vmax_mps: float
-    margin_to_vmin_mps: float
-    violation_code: int
-    speed_limit_segment: int
-
-
-class EventInfo(TypedDict, total=False):
-    episode_truncated_count: int
-    episode_low_violation_count: int
-    episode_high_violation_count: int
-
-
 @final
 class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
     """Gym adapter over the shared operational transition/reward pipeline."""
@@ -65,14 +54,16 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         safeguard_utility: SafeGuardUtility,
         train_service: TrainService,
         gamma: float,
-        max_step_distance: float,
-        enable_diagnostics: bool = False,
-        diagnostics_interval_steps: int = 1,
+        step_distance: float,
+        compact_training_info: bool = False,
         enable_trajectory_tracking: bool = False,
         render_mode: str | None = None,
         use_animation: bool = False,
         reward_config: RewardConfig | None = None,
-        reference_initial_state_provider: ReferenceInitialStateProvider | None = None,
+        context_sampler: ContextSampler | None = None,
+        dspdl_accumulator: DSPDLEpisodeAccumulator | None = None,
+        safety_truncation_buffer: SafetyTruncationBuffer | None = None,
+        reward_diagnostics_accumulator: RewardDiagnosticsAccumulator | None = None,
     ) -> None:
         super().__init__()
         self.vehicle: VehicleInfo = vehicle
@@ -80,19 +71,19 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         self.safeguard_utility: SafeGuardUtility = safeguard_utility
         self.train_service: TrainService = train_service
         self.gamma: float = gamma
-        self.max_step_distance: float = float(max_step_distance)
+        self.step_distance: float = float(step_distance)
         self.stepper: OperationalStepper = OperationalStepper(
             vehicle=vehicle,
             track=track,
             safeguard_utility=safeguard_utility,
             train_service=train_service,
-            max_step_distance_m=max_step_distance,
+            step_distance_m=step_distance,
         )
         self.observation_builder: ObservationBuilder = ObservationBuilder(
             vehicle=vehicle,
             track=track,
             train_service=train_service,
-            max_step_distance_m=max_step_distance,
+            step_distance_m=step_distance,
             direction=self.stepper.direction,
             whole_distance_m=self.stepper.whole_distance_m,
             get_upper_speed_or_zero=self.stepper.get_upper_speed_or_zero,
@@ -103,35 +94,22 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
             whole_distance_m=self.stepper.whole_distance_m,
             max_energy_consumption_kj=self.stepper.max_energy_consumption_kj,
             gamma=gamma,
-            vehicle_max_speed_mps=vehicle.max_speed,
             reward_config=reward_config,
         )
         self.reward_config: RewardConfig = self.reward_calculator.reward_config
-        self.reference_initial_state_provider: ReferenceInitialStateProvider | None = (
-            reference_initial_state_provider
-        )
-        self._reference_context_sample_id: int | None = None
-        self._reference_context_index: int | None = None
-        self._reference_context_distribution_version: int | None = None
+        self.context_sampler = context_sampler
+        self.dspdl_accumulator = dspdl_accumulator
+        self.safety_truncation_buffer = safety_truncation_buffer
+        self.reward_diagnostics_accumulator = reward_diagnostics_accumulator
         self.state: OperationalState = self.stepper.reset()
-        self.last_transition: OperationalTransition | None = None
-        self.last_reward_breakdown: RewardBreakdown = RewardBreakdown()
 
         low = np.array([0, 0, -1, -1, -1, -1, 0, 0, -1, -1, 0, 0], dtype=np.float32)
         high = np.ones(12, dtype=np.float32)
         self.observation_space = gym.spaces.Box(low=low, high=high, dtype=np.float32)
         self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
-        self.enable_diagnostics: bool = enable_diagnostics
-        self.diagnostics_interval_steps: int = max(1, int(diagnostics_interval_steps))
-        self._collect_step_diagnostics: bool = False
+        self.compact_training_info: bool = bool(compact_training_info)
         self.basic_info: BasicInfo = {}
         self.outcome_info: OutcomeInfo = {"terminated": False, "truncated": False}
-        self.rewards_info: dict[str, float] = {}
-        self.constraint_info: ConstraintInfo = {}
-        self.event_info: EventInfo = {}
-        self.episode_truncated_count: int = 0
-        self.episode_low_violation_count: int = 0
-        self.episode_high_violation_count: int = 0
         self._comfort_tav: float = 0.0
         self._comfort_sum_sq_delta_acc: float = 0.0
         self._comfort_exceedance_count: int = 0
@@ -154,23 +132,45 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
             self.state = self.stepper.refresh_schedule_time(self.state)
         return self.observation_builder.build(self.state)
 
-    def set_reference_initial_state_provider(
-        self, provider: ReferenceInitialStateProvider | None
-    ) -> None:
-        """Attach or remove the optional reference-state reset provider."""
-        self.reference_initial_state_provider = provider
-
-    def set_reference_initial_state_distribution(
+    def set_dspdl_distribution(
         self,
-        weights: NDArray[np.floating] | list[float],
+        distribution: NDArray[np.floating] | list[float],
         *,
         version: int,
     ) -> None:
-        """Update the provider distribution for resets after this call."""
-        provider = self.reference_initial_state_provider
-        if provider is None:
-            raise RuntimeError("reference initial-state provider is not configured")
-        provider.set_sampling_distribution(weights, version=version)
+        """Atomically validate and install the next DSPDL distribution."""
+        sampler = self.context_sampler
+        accumulator = self.dspdl_accumulator
+        if sampler is None or accumulator is None:
+            raise RuntimeError("DSPDL components are not configured")
+        new_version = accumulator.validate_version_update(version)
+        sampler.update_distribution(distribution, version=new_version)
+        accumulator.switch_version(new_version)
+
+    def drain_dspdl_statistics(self, *, version: int) -> dict[str, object]:
+        accumulator = self.dspdl_accumulator
+        if accumulator is None:
+            raise RuntimeError("DSPDL accumulator is not configured")
+        return accumulator.drain(version=version)
+
+    def disable_dspdl_accumulator(self) -> None:
+        accumulator = self.dspdl_accumulator
+        if accumulator is not None:
+            accumulator.disable()
+
+    def drain_safety_truncations(self) -> SafetyTruncationBatch:
+        buffer = self.safety_truncation_buffer
+        if buffer is None:
+            raise RuntimeError("safety truncation tracking is not configured")
+        return buffer.drain()
+
+    def drain_reward_diagnostics(
+        self, *, finalize: bool = False
+    ) -> RewardDiagnosticsBatch:
+        accumulator = self.reward_diagnostics_accumulator
+        if accumulator is None:
+            raise RuntimeError("reward diagnostics are not configured")
+        return accumulator.drain(finalize=finalize)
 
     def _reset_trajectory(self) -> None:
         if not self.enable_trajectory_tracking:
@@ -196,35 +196,23 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         options: dict[str, Any] | None = None,
     ) -> tuple[NDArray[np.float32], dict[str, object]]:
         _ = super().reset(seed=seed, options=options)
-        provider = self.reference_initial_state_provider
-        if provider is None:
+        sampler = self.context_sampler
+        if sampler is None:
             self.state = self.stepper.reset()
-            self._reference_context_sample_id = None
-            self._reference_context_index = None
-            self._reference_context_distribution_version = None
         else:
             if seed is not None:
-                provider.reseed(seed)
-            reference_sample = provider.sample()
-            self.state = reference_sample.runtime_state
-            self._reference_context_sample_id = reference_sample.sample_id
-            self._reference_context_index = reference_sample.reference_index
-            self._reference_context_distribution_version = (
-                reference_sample.distribution_version
-            )
-        self.last_transition = None
-        self.last_reward_breakdown = RewardBreakdown()
+                sampler.reseed(seed)
+            context = sampler.sample()
+            self.state = context.initial_state
+            if self.dspdl_accumulator is not None:
+                self.dspdl_accumulator.begin_episode(
+                    context_index=context.context_index,
+                    distribution_version=sampler.version,
+                )
         self.basic_info = {}
         self.outcome_info = {"terminated": False, "truncated": False}
-        self.rewards_info = {}
-        self.constraint_info = {}
-        self.event_info = {}
-        self.episode_truncated_count = self.episode_low_violation_count = (
-            self.episode_high_violation_count
-        ) = 0
         self._comfort_tav = self._comfort_sum_sq_delta_acc = 0.0
         self._comfort_exceedance_count = 0
-        self._collect_step_diagnostics = False
         self._reset_trajectory()
         return self.observation_builder.build(self.state), {}
 
@@ -236,47 +224,45 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         acceleration = self.observation_builder.denormalize_action(float(action[0]))
         transition = self.stepper.advance(self.state, acceleration)
         reward = self.reward_calculator.calculate(transition)
-        self.state, self.last_transition, self.last_reward_breakdown = (
-            transition.next_state,
-            transition,
-            reward,
-        )
+        self.state = transition.next_state
         self.outcome_info = {
             "terminated": bool(transition.terminated),
             "truncated": bool(transition.truncated),
         }
-        delta_acc = abs(
-            transition.acceleration_mps2 - transition.previous_state.acceleration_mps2
-        )
-        self._comfort_tav += delta_acc
-        self._comfort_sum_sq_delta_acc += delta_acc**2
-        if delta_acc > self.train_service.max_acc_change:
-            self._comfort_exceedance_count += 1
+        if self.dspdl_accumulator is not None:
+            self.dspdl_accumulator.record_transition(
+                reward.total,
+                done=bool(transition.terminated or transition.truncated),
+            )
+        if self.safety_truncation_buffer is not None:
+            self.safety_truncation_buffer.record(
+                position_m=self.state.position_m,
+                violation_code=transition.violation_code,
+                truncated=bool(transition.truncated),
+            )
+        if self.reward_diagnostics_accumulator is not None:
+            self.reward_diagnostics_accumulator.record(
+                reward,
+                terminated=bool(transition.terminated),
+                truncated=bool(transition.truncated),
+            )
+        if not self.compact_training_info:
+            delta_acc = abs(
+                transition.acceleration_mps2
+                - transition.previous_state.acceleration_mps2
+            )
+            self._comfort_tav += delta_acc
+            self._comfort_sum_sq_delta_acc += delta_acc**2
+            if delta_acc > self.train_service.max_acc_change:
+                self._comfort_exceedance_count += 1
         self._record_trajectory()
-        self._collect_step_diagnostics = (
-            self.enable_diagnostics
-            and self.state.step_count % self.diagnostics_interval_steps == 0
-        )
-        self._record_basic_info()
-        info = self._get_basic_info()
-        if self._reference_context_sample_id is not None:
-            info.update(
-                reference_context_sample_id=self._reference_context_sample_id,
-                reference_context_index=self._reference_context_index,
-                reference_context_distribution_version=(
-                    self._reference_context_distribution_version
-                ),
-            )
-        # Keep the terminal outcome available even when detailed diagnostics
-        # are disabled (for example, vectorized evaluation rollouts).
-        info.update(outcome=dict(self.outcome_info))
-        if self._collect_step_diagnostics:
-            self._record_step_diagnostics()
-            info.update(
-                rewards=dict(self.rewards_info),
-                constraint=dict(self.constraint_info),
-                event=dict(self.event_info),
-            )
+        info: dict[str, object]
+        if self.compact_training_info:
+            info = {}
+        else:
+            self._record_basic_info()
+            info = self._get_basic_info()
+            info.update(outcome=dict(self.outcome_info))
         return (
             self.observation_builder.build(self.state),
             reward.total,
@@ -301,47 +287,6 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
 
     def _get_basic_info(self) -> dict[str, object]:
         return {"basic": dict(self.basic_info)} if self.basic_info else {}
-
-    def _record_step_diagnostics(self) -> None:
-        vmax = self.state.max_speed_mps - self.state.speed_mps
-        vmin = self.state.speed_mps - self.state.min_speed_mps
-        if vmin < 0:
-            self.episode_truncated_count += 1
-            self.episode_low_violation_count += 1
-        elif vmax < 0:
-            self.episode_truncated_count += 1
-            self.episode_high_violation_count += 1
-        self.rewards_info = {
-            "safety": self.last_reward_breakdown.safety,
-            "energy": self.last_reward_breakdown.energy,
-            "comfort": self.last_reward_breakdown.comfort,
-            "stopping": self.last_reward_breakdown.stopping,
-            "terminal_stopping": self.last_reward_breakdown.terminal_stopping,
-            "punctuality": self.last_reward_breakdown.terminal_punctuality,
-            "total": self.last_reward_breakdown.total,
-        }
-        segment = int(
-            np.clip(
-                get_interval_index(
-                    self.state.position_m, self.track.speed_limit_intervals
-                ),
-                0,
-                len(self.track.speed_limits) - 1,
-            )
-        )
-        self.constraint_info = {
-            "margin_to_vmax_mps": vmax,
-            "margin_to_vmin_mps": vmin,
-            "violation_code": int(self.last_transition.violation_code)
-            if self.last_transition is not None
-            else 0,
-            "speed_limit_segment": segment,
-        }
-        self.event_info = {
-            "episode_truncated_count": self.episode_truncated_count,
-            "episode_low_violation_count": self.episode_low_violation_count,
-            "episode_high_violation_count": self.episode_high_violation_count,
-        }
 
     @override
     def render(self):

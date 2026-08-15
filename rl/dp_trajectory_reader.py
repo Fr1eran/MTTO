@@ -9,7 +9,7 @@ import numpy as np
 
 from dp.experiment_utils import DP_CURVE_FILENAME, load_dp_curve_artifact
 from model.ocs import TrainService
-from rl.reference_trajectory_sampler import ReferenceTrajectory
+from rl.context_pool import ReferenceTrajectory
 from utils.trajectory import OptimizedCurveArtifact
 
 __all__ = ["DPTrajectoryReader"]
@@ -25,7 +25,7 @@ class DPTrajectoryReader:
     """Load a task-matching DP curve as a :class:`ReferenceTrajectory`.
 
     The class deliberately no longer samples DP nodes or constructs RL states.
-    Use :class:`rl.reference_trajectory_sampler.ReferenceTrajectorySampler`
+    Use :class:`rl.context_pool.ContextPoolBuilder`
     for RL-grid resampling and environment-state reconstruction.
     """
 

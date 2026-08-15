@@ -1,4 +1,5 @@
 import argparse
+import functools
 from collections.abc import Callable
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from dp.experiment_utils import (
     load_dp_curve_artifact,
     render_dp_curve_on_axes,
 )
-from model.common import ORS
+from model.common import min_operation_time
 from utils.plot_utils import set_global_plot_style
 from utils.scenario import build_scenario
 from utils.trajectory import OptimizedCurveArtifact
@@ -130,7 +131,12 @@ def _build_dp_redundant_operation_time_arr(
     vehicle, track, safeguard_utility, train_service = build_scenario(
         schedule_time_s=schedule_time_s
     )
-    ors = ORS(vehicle=vehicle, track=track, factor=safeguard_utility.gamma)
+    min_remaining_time_fn = functools.partial(
+        min_operation_time,
+        vehicle=vehicle,
+        track=track,
+        gamma=safeguard_utility.gamma,
+    )
 
     target_position = _metric_as_float(metrics, "target_position_m")
     if target_position is None:
@@ -146,7 +152,7 @@ def _build_dp_redundant_operation_time_arr(
         schedule_time_s=schedule_time_s,
         target_position=target_position,
         target_speed=target_speed,
-        min_remaining_time_fn=ors.calc_min_operation_time,
+        min_remaining_time_fn=min_remaining_time_fn,
     )
 
 

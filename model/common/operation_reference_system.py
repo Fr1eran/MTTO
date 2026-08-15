@@ -63,7 +63,7 @@ def _calc_mb_descend_operation_numba(
     end_speed: float,
     speed_limits: NDArray[np.float64],
     speed_limit_intervals: NDArray[np.float64],
-    gamma: float,
+    factor: float,
     max_dec_abs: float,
     tol: float,
 ) -> tuple[float, float, int]:
@@ -76,7 +76,7 @@ def _calc_mb_descend_operation_numba(
 
     while begin_interval >= 0:
         mark_pos = speed_limit_intervals[begin_interval]
-        begin_speed = speed_limits[begin_interval] * gamma
+        begin_speed = speed_limits[begin_interval] * factor
         operation_time = (begin_speed - end_speed) / max_dec_abs
         begin_pos = end_pos - (begin_speed * begin_speed - end_speed * end_speed) / (
             2.0 * max_dec_abs
@@ -94,7 +94,7 @@ def _calc_mb_descend_operation_numba(
         next_idx = begin_interval - 1
         if next_idx < 0:
             next_idx = 0
-        next_interval_speed_limit = speed_limits[next_idx] * gamma
+        next_interval_speed_limit = speed_limits[next_idx] * factor
 
         if (
             edge_speed < next_interval_speed_limit
@@ -123,7 +123,7 @@ def _calc_ma_ascend_operation_numba(
     begin_speed: float,
     speed_limits: NDArray[np.float64],
     speed_limit_intervals: NDArray[np.float64],
-    gamma: float,
+    factor: float,
     max_acc: float,
     tol: float,
 ) -> tuple[float, float, int]:
@@ -136,7 +136,7 @@ def _calc_ma_ascend_operation_numba(
 
     while end_interval <= n_limits - 1:
         mark_pos = speed_limit_intervals[end_interval + 1]
-        end_speed = speed_limits[end_interval] * gamma
+        end_speed = speed_limits[end_interval] * factor
         operation_time = (end_speed - begin_speed) / max_acc
         end_pos = begin_pos + (end_speed * end_speed - begin_speed * begin_speed) / (
             2.0 * max_acc
@@ -156,7 +156,7 @@ def _calc_ma_ascend_operation_numba(
             next_idx = 0
         elif next_idx >= n_limits:
             next_idx = n_limits - 1
-        next_interval_speed_limit = speed_limits[next_idx] * gamma
+        next_interval_speed_limit = speed_limits[next_idx] * factor
 
         if (
             edge_speed < next_interval_speed_limit
@@ -179,678 +179,927 @@ def _calc_ma_ascend_operation_numba(
     return end_pos, operation_time, clipped_idx
 
 
-class ORS:
-    """Operation Reference System"""
+@njit(cache=True)
+def _append_operation_numba(
+    acc_arr: NDArray[np.float64],
+    time_arr: NDArray[np.float64],
+    count: int,
+    acc: float,
+    operation_time: float,
+) -> int:
+    acc_arr[count] = acc
+    time_arr[count] = operation_time
+    return count + 1
 
-    def __init__(
-        self, *, vehicle: VehicleInfo, track: TrackInfo, factor: float
-    ) -> None:
-        self.vehicle: VehicleInfo = vehicle
-        self.track: TrackInfo = track
-        self.gamma: float = factor
-        self._speed_limits_scaled: NDArray[np.float64] = (
-            self.track.speed_limits * self.gamma
+
+@njit(cache=True)
+def _nocruise_scenario_numba(
+    begin_pos: float,
+    begin_speed: float,
+    end_pos: float,
+    end_speed: float,
+    max_acc: float,
+    max_dec: float,
+    max_dec_abs: float,
+    acc_arr: NDArray[np.float64],
+    time_arr: NDArray[np.float64],
+    count: int,
+) -> tuple[int, float, bool]:
+    """Append the no-cruise operations and report the sceptical position."""
+    min_brake_distance = (begin_speed**2 - end_speed**2) / (2.0 * max_dec_abs)
+    sceptical_pos = 0.0
+    has_sceptical_pos = False
+    if min_brake_distance > (end_pos - begin_pos):
+        sceptical_pos = begin_pos - (begin_speed**2 - end_speed**2) / (
+            2.0 * max_dec_abs
         )
-
-        rise_entries_all, fall_exits_all = find_speed_rise_entry_and_fall(
-            speed_limits=self.track.speed_limits,
-            interval_points=self.track.speed_limit_intervals,
-            speed_factor=1.0,
+        has_sceptical_pos = True
+        operation_time = (begin_speed - end_speed) / max_dec_abs
+        count = _append_operation_numba(
+            acc_arr, time_arr, count, max_dec, operation_time
         )
-        self._rise_edge_idx_all: NDArray[np.int64] = np.asarray(
-            [entry.next_interval - 1 for entry in rise_entries_all],
-            dtype=np.int64,
+    else:
+        speed_peak_2 = (
+            2.0 * max_acc * max_dec_abs * (end_pos - begin_pos)
+            + max_dec_abs * begin_speed**2
+            + max_acc * end_speed**2
+        ) / (max_acc + max_dec_abs)
+        speed_peak = np.sqrt(speed_peak_2)
+        forward_time = (speed_peak - begin_speed) / max_acc
+        backward_time = (speed_peak - end_speed) / max_dec_abs
+        count = _append_operation_numba(acc_arr, time_arr, count, max_acc, forward_time)
+        count = _append_operation_numba(
+            acc_arr, time_arr, count, max_dec, backward_time
         )
-        self._fall_edge_idx_all: NDArray[np.int64] = np.asarray(
-            [entry.prev_interval for entry in fall_exits_all],
-            dtype=np.int64,
+    return count, sceptical_pos, has_sceptical_pos
+
+
+@njit(cache=True)
+def _cruise_scenario_numba(
+    cruise_begin_pos: float,
+    cruise_end_pos: float,
+    cruise_interval: int,
+    ma_time: float,
+    mb_time: float,
+    speed_limits: NDArray[np.float64],
+    factor: float,
+    max_acc: float,
+    max_dec: float,
+    acc_arr: NDArray[np.float64],
+    time_arr: NDArray[np.float64],
+    count: int,
+) -> int:
+    """Append max-acceleration, cruise, and max-braking operations."""
+    cruise_speed = speed_limits[cruise_interval] * factor
+    cruise_time = (cruise_end_pos - cruise_begin_pos) / cruise_speed
+    count = _append_operation_numba(acc_arr, time_arr, count, max_acc, ma_time)
+    count = _append_operation_numba(acc_arr, time_arr, count, 0.0, cruise_time)
+    count = _append_operation_numba(acc_arr, time_arr, count, max_dec, mb_time)
+    return count
+
+
+@njit(cache=True)
+def min_runtime_operations_numba(
+    current_pos: float,
+    current_speed: float,
+    end_pos: float,
+    end_speed: float,
+    speed_limits: NDArray[np.float64],
+    speed_limit_intervals: NDArray[np.float64],
+    factor: float,
+    max_acc: float,
+    max_dec: float,
+    max_dec_abs: float,
+    tol: float,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Return the minimum-runtime operation sequence in nopython mode.
+
+    This is the jitted equivalent of the reference implementation. The
+    result is two index-aligned float64 arrays of accelerations and durations.
+    """
+    n_limits = speed_limits.size
+    speed_limits_scaled = speed_limits * factor
+
+    tow_end_pos, tow_operation_time, tow_end_interval = _calc_ma_ascend_operation_numba(
+        current_pos,
+        current_speed,
+        speed_limits,
+        speed_limit_intervals,
+        factor,
+        max_acc,
+        tol,
+    )
+    brake_begin_pos, brake_operation_time, brake_begin_interval = (
+        _calc_mb_descend_operation_numba(
+            end_pos,
+            end_speed,
+            speed_limits,
+            speed_limit_intervals,
+            factor,
+            max_dec_abs,
+            tol,
         )
+    )
 
-    def _get_speed_limits_interval_index(
-        self, pos: float, *, ascend: bool = True
-    ) -> int:
-        """
-        获得当前位置所处区间的索引
-        Args:
-            pos: 当前位置
-            interval_points: 区间端点（升序）
-        返回:
-            区间索引(np.ndarray 或 int):
-              - 正向/forward:
-                若 pos 与某个端点相等，则视为属于将该端点作为左端点的区间（左端点包含）
-              - 反向/backward:
-                若 pos 与某个端点相等，则视为属于将该端点作为右端点的区间（右端点包含）
-        """
+    capacity = 3 * n_limits + 8
+    acc_arr = np.empty(capacity, dtype=np.float64)
+    time_arr = np.empty(capacity, dtype=np.float64)
+    count = 0
 
-        if ascend:  # 正向
-            side = "right"
-        else:  # 反向
-            side = "left"
-
-        idx = np.searchsorted(self.track.speed_limit_intervals, pos, side=side) - 1
-        return int(idx)
-
-    def _find_speed_rise_entry_and_fall(
-        self,
-        *,
-        start_idx: int,
-        end_idx: int,
-    ) -> tuple[list[ForwardBeginPoint], list[BackwardEndPoint]]:
-        """
-        返回所有限速开始上升的入口点（位置与对应限速）列表
-        和所有限速下降后的出口点（位置与对应限速）列表。
-
-        返回格式： (AscendBeginPoints, DescendEndPoints)
-          - AscendBeginPoints: list of ForwardBeginPoint
-            应为在上升沿边界位置、左侧的区间限速、右侧区间编号
-          - DescendEndPoints: list of BackwardEndPoint
-            应为在下降沿边界位置、右侧的区间限速、左侧区间编号
-        """
-
-        n = len(self.track.speed_limits)
-        if n < 2:
-            return [], []
-
-        resolved_start = max(0, int(start_idx))
-        resolved_end = min(n - 1, int(end_idx))
-        if resolved_start >= resolved_end:
-            return [], []
-
-        rise_indices = self._rise_edge_idx_all[
-            (self._rise_edge_idx_all >= resolved_start)
-            & (self._rise_edge_idx_all < resolved_end)
-        ]
-        ascend_begin_points = [
-            ForwardBeginPoint(
-                float(self.track.speed_limit_intervals[i + 1]),
-                float(self._speed_limits_scaled[i]),
-                int(i + 1),
+    if tow_end_interval >= brake_begin_interval:
+        if tow_end_pos > brake_begin_pos:
+            count, _, _ = _nocruise_scenario_numba(
+                current_pos,
+                current_speed,
+                end_pos,
+                end_speed,
+                max_acc,
+                max_dec,
+                max_dec_abs,
+                acc_arr,
+                time_arr,
+                count,
             )
-            for i in rise_indices
-        ]
-
-        fall_indices = self._fall_edge_idx_all[
-            (self._fall_edge_idx_all >= resolved_start)
-            & (self._fall_edge_idx_all < resolved_end)
-        ]
-        descend_end_points = [
-            BackwardEndPoint(
-                float(self.track.speed_limit_intervals[j + 1]),
-                float(self._speed_limits_scaled[j + 1]),
-                int(j),
-            )
-            for j in fall_indices
-        ]
-
-        return ascend_begin_points, descend_end_points
-
-    def _calc_mb_descend_operation(
-        self,
-        end_pos: float,
-        end_speed: float,
-    ) -> tuple[float, float, int]:
-        """
-        根据当前位置和速度反向计算在最大制动加速度下的
-        部分运行过程，直至达到顶棚运行速度
-
-        Args:
-            end_pos: 终点位置
-            end_speed: 终点速度
-
-        Returns:
-            最大制动模式的起始位置
-            最大制动模式的运行时间
-            最大制动模式的起始区间
-        """
-        begin_pos, operation_time, begin_interval = _calc_mb_descend_operation_numba(
-            end_pos=float(end_pos),
-            end_speed=float(end_speed),
-            speed_limits=self.track.speed_limits,
-            speed_limit_intervals=self.track.speed_limit_intervals,
-            gamma=float(self.gamma),
-            max_dec_abs=float(self.vehicle.max_dec_abs),
-            tol=1e-9,
-        )
-        return float(begin_pos), float(operation_time), int(begin_interval)
-
-    def _calc_ma_ascend_operation(
-        self,
-        begin_pos: float,
-        begin_speed: float,
-    ) -> tuple[float, float, int]:
-        """
-        根据当前位置和速度反向计算在最大牵引加速度下的
-        部分运行过程，直至达到顶棚运行速度
-        Args:
-            begin_pos: 起始位置
-            begin_speed: 起始速度
-
-        Returns:
-            最大牵引模式下的终点位置
-            最大牵引模式下的运行时间
-            最大牵引模式下的终止区间
-        """
-        end_pos, operation_time, end_interval = _calc_ma_ascend_operation_numba(
-            begin_pos=float(begin_pos),
-            begin_speed=float(begin_speed),
-            speed_limits=self.track.speed_limits,
-            speed_limit_intervals=self.track.speed_limit_intervals,
-            gamma=float(self.gamma),
-            max_acc=float(self.vehicle.max_acc),
-            tol=1e-9,
-        )
-        return float(end_pos), float(operation_time), int(end_interval)
-
-    def _calc_withnocruise_scenario(
-        self, begin_pos: float, begin_speed: float, end_pos: float, end_speed: float
-    ) -> tuple[list[GeneralOperation], float | None]:
-        """计算限速区间内不存在巡航阶段的操作模式序列"""
-        operation = []
-        min_brake_distance = (begin_speed**2 - end_speed**2) / (
-            2 * self.vehicle.max_dec_abs
-        )
-        sceptical_pos: float | None = None
-        # min_brake_distance = (
-        #     (begin_speed + end_speed)
-        #     * (begin_speed - end_speed)
-        #     / (2 * self.vehicle.max_dec)
-        # )
-        if min_brake_distance > (end_pos - begin_pos):
-            # 此时即使施加最大制动也无法停靠
-            # 减速到目标速度
-            sceptical_pos = begin_pos - (begin_speed**2 - end_speed**2) / (
-                2 * self.vehicle.max_dec_abs
-            )
-            operation_time = (begin_speed - end_speed) / self.vehicle.max_dec_abs
-            operation.append(GeneralOperation(self.vehicle.max_dec, operation_time))
         else:
-            # 先以最大加速度牵引再以最大减速度制动到目标位置
-            speed_peak_2 = (
-                (
-                    2
-                    * self.vehicle.max_acc
-                    * self.vehicle.max_dec_abs
-                    * (end_pos - begin_pos)
-                )
-                + self.vehicle.max_dec_abs * begin_speed**2
-                + self.vehicle.max_acc * end_speed**2
-            ) / (
-                self.vehicle.max_acc + self.vehicle.max_dec_abs
-            )  # 计算工况切换的顶棚速度
-            speed_peak = np.sqrt(speed_peak_2)
-            forward_operation_time = (speed_peak - begin_speed) / self.vehicle.max_acc
-            backward_operation_time = (
-                speed_peak - end_speed
-            ) / self.vehicle.max_dec_abs
-            operation.append(
-                GeneralOperation(self.vehicle.max_acc, forward_operation_time)
+            count = _cruise_scenario_numba(
+                tow_end_pos,
+                brake_begin_pos,
+                brake_begin_interval,
+                tow_operation_time,
+                brake_operation_time,
+                speed_limits,
+                factor,
+                max_acc,
+                max_dec,
+                acc_arr,
+                time_arr,
+                count,
             )
-            operation.append(
-                GeneralOperation(self.vehicle.max_dec, backward_operation_time)
-            )
-        return operation, sceptical_pos
+        return acc_arr[:count], time_arr[:count]
 
-    def _calc_withcruise_scenario(
-        self,
-        cruise_begin_pos: float,
-        cruise_end_pos: float,
-        cruise_interval: int,
-        ma_time: float,
-        mb_time: float,
-    ) -> list[GeneralOperation]:
-        """计算限速区间内存在巡航阶段的操作模式序列"""
-        operation = []
-        cruise_speed = self.track.speed_limits[cruise_interval] * self.gamma
-        cruise_time = (cruise_end_pos - cruise_begin_pos) / cruise_speed
-        operation.append(GeneralOperation(self.vehicle.max_acc, ma_time))
-        operation.append(GeneralOperation(0.0, cruise_time))
-        operation.append(GeneralOperation(self.vehicle.max_dec, mb_time))
-        return operation
+    table_size = n_limits + 4
+    asc_begin_pos = np.empty(table_size)
+    asc_begin_speed = np.empty(table_size)
+    asc_operation_time = np.empty(table_size)
+    asc_end_pos = np.empty(table_size)
+    asc_end_interval = np.empty(table_size, dtype=np.int64)
 
-    def _calc_min_runtime_operation(
-        self, current_pos: float, current_speed: float, end_pos: float, end_speed: float
-    ):
-        """
-        计算列车在给定线路条件和约束下的最短运行时间操作序列
-        """
-        tow_begin_speed = current_speed
-        tow_begin_pos = current_pos
-        brake_end_speed = end_speed
-        brake_end_pos = end_pos
+    desc_end_pos = np.empty(table_size)
+    desc_end_speed = np.empty(table_size)
+    desc_operation_time = np.empty(table_size)
+    desc_begin_pos = np.empty(table_size)
+    desc_begin_interval = np.empty(table_size, dtype=np.int64)
+    desc_end_interval = np.empty(table_size, dtype=np.int64)
 
-        (
-            tow_end_pos,
-            tow_operation_time,
-            tow_end_interval,
-        ) = self._calc_ma_ascend_operation(
-            begin_pos=tow_begin_pos, begin_speed=tow_begin_speed
-        )
+    n_ascend = 1
+    asc_begin_pos[0] = current_pos
+    asc_begin_speed[0] = current_speed
+    asc_operation_time[0] = tow_operation_time
+    asc_end_pos[0] = tow_end_pos
+    asc_end_interval[0] = tow_end_interval
 
-        (
-            brake_begin_pos,
-            brake_operation_time,
-            brake_begin_interval,
-        ) = self._calc_mb_descend_operation(
-            end_pos=brake_end_pos,
-            end_speed=brake_end_speed,
-        )
-        operations: list[GeneralOperation] = []
-
-        if tow_end_interval < brake_begin_interval:
-            ascend_begin_points, descend_end_points = (
-                self._find_speed_rise_entry_and_fall(
-                    start_idx=tow_end_interval, end_idx=brake_begin_interval
+    prev_ascend_end_interval = tow_end_interval
+    for i in range(tow_end_interval, brake_begin_interval):
+        if i >= n_limits - 1:
+            continue
+        if speed_limits[i + 1] <= speed_limits[i]:
+            continue
+        next_interval = i + 1
+        if next_interval > prev_ascend_end_interval:
+            end_pos_i, operation_time_i, end_interval_i = (
+                _calc_ma_ascend_operation_numba(
+                    speed_limit_intervals[next_interval],
+                    speed_limits_scaled[i],
+                    speed_limits,
+                    speed_limit_intervals,
+                    factor,
+                    max_acc,
+                    tol,
                 )
             )
+            asc_begin_pos[n_ascend] = speed_limit_intervals[next_interval]
+            asc_begin_speed[n_ascend] = speed_limits_scaled[i]
+            asc_operation_time[n_ascend] = operation_time_i
+            asc_end_pos[n_ascend] = end_pos_i
+            asc_end_interval[n_ascend] = end_interval_i
+            n_ascend += 1
+            prev_ascend_end_interval = end_interval_i
 
-            ascend_operations: list[AscendOperation] = [
-                {
-                    "ascend_begin_pos": tow_begin_pos,
-                    "ascend_begin_speed": tow_begin_speed,
-                    "ascend_operation_time": tow_operation_time,
-                    "ascend_end_pos": tow_end_pos,
-                    "ascend_end_interval": tow_end_interval,
-                    "ascend_begin_interval": self._get_speed_limits_interval_index(
-                        tow_begin_pos,
-                        ascend=True,
-                    ),
-                }
-            ]
+    n_descend = 1
+    desc_end_pos[0] = end_pos
+    desc_end_speed[0] = end_speed
+    desc_operation_time[0] = brake_operation_time
+    desc_begin_pos[0] = brake_begin_pos
+    desc_begin_interval[0] = brake_begin_interval
+    desc_end_interval[0] = _get_speed_limits_interval_index_numba(
+        speed_limit_intervals, end_pos, False
+    )
 
-            descend_operations: list[DescendOperation] = [
-                {
-                    "descend_end_pos": brake_end_pos,
-                    "descend_end_speed": brake_end_speed,
-                    "descend_operation_time": brake_operation_time,
-                    "descend_begin_pos": brake_begin_pos,
-                    "descend_begin_interval": brake_begin_interval,
-                    "descend_end_interval": self._get_speed_limits_interval_index(
-                        brake_end_pos,
-                        ascend=False,
-                    ),
-                }
-            ]
-            prev_ascend_end_interval = tow_end_interval
-            for (
-                ascend_begin_pos,
-                ascend_begin_speed,
-                ascend_begin_interval,
-            ) in ascend_begin_points:
-                # 如果当前正向最大牵引的起始位置被上个正向牵引曲线包含，则不计算
-                if ascend_begin_interval > prev_ascend_end_interval:
-                    (
-                        ascend_end_pos,
-                        ascend_operation_time,
-                        ascend_end_interval,
-                    ) = self._calc_ma_ascend_operation(
-                        begin_pos=ascend_begin_pos, begin_speed=ascend_begin_speed
-                    )
-
-                    ascend_operations.append(
-                        {
-                            "ascend_begin_pos": ascend_begin_pos,
-                            "ascend_begin_speed": ascend_begin_speed,
-                            "ascend_operation_time": ascend_operation_time,
-                            "ascend_end_pos": ascend_end_pos,
-                            "ascend_end_interval": ascend_end_interval,
-                            "ascend_begin_interval": ascend_begin_interval,
-                        }
-                    )
-                    prev_ascend_end_interval = ascend_end_interval
-
-            prev_descend_begin_interval = brake_begin_interval
-            for (
-                descend_end_pos,
-                descend_end_speed,
-                descend_end_interval,
-            ) in reversed(descend_end_points):
-                if descend_end_interval < prev_descend_begin_interval:
-                    (
-                        descend_begin_pos,
-                        descend_operation_time,
-                        descend_begin_interval,
-                    ) = self._calc_mb_descend_operation(
-                        end_pos=descend_end_pos, end_speed=descend_end_speed
-                    )
-
-                    descend_operations.append(
-                        {
-                            "descend_end_pos": descend_end_pos,
-                            "descend_end_speed": descend_end_speed,
-                            "descend_operation_time": descend_operation_time,
-                            "descend_begin_pos": descend_begin_pos,
-                            "descend_begin_interval": descend_begin_interval,
-                            "descend_end_interval": descend_end_interval,
-                        }
-                    )
-            # descend_operations不必反转
-            # ToDO: 添加其他特殊情况下的子操作剔除
-            # 计算操作模式
-            sceptical_pos: float | None = (
-                None  # 对于初始状态在最短时间运行曲线轮廓外的情况是必要的
+    prev_descend_begin_interval = brake_begin_interval
+    for j in range(brake_begin_interval - 1, tow_end_interval - 1, -1):
+        if j < 0:
+            continue
+        if speed_limits[j + 1] >= speed_limits[j]:
+            continue
+        if j < prev_descend_begin_interval:
+            begin_pos_j, operation_time_j, begin_interval_j = (
+                _calc_mb_descend_operation_numba(
+                    speed_limit_intervals[j + 1],
+                    speed_limits_scaled[j + 1],
+                    speed_limits,
+                    speed_limit_intervals,
+                    factor,
+                    max_dec_abs,
+                    tol,
+                )
             )
-            current_interval = tow_end_interval
-            while current_interval <= brake_begin_interval:
-                ascend_operation_idx = next(
-                    (
-                        i
-                        for i, fo in enumerate(ascend_operations)
-                        if fo["ascend_end_interval"] >= current_interval
-                    ),
-                    None,
-                )
-                descend_operation_idx = next(
-                    (
-                        i
-                        for i, bo in enumerate(descend_operations)
-                        if bo["descend_begin_interval"] <= current_interval
-                    ),
-                    None,
-                )
-                if (ascend_operation_idx is not None) and (
-                    descend_operation_idx is not None
-                ):
-                    # 此时必定要制动
-                    ascend_op = ascend_operations[ascend_operation_idx]
-                    descend_op = descend_operations[descend_operation_idx]
+            desc_end_pos[n_descend] = speed_limit_intervals[j + 1]
+            desc_end_speed[n_descend] = speed_limits_scaled[j + 1]
+            desc_operation_time[n_descend] = operation_time_j
+            desc_begin_pos[n_descend] = begin_pos_j
+            desc_begin_interval[n_descend] = begin_interval_j
+            desc_end_interval[n_descend] = j
+            n_descend += 1
+            prev_descend_begin_interval = j
 
-                    if ascend_op["ascend_end_pos"] > descend_op["descend_begin_pos"]:
-                        # 此时不存在中间巡航过程
-                        middle_operations, sceptical_pos = (
-                            self._calc_withnocruise_scenario(
-                                begin_pos=ascend_op["ascend_begin_pos"],
-                                begin_speed=ascend_op["ascend_begin_speed"],
-                                end_pos=descend_op["descend_end_pos"],
-                                end_speed=descend_op["descend_end_speed"],
-                            )
-                        )
-                    else:
-                        # 此时必定存在中间巡航过程
-                        middle_operations = self._calc_withcruise_scenario(
-                            cruise_begin_pos=ascend_op["ascend_end_pos"],
-                            cruise_end_pos=descend_op["descend_begin_pos"],
-                            cruise_interval=current_interval,
-                            ma_time=ascend_op["ascend_operation_time"],
-                            mb_time=descend_op["descend_operation_time"],
-                        )
-                    operations += middle_operations
-                    current_interval = descend_op["descend_end_interval"] + 1
-                elif (ascend_operation_idx is not None) and (
-                    descend_operation_idx is None
-                ):
-                    # 先最大牵引后巡航
-                    ascend_op = ascend_operations[ascend_operation_idx]
-                    operations.append(
-                        GeneralOperation(
-                            self.vehicle.max_acc, ascend_op["ascend_operation_time"]
-                        )
-                    )
-                    cruise_speed = (
-                        self.track.speed_limits[current_interval] * self.gamma
-                    )
-                    cruise_distance = (
-                        self.track.speed_limit_intervals[
-                            ascend_op["ascend_end_interval"] + 1
-                        ]
-                        - ascend_op["ascend_end_pos"]
-                    )
-                    cruise_time = cruise_distance / cruise_speed
-                    operations.append(GeneralOperation(0.0, cruise_time))
-                    current_interval = ascend_op["ascend_end_interval"] + 1
-                elif (ascend_operation_idx is None) and (
-                    descend_operation_idx is not None
-                ):
-                    descend_op = descend_operations[descend_operation_idx]
-                    cruise_distance = descend_op["descend_begin_pos"] - (
-                        sceptical_pos
-                        if sceptical_pos is not None
-                        else self.track.speed_limit_intervals[current_interval]
-                    )
-                    dot = descend_op["descend_operation_time"]
-                    if cruise_distance < 0.0:
-                        # 此时只有最大制动工况
-                        operations.append(
-                            GeneralOperation(
-                                self.vehicle.max_dec,
-                                dot,
-                            )
-                        )
-                        sceptical_pos += (
-                            self.track.speed_limits[current_interval] * self.gamma * dot
-                            + 0.5 * self.vehicle.max_dec * dot**2
-                        )
-                    else:
-                        # 先巡航后最大制动
-                        cruise_speed = (
-                            self.track.speed_limits[current_interval] * self.gamma
-                        )
-                        cruise_time = cruise_distance / cruise_speed
-                        operations.append(GeneralOperation(0.0, cruise_time))
-                        operations.append(
-                            GeneralOperation(
-                                self.vehicle.max_dec,
-                                dot,
-                            )
-                        )
-                        sceptical_pos = None
-                    current_interval = descend_op["descend_end_interval"] + 1
-                else:
-                    # 全程巡航
-                    cruise_speed = (
-                        self.track.speed_limits[current_interval] * self.gamma
-                    )
-                    cruise_distance = (
-                        self.track.speed_limit_intervals[current_interval + 1]
-                        - self.track.speed_limit_intervals[current_interval]
-                    )
-                    cruise_time = cruise_distance / cruise_speed
-                    operations.append(GeneralOperation(0.0, cruise_time))
-                    current_interval += 1
-
-        else:  # 没有中间最大牵引或最大制动环节
-            if tow_end_pos > brake_begin_pos:
-                # 此时不存在中间巡航过程
-                operations, _ = self._calc_withnocruise_scenario(
-                    begin_pos=tow_begin_pos,
-                    begin_speed=tow_begin_speed,
-                    end_pos=brake_end_pos,
-                    end_speed=brake_end_speed,
-                )
-
-            else:
-                # 此时必定存在中间巡航过程
-                operations = self._calc_withcruise_scenario(
-                    cruise_begin_pos=tow_end_pos,
-                    cruise_end_pos=brake_begin_pos,
-                    cruise_interval=brake_begin_interval,
-                    ma_time=tow_operation_time,
-                    mb_time=brake_operation_time,
-                )
-
-        return operations
-
-    def calc_min_operation_time_curve(
-        self,
-        begin_pos: float,
-        begin_speed: float,
-        end_pos: float,
-        end_speed: float,
-    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-        """计算在给定当前位置、速度下的最小运行速度曲线及其运行时间"""
-        operations = self._calc_min_runtime_operation(
-            current_pos=begin_pos,
-            current_speed=begin_speed,
-            end_pos=end_pos,
-            end_speed=end_speed,
-        )
-        curve_pos_array = np.array([begin_pos], dtype=np.float64)
-        curve_speed_array = np.array([begin_speed], dtype=np.float64)
-        for acc, operation_time in operations:
-            # build trajectory for this operation (constant accel for duration)
-            if operation_time <= 0:
-                continue
-
-            # sampling resolution (s)
-            dt = 0.1
-            n_steps = max(int(np.floor(operation_time / dt)), 2)
-
-            # sample interior points (exclude the final endpoint to avoid duplicates)
-            t_samples = np.linspace(
-                0.0, operation_time, n_steps, endpoint=True, dtype=np.float64
-            )
-            speeds = begin_speed + acc * t_samples
-            positions = begin_pos + begin_speed * t_samples + 0.5 * acc * t_samples**2
-
-            curve_pos_array = np.concatenate((curve_pos_array[:-1], positions))
-            curve_speed_array = np.concatenate((curve_speed_array[:-1], speeds))
-
-            # update current state
-            begin_pos = curve_pos_array[-1]
-            begin_speed = curve_speed_array[-1]
-
-        # 输出 guard：自动去掉重复位置点，并同步保留对应速度。
-        if curve_pos_array.size > 1:
-            keep_mask = np.empty(curve_pos_array.size, dtype=bool)
-            keep_mask[0] = True
-            keep_mask[1:] = np.diff(curve_pos_array) != 0.0
-            curve_pos_array = curve_pos_array[keep_mask]
-            curve_speed_array = curve_speed_array[keep_mask]
-
-        return (
-            curve_pos_array,
-            curve_speed_array,
-        )
-
-    def calc_min_operation_time(
-        self, begin_pos: float, begin_speed: float, end_pos: float, end_speed: float
-    ) -> float:
-        """
-        计算在给定起始位置、起始速度、终止位置、终止速度
-        在参考系统运行模式下的最短运行时间
-
-        Args:
-            begin_pos: 起始位置(m)
-            begin_speed: 起始速度(m/s)
-            end_pos: 终止位置(m)
-            end_speed: 终止速度(m/s)
-
-        Returns:
-            ref_operation_time: 参考最短运行时间
-
-        """
-        ref_operations: list[GeneralOperation] = self._calc_min_runtime_operation(
-            current_pos=begin_pos,
-            current_speed=begin_speed,
-            end_pos=end_pos,
-            end_speed=end_speed,
-        )
-
-        ref_operation_time: float = 0.0
-        for _, time in ref_operations:
-            ref_operation_time += time
-
-        return ref_operation_time
-
-    def calc_max_energy_and_min_operation_time(
-        self,
-        begin_pos: float,
-        begin_speed: float,
-        end_pos: float,
-        end_speed: float,
-        distance: float,
-        energy_con_calc: ECC,
-    ) -> tuple[float, float, float]:
-        """
-        计算在给定起始位置、起始速度、终止位置、终止速度和目标位移量
-        在参考系统运行模式下的能耗和最短运行时间
-
-        Args:
-            begin_pos: 起始位置(m)
-            begin_speed: 起始速度(m/s)
-            end_pos: 终止位置(m)
-            end_speed: 终止速度(m/s)
-            distance: 目标位移量(m)
-
-        Returns:
-            ref_mechanic_energy_consumption: 参考机械能耗(J)
-            ref_leviated_energy_consumption: 参考悬浮能耗(J)
-            ref_operation_time: 参考运行时间(s)
-        """
-        ref_operations: list[GeneralOperation] = self._calc_min_runtime_operation(
-            current_pos=begin_pos,
-            current_speed=begin_speed,
-            end_pos=end_pos,
-            end_speed=end_speed,
-        )
-
-        ref_mec = 0.0
-        ref_lec = 0.0
-        ref_operation_time = 0.0
-        accumulated_distance = 0.0
-
-        current_pos_i = float(begin_pos)
-        current_speed_i = float(begin_speed)
-
-        # 遍历每个操作段，累计能耗和时间直到达到目标位移
-        for acc, operation_time in ref_operations:
-            # 计算该操作段的位移
-            segment_distance = (
-                current_speed_i * operation_time + 0.5 * acc * operation_time**2
-            )
-
-            # 判断是否超过目标位移
-            if accumulated_distance + segment_distance >= float(distance):
-                # 计算到达目标位移所需的实际时间
-                remaining_displacement = float(distance) - accumulated_distance
-
-                # 求解运动学方程: s = v0*t + 0.5*a*t^2
-                if np.abs(acc) < 1e-9:
-                    # 匀速运动
-                    actual_time = remaining_displacement / np.maximum(
-                        current_speed_i, 1e-6
-                    )
-                else:
-                    # 变速运动，求解二次方程
-                    discriminant = current_speed_i**2 + 2 * acc * remaining_displacement
-                    discriminant = max(discriminant, 0)
-                    actual_time = (np.sqrt(discriminant) - current_speed_i) / acc
-
-                # 计算该段的能耗
-                pec, lec = energy_con_calc.calc_energy(
-                    begin_pos=current_pos_i,
-                    begin_speed=current_speed_i,
-                    acc=acc,
-                    distance=remaining_displacement,
-                    direction=1,
-                    operation_time=actual_time,
-                    vehicle=self.vehicle,
-                    track=self.track,
-                )
-
-                ref_mec += pec
-                ref_lec += lec
-                ref_operation_time += actual_time
+    sceptical_pos = 0.0
+    has_sceptical_pos = False
+    current_interval = tow_end_interval
+    while current_interval <= brake_begin_interval:
+        ascend_idx = -1
+        for k in range(n_ascend):
+            if asc_end_interval[k] >= current_interval:
+                ascend_idx = k
                 break
+        descend_idx = -1
+        for k in range(n_descend):
+            if desc_begin_interval[k] <= current_interval:
+                descend_idx = k
+                break
+
+        if ascend_idx >= 0 and descend_idx >= 0:
+            if asc_end_pos[ascend_idx] > desc_begin_pos[descend_idx]:
+                count, sceptical_pos, has_sceptical_pos = _nocruise_scenario_numba(
+                    asc_begin_pos[ascend_idx],
+                    asc_begin_speed[ascend_idx],
+                    desc_end_pos[descend_idx],
+                    desc_end_speed[descend_idx],
+                    max_acc,
+                    max_dec,
+                    max_dec_abs,
+                    acc_arr,
+                    time_arr,
+                    count,
+                )
             else:
-                # 该段未达到目标位移，计算完整段的能耗
-                pec, lec = energy_con_calc.calc_energy(
-                    begin_pos=current_pos_i,
-                    begin_speed=current_speed_i,
-                    acc=acc,
-                    distance=segment_distance,
-                    direction=1,
-                    operation_time=operation_time,
-                    vehicle=self.vehicle,
-                    track=self.track,
+                count = _cruise_scenario_numba(
+                    asc_end_pos[ascend_idx],
+                    desc_begin_pos[descend_idx],
+                    current_interval,
+                    asc_operation_time[ascend_idx],
+                    desc_operation_time[descend_idx],
+                    speed_limits,
+                    factor,
+                    max_acc,
+                    max_dec,
+                    acc_arr,
+                    time_arr,
+                    count,
+                )
+            current_interval = desc_end_interval[descend_idx] + 1
+        elif ascend_idx >= 0:
+            count = _append_operation_numba(
+                acc_arr,
+                time_arr,
+                count,
+                max_acc,
+                asc_operation_time[ascend_idx],
+            )
+            cruise_speed = speed_limits[current_interval] * factor
+            cruise_distance = (
+                speed_limit_intervals[asc_end_interval[ascend_idx] + 1]
+                - asc_end_pos[ascend_idx]
+            )
+            count = _append_operation_numba(
+                acc_arr, time_arr, count, 0.0, cruise_distance / cruise_speed
+            )
+            current_interval = asc_end_interval[ascend_idx] + 1
+        elif descend_idx >= 0:
+            cruise_start_pos = (
+                sceptical_pos
+                if has_sceptical_pos
+                else speed_limit_intervals[current_interval]
+            )
+            cruise_distance = desc_begin_pos[descend_idx] - cruise_start_pos
+            descend_time = desc_operation_time[descend_idx]
+            if cruise_distance < 0.0:
+                count = _append_operation_numba(
+                    acc_arr, time_arr, count, max_dec, descend_time
+                )
+                sceptical_pos += (
+                    speed_limits[current_interval] * factor * descend_time
+                    + 0.5 * max_dec * descend_time**2
+                )
+                has_sceptical_pos = True
+            else:
+                cruise_speed = speed_limits[current_interval] * factor
+                count = _append_operation_numba(
+                    acc_arr, time_arr, count, 0.0, cruise_distance / cruise_speed
+                )
+                count = _append_operation_numba(
+                    acc_arr, time_arr, count, max_dec, descend_time
+                )
+                sceptical_pos = 0.0
+                has_sceptical_pos = False
+            current_interval = desc_end_interval[descend_idx] + 1
+        else:
+            cruise_speed = speed_limits[current_interval] * factor
+            cruise_distance = (
+                speed_limit_intervals[current_interval + 1]
+                - speed_limit_intervals[current_interval]
+            )
+            count = _append_operation_numba(
+                acc_arr, time_arr, count, 0.0, cruise_distance / cruise_speed
+            )
+            current_interval += 1
+
+    return acc_arr[:count], time_arr[:count]
+
+
+@njit(cache=True)
+def min_operation_time_numba(
+    current_pos: float,
+    current_speed: float,
+    end_pos: float,
+    end_speed: float,
+    speed_limits: NDArray[np.float64],
+    speed_limit_intervals: NDArray[np.float64],
+    factor: float,
+    max_acc: float,
+    max_dec: float,
+    max_dec_abs: float,
+    tol: float,
+) -> float:
+    """Return only the total minimum operation time (nopython fast path)."""
+    _, time_arr = min_runtime_operations_numba(
+        current_pos,
+        current_speed,
+        end_pos,
+        end_speed,
+        speed_limits,
+        speed_limit_intervals,
+        factor,
+        max_acc,
+        max_dec,
+        max_dec_abs,
+        tol,
+    )
+    return float(np.sum(time_arr))
+
+
+def _get_speed_limits_interval_index_reference(
+    speed_limit_intervals: NDArray[np.float64],
+    pos: float,
+    *,
+    ascend: bool = True,
+) -> int:
+    """Return the interval index containing ``pos`` (side depends on direction)."""
+    side = "right" if ascend else "left"
+    return int(np.searchsorted(speed_limit_intervals, pos, side=side) - 1)
+
+
+def _find_speed_rise_entry_and_fall_reference(
+    speed_limits: NDArray[np.float64],
+    speed_limit_intervals: NDArray[np.float64],
+    *,
+    factor: float,
+    start_idx: int,
+    end_idx: int,
+) -> tuple[list[ForwardBeginPoint], list[BackwardEndPoint]]:
+    """Return scaled rise entries and fall exits in ``[start_idx, end_idx)``."""
+    rise_entries, fall_exits = find_speed_rise_entry_and_fall(
+        speed_limits=speed_limits,
+        interval_points=speed_limit_intervals,
+        start_idx=start_idx,
+        end_idx=end_idx,
+        speed_factor=factor,
+    )
+    ascend_begin_points = [
+        ForwardBeginPoint(
+            float(entry.boundary_pos),
+            float(entry.left_speed_scaled),
+            int(entry.next_interval),
+        )
+        for entry in rise_entries
+    ]
+    descend_end_points = [
+        BackwardEndPoint(
+            float(entry.boundary_pos),
+            float(entry.right_speed_scaled),
+            int(entry.prev_interval),
+        )
+        for entry in fall_exits
+    ]
+    return ascend_begin_points, descend_end_points
+
+
+def _calc_mb_descend_operation_reference(
+    vehicle: VehicleInfo,
+    track: TrackInfo,
+    factor: float,
+    end_pos: float,
+    end_speed: float,
+) -> tuple[float, float, int]:
+    """Backward max-braking operation for the reference implementation."""
+    begin_pos, operation_time, begin_interval = _calc_mb_descend_operation_numba(
+        end_pos=float(end_pos),
+        end_speed=float(end_speed),
+        speed_limits=track.speed_limits,
+        speed_limit_intervals=track.speed_limit_intervals,
+        factor=float(factor),
+        max_dec_abs=float(vehicle.max_dec_abs),
+        tol=1e-9,
+    )
+    return float(begin_pos), float(operation_time), int(begin_interval)
+
+
+def _calc_ma_ascend_operation_reference(
+    vehicle: VehicleInfo,
+    track: TrackInfo,
+    factor: float,
+    begin_pos: float,
+    begin_speed: float,
+) -> tuple[float, float, int]:
+    """Forward max-acceleration operation for the reference implementation."""
+    end_pos, operation_time, end_interval = _calc_ma_ascend_operation_numba(
+        begin_pos=float(begin_pos),
+        begin_speed=float(begin_speed),
+        speed_limits=track.speed_limits,
+        speed_limit_intervals=track.speed_limit_intervals,
+        factor=float(factor),
+        max_acc=float(vehicle.max_acc),
+        tol=1e-9,
+    )
+    return float(end_pos), float(operation_time), int(end_interval)
+
+
+def _calc_withnocruise_scenario_reference(
+    vehicle: VehicleInfo,
+    begin_pos: float,
+    begin_speed: float,
+    end_pos: float,
+    end_speed: float,
+) -> tuple[list[GeneralOperation], float | None]:
+    """Return the no-cruise operation sequence for the reference implementation."""
+    operation: list[GeneralOperation] = []
+    max_dec_abs = float(vehicle.max_dec_abs)
+    min_brake_distance = (begin_speed**2 - end_speed**2) / (2.0 * max_dec_abs)
+    sceptical_pos: float | None = None
+    if min_brake_distance > (end_pos - begin_pos):
+        sceptical_pos = begin_pos - (begin_speed**2 - end_speed**2) / (
+            2.0 * max_dec_abs
+        )
+        operation_time = (begin_speed - end_speed) / max_dec_abs
+        operation.append(GeneralOperation(vehicle.max_dec, operation_time))
+    else:
+        speed_peak_2 = (
+            2.0 * vehicle.max_acc * max_dec_abs * (end_pos - begin_pos)
+            + max_dec_abs * begin_speed**2
+            + vehicle.max_acc * end_speed**2
+        ) / (vehicle.max_acc + max_dec_abs)
+        speed_peak = np.sqrt(speed_peak_2)
+        forward_operation_time = (speed_peak - begin_speed) / vehicle.max_acc
+        backward_operation_time = (speed_peak - end_speed) / max_dec_abs
+        operation.append(GeneralOperation(vehicle.max_acc, forward_operation_time))
+        operation.append(GeneralOperation(vehicle.max_dec, backward_operation_time))
+    return operation, sceptical_pos
+
+
+def _calc_withcruise_scenario_reference(
+    vehicle: VehicleInfo,
+    track: TrackInfo,
+    factor: float,
+    cruise_begin_pos: float,
+    cruise_end_pos: float,
+    cruise_interval: int,
+    ma_time: float,
+    mb_time: float,
+) -> list[GeneralOperation]:
+    """Return the max-accel/cruise/max-brake sequence (reference implementation)."""
+    cruise_speed = track.speed_limits[cruise_interval] * factor
+    cruise_time = (cruise_end_pos - cruise_begin_pos) / cruise_speed
+    return [
+        GeneralOperation(vehicle.max_acc, ma_time),
+        GeneralOperation(0.0, cruise_time),
+        GeneralOperation(vehicle.max_dec, mb_time),
+    ]
+
+
+def _calc_min_runtime_operation_reference(
+    vehicle: VehicleInfo,
+    track: TrackInfo,
+    factor: float,
+    current_pos: float,
+    current_speed: float,
+    end_pos: float,
+    end_speed: float,
+) -> list[GeneralOperation]:
+    """Pure-Python reference for the minimum-runtime operation sequence."""
+    tow_begin_speed = current_speed
+    tow_begin_pos = current_pos
+    brake_end_speed = end_speed
+    brake_end_pos = end_pos
+
+    (
+        tow_end_pos,
+        tow_operation_time,
+        tow_end_interval,
+    ) = _calc_ma_ascend_operation_reference(
+        vehicle, track, factor, tow_begin_pos, tow_begin_speed
+    )
+
+    (
+        brake_begin_pos,
+        brake_operation_time,
+        brake_begin_interval,
+    ) = _calc_mb_descend_operation_reference(
+        vehicle, track, factor, brake_end_pos, brake_end_speed
+    )
+    operations: list[GeneralOperation] = []
+
+    if tow_end_interval < brake_begin_interval:
+        ascend_begin_points, descend_end_points = (
+            _find_speed_rise_entry_and_fall_reference(
+                track.speed_limits,
+                track.speed_limit_intervals,
+                factor=factor,
+                start_idx=tow_end_interval,
+                end_idx=brake_begin_interval,
+            )
+        )
+
+        ascend_operations: list[AscendOperation] = [
+            {
+                "ascend_begin_pos": tow_begin_pos,
+                "ascend_begin_speed": tow_begin_speed,
+                "ascend_operation_time": tow_operation_time,
+                "ascend_end_pos": tow_end_pos,
+                "ascend_end_interval": tow_end_interval,
+                "ascend_begin_interval": _get_speed_limits_interval_index_reference(
+                    track.speed_limit_intervals,
+                    tow_begin_pos,
+                    ascend=True,
+                ),
+            }
+        ]
+
+        descend_operations: list[DescendOperation] = [
+            {
+                "descend_end_pos": brake_end_pos,
+                "descend_end_speed": brake_end_speed,
+                "descend_operation_time": brake_operation_time,
+                "descend_begin_pos": brake_begin_pos,
+                "descend_begin_interval": brake_begin_interval,
+                "descend_end_interval": _get_speed_limits_interval_index_reference(
+                    track.speed_limit_intervals,
+                    brake_end_pos,
+                    ascend=False,
+                ),
+            }
+        ]
+        prev_ascend_end_interval = tow_end_interval
+        for (
+            ascend_begin_pos,
+            ascend_begin_speed,
+            ascend_begin_interval,
+        ) in ascend_begin_points:
+            if ascend_begin_interval > prev_ascend_end_interval:
+                (
+                    ascend_end_pos,
+                    ascend_operation_time,
+                    ascend_end_interval,
+                ) = _calc_ma_ascend_operation_reference(
+                    vehicle,
+                    track,
+                    factor,
+                    ascend_begin_pos,
+                    ascend_begin_speed,
+                )
+                ascend_operations.append(
+                    {
+                        "ascend_begin_pos": ascend_begin_pos,
+                        "ascend_begin_speed": ascend_begin_speed,
+                        "ascend_operation_time": ascend_operation_time,
+                        "ascend_end_pos": ascend_end_pos,
+                        "ascend_end_interval": ascend_end_interval,
+                        "ascend_begin_interval": ascend_begin_interval,
+                    }
+                )
+                prev_ascend_end_interval = ascend_end_interval
+
+        prev_descend_begin_interval = brake_begin_interval
+        for (
+            descend_end_pos,
+            descend_end_speed,
+            descend_end_interval,
+        ) in reversed(descend_end_points):
+            if descend_end_interval < prev_descend_begin_interval:
+                (
+                    descend_begin_pos,
+                    descend_operation_time,
+                    descend_begin_interval,
+                ) = _calc_mb_descend_operation_reference(
+                    vehicle,
+                    track,
+                    factor,
+                    descend_end_pos,
+                    descend_end_speed,
+                )
+                descend_operations.append(
+                    {
+                        "descend_end_pos": descend_end_pos,
+                        "descend_end_speed": descend_end_speed,
+                        "descend_operation_time": descend_operation_time,
+                        "descend_begin_pos": descend_begin_pos,
+                        "descend_begin_interval": descend_begin_interval,
+                        "descend_end_interval": descend_end_interval,
+                    }
                 )
 
-                ref_mec += pec
-                ref_lec += lec
-                ref_operation_time += operation_time
-                accumulated_distance += segment_distance
+        sceptical_pos: float | None = None
+        current_interval = tow_end_interval
+        while current_interval <= brake_begin_interval:
+            ascend_operation_idx = next(
+                (
+                    i
+                    for i, fo in enumerate(ascend_operations)
+                    if fo["ascend_end_interval"] >= current_interval
+                ),
+                None,
+            )
+            descend_operation_idx = next(
+                (
+                    i
+                    for i, bo in enumerate(descend_operations)
+                    if bo["descend_begin_interval"] <= current_interval
+                ),
+                None,
+            )
+            if (ascend_operation_idx is not None) and (
+                descend_operation_idx is not None
+            ):
+                ascend_op = ascend_operations[ascend_operation_idx]
+                descend_op = descend_operations[descend_operation_idx]
+                if ascend_op["ascend_end_pos"] > descend_op["descend_begin_pos"]:
+                    middle_operations, sceptical_pos = (
+                        _calc_withnocruise_scenario_reference(
+                            vehicle,
+                            ascend_op["ascend_begin_pos"],
+                            ascend_op["ascend_begin_speed"],
+                            descend_op["descend_end_pos"],
+                            descend_op["descend_end_speed"],
+                        )
+                    )
+                else:
+                    middle_operations = _calc_withcruise_scenario_reference(
+                        vehicle,
+                        track,
+                        factor,
+                        ascend_op["ascend_end_pos"],
+                        descend_op["descend_begin_pos"],
+                        current_interval,
+                        ascend_op["ascend_operation_time"],
+                        descend_op["descend_operation_time"],
+                    )
+                operations += middle_operations
+                current_interval = descend_op["descend_end_interval"] + 1
+            elif (ascend_operation_idx is not None) and (descend_operation_idx is None):
+                ascend_op = ascend_operations[ascend_operation_idx]
+                operations.append(
+                    GeneralOperation(
+                        vehicle.max_acc, ascend_op["ascend_operation_time"]
+                    )
+                )
+                cruise_speed = track.speed_limits[current_interval] * factor
+                cruise_distance = (
+                    track.speed_limit_intervals[ascend_op["ascend_end_interval"] + 1]
+                    - ascend_op["ascend_end_pos"]
+                )
+                operations.append(GeneralOperation(0.0, cruise_distance / cruise_speed))
+                current_interval = ascend_op["ascend_end_interval"] + 1
+            elif (ascend_operation_idx is None) and (descend_operation_idx is not None):
+                descend_op = descend_operations[descend_operation_idx]
+                cruise_distance = descend_op["descend_begin_pos"] - (
+                    sceptical_pos
+                    if sceptical_pos is not None
+                    else track.speed_limit_intervals[current_interval]
+                )
+                dot = descend_op["descend_operation_time"]
+                if cruise_distance < 0.0:
+                    operations.append(GeneralOperation(vehicle.max_dec, dot))
+                    sceptical_pos += (
+                        track.speed_limits[current_interval] * factor * dot
+                        + 0.5 * vehicle.max_dec * dot**2
+                    )
+                else:
+                    cruise_speed = track.speed_limits[current_interval] * factor
+                    operations.append(
+                        GeneralOperation(0.0, cruise_distance / cruise_speed)
+                    )
+                    operations.append(GeneralOperation(vehicle.max_dec, dot))
+                    sceptical_pos = None
+                current_interval = descend_op["descend_end_interval"] + 1
+            else:
+                cruise_speed = track.speed_limits[current_interval] * factor
+                cruise_distance = (
+                    track.speed_limit_intervals[current_interval + 1]
+                    - track.speed_limit_intervals[current_interval]
+                )
+                operations.append(GeneralOperation(0.0, cruise_distance / cruise_speed))
+                current_interval += 1
+    else:
+        if tow_end_pos > brake_begin_pos:
+            operations, _ = _calc_withnocruise_scenario_reference(
+                vehicle,
+                tow_begin_pos,
+                tow_begin_speed,
+                brake_end_pos,
+                brake_end_speed,
+            )
+        else:
+            operations = _calc_withcruise_scenario_reference(
+                vehicle,
+                track,
+                factor,
+                tow_end_pos,
+                brake_begin_pos,
+                brake_begin_interval,
+                tow_operation_time,
+                brake_operation_time,
+            )
 
-                # 更新当前状态
-                current_pos_i += segment_distance
-                current_speed_i += acc * operation_time
+    return operations
 
-        return float(ref_mec), float(ref_lec), float(ref_operation_time)
+
+def min_operation_time(
+    vehicle: VehicleInfo,
+    track: TrackInfo,
+    factor: float,
+    begin_pos: float,
+    begin_speed: float,
+    end_pos: float,
+    end_speed: float,
+) -> float:
+    """Return the minimum operation time from ``begin`` to ``end``."""
+    return float(
+        min_operation_time_numba(
+            current_pos=begin_pos,
+            current_speed=begin_speed,
+            end_pos=end_pos,
+            end_speed=end_speed,
+            speed_limits=track.speed_limits,
+            speed_limit_intervals=track.speed_limit_intervals,
+            factor=float(factor),
+            max_acc=float(vehicle.max_acc),
+            max_dec=float(vehicle.max_dec),
+            max_dec_abs=float(vehicle.max_dec_abs),
+            tol=1e-9,
+        )
+    )
+
+
+def min_operation_time_curve(
+    vehicle: VehicleInfo,
+    track: TrackInfo,
+    factor: float,
+    begin_pos: float,
+    begin_speed: float,
+    end_pos: float,
+    end_speed: float,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Return the minimum-time speed curve as sampled (position, speed) arrays."""
+    acc_arr, time_arr = min_runtime_operations_numba(
+        current_pos=begin_pos,
+        current_speed=begin_speed,
+        end_pos=end_pos,
+        end_speed=end_speed,
+        speed_limits=track.speed_limits,
+        speed_limit_intervals=track.speed_limit_intervals,
+        factor=float(factor),
+        max_acc=float(vehicle.max_acc),
+        max_dec=float(vehicle.max_dec),
+        max_dec_abs=float(vehicle.max_dec_abs),
+        tol=1e-9,
+    )
+    curve_pos_array = np.array([begin_pos], dtype=np.float64)
+    curve_speed_array = np.array([begin_speed], dtype=np.float64)
+    for acc, operation_time in zip(acc_arr, time_arr, strict=True):
+        operation_time_value = float(operation_time)
+        if operation_time_value <= 0:
+            continue
+        dt = 0.1
+        n_steps = max(int(np.floor(operation_time_value / dt)), 2)
+        t_samples = np.linspace(
+            0.0, operation_time_value, n_steps, endpoint=True, dtype=np.float64
+        )
+        acc_value = float(acc)
+        speeds = begin_speed + acc_value * t_samples
+        positions = begin_pos + begin_speed * t_samples + 0.5 * acc_value * t_samples**2
+        curve_pos_array = np.concatenate((curve_pos_array[:-1], positions))
+        curve_speed_array = np.concatenate((curve_speed_array[:-1], speeds))
+        begin_pos = curve_pos_array[-1]
+        begin_speed = curve_speed_array[-1]
+
+    if curve_pos_array.size > 1:
+        keep_mask = np.empty(curve_pos_array.size, dtype=bool)
+        keep_mask[0] = True
+        keep_mask[1:] = np.diff(curve_pos_array) != 0.0
+        curve_pos_array = curve_pos_array[keep_mask]
+        curve_speed_array = curve_speed_array[keep_mask]
+
+    return curve_pos_array, curve_speed_array
+
+
+def max_energy_and_min_operation_time(
+    vehicle: VehicleInfo,
+    track: TrackInfo,
+    factor: float,
+    energy_con_calc: ECC,
+    begin_pos: float,
+    begin_speed: float,
+    end_pos: float,
+    end_speed: float,
+    distance: float,
+) -> tuple[float, float, float]:
+    """Return reference max-energy consumption and the minimum operation time."""
+    acc_arr, time_arr = min_runtime_operations_numba(
+        current_pos=begin_pos,
+        current_speed=begin_speed,
+        end_pos=end_pos,
+        end_speed=end_speed,
+        speed_limits=track.speed_limits,
+        speed_limit_intervals=track.speed_limit_intervals,
+        factor=float(factor),
+        max_acc=float(vehicle.max_acc),
+        max_dec=float(vehicle.max_dec),
+        max_dec_abs=float(vehicle.max_dec_abs),
+        tol=1e-9,
+    )
+
+    ref_mec = 0.0
+    ref_lec = 0.0
+    ref_operation_time = 0.0
+    accumulated_distance = 0.0
+
+    current_pos_i = float(begin_pos)
+    current_speed_i = float(begin_speed)
+
+    for acc, operation_time in zip(acc_arr, time_arr, strict=True):
+        acc_value = float(acc)
+        operation_time_value = float(operation_time)
+        segment_distance = (
+            current_speed_i * operation_time_value
+            + 0.5 * acc_value * operation_time_value**2
+        )
+        if accumulated_distance + segment_distance >= float(distance):
+            remaining_displacement = float(distance) - accumulated_distance
+            if np.abs(acc_value) < 1e-9:
+                actual_time = remaining_displacement / np.maximum(current_speed_i, 1e-6)
+            else:
+                discriminant = (
+                    current_speed_i**2 + 2 * acc_value * remaining_displacement
+                )
+                discriminant = max(discriminant, 0)
+                actual_time = (np.sqrt(discriminant) - current_speed_i) / acc_value
+            pec, lec = energy_con_calc.calc_energy(
+                begin_pos=current_pos_i,
+                begin_speed=current_speed_i,
+                acc=acc_value,
+                distance=remaining_displacement,
+                direction=1,
+                operation_time=actual_time,
+                vehicle=vehicle,
+                track=track,
+            )
+            ref_mec += pec
+            ref_lec += lec
+            ref_operation_time += actual_time
+            break
+        pec, lec = energy_con_calc.calc_energy(
+            begin_pos=current_pos_i,
+            begin_speed=current_speed_i,
+            acc=acc_value,
+            distance=segment_distance,
+            direction=1,
+            operation_time=operation_time_value,
+            vehicle=vehicle,
+            track=track,
+        )
+        ref_mec += pec
+        ref_lec += lec
+        ref_operation_time += operation_time_value
+        accumulated_distance += segment_distance
+        current_pos_i += segment_distance
+        current_speed_i += acc_value * operation_time_value
+
+    return float(ref_mec), float(ref_lec), float(ref_operation_time)

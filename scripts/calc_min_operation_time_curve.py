@@ -5,7 +5,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.backend_bases import Event, KeyEvent
 
-from model.common import ECC, ORS
+from model.common import (
+    ECC,
+    max_energy_and_min_operation_time,
+    min_operation_time,
+    min_operation_time_curve,
+)
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
@@ -68,7 +73,6 @@ train_service = TrainService(
     max_arr_time_error_ratio=0.01,
     max_stop_error=0.3,
 )
-ors = ORS(vehicle=vehicle, track=track, factor=factor)
 ecc = ECC(
     R_m=0.2796,
     L_d=0.0002,
@@ -150,7 +154,10 @@ def draw_curve(pos: float, speed: float) -> bool:
 
     try:
         # 计算最短运行时间曲线
-        min_curve_pos_array, min_curve_speed_array = ors.calc_min_operation_time_curve(
+        min_curve_pos_array, min_curve_speed_array = min_operation_time_curve(
+            vehicle=vehicle,
+            track=track,
+            factor=factor,
             begin_pos=pos,
             begin_speed=speed,
             end_pos=train_service.target_position,
@@ -162,14 +169,20 @@ def draw_curve(pos: float, speed: float) -> bool:
         next_speed = max(
             0.0, np.interp(next_pos, min_curve_pos_array, min_curve_speed_array)
         )
-        t_min = ors.calc_min_operation_time(
+        t_min = min_operation_time(
+            vehicle=vehicle,
+            track=track,
+            factor=factor,
             begin_pos=pos,
             begin_speed=speed,
             end_pos=next_pos,
             end_speed=next_speed,
         )
 
-        T_min = ors.calc_min_operation_time(
+        T_min = min_operation_time(
+            vehicle=vehicle,
+            track=track,
+            factor=factor,
             begin_pos=pos,
             begin_speed=speed,
             end_pos=train_service.target_position,
@@ -177,13 +190,16 @@ def draw_curve(pos: float, speed: float) -> bool:
         )
 
         # 计算最速操作模式下的总运行时间和能耗
-        PEC, LEC, total_operation_time = ors.calc_max_energy_and_min_operation_time(
+        PEC, LEC, total_operation_time = max_energy_and_min_operation_time(
+            vehicle=vehicle,
+            track=track,
+            factor=factor,
+            energy_con_calc=ecc,
             begin_pos=pos,
             begin_speed=speed,
             end_pos=train_service.target_position,
             end_speed=0.0,
             distance=end_pos - pos,
-            energy_con_calc=ecc,
         )
         total_energy = PEC + LEC
 

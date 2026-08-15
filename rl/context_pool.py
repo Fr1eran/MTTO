@@ -1,4 +1,4 @@
-"""Reconstruct RL-compatible initial states from reference trajectories."""
+"""Build immutable DSPDL contexts from a validated reference trajectory."""
 
 from __future__ import annotations
 
@@ -14,9 +14,10 @@ from rl.operational_state import OperationalState
 from rl.operational_stepper import OperationalStepper
 
 __all__ = [
+    "Context",
+    "ContextPool",
+    "ContextPoolBuilder",
     "ReferenceTrajectory",
-    "ReferenceTrajectorySampler",
-    "ReferenceTrajectoryState",
 ]
 
 
@@ -76,20 +77,62 @@ class ReferenceTrajectory:
         object.__setattr__(self, "metadata", dict(self.metadata))
 
 
-@dataclass(frozen=True)
-class ReferenceTrajectoryState:
-    """One replayed RL-grid node and its complete runtime state."""
+@dataclass(frozen=True, slots=True)
+class Context:
+    """One finite DSPDL task context and its materialized initial state."""
 
-    reference_index: int
-    position_m: float
-    speed_mps: float
-    operation_time_s: float
+    context_index: int
     remaining_distance_m: float
-    runtime_state: OperationalState
+    initial_state: OperationalState
 
 
-class ReferenceTrajectorySampler:
-    """Sample fully reconstructed states from a complete reference trajectory.
+@dataclass(frozen=True)
+class ContextPool:
+    """Immutable, index-aligned finite DSPDL context pool."""
+
+    contexts: tuple[Context, ...]
+
+    def __post_init__(self) -> None:
+        contexts = tuple(self.contexts)
+        if not contexts:
+            raise ValueError("context pool must be non-empty")
+        remaining = np.empty(len(contexts), dtype=np.float64)
+        for index, context in enumerate(contexts):
+            if context.context_index != index:
+                raise ValueError("context indices must be contiguous and index-aligned")
+            if (
+                not np.isfinite(context.remaining_distance_m)
+                or context.remaining_distance_m < 0
+            ):
+                raise ValueError(
+                    "context remaining distance must be finite and non-negative"
+                )
+            remaining[index] = context.remaining_distance_m
+        remaining.flags.writeable = False
+        object.__setattr__(self, "contexts", contexts)
+        object.__setattr__(self, "_remaining_distances_m", remaining)
+
+    @property
+    def context_count(self) -> int:
+        return len(self.contexts)
+
+    @property
+    def remaining_distances_m(self) -> NDArray[np.float64]:
+        return self._remaining_distances_m
+
+    def context_at(self, context_index: int) -> Context:
+        if not isinstance(context_index, (int, np.integer)):
+            raise TypeError("context_index must be an integer")
+        index = int(context_index)
+        if not 0 <= index < self.context_count:
+            raise IndexError(
+                f"context index {index} is outside [0, {self.context_count - 1}]"
+            )
+        return self.contexts[index]
+
+
+class ContextPoolBuilder:
+    """Reconstruct a finite context pool from a complete reference trajectory.
 
     The source trajectory is first checked for piecewise constant-acceleration
     consistency.  It is then sampled on the environment's action grid.  Since
@@ -111,9 +154,9 @@ class ReferenceTrajectorySampler:
         self._validate_task_coverage()
         self._validate_source_timing()
         position, speed, operation_time = self._resample_on_rl_grid()
-        self._states: tuple[ReferenceTrajectoryState, ...] = self._replay_states(
-            position, speed, operation_time
-        )
+        self._position = position
+        self._speed = speed
+        self._operation_time = operation_time
 
     @classmethod
     def from_arrays(
@@ -124,8 +167,8 @@ class ReferenceTrajectorySampler:
         cumulative_time_s: NDArray[np.floating[Any]] | list[float],
         stepper: OperationalStepper,
         metadata: Mapping[str, object] | None = None,
-    ) -> ReferenceTrajectorySampler:
-        """Build a sampler directly from a source-independent trajectory."""
+    ) -> ContextPool:
+        """Build a context pool directly from source-independent arrays."""
         return cls(
             ReferenceTrajectory(
                 position_m=np.asarray(position_m, dtype=np.float64),
@@ -134,72 +177,17 @@ class ReferenceTrajectorySampler:
                 metadata={} if metadata is None else metadata,
             ),
             stepper=stepper,
-        )
+        ).build()
 
     @property
     def trajectory(self) -> ReferenceTrajectory:
         return self._trajectory
 
-    @property
-    def node_count(self) -> int:
-        """Number of replayed nodes, including the terminal node."""
-        return len(self._states)
-
-    @property
-    def eligible_node_count(self) -> int:
-        """Number of nodes eligible for reset sampling (excludes terminal)."""
-        return max(0, self.node_count - 1)
-
-    @property
-    def states(self) -> tuple[ReferenceTrajectoryState, ...]:
-        return self._states
-
-    def state_at(self, index: int) -> ReferenceTrajectoryState:
-        """Return a replayed node, including the final terminal node."""
-        if not isinstance(index, (int, np.integer)):
-            raise TypeError("index must be an integer")
-        value = int(index)
-        if not 0 <= value < self.node_count:
-            raise IndexError(f"index {value} is outside [0, {self.node_count - 1}]")
-        return self._states[value]
-
-    def sample(
-        self,
-        rng: np.random.Generator,
-        *,
-        weights: NDArray[np.floating[Any]] | list[float] | None = None,
-        index_range: tuple[int, int] | None = None,
-        remaining_distance_range_m: tuple[float, float] | None = None,
-    ) -> ReferenceTrajectoryState:
-        """Sample a non-terminal replayed node from one optional selection range."""
-        if not isinstance(rng, np.random.Generator):
-            raise TypeError("rng must be a numpy.random.Generator")
-        if index_range is not None and remaining_distance_range_m is not None:
-            raise ValueError(
-                "Specify at most one of index_range and remaining_distance_range_m."
-            )
-
-        candidates = np.arange(self.eligible_node_count, dtype=np.int64)
-        if index_range is not None:
-            lower, upper = self._validate_index_range(index_range)
-            candidates = np.arange(lower, upper + 1, dtype=np.int64)
-        elif remaining_distance_range_m is not None:
-            lower, upper = self._validate_remaining_distance_range(
-                remaining_distance_range_m
-            )
-            candidates = np.asarray(
-                [
-                    state.reference_index
-                    for state in self._states[:-1]
-                    if lower <= state.remaining_distance_m <= upper
-                ],
-                dtype=np.int64,
-            )
-
-        if candidates.size == 0:
-            raise ValueError("The requested sampling range contains no eligible nodes.")
-        probabilities = self._resolve_probabilities(weights, candidates)
-        return self.state_at(int(rng.choice(candidates, p=probabilities)))
+    def build(self) -> ContextPool:
+        contexts = self._reconstruct_contexts(
+            self._position, self._speed, self._operation_time
+        )
+        return ContextPool(contexts)
 
     def _validate_task_coverage(self) -> None:
         service = self._stepper.train_service
@@ -265,7 +253,7 @@ class ReferenceTrajectorySampler:
     ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
         service = self._stepper.train_service
         total_distance = self._stepper.whole_distance_m
-        max_step = self._stepper.max_step_distance_m
+        max_step = self._stepper.step_distance_m
         node_count = int(np.ceil(total_distance / max_step)) + 1
         travelled = np.minimum(
             np.arange(node_count, dtype=np.float64) * max_step,
@@ -314,20 +302,18 @@ class ReferenceTrajectorySampler:
             result[index] = float(np.sqrt(max(speed_sq, 0.0)))
         return result
 
-    def _replay_states(
+    def _reconstruct_contexts(
         self,
         position: NDArray[np.float64],
         speed: NDArray[np.float64],
         operation_time: NDArray[np.float64],
-    ) -> tuple[ReferenceTrajectoryState, ...]:
+    ) -> tuple[Context, ...]:
         state = self._stepper.reset()
         self._validate_replayed_state(
             state, position[0], speed[0], operation_time[0], 0
         )
-        states: list[ReferenceTrajectoryState] = [
-            self._make_reference_state(
-                0, state, position[0], speed[0], operation_time[0]
-            )
+        contexts: list[Context] = [
+            self._build_context(0, state, position[0], speed[0], operation_time[0])
         ]
 
         for index in range(position.size - 1):
@@ -362,35 +348,34 @@ class ReferenceTrajectorySampler:
                 operation_time[index + 1],
                 index + 1,
             )
-            states.append(
-                self._make_reference_state(
-                    index + 1,
-                    state,
-                    position[index + 1],
-                    speed[index + 1],
-                    operation_time[index + 1],
+            if not is_final_transition:
+                contexts.append(
+                    self._build_context(
+                        index + 1,
+                        state,
+                        position[index + 1],
+                        speed[index + 1],
+                        operation_time[index + 1],
+                    )
                 )
-            )
 
-        return tuple(states)
+        return tuple(contexts)
 
-    def _make_reference_state(
+    def _build_context(
         self,
         index: int,
         runtime_state: OperationalState,
         position_m: float,
         speed_mps: float,
         operation_time_s: float,
-    ) -> ReferenceTrajectoryState:
-        return ReferenceTrajectoryState(
-            reference_index=index,
-            position_m=float(position_m),
-            speed_mps=float(speed_mps),
-            operation_time_s=float(operation_time_s),
+    ) -> Context:
+        del speed_mps, operation_time_s
+        return Context(
+            context_index=index,
             remaining_distance_m=abs(
                 float(self._stepper.train_service.target_position) - float(position_m)
             ),
-            runtime_state=runtime_state,
+            initial_state=runtime_state,
         )
 
     def _validate_replayed_state(
@@ -445,59 +430,3 @@ class ReferenceTrajectorySampler:
         if not np.isfinite(duration) or duration <= 0.0:
             raise ValueError("reference segment duration must be finite and positive")
         return float(duration)
-
-    def _validate_index_range(self, index_range: tuple[int, int]) -> tuple[int, int]:
-        if len(index_range) != 2:
-            raise ValueError("index_range must contain exactly two indices")
-        lower, upper = index_range
-        if not isinstance(lower, (int, np.integer)) or not isinstance(
-            upper, (int, np.integer)
-        ):
-            raise TypeError("index_range values must be integers")
-        lower_value, upper_value = int(lower), int(upper)
-        if lower_value > upper_value:
-            raise ValueError("index_range lower bound must not exceed upper bound")
-        if lower_value < 0 or upper_value >= self.eligible_node_count:
-            raise ValueError(
-                "index_range must stay within non-terminal reference node bounds"
-            )
-        return lower_value, upper_value
-
-    @staticmethod
-    def _validate_remaining_distance_range(
-        remaining_distance_range_m: tuple[float, float],
-    ) -> tuple[float, float]:
-        if len(remaining_distance_range_m) != 2:
-            raise ValueError(
-                "remaining_distance_range_m must contain exactly two values"
-            )
-        lower, upper = map(float, remaining_distance_range_m)
-        if not np.isfinite(lower) or not np.isfinite(upper) or lower < 0.0:
-            raise ValueError(
-                "remaining_distance_range_m must contain finite non-negative values"
-            )
-        if lower > upper:
-            raise ValueError(
-                "remaining_distance_range_m lower bound must not exceed upper bound"
-            )
-        return lower, upper
-
-    def _resolve_probabilities(
-        self,
-        weights: NDArray[np.floating[Any]] | list[float] | None,
-        candidates: NDArray[np.int64],
-    ) -> NDArray[np.float64] | None:
-        if weights is None:
-            return None
-        all_weights = np.asarray(weights, dtype=np.float64)
-        if all_weights.ndim != 1 or all_weights.size != self.node_count:
-            raise ValueError("weights must be one-dimensional with one value per node")
-        if not np.all(np.isfinite(all_weights)) or np.any(all_weights < 0.0):
-            raise ValueError("weights must be finite and non-negative")
-        selected = all_weights[candidates]
-        total = float(np.sum(selected))
-        if total <= 0.0:
-            raise ValueError(
-                "weights over the requested sampling range must sum to > 0"
-            )
-        return selected / total

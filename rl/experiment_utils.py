@@ -9,7 +9,7 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import numpy as np
 from stable_baselines3 import PPO
@@ -25,24 +25,22 @@ from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
 from rl.callbacks import (
-    BestTrajectoryRecorder,
-    EpisodeMetricsCollector,
-    FixedReverseCurriculumCallback,
-    PeriodicEvalCallback,
-    SafetyViolationPositionRecorder,
-    SPDLReferenceCurriculumCallback,
-    TensorboardCallback,
+    DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
+    BestEvaluationArtifactHandler,
+    EvaluationHistoryArtifactHandler,
+    RewardDiagnosticsArtifactCallback,
+    SafetyTruncationPositionHistogramCallback,
+    ScheduledPolicyEvaluationCallback,
 )
+from rl.context_pool import ContextPool, ContextPoolBuilder
 from rl.dp_trajectory_reader import DPTrajectoryReader
+from rl.dspdl import DSPDLCallback, DSPDLConfig
 from rl.env_factory import make_env
-from rl.evaluation import build_single_eval_env
+from rl.evaluation import build_single_eval_env, evaluate_and_save_final_policy
 from rl.observation_builder import ObservationBuilder
 from rl.operational_stepper import OperationalStepper
-from rl.reference_trajectory_sampler import (
-    ReferenceTrajectory,
-    ReferenceTrajectorySampler,
-)
 from rl.reward_calculator import RewardConfig
+from rl.reward_diagnostics import REWARD_DIAGNOSTICS_SCHEMA_VERSION
 from rl.training_analysis import AnalysisConfig, run_training_analysis
 from utils.io_utils import format_float_token, load_optimized_curve_and_metrics
 from utils.plot_utils import set_global_plot_style
@@ -57,20 +55,22 @@ __all__ = [
     "RL_TRAJECTORY_SOURCE_CHOICES",
     "DEFAULT_SCHEDULE_TIME_S",
     "DEFAULT_REWARD_DISCOUNT",
-    "DEFAULT_MAX_STEP_DISTANCE",
-    "DEFAULT_REWARD_PROFILE_NAME",
+    "DEFAULT_EVALUATION_INTERVAL_ROLLOUTS",
+    "DEFAULT_ROLLOUT_STEPS_PER_UPDATE",
+    "DEFAULT_STEP_DISTANCE",
+    "DEFAULT_REWARD_PRESET_NAME",
     "DEFAULT_CURRICULUM_PROFILE_NAME",
     # dataclass
-    "CurriculumProfile",
-    "RewardProfile",
+    "DSPDLConfig",
+    "RewardPreset",
     "TrainingRunSpec",
-    # reward profile
-    "reward_profile_names",
-    "resolve_reward_profile",
+    # reward preset
+    "reward_preset_names",
+    "resolve_reward_preset",
     "build_reward_config",
     # curriculum profile
     "curriculum_profile_names",
-    "resolve_curriculum_profile",
+    "resolve_curriculum_profile_name",
     # 路径 & 元数据
     "resolve_output_dir",
     "resolve_tb_log_name",
@@ -84,6 +84,7 @@ __all__ = [
     "resolve_training_run_spec",
     # 训练
     "train_single_experiment",
+    "evaluate_final_training_run",
     # 轨迹产物
     "resolve_rl_curve_artifact",
     "load_rl_curve_artifact",
@@ -108,8 +109,7 @@ RL_DEFAULT_SEARCH_DIR = "output/optimal/rl"
 
 RL_TRAJECTORY_SOURCE_CHOICES: tuple[str, ...] = (
     "best",
-    "best_steps",
-    "best_episodes",
+    "best_rollouts",
     "final",
 )
 _RL_BEST_TRAJECTORY_FILENAME = "best_trajectory.npz"
@@ -119,11 +119,11 @@ _RL_TRAJECTORY_METRICS_SUFFIX = "_metrics.json"
 # 训练超参数常量
 # =============================================================================
 
-DEFAULT_SCHEDULE_TIME_S = 430.0
+DEFAULT_SCHEDULE_TIME_S = 465.0
 DEFAULT_REWARD_DISCOUNT = 0.998
 DEFAULT_ROLLOUT_STEPS_PER_UPDATE = 8192
-DEFAULT_MAX_STEP_DISTANCE = 30.0
-DEFAULT_REWARD_PROFILE_NAME = "basic_safety_stopping"
+DEFAULT_STEP_DISTANCE = 30.0
+DEFAULT_REWARD_PRESET_NAME = "basic_safety_stopping"
 DEFAULT_CURRICULUM_PROFILE_NAME = "none"
 
 # =============================================================================
@@ -132,92 +132,33 @@ DEFAULT_CURRICULUM_PROFILE_NAME = "none"
 
 
 @dataclass(frozen=True)
-class RewardProfile:
-    """奖励情形 —— 描述安全与停站 PBRS 的消融组合。"""
+class RewardPreset:
+    """具名奖励预设，将实验身份与运行时奖励配置组合在一起。"""
 
     name: str
     label: str
     description: str
-    enable_potential_safety: bool = False
-    enable_potential_stopping: bool = False
-
-    def to_reward_config(self) -> RewardConfig:
-        return RewardConfig(
-            enable_energy=True,
-            enable_comfort=True,
-            enable_potential_safety=self.enable_potential_safety,
-            enable_potential_stopping=self.enable_potential_stopping,
-        )
+    config: RewardConfig
 
     def enabled_shaping_components(self) -> tuple[str, ...]:
         components: list[str] = []
-        if self.enable_potential_safety:
+        if self.config.enable_potential_safety:
             components.append("safety")
-        if self.enable_potential_stopping:
+        if self.config.enable_potential_stopping:
             components.append("stopping")
         return tuple(components)
 
     def to_metadata(self) -> dict[str, Any]:
         return {
-            "reward_profile_name": self.name,
-            "reward_profile_label": self.label,
-            "reward_profile_description": self.description,
+            "reward_preset_name": self.name,
+            "reward_preset_label": self.label,
+            "reward_preset_description": self.description,
             "potential_shaping_components": list(self.enabled_shaping_components()),
-            "reward_config": _reward_config_to_dict(self.to_reward_config()),
+            "reward_config": _reward_config_to_dict(self.config),
         }
 
 
-@dataclass(frozen=True)
-class CurriculumProfile:
-    """Curriculum reset distribution preset."""
-
-    name: str
-    label: str
-    description: str
-    controller_kind: Literal["disabled", "fixed_reverse", "spdl"]
-    min_remaining_distance_m: float | None = None
-    initial_max_remaining_distance_m: float | None = None
-    expansion_start_ratio: float | None = None
-    expansion_end_ratio: float | None = None
-    start_only_ratio: float | None = None
-    base_start_probability: float | None = None
-    spdl_initial_easy_mass: float | None = None
-    spdl_initial_start_mass: float | None = None
-    spdl_initial_uniform_mass: float | None = None
-    spdl_target_uniform_mass: float | None = None
-    spdl_alpha_warmup_updates: int | None = None
-    spdl_relative_entropy_bound: float | None = None
-    spdl_zeta: float | None = None
-    spdl_min_context_samples: int | None = None
-    spdl_min_completed_episodes: int | None = None
-
-    @property
-    def enabled(self) -> bool:
-        return self.controller_kind != "disabled"
-
-    def to_metadata(self) -> dict[str, object]:
-        return {
-            "profile_name": self.name,
-            "profile_label": self.label,
-            "profile_description": self.description,
-            "controller_kind": self.controller_kind,
-            "enabled": self.enabled,
-            "min_remaining_distance_m": self.min_remaining_distance_m,
-            "initial_max_remaining_distance_m": self.initial_max_remaining_distance_m,
-            "expansion_start_ratio": self.expansion_start_ratio,
-            "expansion_end_ratio": self.expansion_end_ratio,
-            "start_only_ratio": self.start_only_ratio,
-            "base_start_probability": self.base_start_probability,
-            "spdl_initial_easy_mass": self.spdl_initial_easy_mass,
-            "spdl_initial_start_mass": self.spdl_initial_start_mass,
-            "spdl_initial_uniform_mass": self.spdl_initial_uniform_mass,
-            "spdl_target_uniform_mass": self.spdl_target_uniform_mass,
-            "spdl_alpha_warmup_updates": self.spdl_alpha_warmup_updates,
-            "spdl_relative_entropy_bound": self.spdl_relative_entropy_bound,
-            "spdl_zeta": self.spdl_zeta,
-            "spdl_min_context_samples": self.spdl_min_context_samples,
-            "spdl_min_completed_episodes": self.spdl_min_completed_episodes,
-        }
+CurriculumProfileName = Literal["none", "dspdl"]
 
 
 @dataclass(frozen=True)
@@ -225,11 +166,11 @@ class TrainingRunSpec:
     """单次训练运行的完整配置快照，由 CLI 参数解析得到。"""
 
     schedule_time_s: float
-    max_step_distance: float
+    step_distance: float
     reward_discount: float
-    reward_profile: RewardProfile
-    reward_config: RewardConfig
-    curriculum_profile: CurriculumProfile
+    reward_preset: RewardPreset
+    curriculum_profile: CurriculumProfileName
+    dspdl_config: DSPDLConfig | None
     reference_curve_dir: str | None
     reference_curve_artifact_path: str | None
     reference_curve_metrics_path: str | None
@@ -237,43 +178,42 @@ class TrainingRunSpec:
     output_dir: str
     final_output_dir: str
     best_eval_output_dir: str
+    reward_diagnostics_path: str
     final_model_save_path: str
     run_metadata_path: str
     run_metadata: dict[str, Any]
     run_mode: str
     enable_tb: bool
-    enable_callback: bool
     enable_monitor: bool
-    enable_env_diagnostics: bool
     enable_auto_analysis: bool
-    enable_best_eval: bool
+    enable_best_evaluation_artifacts: bool
     tb_log_name: str
     tensorboard_log_dir: str
     log_interval: int
-    tb_sample_interval_steps: int
-    env_diagnostics_interval_steps: int
-    force_dump_interval_steps: int | None
-    tb_batch_dump_records: int | None
     num_envs: int
     n_steps_per_env: int
     rollout_steps_per_update: int
     use_subproc: bool
     resolved_vec_env_type: str
     subproc_start_method: str | None
-    best_eval_trigger_mode: str
-    best_eval_trigger_interval: int
-    best_eval_deterministic: bool
-    enable_safety_violation_bins: bool
-    safety_position_bin_size_m: float
-    rollout_record_trigger_mode: str
+    evaluation_interval_rollouts: int
+    evaluation_deterministic: bool
+    evaluation_history_path: str | None
+    enable_safety_truncation_histogram: bool
+    safety_truncation_bin_size_m: float
     total_timesteps: int
     device: str
     seed: int | None
     dry_run: bool
 
+    @property
+    def reward_config(self) -> RewardConfig:
+        """Return the runtime config owned by the selected reward preset."""
+        return self.reward_preset.config
+
 
 # =============================================================================
-# Reward Profile
+# Reward Preset
 # =============================================================================
 
 
@@ -281,93 +221,68 @@ def _reward_config_to_dict(reward_config: RewardConfig) -> dict[str, bool]:
     return {key: bool(value) for key, value in asdict(reward_config).items()}
 
 
-REWARD_PROFILES: dict[str, RewardProfile] = {
-    "basic": RewardProfile(
+REWARD_PRESETS: dict[str, RewardPreset] = {
+    "basic": RewardPreset(
         name="basic",
         label="basic",
         description="Base reward only: energy and comfort are always enabled.",
+        config=RewardConfig(
+            enable_potential_safety=False,
+            enable_potential_stopping=False,
+        ),
     ),
-    "basic_safety": RewardProfile(
+    "basic_safety": RewardPreset(
         name="basic_safety",
         label="basic+safety",
         description="Base reward plus safety PBRS shaping.",
-        enable_potential_safety=True,
+        config=RewardConfig(
+            enable_potential_safety=True,
+            enable_potential_stopping=False,
+        ),
     ),
-    "basic_safety_stopping": RewardProfile(
+    "basic_stopping": RewardPreset(
+        name="basic_stopping",
+        label="basic+stopping",
+        description="Base reward plus stopping PBRS shaping.",
+        config=RewardConfig(
+            enable_potential_safety=False,
+            enable_potential_stopping=True,
+        ),
+    ),
+    "basic_safety_stopping": RewardPreset(
         name="basic_safety_stopping",
         label="basic+safety+stopping",
         description="Base reward plus safety and stopping PBRS shaping.",
-        enable_potential_safety=True,
-        enable_potential_stopping=True,
+        config=RewardConfig(
+            enable_potential_safety=True,
+            enable_potential_stopping=True,
+        ),
     ),
 }
 
-REWARD_PROFILE_ALIASES: dict[str, str] = {
-    "default": DEFAULT_REWARD_PROFILE_NAME,
-    "all": DEFAULT_REWARD_PROFILE_NAME,
-    "full": DEFAULT_REWARD_PROFILE_NAME,
+REWARD_PRESET_ALIASES: dict[str, str] = {
+    "default": DEFAULT_REWARD_PRESET_NAME,
+    "all": DEFAULT_REWARD_PRESET_NAME,
+    "full": DEFAULT_REWARD_PRESET_NAME,
     "basic": "basic",
     "basic+safety": "basic_safety",
+    "basic+stopping": "basic_stopping",
     "basic+safety+stopping": "basic_safety_stopping",
 }
 
-CURRICULUM_PROFILES: dict[str, CurriculumProfile] = {
-    "none": CurriculumProfile(
-        name="none",
-        label="no curriculum",
-        description="Always reset from the real operational start state.",
-        controller_kind="disabled",
-    ),
-    "fixed_reverse": CurriculumProfile(
-        name="fixed_reverse",
-        label="fixed reverse curriculum",
-        description=(
-            "Expand reference initial states from the terminal-side region while "
-            "retaining real-start samples, then consolidate from the real start."
-        ),
-        controller_kind="fixed_reverse",
-        min_remaining_distance_m=300.0,
-        initial_max_remaining_distance_m=3000.0,
-        expansion_start_ratio=0.10,
-        expansion_end_ratio=0.45,
-        start_only_ratio=0.55,
-        base_start_probability=0.15,
-    ),
-    "spdl": CurriculumProfile(
-        name="spdl",
-        label="discrete SPDL",
-        description=(
-            "Critic-evaluated self-paced learning over reconstructed "
-            "reference initial states."
-        ),
-        controller_kind="spdl",
-        min_remaining_distance_m=300.0,
-        initial_max_remaining_distance_m=3000.0,
-        spdl_initial_easy_mass=0.84,
-        spdl_initial_start_mass=0.15,
-        spdl_initial_uniform_mass=0.01,
-        spdl_target_uniform_mass=1e-3,
-        spdl_alpha_warmup_updates=10,
-        spdl_relative_entropy_bound=0.05,
-        spdl_zeta=0.4,
-        spdl_min_context_samples=32,
-        spdl_min_completed_episodes=8,
-    ),
-}
 
-
-def reward_profile_names() -> tuple[str, ...]:
+def reward_preset_names() -> tuple[str, ...]:
     """返回所有已注册奖励情形的名称元组。"""
-    return tuple(REWARD_PROFILES.keys())
+    return tuple(REWARD_PRESETS.keys())
 
 
 def curriculum_profile_names() -> tuple[str, ...]:
-    return tuple(CURRICULUM_PROFILES.keys())
+    return ("none", "dspdl")
 
 
-def resolve_curriculum_profile(
+def resolve_curriculum_profile_name(
     profile_name: str | None = None,
-) -> CurriculumProfile:
+) -> CurriculumProfileName:
     normalized = (
         DEFAULT_CURRICULUM_PROFILE_NAME
         if profile_name is None
@@ -375,58 +290,57 @@ def resolve_curriculum_profile(
     )
     if not normalized:
         normalized = DEFAULT_CURRICULUM_PROFILE_NAME
-    profile = CURRICULUM_PROFILES.get(normalized)
-    if profile is None:
+    if normalized not in curriculum_profile_names():
         available = ", ".join(curriculum_profile_names())
         raise ValueError(
             "Unknown curriculum profile "
             + f"'{profile_name}'. Available profiles: {available}"
         )
-    return profile
+    return cast(CurriculumProfileName, normalized)
 
 
-def _normalize_reward_profile_token(profile_name: str | None) -> str:
-    if profile_name is None:
-        return DEFAULT_REWARD_PROFILE_NAME
-    normalized = str(profile_name).strip().lower().replace("-", "_").replace(" ", "_")
+def _normalize_reward_preset_token(preset_name: str | None) -> str:
+    if preset_name is None:
+        return DEFAULT_REWARD_PRESET_NAME
+    normalized = str(preset_name).strip().lower().replace("-", "_").replace(" ", "_")
     if not normalized:
-        return DEFAULT_REWARD_PROFILE_NAME
+        return DEFAULT_REWARD_PRESET_NAME
     return normalized
 
 
-def resolve_reward_profile(profile_name: str | None = None) -> RewardProfile:
-    """将奖励情形名称（含别名）解析为 _RewardProfile 实例。
+def resolve_reward_preset(preset_name: str | None = None) -> RewardPreset:
+    """将奖励情形名称（含别名）解析为 RewardPreset 实例。
 
     Args:
-        profile_name: 情形名，支持 ``basic``、``default``、``all`` 和 ``full``。
+        preset_name: 预设名，支持 ``basic``、``default``、``all`` 和 ``full``。
 
     Returns:
-        对应的 _RewardProfile 实例。
+        对应的 RewardPreset 实例。
 
     Raises:
         ValueError: 未知的情形名。
     """
-    normalized = _normalize_reward_profile_token(profile_name)
-    canonical = REWARD_PROFILE_ALIASES.get(normalized, normalized)
-    profile = REWARD_PROFILES.get(canonical)
-    if profile is None:
-        available = ", ".join(reward_profile_names())
+    normalized = _normalize_reward_preset_token(preset_name)
+    canonical = REWARD_PRESET_ALIASES.get(normalized, normalized)
+    preset = REWARD_PRESETS.get(canonical)
+    if preset is None:
+        available = ", ".join(reward_preset_names())
         raise ValueError(
-            f"Unknown reward profile '{profile_name}'. Available profiles: {available}"
+            f"Unknown reward preset '{preset_name}'. Available presets: {available}"
         )
-    return profile
+    return preset
 
 
-def build_reward_config(profile_name: str | None = None) -> RewardConfig:
+def build_reward_config(preset_name: str | None = None) -> RewardConfig:
     """根据奖励情形名构建 RewardConfig 实例。
 
     Args:
-        profile_name: 情形名，同 resolve_reward_profile。
+        preset_name: 预设名，同 resolve_reward_preset。
 
     Returns:
         用于初始化 MTTOEnv 的 RewardConfig。
     """
-    return resolve_reward_profile(profile_name).to_reward_config()
+    return resolve_reward_preset(preset_name).config
 
 
 # =============================================================================
@@ -445,26 +359,26 @@ def _sanitize_identifier_token(value: str) -> str:
 def _build_experiment_token(
     *,
     schedule_time_s: float,
-    max_step_distance: float,
-    reward_profile_name: str | None = None,
+    step_distance: float,
+    reward_preset_name: str | None = None,
     curriculum_profile_name: str | None = None,
     experiment_tag: str | None = None,
-    include_default_profile: bool = False,
+    include_default_preset: bool = False,
 ) -> str:
     schedule_token = format_float_token(schedule_time_s)
-    max_step_token = format_float_token(max_step_distance)
-    profile = resolve_reward_profile(reward_profile_name)
-    curriculum_profile = resolve_curriculum_profile(curriculum_profile_name)
+    step_token = format_float_token(step_distance)
+    preset = resolve_reward_preset(reward_preset_name)
+    curriculum_profile = resolve_curriculum_profile_name(curriculum_profile_name)
 
-    tokens = [f"{schedule_token}_{max_step_token}"]
+    tokens = [f"{schedule_token}_{step_token}"]
     if (
-        include_default_profile
-        or profile.name != DEFAULT_REWARD_PROFILE_NAME
+        include_default_preset
+        or preset.name != DEFAULT_REWARD_PRESET_NAME
         or experiment_tag
     ):
-        tokens.append(profile.name)
-    if curriculum_profile.enabled:
-        tokens.append(curriculum_profile.name)
+        tokens.append(preset.name)
+    if curriculum_profile == "dspdl":
+        tokens.append(curriculum_profile)
     if experiment_tag:
         tokens.append(_sanitize_identifier_token(experiment_tag))
     return "__".join(tokens)
@@ -474,8 +388,8 @@ def resolve_output_dir(
     *,
     output_root: str,
     schedule_time_s: float,
-    max_step_distance: float,
-    reward_profile_name: str | None = None,
+    step_distance: float,
+    reward_preset_name: str | None = None,
     curriculum_profile_name: str | None = None,
     experiment_tag: str | None = None,
 ) -> str:
@@ -484,8 +398,8 @@ def resolve_output_dir(
     Args:
         output_root: 输出根目录。
         schedule_time_s: 规划运行时间 (s)。
-        max_step_distance: 单步最大位移 (m)。
-        reward_profile_name: 奖励情形名。
+        step_distance: 固定空间控制步长 (m)。
+        reward_preset_name: 奖励预设名。
         experiment_tag: 实验标签。
 
     Returns:
@@ -493,8 +407,8 @@ def resolve_output_dir(
     """
     experiment_token = _build_experiment_token(
         schedule_time_s=schedule_time_s,
-        max_step_distance=max_step_distance,
-        reward_profile_name=reward_profile_name,
+        step_distance=step_distance,
+        reward_preset_name=reward_preset_name,
         curriculum_profile_name=curriculum_profile_name,
         experiment_tag=experiment_tag,
     )
@@ -506,8 +420,8 @@ def resolve_tb_log_name(
     tb_log_name: str | None,
     run_mode: str,
     schedule_time_s: float,
-    max_step_distance: float,
-    reward_profile_name: str | None = None,
+    step_distance: float,
+    reward_preset_name: str | None = None,
     curriculum_profile_name: str | None = None,
     experiment_tag: str | None = None,
 ) -> str:
@@ -517,8 +431,8 @@ def resolve_tb_log_name(
         tb_log_name: 用户指定的日志名（优先使用）。
         run_mode: 运行模式 (tune/reproduce/monitor_best/best_only)。
         schedule_time_s: 规划运行时间 (s)。
-        max_step_distance: 单步最大位移 (m)。
-        reward_profile_name: 奖励情形名。
+        step_distance: 固定空间控制步长 (m)。
+        reward_preset_name: 奖励预设名。
         experiment_tag: 实验标签。
 
     Returns:
@@ -529,11 +443,11 @@ def resolve_tb_log_name(
 
     experiment_token = _build_experiment_token(
         schedule_time_s=schedule_time_s,
-        max_step_distance=max_step_distance,
-        reward_profile_name=reward_profile_name,
+        step_distance=step_distance,
+        reward_preset_name=reward_preset_name,
         curriculum_profile_name=curriculum_profile_name,
         experiment_tag=experiment_tag,
-        include_default_profile=True,
+        include_default_preset=True,
     )
     return f"train_log__{_sanitize_identifier_token(run_mode)}__{experiment_token}"
 
@@ -545,33 +459,35 @@ def resolve_tb_log_name(
 
 def build_run_metadata(
     *,
-    reward_profile: RewardProfile,
-    curriculum_profile: CurriculumProfile | None = None,
+    reward_preset: RewardPreset,
+    curriculum_profile: CurriculumProfileName = DEFAULT_CURRICULUM_PROFILE_NAME,
+    dspdl_config: DSPDLConfig | None = None,
     reference_curve_dir: str | None = None,
     reference_curve_artifact_path: str | None = None,
     reference_curve_metrics_path: str | None = None,
     schedule_time_s: float,
-    max_step_distance: float,
+    step_distance: float,
     reward_discount: float,
     run_mode: str | None = None,
     experiment_tag: str | None = None,
     total_timesteps: int | None = None,
     enable_tb: bool | None = None,
-    enable_callback: bool | None = None,
     enable_monitor: bool | None = None,
-    enable_env_diagnostics: bool | None = None,
     enable_auto_analysis: bool | None = None,
-    enable_best_eval: bool | None = None,
-    enable_safety_violation_bins: bool | None = None,
-    safety_position_bin_size_m: float | None = None,
+    enable_best_evaluation_artifacts: bool | None = None,
+    enable_safety_truncation_histogram: bool | None = None,
+    safety_truncation_bin_size_m: float | None = None,
+    evaluation_interval_rollouts: int | None = None,
+    evaluation_deterministic: bool | None = None,
+    evaluation_history_path: str | None = None,
     num_envs: int | None = None,
     vec_env_type: str | None = None,
     subproc_start_method: str | None = None,
     n_steps_per_env: int | None = None,
     rollout_steps_per_update: int | None = None,
-    rollout_record_trigger_mode: str | None = None,
     output_dir: str | None = None,
     final_output_dir: str | None = None,
+    reward_diagnostics_path: str | None = None,
     best_eval_output_dir: str | None = None,
     tensorboard_log_dir: str | None = None,
     tb_log_name: str | None = None,
@@ -579,25 +495,22 @@ def build_run_metadata(
     """构建单次训练运行的元数据字典，用于持久化记录实验参数。
 
     Args:
-        reward_profile: 奖励情形实例。
+        reward_preset: 具名奖励预设。
         schedule_time_s: 规划运行时间 (s)。
-        max_step_distance: 单步最大位移 (m)。
+        step_distance: 固定空间控制步长 (m)。
         reward_discount: 奖励折扣因子 γ。
         run_mode: 运行模式。
         experiment_tag: 实验标签。
         total_timesteps: PPO 总训练步数。
         enable_tb: 是否启用 TensorBoard。
-        enable_callback: 是否启用 TensorBoard 回调。
         enable_monitor: 是否启用 VecMonitor。
-        enable_env_diagnostics: 是否启用环境诊断信息。
         enable_auto_analysis: 是否启用训练后自动分析。
-        enable_best_eval: 是否启用最优轨迹评估。
+        enable_best_evaluation_artifacts: 是否保存最优评估产物。
         num_envs: 训练环境数量。
         vec_env_type: 向量化环境后端类型。
         subproc_start_method: SubprocVecEnv 启动方法。
         n_steps_per_env: 每个环境的 rollout 步数。
         rollout_steps_per_update: 单次 PPO 更新的总 rollout 步数。
-        rollout_record_trigger_mode: EpisodeMetricsCollector 记录触发模式。
         output_dir: 输出目录。
         final_output_dir: 最终产出目录。
         best_eval_output_dir: 最优轨迹评估产出目录。
@@ -607,37 +520,43 @@ def build_run_metadata(
     Returns:
         包含实验完整元数据的字典。
     """
-    metadata = reward_profile.to_metadata()
-    resolved_curriculum = curriculum_profile or resolve_curriculum_profile()
+    metadata = reward_preset.to_metadata()
+    resolved_curriculum = resolve_curriculum_profile_name(curriculum_profile)
+    curriculum_enabled = resolved_curriculum == "dspdl"
+    resolved_dspdl_config = (
+        (dspdl_config if dspdl_config is not None else DSPDLConfig())
+        if curriculum_enabled
+        else None
+    )
     metadata["curriculum"] = {
-        **resolved_curriculum.to_metadata(),
+        "profile_name": resolved_curriculum,
+        "enabled": curriculum_enabled,
+        "dspdl_config": (
+            asdict(resolved_dspdl_config) if resolved_dspdl_config is not None else None
+        ),
         "reference_curve_dir": reference_curve_dir,
         "reference_curve_artifact_path": reference_curve_artifact_path,
         "reference_curve_metrics_path": reference_curve_metrics_path,
-        "rl_max_step_distance_m": (
-            float(max_step_distance) if resolved_curriculum.enabled else None
-        ),
-        "eligible_reference_node_count": None,
-        "initial_sampling_distribution_version": (
-            0 if resolved_curriculum.enabled else None
-        ),
+        "rl_step_distance_m": (float(step_distance) if curriculum_enabled else None),
+        "context_count": None,
+        "initial_curriculum_version": (0 if curriculum_enabled else None),
     }
 
     metadata.update(
         {
             "schedule_time_s": float(schedule_time_s),
-            "max_step_distance": float(max_step_distance),
+            "step_distance": float(step_distance),
             "reward_discount": float(reward_discount),
         }
     )
 
     metadata["experiment_token"] = _build_experiment_token(
         schedule_time_s=schedule_time_s,
-        max_step_distance=max_step_distance,
-        reward_profile_name=reward_profile.name,
-        curriculum_profile_name=resolved_curriculum.name,
+        step_distance=step_distance,
+        reward_preset_name=reward_preset.name,
+        curriculum_profile_name=resolved_curriculum,
         experiment_tag=experiment_tag,
-        include_default_profile=True,
+        include_default_preset=True,
     )
     if experiment_tag is not None:
         metadata["experiment_tag"] = str(experiment_tag)
@@ -648,20 +567,28 @@ def build_run_metadata(
 
     if enable_tb is not None:
         metadata["enable_tb"] = bool(enable_tb)
-    if enable_callback is not None:
-        metadata["enable_callback"] = bool(enable_callback)
     if enable_monitor is not None:
         metadata["enable_monitor"] = bool(enable_monitor)
-    if enable_env_diagnostics is not None:
-        metadata["enable_env_diagnostics"] = bool(enable_env_diagnostics)
     if enable_auto_analysis is not None:
         metadata["enable_auto_analysis"] = bool(enable_auto_analysis)
-    if enable_best_eval is not None:
-        metadata["enable_best_eval"] = bool(enable_best_eval)
-    if enable_safety_violation_bins is not None:
-        metadata["enable_safety_violation_bins"] = bool(enable_safety_violation_bins)
-    if safety_position_bin_size_m is not None:
-        metadata["safety_position_bin_size_m"] = float(safety_position_bin_size_m)
+    if enable_best_evaluation_artifacts is not None:
+        metadata["enable_best_evaluation_artifacts"] = bool(
+            enable_best_evaluation_artifacts
+        )
+    if enable_safety_truncation_histogram is not None:
+        metadata["enable_safety_truncation_histogram"] = bool(
+            enable_safety_truncation_histogram
+        )
+    if safety_truncation_bin_size_m is not None:
+        metadata["safety_truncation_bin_size_m"] = float(safety_truncation_bin_size_m)
+    if evaluation_interval_rollouts is not None:
+        metadata["evaluation_interval_rollouts"] = int(
+            evaluation_interval_rollouts
+        )
+    if evaluation_deterministic is not None:
+        metadata["evaluation_deterministic"] = bool(evaluation_deterministic)
+    if evaluation_history_path is not None:
+        metadata["evaluation_history_path"] = str(evaluation_history_path)
 
     if num_envs is not None:
         metadata["num_envs"] = int(num_envs)
@@ -674,13 +601,15 @@ def build_run_metadata(
     if rollout_steps_per_update is not None:
         metadata["rollout_steps_per_update"] = int(rollout_steps_per_update)
 
-    if rollout_record_trigger_mode is not None:
-        metadata["rollout_record_trigger_mode"] = str(rollout_record_trigger_mode)
-
     if output_dir is not None:
         metadata["output_dir"] = str(output_dir)
     if final_output_dir is not None:
         metadata["final_output_dir"] = str(final_output_dir)
+    if reward_diagnostics_path is not None:
+        metadata["reward_diagnostics_path"] = str(reward_diagnostics_path)
+        metadata["reward_diagnostics_schema_version"] = (
+            REWARD_DIAGNOSTICS_SCHEMA_VERSION
+        )
     if best_eval_output_dir is not None:
         metadata["best_eval_output_dir"] = str(best_eval_output_dir)
     if tensorboard_log_dir is not None:
@@ -751,21 +680,18 @@ def build_default_training_args() -> argparse.Namespace:
     return argparse.Namespace(
         output_root="output/optimal/rl/",
         schedule_time_s=DEFAULT_SCHEDULE_TIME_S,
-        max_step_distance=DEFAULT_MAX_STEP_DISTANCE,
-        reward_profile=DEFAULT_REWARD_PROFILE_NAME,
+        step_distance=DEFAULT_STEP_DISTANCE,
+        reward_preset=DEFAULT_REWARD_PRESET_NAME,
         curriculum_profile=DEFAULT_CURRICULUM_PROFILE_NAME,
         reference_curve_dir=None,
         experiment_tag=None,
         run_mode="tune",
         enable_tb=None,
-        enable_callback=None,
         enable_monitor=None,
-        enable_env_diagnostics=None,
         enable_auto_analysis=None,
-        enable_best_eval=None,
+        enable_best_evaluation_artifacts=None,
         analysis_output_root="mtto_train_reports",
         analysis_min_points_per_10k_steps=5.0,
-        analysis_min_unique_episodes=100,
         analysis_sampling_quality_mode="warn_only",
         reward_discount=DEFAULT_REWARD_DISCOUNT,
         num_envs=1,
@@ -776,16 +702,11 @@ def build_default_training_args() -> argparse.Namespace:
         tensorboard_log_dir="mtto_ppo_tb_logs",
         tb_log_name=None,
         log_interval=None,
-        tb_sample_interval_steps=1,
-        env_diagnostics_interval_steps=None,
-        force_dump_interval_steps=0,
-        tb_batch_dump_records=0,
-        best_eval_trigger_mode="steps",
-        best_eval_trigger_interval=100_000,
-        best_eval_deterministic=True,
-        enable_safety_violation_bins=False,
-        safety_position_bin_size_m=5000.0,
-        rollout_record_trigger_mode="steps",
+        evaluation_interval_rollouts=DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
+        evaluation_deterministic=True,
+        evaluation_history_path=None,
+        enable_safety_truncation_histogram=False,
+        safety_truncation_bin_size_m=5000.0,
         seed=None,
         device="cpu",
         dry_run=False,
@@ -794,88 +715,65 @@ def build_default_training_args() -> argparse.Namespace:
 
 def resolve_run_mode(
     args: argparse.Namespace,
-) -> tuple[str, bool, bool, bool, bool, bool, bool]:
+) -> tuple[str, bool, bool, bool, bool]:
     """根据 CLI 参数和预设模式解析各功能开关。
 
     Args:
         args: CLI 解析后的命名空间。
 
     Returns:
-        (run_mode, enable_tb, enable_callback, enable_monitor,
-         enable_env_diagnostics, enable_auto_analysis, enable_best_eval) 七元组。
+        (run_mode, enable_tb, enable_monitor, enable_auto_analysis,
+         enable_best_evaluation_artifacts) 五元组。
     """
     run_mode = args.run_mode
     defaults_by_mode = {
         "tune": {
             "tb": True,
-            "callback": True,
             "monitor": True,
-            "env_diagnostics": True,
             "analysis": True,
             "best_eval": True,
         },
         "reproduce": {
             "tb": False,
-            "callback": False,
             "monitor": True,
-            "env_diagnostics": False,
             "analysis": False,
             "best_eval": False,
         },
         "monitor_best": {
             "tb": True,
-            "callback": False,
             "monitor": True,
-            "env_diagnostics": False,
             "analysis": False,
             "best_eval": True,
         },
         "best_only": {
             "tb": False,
-            "callback": False,
             "monitor": False,
-            "env_diagnostics": False,
             "analysis": False,
             "best_eval": True,
         },
     }
     mode_defaults = defaults_by_mode[run_mode]
     enable_tb = mode_defaults["tb"] if args.enable_tb is None else args.enable_tb
-    enable_callback = (
-        mode_defaults["callback"]
-        if args.enable_callback is None
-        else args.enable_callback
-    )
     enable_monitor = (
         mode_defaults["monitor"] if args.enable_monitor is None else args.enable_monitor
-    )
-    enable_env_diagnostics = (
-        mode_defaults["env_diagnostics"]
-        if args.enable_env_diagnostics is None
-        else args.enable_env_diagnostics
     )
     enable_auto_analysis = (
         mode_defaults["analysis"]
         if args.enable_auto_analysis is None
         else args.enable_auto_analysis
     )
-    enable_best_eval = (
+    enable_best_evaluation_artifacts = (
         mode_defaults["best_eval"]
-        if args.enable_best_eval is None
-        else args.enable_best_eval
+        if args.enable_best_evaluation_artifacts is None
+        else args.enable_best_evaluation_artifacts
     )
-
-    if not enable_tb:
-        enable_callback = False
 
     return (
         run_mode,
         enable_tb,
-        enable_callback,
         enable_monitor,
-        enable_env_diagnostics,
         enable_auto_analysis,
-        enable_best_eval,
+        enable_best_evaluation_artifacts,
     )
 
 
@@ -940,16 +838,18 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
         TrainingRunSpec 实例，包含所有解析后的训练配置。
     """
     schedule_time_s = float(args.schedule_time_s)
-    ds = float(args.max_step_distance)
+    ds = float(args.step_distance)
+    if not math.isfinite(ds) or ds <= 0.0:
+        raise ValueError("step_distance must be finite and positive")
     reward_discount = float(args.reward_discount)
-    reward_profile = resolve_reward_profile(args.reward_profile)
-    reward_config = reward_profile.to_reward_config()
-    curriculum_profile = resolve_curriculum_profile(
+    reward_preset = resolve_reward_preset(args.reward_preset)
+    curriculum_profile = resolve_curriculum_profile_name(
         getattr(args, "curriculum_profile", DEFAULT_CURRICULUM_PROFILE_NAME)
     )
+    dspdl_config = DSPDLConfig() if curriculum_profile == "dspdl" else None
     reference_curve_dir_raw = getattr(args, "reference_curve_dir", None)
     reference_curve_dir: str | None = None
-    if curriculum_profile.enabled:
+    if curriculum_profile == "dspdl":
         if (
             not isinstance(reference_curve_dir_raw, str)
             or not reference_curve_dir_raw.strip()
@@ -968,62 +868,53 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
     output_dir = resolve_output_dir(
         output_root=output_root,
         schedule_time_s=schedule_time_s,
-        max_step_distance=ds,
-        reward_profile_name=reward_profile.name,
-        curriculum_profile_name=curriculum_profile.name,
+        step_distance=ds,
+        reward_preset_name=reward_preset.name,
+        curriculum_profile_name=curriculum_profile,
         experiment_tag=args.experiment_tag,
     )
     final_output_dir = os.path.join(output_dir, "final")
     final_model_save_path = os.path.join(final_output_dir, RL_FINAL_MODEL_FILENAME)
-    best_eval_output_dir = os.path.join(
-        output_dir,
-        f"best_{args.best_eval_trigger_mode}",
+    reward_diagnostics_path = os.path.join(final_output_dir, "reward_diagnostics.npz")
+    best_eval_output_dir = os.path.join(output_dir, "best_rollouts")
+    evaluation_history_path_raw = getattr(args, "evaluation_history_path", None)
+    evaluation_history_path = (
+        str(evaluation_history_path_raw)
+        if isinstance(evaluation_history_path_raw, str)
+        and evaluation_history_path_raw.strip()
+        else None
     )
 
     (
         run_mode,
         enable_tb,
-        enable_callback,
         enable_monitor,
-        enable_env_diagnostics,
         enable_auto_analysis,
-        enable_best_eval,
+        enable_best_evaluation_artifacts,
     ) = resolve_run_mode(args)
 
     effective_tb_log_name = resolve_tb_log_name(
         tb_log_name=args.tb_log_name,
         run_mode=run_mode,
         schedule_time_s=schedule_time_s,
-        max_step_distance=ds,
-        reward_profile_name=reward_profile.name,
-        curriculum_profile_name=curriculum_profile.name,
+        step_distance=ds,
+        reward_preset_name=reward_preset.name,
+        curriculum_profile_name=curriculum_profile,
         experiment_tag=args.experiment_tag,
     )
 
     log_interval = resolve_log_interval(args, run_mode, enable_tb)
-    tb_sample_interval_steps = max(1, int(args.tb_sample_interval_steps))
-    env_diagnostics_interval_steps = max(
-        1,
-        int(
-            args.env_diagnostics_interval_steps
-            if args.env_diagnostics_interval_steps is not None
-            else tb_sample_interval_steps
-        ),
+    enable_safety_truncation_histogram = run_mode == "tune" or bool(
+        getattr(args, "enable_safety_truncation_histogram", False)
     )
-    force_dump_interval_steps = _normalize_optional_positive_int(
-        args.force_dump_interval_steps
+    safety_truncation_bin_size_m = float(
+        getattr(args, "safety_truncation_bin_size_m", 5000.0)
     )
-    tb_batch_dump_records = _normalize_optional_positive_int(args.tb_batch_dump_records)
-    enable_safety_violation_bins = bool(
-        getattr(args, "enable_safety_violation_bins", False)
-    )
-    safety_position_bin_size_m = max(
-        1.0,
-        float(getattr(args, "safety_position_bin_size_m", 5000.0)),
-    )
-    if enable_safety_violation_bins:
-        enable_env_diagnostics = True
-
+    if (
+        not np.isfinite(safety_truncation_bin_size_m)
+        or safety_truncation_bin_size_m <= 0.0
+    ):
+        raise ValueError("safety_truncation_bin_size_m must be finite and positive")
     num_envs = max(1, int(args.num_envs))
     n_steps_per_env = _resolve_n_steps_per_env(args, num_envs)
     rollout_steps_per_update = n_steps_per_env * num_envs
@@ -1033,43 +924,49 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
     subproc_start_method = _resolve_subproc_start_method() if use_subproc else None
 
     run_metadata = build_run_metadata(
-        reward_profile=reward_profile,
+        reward_preset=reward_preset,
         curriculum_profile=curriculum_profile,
+        dspdl_config=dspdl_config,
         reference_curve_dir=reference_curve_dir,
         schedule_time_s=schedule_time_s,
-        max_step_distance=ds,
+        step_distance=ds,
         reward_discount=reward_discount,
         run_mode=run_mode,
         experiment_tag=args.experiment_tag,
         total_timesteps=int(args.total_timesteps),
         enable_tb=bool(enable_tb),
-        enable_callback=bool(enable_callback),
         enable_monitor=bool(enable_monitor),
-        enable_env_diagnostics=bool(enable_env_diagnostics),
         enable_auto_analysis=bool(enable_auto_analysis),
-        enable_best_eval=bool(enable_best_eval),
-        enable_safety_violation_bins=bool(enable_safety_violation_bins),
-        safety_position_bin_size_m=safety_position_bin_size_m,
+        enable_best_evaluation_artifacts=bool(enable_best_evaluation_artifacts),
+        enable_safety_truncation_histogram=bool(enable_safety_truncation_histogram),
+        safety_truncation_bin_size_m=safety_truncation_bin_size_m,
+        evaluation_interval_rollouts=max(
+            1, int(args.evaluation_interval_rollouts)
+        ),
+        evaluation_deterministic=bool(args.evaluation_deterministic),
+        evaluation_history_path=evaluation_history_path,
         num_envs=int(num_envs),
         vec_env_type=resolved_vec_env_type,
         subproc_start_method=subproc_start_method,
         n_steps_per_env=int(n_steps_per_env),
         rollout_steps_per_update=int(rollout_steps_per_update),
-        rollout_record_trigger_mode=args.rollout_record_trigger_mode,
         output_dir=output_dir,
         final_output_dir=final_output_dir,
-        best_eval_output_dir=best_eval_output_dir if enable_best_eval else None,
+        reward_diagnostics_path=reward_diagnostics_path,
+        best_eval_output_dir=(
+            best_eval_output_dir if enable_best_evaluation_artifacts else None
+        ),
         tensorboard_log_dir=args.tensorboard_log_dir if enable_tb else None,
         tb_log_name=effective_tb_log_name if enable_tb else None,
     )
 
     return TrainingRunSpec(
         schedule_time_s=schedule_time_s,
-        max_step_distance=ds,
+        step_distance=ds,
         reward_discount=reward_discount,
-        reward_profile=reward_profile,
-        reward_config=reward_config,
+        reward_preset=reward_preset,
         curriculum_profile=curriculum_profile,
+        dspdl_config=dspdl_config,
         reference_curve_dir=reference_curve_dir,
         reference_curve_artifact_path=None,
         reference_curve_metrics_path=None,
@@ -1077,35 +974,31 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
         output_dir=output_dir,
         final_output_dir=final_output_dir,
         best_eval_output_dir=best_eval_output_dir,
+        reward_diagnostics_path=reward_diagnostics_path,
         final_model_save_path=final_model_save_path,
         run_metadata_path=os.path.join(output_dir, RUN_METADATA_FILENAME),
         run_metadata=run_metadata,
         run_mode=run_mode,
         enable_tb=bool(enable_tb),
-        enable_callback=bool(enable_callback),
         enable_monitor=bool(enable_monitor),
-        enable_env_diagnostics=bool(enable_env_diagnostics),
         enable_auto_analysis=bool(enable_auto_analysis),
-        enable_best_eval=bool(enable_best_eval),
+        enable_best_evaluation_artifacts=bool(enable_best_evaluation_artifacts),
         tb_log_name=effective_tb_log_name,
         tensorboard_log_dir=args.tensorboard_log_dir,
         log_interval=int(log_interval),
-        tb_sample_interval_steps=int(tb_sample_interval_steps),
-        env_diagnostics_interval_steps=int(env_diagnostics_interval_steps),
-        force_dump_interval_steps=force_dump_interval_steps,
-        tb_batch_dump_records=tb_batch_dump_records,
         num_envs=int(num_envs),
         n_steps_per_env=int(n_steps_per_env),
         rollout_steps_per_update=int(rollout_steps_per_update),
         use_subproc=bool(use_subproc),
         resolved_vec_env_type=resolved_vec_env_type,
         subproc_start_method=subproc_start_method,
-        best_eval_trigger_mode=args.best_eval_trigger_mode,
-        best_eval_trigger_interval=max(1, int(args.best_eval_trigger_interval)),
-        best_eval_deterministic=bool(args.best_eval_deterministic),
-        enable_safety_violation_bins=bool(enable_safety_violation_bins),
-        safety_position_bin_size_m=safety_position_bin_size_m,
-        rollout_record_trigger_mode=args.rollout_record_trigger_mode,
+        evaluation_interval_rollouts=max(
+            1, int(args.evaluation_interval_rollouts)
+        ),
+        evaluation_deterministic=bool(args.evaluation_deterministic),
+        evaluation_history_path=evaluation_history_path,
+        enable_safety_truncation_histogram=bool(enable_safety_truncation_histogram),
+        safety_truncation_bin_size_m=safety_truncation_bin_size_m,
         total_timesteps=int(args.total_timesteps),
         device=args.device,
         seed=args.seed,
@@ -1138,13 +1031,15 @@ def _build_env_initializer(
     safeguard_utility: SafeGuardUtility,
     train_service: TrainService,
     gamma: float,
-    max_step_distance: float,
-    enable_diagnostics: bool,
-    diagnostics_interval_steps: int,
+    step_distance: float,
+    worker_rank: int,
+    rollout_capacity: int,
     reward_config: RewardConfig | None = None,
-    reference_trajectory: ReferenceTrajectory | None = None,
-    reference_initial_state_weights: np.ndarray | None = None,
-    reference_initial_state_seed: int | None = None,
+    context_pool: ContextPool | None = None,
+    initial_context_distribution: np.ndarray | None = None,
+    context_sampling_seed: int | None = None,
+    enable_dspdl_accumulator: bool = False,
+    enable_safety_truncation_tracking: bool = False,
 ) -> Callable[[], Any]:
     def _init():
         return make_env(
@@ -1153,13 +1048,16 @@ def _build_env_initializer(
             safeguard_utility=safeguard_utility,
             train_service=train_service,
             gamma=gamma,
-            max_step_distance=max_step_distance,
-            enable_diagnostics=enable_diagnostics,
-            diagnostics_interval_steps=diagnostics_interval_steps,
+            step_distance=step_distance,
+            compact_training_info=True,
             reward_config=reward_config,
-            reference_trajectory=reference_trajectory,
-            reference_initial_state_weights=reference_initial_state_weights,
-            reference_initial_state_seed=reference_initial_state_seed,
+            context_pool=context_pool,
+            initial_context_distribution=initial_context_distribution,
+            context_sampling_seed=context_sampling_seed,
+            enable_dspdl_accumulator=enable_dspdl_accumulator,
+            enable_safety_truncation_tracking=enable_safety_truncation_tracking,
+            reward_diagnostics_worker_rank=worker_rank,
+            reward_diagnostics_rollout_capacity=rollout_capacity,
         )
 
     return _init
@@ -1194,10 +1092,10 @@ def train_single_experiment(
         schedule_time_s=resolved_spec.schedule_time_s
     )
 
-    reference_trajectory: ReferenceTrajectory | None = None
-    initial_reference_weights: np.ndarray | None = None
+    context_pool: ContextPool | None = None
+    initial_context_distribution: np.ndarray | None = None
     curriculum_callback: BaseCallback | None = None
-    if resolved_spec.curriculum_profile.enabled:
+    if resolved_spec.curriculum_profile == "dspdl":
         if resolved_spec.reference_curve_dir is None:
             raise RuntimeError("enabled curriculum is missing reference_curve_dir")
         artifact = DPTrajectoryReader.resolve_matching_artifact(
@@ -1213,57 +1111,46 @@ def train_single_experiment(
             track=track,
             safeguard_utility=safeguard_utility,
             train_service=train_service,
-            max_step_distance_m=resolved_spec.max_step_distance,
+            step_distance_m=resolved_spec.step_distance,
         )
-        parent_sampler = ReferenceTrajectorySampler(
+        context_pool = ContextPoolBuilder(
             reference_trajectory,
             stepper=parent_stepper,
+        ).build()
+        if resolved_spec.dspdl_config is None:
+            raise RuntimeError("DSPDL curriculum is missing its configuration")
+        observation_builder = ObservationBuilder(
+            vehicle=vehicle,
+            track=track,
+            train_service=train_service,
+            step_distance_m=resolved_spec.step_distance,
+            direction=parent_stepper.direction,
+            whole_distance_m=parent_stepper.whole_distance_m,
+            get_upper_speed_or_zero=parent_stepper.get_upper_speed_or_zero,
         )
-        remaining_distances_m = np.asarray(
-            [state.remaining_distance_m for state in parent_sampler.states[:-1]],
-            dtype=np.float64,
+        context_observations = np.stack(
+            [
+                observation_builder.build(context.initial_state)
+                for context in context_pool.contexts
+            ],
+            axis=0,
         )
-        if resolved_spec.curriculum_profile.controller_kind == "fixed_reverse":
-            curriculum_callback = FixedReverseCurriculumCallback(
-                remaining_distances_m=remaining_distances_m,
-                whole_distance_m=parent_stepper.whole_distance_m,
-                total_timesteps=resolved_spec.total_timesteps,
-                profile=resolved_spec.curriculum_profile,
-            )
-        elif resolved_spec.curriculum_profile.controller_kind == "spdl":
-            observation_builder = ObservationBuilder(
-                vehicle=vehicle,
-                track=track,
-                train_service=train_service,
-                max_step_distance_m=resolved_spec.max_step_distance,
-                direction=parent_stepper.direction,
-                whole_distance_m=parent_stepper.whole_distance_m,
-                get_upper_speed_or_zero=parent_stepper.get_upper_speed_or_zero,
-            )
-            reference_observations = np.stack(
-                [
-                    observation_builder.build(state.runtime_state)
-                    for state in parent_sampler.states[:-1]
-                ],
-                axis=0,
-            )
-            curriculum_callback = SPDLReferenceCurriculumCallback(
-                remaining_distances_m=remaining_distances_m,
-                reference_observations=reference_observations,
-                gamma=resolved_spec.reward_discount,
-                profile=resolved_spec.curriculum_profile,
-            )
-        else:
-            raise RuntimeError("unsupported enabled curriculum controller")
-        initial_reference_weights = curriculum_callback.initial_weights()
+        curriculum_callback = DSPDLCallback(
+            context_pool=context_pool,
+            context_observations=context_observations,
+            config=resolved_spec.dspdl_config,
+        )
+        initial_context_distribution = (
+            curriculum_callback.initial_context_distribution()
+        )
         curriculum_metadata = dict(resolved_spec.run_metadata["curriculum"])
         curriculum_metadata.update(
             {
                 "reference_curve_artifact_path": artifact.npz_path,
                 "reference_curve_metrics_path": artifact.metrics_path,
-                "rl_max_step_distance_m": resolved_spec.max_step_distance,
-                "eligible_reference_node_count": parent_sampler.eligible_node_count,
-                "initial_sampling_distribution_version": 0,
+                "rl_step_distance_m": resolved_spec.step_distance,
+                "context_count": context_pool.context_count,
+                "initial_curriculum_version": 0,
             }
         )
         resolved_metadata = dict(resolved_spec.run_metadata)
@@ -1286,14 +1173,18 @@ def train_single_experiment(
             safeguard_utility=safeguard_utility,
             train_service=train_service,
             gamma=resolved_spec.reward_discount,
-            max_step_distance=resolved_spec.max_step_distance,
-            enable_diagnostics=resolved_spec.enable_env_diagnostics,
-            diagnostics_interval_steps=resolved_spec.env_diagnostics_interval_steps,
+            step_distance=resolved_spec.step_distance,
+            worker_rank=env_rank,
+            rollout_capacity=resolved_spec.n_steps_per_env,
             reward_config=resolved_spec.reward_config,
-            reference_trajectory=reference_trajectory,
-            reference_initial_state_weights=initial_reference_weights,
-            reference_initial_state_seed=(
+            context_pool=context_pool,
+            initial_context_distribution=initial_context_distribution,
+            context_sampling_seed=(
                 None if resolved_spec.seed is None else resolved_spec.seed + env_rank
+            ),
+            enable_dspdl_accumulator=context_pool is not None,
+            enable_safety_truncation_tracking=(
+                resolved_spec.enable_safety_truncation_histogram
             ),
         )
         for env_rank in range(resolved_spec.num_envs)
@@ -1341,57 +1232,58 @@ def train_single_experiment(
     if curriculum_callback is not None:
         callbacks.append(curriculum_callback)
     callbacks.append(
-        EpisodeMetricsCollector(
-            output_path=os.path.join(
-                resolved_spec.final_output_dir, "episode_metrics.npz"
-            ),
-            collect_interval_steps=max(1, resolved_spec.n_steps_per_env),
-            record_trigger_mode=resolved_spec.rollout_record_trigger_mode,
+        RewardDiagnosticsArtifactCallback(
+            output_path=resolved_spec.reward_diagnostics_path
         )
     )
-    if resolved_spec.enable_safety_violation_bins:
+    if resolved_spec.enable_safety_truncation_histogram:
         callbacks.append(
-            SafetyViolationPositionRecorder(
+            SafetyTruncationPositionHistogramCallback(
                 output_path=os.path.join(
                     resolved_spec.final_output_dir,
-                    "safety_violation_position_bins.npz",
+                    "safety_truncation_position_histogram.npz",
                 ),
-                position_bin_size_m=resolved_spec.safety_position_bin_size_m,
-            )
-        )
-    if resolved_spec.enable_callback:
-        callbacks.append(
-            TensorboardCallback(
-                tb_sample_interval_steps=resolved_spec.tb_sample_interval_steps,
-                force_dump_interval_steps=resolved_spec.force_dump_interval_steps,
-                batch_dump_records=resolved_spec.tb_batch_dump_records,
+                position_bin_size_m=resolved_spec.safety_truncation_bin_size_m,
             )
         )
 
-    if resolved_spec.enable_best_eval:
-        eval_recorders: list[Any] = [
-            BestTrajectoryRecorder(
-                output_dir=resolved_spec.best_eval_output_dir,
-                artifact_metadata=resolved_spec.run_metadata,
+    if (
+        resolved_spec.enable_best_evaluation_artifacts
+        or resolved_spec.evaluation_history_path
+    ):
+        evaluation_handlers: list[Any] = []
+        if resolved_spec.evaluation_history_path:
+            evaluation_handlers.append(
+                EvaluationHistoryArtifactHandler(
+                    output_path=resolved_spec.evaluation_history_path,
+                )
             )
-        ]
+        if resolved_spec.enable_best_evaluation_artifacts:
+            evaluation_handlers.append(
+                BestEvaluationArtifactHandler(
+                    output_dir=resolved_spec.best_eval_output_dir,
+                    artifact_metadata=resolved_spec.run_metadata,
+                )
+            )
         callbacks.append(
-            PeriodicEvalCallback(
+            ScheduledPolicyEvaluationCallback(
                 eval_env=build_single_eval_env(
                     vehicle=vehicle,
                     track=track,
                     safeguard_utility=safeguard_utility,
                     train_service=train_service,
                     gamma=resolved_spec.reward_discount,
-                    max_step_distance=resolved_spec.max_step_distance,
-                    enable_diagnostics=False,
-                    enable_trajectory_tracking=True,
+                    step_distance=resolved_spec.step_distance,
+                    enable_trajectory_tracking=(
+                        resolved_spec.enable_best_evaluation_artifacts
+                    ),
                     reward_config=resolved_spec.reward_config,
                 ),
-                recorders=eval_recorders,
-                eval_trigger_mode=resolved_spec.best_eval_trigger_mode,
-                eval_trigger_interval=resolved_spec.best_eval_trigger_interval,
-                deterministic=resolved_spec.best_eval_deterministic,
+                handlers=evaluation_handlers,
+                evaluation_interval_rollouts=(
+                    resolved_spec.evaluation_interval_rollouts
+                ),
+                deterministic=resolved_spec.evaluation_deterministic,
             )
         )
 
@@ -1409,7 +1301,7 @@ def train_single_experiment(
 
     print("Training finished.")
     print(f"Final Model saved to: {resolved_spec.final_model_save_path}")
-    if resolved_spec.enable_best_eval:
+    if resolved_spec.enable_best_evaluation_artifacts:
         print(
             f"Best trajectory artifacts saved under: \
             {resolved_spec.best_eval_output_dir}"
@@ -1424,12 +1316,16 @@ def train_single_experiment(
                     resolved_spec.log_interval if resolved_spec.enable_tb else None
                 ),
                 min_points_per_10k_steps=args.analysis_min_points_per_10k_steps,
-                min_unique_episodes=args.analysis_min_unique_episodes,
                 rollout_steps_per_update=resolved_spec.rollout_steps_per_update,
                 sampling_quality_mode=args.analysis_sampling_quality_mode,
+                final_output_dir=resolved_spec.final_output_dir,
             )
             analysis_result = run_training_analysis(
-                log_root=resolved_spec.tensorboard_log_dir,
+                log_root=(
+                    resolved_spec.tensorboard_log_dir
+                    if resolved_spec.enable_tb
+                    else None
+                ),
                 run_name=resolved_spec.tb_log_name if resolved_spec.enable_tb else None,
                 config=analyze_config,
             )
@@ -1441,6 +1337,41 @@ def train_single_experiment(
             print(f"Training analysis skipped due to error: {exc}")
 
     return resolved_spec
+
+
+def evaluate_final_training_run(
+    spec: TrainingRunSpec,
+) -> tuple[str, str]:
+    """Evaluate ``final_model`` from a completed run at the real start state.
+
+    This deliberately does not attach the curriculum reference-state provider:
+    final artifacts always represent the deployed policy on the full task.
+    """
+    vehicle, track, safeguard_utility, train_service = build_scenario(
+        schedule_time_s=spec.schedule_time_s
+    )
+    env = build_single_eval_env(
+        vehicle=vehicle,
+        track=track,
+        safeguard_utility=safeguard_utility,
+        train_service=train_service,
+        gamma=spec.reward_discount,
+        step_distance=spec.step_distance,
+        enable_trajectory_tracking=True,
+        reward_config=spec.reward_config,
+    )
+    try:
+        model = PPO.load(spec.final_model_save_path, device=spec.device)
+        _, npz_path, metrics_path = evaluate_and_save_final_policy(
+            model,
+            env,
+            output_path=os.path.join(spec.final_output_dir, "final_trajectory.npz"),
+            metadata=spec.run_metadata,
+            deterministic=True,
+        )
+        return npz_path, metrics_path
+    finally:
+        env.close()
 
 
 # =============================================================================
@@ -1501,16 +1432,10 @@ def _best_trajectory_filter(path: Path) -> bool:
     )
 
 
-def _best_steps_trajectory_filter(path: Path) -> bool:
-    return (
-        path.name == _RL_BEST_TRAJECTORY_FILENAME and path.parent.name == "best_steps"
-    )
-
-
-def _best_episodes_trajectory_filter(path: Path) -> bool:
+def _best_rollouts_trajectory_filter(path: Path) -> bool:
     return (
         path.name == _RL_BEST_TRAJECTORY_FILENAME
-        and path.parent.name == "best_episodes"
+        and path.parent.name == "best_rollouts"
     )
 
 
@@ -1527,7 +1452,7 @@ def resolve_rl_curve_artifact(
 
     Args:
         curve_dir: 训练输出根目录。
-        trajectory_source: 轨迹来源标识 (best/best_steps/best_episodes/final)。
+        trajectory_source: 轨迹来源标识 (best/best_rollouts/final)。
 
     Returns:
         OptimizedCurveArtifact 实例。
@@ -1538,10 +1463,9 @@ def resolve_rl_curve_artifact(
     """
     filter_map: dict[str, tuple[str, Callable[[Path], bool]]] = {
         "best": (_RL_BEST_TRAJECTORY_FILENAME, _best_trajectory_filter),
-        "best_steps": (_RL_BEST_TRAJECTORY_FILENAME, _best_steps_trajectory_filter),
-        "best_episodes": (
+        "best_rollouts": (
             _RL_BEST_TRAJECTORY_FILENAME,
-            _best_episodes_trajectory_filter,
+            _best_rollouts_trajectory_filter,
         ),
         "final": (_RL_FINAL_TRAJECTORY_FILENAME, _final_trajectory_filter),
     }
@@ -1778,7 +1702,7 @@ def format_rl_trajectory_terminal_summary(
     metrics: dict[str, object],
     *,
     panel_label: str | None = None,
-    reward_profile_name: str | None = None,
+    reward_preset_name: str | None = None,
     repeat_index: int | None = None,
     seed: int | None = None,
     artifact_path: str | None = None,
@@ -1788,7 +1712,7 @@ def format_rl_trajectory_terminal_summary(
     Args:
         metrics: 轨迹指标字典。
         panel_label: 面板标签。
-        reward_profile_name: 奖励情形名。
+        reward_preset_name: 奖励预设名。
         repeat_index: 重复实验索引。
         seed: 随机种子。
         artifact_path: 产物文件路径。
@@ -1796,10 +1720,10 @@ def format_rl_trajectory_terminal_summary(
     Returns:
         " | " 分隔的摘要字符串。
     """
-    effective_profile = reward_profile_name or str(
-        metrics.get("reward_profile_name", "unknown")
+    effective_preset = reward_preset_name or str(
+        metrics.get("reward_preset_name", "unknown")
     )
-    fields = [f"profile={effective_profile}"]
+    fields = [f"preset={effective_preset}"]
     if panel_label:
         fields.insert(0, f"panel={panel_label}")
     if repeat_index is not None:

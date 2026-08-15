@@ -9,6 +9,13 @@ from tensorboard.backend.event_processing import (
     event_accumulator,
 )
 
+from rl.reward_diagnostics import (
+    REWARD_DIAGNOSTICS_SCHEMA_VERSION,
+    REWARD_NAMES,
+    REWARD_SIGNAL_COUNT,
+    TOTAL_REWARD_INDEX,
+)
+
 
 @dataclass(frozen=True)
 class ScalarSeries:
@@ -18,23 +25,216 @@ class ScalarSeries:
     wall_times: np.ndarray
 
 
+@dataclass(frozen=True)
+class RewardDiagnosticsArtifact:
+    reward_names: tuple[str, ...]
+    rollout_end_step: np.ndarray
+    rollout_transition_count: np.ndarray
+    rollout_reward_sum: np.ndarray
+    rollout_reward_abs_sum: np.ndarray
+    rollout_reward_nonzero_count: np.ndarray
+    rollout_reward_cross_product: np.ndarray
+    episode_end_step: np.ndarray
+    episode_worker_rank: np.ndarray
+    episode_index: np.ndarray
+    episode_length: np.ndarray
+    episode_terminated: np.ndarray
+    episode_truncated: np.ndarray
+    episode_complete: np.ndarray
+    episode_reward_sums: np.ndarray
+
+
+@dataclass(frozen=True)
+class CompleteEpisodeSeries:
+    end_step: np.ndarray
+    total_reward: np.ndarray
+    length: np.ndarray
+
+
+def extract_complete_episode_series(
+    artifact: RewardDiagnosticsArtifact,
+) -> CompleteEpisodeSeries:
+    """Build a strictly ordered curve, averaging episodes ending at one step."""
+    complete = artifact.episode_complete
+    steps = artifact.episode_end_step[complete]
+    rewards = artifact.episode_reward_sums[complete, TOTAL_REWARD_INDEX]
+    lengths = artifact.episode_length[complete].astype(np.float64)
+    if steps.size == 0:
+        return CompleteEpisodeSeries(
+            end_step=np.empty(0, dtype=np.int64),
+            total_reward=np.empty(0, dtype=np.float64),
+            length=np.empty(0, dtype=np.float64),
+        )
+    unique_steps, inverse, counts = np.unique(
+        steps, return_inverse=True, return_counts=True
+    )
+    reward_sum = np.bincount(inverse, weights=rewards)
+    length_sum = np.bincount(inverse, weights=lengths)
+    return CompleteEpisodeSeries(
+        end_step=unique_steps.astype(np.int64, copy=False),
+        total_reward=reward_sum / counts,
+        length=length_sum / counts,
+    )
+
+
+def load_reward_diagnostics_artifact(
+    path: str | Path,
+) -> RewardDiagnosticsArtifact:
+    artifact_path = Path(path)
+    if not artifact_path.is_file():
+        raise FileNotFoundError(
+            f"Reward diagnostics artifact not found: {artifact_path}"
+        )
+    required = (
+        "schema_version",
+        "reward_names",
+        "rollout_end_step",
+        "rollout_transition_count",
+        "rollout_reward_sum",
+        "rollout_reward_abs_sum",
+        "rollout_reward_nonzero_count",
+        "rollout_reward_cross_product",
+        "episode_end_step",
+        "episode_worker_rank",
+        "episode_index",
+        "episode_length",
+        "episode_terminated",
+        "episode_truncated",
+        "episode_complete",
+        "episode_reward_sums",
+    )
+    with np.load(artifact_path, allow_pickle=False) as data:
+        missing = [name for name in required if name not in data.files]
+        if missing:
+            raise ValueError(f"Reward diagnostics artifact is missing {missing}")
+        version = np.asarray(data["schema_version"], dtype=np.int16)
+        names = tuple(str(name) for name in np.asarray(data["reward_names"]))
+        values = {name: np.asarray(data[name]).copy() for name in required[2:]}
+    if version.shape != (1,) or int(version[0]) != REWARD_DIAGNOSTICS_SCHEMA_VERSION:
+        raise ValueError("Unsupported reward diagnostics schema version")
+    if names != REWARD_NAMES:
+        raise ValueError("Reward diagnostics names do not match the schema")
+
+    rollout_end = np.asarray(values["rollout_end_step"], dtype=np.int64)
+    rollout_count = np.asarray(values["rollout_transition_count"], dtype=np.int64)
+    rollout_nonzero = np.asarray(values["rollout_reward_nonzero_count"], dtype=np.int64)
+    rollout_rows = rollout_count.size
+    expected_rollout_shapes = {
+        "rollout_end_step": (rollout_rows,),
+        "rollout_reward_sum": (rollout_rows, REWARD_SIGNAL_COUNT),
+        "rollout_reward_abs_sum": (rollout_rows, REWARD_SIGNAL_COUNT),
+        "rollout_reward_nonzero_count": (rollout_rows, REWARD_SIGNAL_COUNT),
+        "rollout_reward_cross_product": (
+            rollout_rows,
+            REWARD_SIGNAL_COUNT,
+            REWARD_SIGNAL_COUNT,
+        ),
+    }
+    for name, shape in expected_rollout_shapes.items():
+        if np.asarray(values[name]).shape != shape:
+            raise ValueError(f"Reward diagnostics has invalid {name} shape")
+    episode_end = np.asarray(values["episode_end_step"], dtype=np.int64)
+    episode_rows = episode_end.size
+    for name in (
+        "episode_worker_rank",
+        "episode_index",
+        "episode_length",
+        "episode_terminated",
+        "episode_truncated",
+        "episode_complete",
+    ):
+        if np.asarray(values[name]).shape != (episode_rows,):
+            raise ValueError(f"Reward diagnostics has invalid {name} shape")
+    episode_rewards = np.asarray(values["episode_reward_sums"], dtype=np.float64)
+    if episode_rewards.shape != (episode_rows, REWARD_SIGNAL_COUNT):
+        raise ValueError("Reward diagnostics has invalid episode_reward_sums shape")
+
+    reward_sum = np.asarray(values["rollout_reward_sum"], dtype=np.float64)
+    reward_abs_sum = np.asarray(values["rollout_reward_abs_sum"], dtype=np.float64)
+    cross = np.asarray(values["rollout_reward_cross_product"], dtype=np.float64)
+    if (
+        np.any(rollout_count < 0)
+        or np.any(rollout_end < 0)
+        or np.any(np.diff(rollout_end) <= 0)
+        or np.any(reward_abs_sum < 0.0)
+        or np.any(rollout_nonzero < 0)
+        or np.any(rollout_nonzero > rollout_count[:, None])
+        or not np.all(np.isfinite(reward_sum))
+        or not np.all(np.isfinite(reward_abs_sum))
+        or not np.all(np.isfinite(cross))
+        or not np.all(np.isfinite(episode_rewards))
+    ):
+        raise ValueError("Reward diagnostics contains invalid values")
+    if not np.allclose(cross, np.swapaxes(cross, 1, 2), atol=1e-8):
+        raise ValueError("Reward diagnostics cross products are not symmetric")
+    episode_length = np.asarray(values["episode_length"], dtype=np.int32)
+    episode_terminated = np.asarray(values["episode_terminated"], dtype=np.bool_)
+    episode_truncated = np.asarray(values["episode_truncated"], dtype=np.bool_)
+    episode_complete = np.asarray(values["episode_complete"], dtype=np.bool_)
+    episode_worker_rank = np.asarray(values["episode_worker_rank"], dtype=np.int16)
+    episode_index = np.asarray(values["episode_index"], dtype=np.int64)
+    if (
+        np.any(episode_end < 0)
+        or np.any(np.diff(episode_end) < 0)
+        or np.any(episode_worker_rank < 0)
+        or np.any(episode_index < 0)
+        or np.any(episode_length <= 0)
+        or np.any(episode_terminated & episode_truncated)
+        or np.any(episode_complete != (episode_terminated | episode_truncated))
+        or int(episode_length.sum()) != int(rollout_count.sum())
+    ):
+        raise ValueError("Reward diagnostics contains invalid episode metadata")
+    component_slice = slice(0, TOTAL_REWARD_INDEX)
+    if not np.allclose(
+        reward_sum[:, TOTAL_REWARD_INDEX],
+        reward_sum[:, component_slice].sum(axis=1),
+        atol=1e-5,
+    ) or not np.allclose(
+        episode_rewards[:, TOTAL_REWARD_INDEX],
+        episode_rewards[:, component_slice].sum(axis=1),
+        atol=1e-5,
+    ):
+        raise ValueError("Reward diagnostics total does not equal component sum")
+
+    return RewardDiagnosticsArtifact(
+        reward_names=names,
+        rollout_end_step=rollout_end,
+        rollout_transition_count=rollout_count,
+        rollout_reward_sum=reward_sum,
+        rollout_reward_abs_sum=reward_abs_sum,
+        rollout_reward_nonzero_count=rollout_nonzero,
+        rollout_reward_cross_product=cross,
+        episode_end_step=episode_end,
+        episode_worker_rank=episode_worker_rank,
+        episode_index=episode_index,
+        episode_length=episode_length,
+        episode_terminated=episode_terminated,
+        episode_truncated=episode_truncated,
+        episode_complete=episode_complete,
+        episode_reward_sums=episode_rewards,
+    )
+
+
 DEFAULT_SAMPLING_HEALTH_TAGS = [
     "rollout/ep_rew_mean",
-    "basic/episode_id",
-    "outcome/truncated",
-    "constraint/violation_code",
-    "rewards/safety",
+    "train/approx_kl",
 ]
+
+EXCLUDED_ANALYSIS_TAG_PREFIXES = ("basic/", "constraint/", "event/")
+EXCLUDED_ANALYSIS_TAGS = frozenset({"rewards/terminal_stopping", "rewards/punctuality"})
 
 
 # Writers use the canonical names below.  Readers retain aliases so existing
 # TensorBoard runs generated before the info-contract cleanup remain analyzable.
 LEGACY_INFO_TAG_ALIASES = {
-    "basic/episode_id": "state/episode_id",
-    "basic/position": "state/position",
-    "basic/stopping_point_index": "state/stopping_point_index",
     "outcome/truncated": "constraint/is_truncated",
 }
+
+
+def _is_excluded_analysis_tag(tag: str) -> bool:
+    return tag in EXCLUDED_ANALYSIS_TAGS or tag.startswith(
+        EXCLUDED_ANALYSIS_TAG_PREFIXES
+    )
 
 
 def with_legacy_info_tag_aliases(
@@ -44,7 +244,11 @@ def with_legacy_info_tag_aliases(
     for canonical_tag, legacy_tag in LEGACY_INFO_TAG_ALIASES.items():
         if canonical_tag not in resolved and legacy_tag in resolved:
             resolved[canonical_tag] = resolved[legacy_tag]
-    return resolved
+    return {
+        tag: series
+        for tag, series in resolved.items()
+        if not _is_excluded_analysis_tag(tag)
+    }
 
 
 def list_run_directories(log_root: str | Path) -> list[Path]:

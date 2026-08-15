@@ -237,7 +237,7 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         "--trajectory-source",
         choices=RL_TRAJECTORY_SOURCE_CHOICES,
         default="best",
-        help="RL trajectory source: best, best_steps, best_episodes, final.",
+        help="RL trajectory source: best, best_rollouts, final.",
     )
     _ = parser.add_argument(
         "--analysis-mode",

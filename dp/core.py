@@ -22,7 +22,11 @@ try:
 except ImportError:
     tqdm = None
 
-from model.common import ECC, ORS, calc_transition_to_speed_scalar_numba
+from model.common import (
+    ECC,
+    calc_transition_to_speed_scalar_numba,
+    min_operation_time_curve,
+)
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
@@ -383,21 +387,17 @@ class VariableSpacingDPOptimizer:
             Psi_fd=3.9629,
             k_c=0.8,
         )
-        self.ors: ORS = ORS(
-            vehicle=self.vehicle,
-            track=self.track,
-            factor=self.safeguard_utility.gamma,
-        )
         # 计算最短运行时间参考曲线
         self.ref_curve_pos: NDArray[np.float64]
         self.ref_curve_speed: NDArray[np.float64]
-        self.ref_curve_pos, self.ref_curve_speed = (
-            self.ors.calc_min_operation_time_curve(
-                begin_pos=self.train_service.start_position,
-                begin_speed=self.train_service.start_speed,
-                end_pos=self.train_service.target_position,
-                end_speed=0.0,
-            )
+        self.ref_curve_pos, self.ref_curve_speed = min_operation_time_curve(
+            vehicle=self.vehicle,
+            track=self.track,
+            factor=self.safeguard_utility.gamma,
+            begin_pos=self.train_service.start_position,
+            begin_speed=self.train_service.start_speed,
+            end_pos=self.train_service.target_position,
+            end_speed=0.0,
         )
         self._graph_cache_signature: (
             tuple[float, float, str, int, float, str] | None

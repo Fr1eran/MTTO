@@ -22,15 +22,15 @@ from rl.evaluation import (
     get_strict_time_error_limit_s,
 )
 from rl.experiment_utils import (
-    DEFAULT_MAX_STEP_DISTANCE,
     DEFAULT_REWARD_DISCOUNT,
-    DEFAULT_REWARD_PROFILE_NAME,
+    DEFAULT_REWARD_PRESET_NAME,
     DEFAULT_SCHEDULE_TIME_S,
+    DEFAULT_STEP_DISTANCE,
     RL_FINAL_MODEL_FILENAME,
     apply_rl_curve_plot_style,
     load_run_metadata,
-    resolve_reward_profile,
-    reward_profile_names,
+    resolve_reward_preset,
+    reward_preset_names,
 )
 from utils.io_utils import (
     format_float_token,
@@ -208,16 +208,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     _ = evaluate_parser.add_argument(
         "--step-distance",
+        "--max-step-distance",
+        dest="step_distance",
         type=float,
         default=None,
         help="Maximum simulation step distance.",
     )
     _ = evaluate_parser.add_argument(
-        "--reward-profile",
+        "--reward-preset",
         type=str,
-        choices=tuple(reward_profile_names()),
+        choices=tuple(reward_preset_names()),
         default=None,
-        help="Reward profile preset; falls back to run metadata.",
+        help="Reward preset; falls back to run metadata.",
     )
     _ = evaluate_parser.add_argument(
         "--device",
@@ -318,8 +320,8 @@ def _run_one_case(
     case: ScheduleChangeCase,
     schedule_time_s: float,
     reward_discount: float,
-    max_step_distance: float,
-    reward_profile_name: str,
+    step_distance: float,
+    reward_preset_name: str,
     reward_config: Any,
     deterministic: bool,
     change_distance_m: float,
@@ -336,8 +338,7 @@ def _run_one_case(
                 safeguard_utility=safeguard_utility,
                 train_service=train_service,
                 gamma=reward_discount,
-                max_step_distance=max_step_distance,
-                enable_diagnostics=False,
+                step_distance=step_distance,
                 enable_trajectory_tracking=False,
                 reward_config=reward_config,
             )
@@ -490,7 +491,7 @@ def _run_one_case(
         {
             "trajectory_source": "schedule_time_change",
             "evaluation_load_dir": load_dir,
-            "reward_profile_name": reward_profile_name,
+            "reward_preset_name": reward_preset_name,
             "initial_schedule_time_s": float(schedule_time_s),
             "final_schedule_time_s": target_time_s,
             "delta_time_s": float(case.delta_time_s),
@@ -501,7 +502,7 @@ def _run_one_case(
             "schedule_change_step": change_step,
             "schedule_change_position_m": change_position_m,
             "schedule_change_speed_mps": change_speed_mps,
-            "max_step_distance": float(max_step_distance),
+            "step_distance": float(step_distance),
             "reward_discount": float(reward_discount),
             "deterministic": bool(deterministic),
         }
@@ -546,9 +547,9 @@ def _write_summary(
     load_dir: str,
     output_root: str,
     schedule_time_s: float,
-    reward_profile_name: str,
+    reward_preset_name: str,
     reward_discount: float,
-    max_step_distance: float,
+    step_distance: float,
     deterministic: bool,
     change_distance_m: float,
     results: list[ScheduleChangeRunResult],
@@ -559,9 +560,9 @@ def _write_summary(
         "evaluation_load_dir": load_dir,
         "output_root": output_root,
         "initial_schedule_time_s": float(schedule_time_s),
-        "reward_profile_name": reward_profile_name,
+        "reward_preset_name": reward_preset_name,
         "reward_discount": float(reward_discount),
-        "max_step_distance": float(max_step_distance),
+        "step_distance": float(step_distance),
         "deterministic": bool(deterministic),
         "change_distance_m": float(change_distance_m),
         "cases": [result.to_summary_case() for result in results],
@@ -585,16 +586,19 @@ def run_evaluate(args: argparse.Namespace) -> None:
         if args.reward_discount is not None
         else run_metadata.get("reward_discount", DEFAULT_REWARD_DISCOUNT)
     )
-    max_step_distance = float(
+    step_distance = float(
         args.step_distance
         if args.step_distance is not None
-        else run_metadata.get("max_step_distance", DEFAULT_MAX_STEP_DISTANCE)
+        else run_metadata.get(
+            "step_distance",
+            run_metadata.get("max_step_distance", DEFAULT_STEP_DISTANCE),
+        )
     )
-    reward_profile = resolve_reward_profile(
-        args.reward_profile
-        or str(run_metadata.get("reward_profile_name", DEFAULT_REWARD_PROFILE_NAME))
+    reward_preset = resolve_reward_preset(
+        args.reward_preset
+        or str(run_metadata.get("reward_preset_name", DEFAULT_REWARD_PRESET_NAME))
     )
-    reward_config = reward_profile.to_reward_config()
+    reward_config = reward_preset.config
 
     model_zip_path = os.path.join(load_dir, RL_FINAL_MODEL_FILENAME)
     cases = [build_schedule_change_case(delta) for delta in args.delta_times_s]
@@ -604,10 +608,10 @@ def run_evaluate(args: argparse.Namespace) -> None:
         print("  mode:                evaluate")
         print(f"  load_dir:            {load_dir}")
         print(f"  output_dir:          {args.output_dir}")
-        print(f"  reward_profile:      {reward_profile.name}")
+        print(f"  reward_preset:      {reward_preset.name}")
         print(f"  schedule_time_s:     {schedule_time_s:.2f}")
         print(f"  reward_discount:     {reward_discount:.4f}")
-        print(f"  step_distance:       {max_step_distance:.2f}")
+        print(f"  step_distance:       {step_distance:.2f}")
         print(f"  change_distance_m:   {args.change_distance_m:.2f}")
         print(f"  delta_times_s:       {args.delta_times_s}")
         print(f"  deterministic:       {args.deterministic}")
@@ -634,8 +638,8 @@ def run_evaluate(args: argparse.Namespace) -> None:
             case=case,
             schedule_time_s=schedule_time_s,
             reward_discount=reward_discount,
-            max_step_distance=max_step_distance,
-            reward_profile_name=reward_profile.name,
+            step_distance=step_distance,
+            reward_preset_name=reward_preset.name,
             reward_config=reward_config,
             deterministic=bool(args.deterministic),
             change_distance_m=float(args.change_distance_m),
@@ -647,9 +651,9 @@ def run_evaluate(args: argparse.Namespace) -> None:
         load_dir=load_dir,
         output_root=args.output_dir,
         schedule_time_s=schedule_time_s,
-        reward_profile_name=reward_profile.name,
+        reward_preset_name=reward_preset.name,
         reward_discount=reward_discount,
-        max_step_distance=max_step_distance,
+        step_distance=step_distance,
         deterministic=bool(args.deterministic),
         change_distance_m=float(args.change_distance_m),
         results=results,

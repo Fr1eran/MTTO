@@ -38,6 +38,14 @@ def test_show_rl_result_cli_accepts_trajectory_source() -> None:
     assert args.curve_dir == "output/custom/rl"
 
 
+def test_show_rl_result_cli_accepts_rollout_best_source() -> None:
+    args = _build_cli_parser().parse_args(
+        ["--trajectory-source", "best_rollouts"]
+    )
+
+    assert args.trajectory_source == "best_rollouts"
+
+
 def test_show_rl_result_cli_accepts_dry_run() -> None:
     parser = _build_cli_parser()
     args = parser.parse_args(["--dry-run", "--curve-dir", "output/custom/rl"])
@@ -46,17 +54,19 @@ def test_show_rl_result_cli_accepts_dry_run() -> None:
     assert args.curve_dir == "output/custom/rl"
 
 
-def test_resolve_rl_curve_artifact_prefers_latest_best_across_trigger_modes(
+def test_resolve_rl_curve_artifact_prefers_latest_best_across_runs(
     tmp_path: Path,
 ) -> None:
     curve_root = tmp_path / "runs"
-    best_steps_dir = curve_root / "430p0_100p0__basic_safety_stopping" / "best_steps"
-    best_episodes_dir = curve_root / "430p0_100p0__basic" / "best_episodes"
-    best_steps_dir.mkdir(parents=True)
-    best_episodes_dir.mkdir(parents=True)
+    old_best_dir = (
+        curve_root / "430p0_100p0__basic_safety_stopping" / "best_rollouts"
+    )
+    new_best_dir = curve_root / "430p0_100p0__basic" / "best_rollouts"
+    old_best_dir.mkdir(parents=True)
+    new_best_dir.mkdir(parents=True)
 
-    old_curve, _ = _write_artifact(best_steps_dir, "best_trajectory.npz")
-    new_curve, new_metrics = _write_artifact(best_episodes_dir, "best_trajectory.npz")
+    old_curve, _ = _write_artifact(old_best_dir, "best_trajectory.npz")
+    new_curve, new_metrics = _write_artifact(new_best_dir, "best_trajectory.npz")
 
     os.utime(old_curve, (1, 1))
     os.utime(new_curve, (2, 2))

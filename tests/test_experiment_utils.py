@@ -4,45 +4,47 @@ import matplotlib.pyplot as plt
 import pytest
 
 from rl.experiment_utils import (
-    DEFAULT_REWARD_PROFILE_NAME,
+    DEFAULT_REWARD_PRESET_NAME,
     RUN_METADATA_FILENAME,
     add_panel_label,
     build_reward_config,
     build_rl_trajectory_comparison_key,
     curriculum_profile_names,
     load_run_metadata,
-    resolve_curriculum_profile,
+    resolve_curriculum_profile_name,
     resolve_output_dir,
-    resolve_reward_profile,
+    resolve_reward_preset,
     resolve_tb_log_name,
-    reward_profile_names,
+    reward_preset_names,
     save_run_metadata,
 )
 
 
 def test_curriculum_profiles_resolve_with_disabled_default() -> None:
-    assert curriculum_profile_names() == ("none", "fixed_reverse", "spdl")
-    assert resolve_curriculum_profile().enabled is False
-    assert resolve_curriculum_profile("fixed_reverse").enabled is True
-    assert resolve_curriculum_profile("spdl").enabled is True
+    assert curriculum_profile_names() == ("none", "dspdl")
+    assert resolve_curriculum_profile_name() == "none"
+    assert resolve_curriculum_profile_name("dspdl") == "dspdl"
+    with pytest.raises(ValueError, match="Available profiles: none, dspdl"):
+        _ = resolve_curriculum_profile_name("fixed_reverse")
 
 
 def test_curriculum_profile_scopes_nonbaseline_output_name() -> None:
     output_dir = resolve_output_dir(
         output_root="output/optimal/rl",
         schedule_time_s=430.0,
-        max_step_distance=30.0,
-        reward_profile_name="basic",
-        curriculum_profile_name="fixed_reverse",
+        step_distance=30.0,
+        reward_preset_name="basic",
+        curriculum_profile_name="dspdl",
     )
 
-    assert Path(output_dir).name == "430p0_30p0__basic__fixed_reverse"
+    assert Path(output_dir).name == "430p0_30p0__basic__dspdl"
 
 
-def test_reward_profile_names_include_real_pbrs_ablation_profiles() -> None:
-    assert reward_profile_names() == (
+def test_reward_preset_names_include_real_pbrs_ablation_profiles() -> None:
+    assert reward_preset_names() == (
         "basic",
         "basic_safety",
+        "basic_stopping",
         "basic_safety_stopping",
     )
 
@@ -53,13 +55,14 @@ def test_reward_profile_names_include_real_pbrs_ablation_profiles() -> None:
 )
 def test_removed_punctuality_profiles_are_rejected(profile_name: str) -> None:
     with pytest.raises(ValueError):
-        _ = resolve_reward_profile(profile_name)
+        _ = resolve_reward_preset(profile_name)
 
 
-def test_reward_profiles_keep_energy_comfort_and_toggle_pbrs() -> None:
+def test_reward_presets_keep_energy_comfort_and_toggle_pbrs() -> None:
     expected_flags = {
         "basic": (False, False),
         "basic_safety": (True, False),
+        "basic_stopping": (False, True),
         "basic_safety_stopping": (True, True),
     }
     for profile_name, expected in expected_flags.items():
@@ -72,12 +75,19 @@ def test_reward_profiles_keep_energy_comfort_and_toggle_pbrs() -> None:
         ) == expected
 
 
+def test_reward_preset_owns_the_runtime_config() -> None:
+    preset = resolve_reward_preset("basic_stopping")
+
+    assert preset.config is build_reward_config("basic_stopping")
+    assert preset.enabled_shaping_components() == ("stopping",)
+
+
 def test_resolve_output_dir_scopes_non_default_profile_and_experiment_tag() -> None:
     output_dir = resolve_output_dir(
         output_root="output/optimal/rl",
         schedule_time_s=430.0,
-        max_step_distance=100.0,
-        reward_profile_name="basic",
+        step_distance=100.0,
+        reward_preset_name="basic",
         experiment_tag="Trial A",
     )
 
@@ -89,8 +99,8 @@ def test_resolve_tb_log_name_generates_experiment_scoped_name() -> None:
         tb_log_name=None,
         run_mode="monitor_best",
         schedule_time_s=430.0,
-        max_step_distance=100.0,
-        reward_profile_name=DEFAULT_REWARD_PROFILE_NAME,
+        step_distance=100.0,
+        reward_preset_name=DEFAULT_REWARD_PRESET_NAME,
         experiment_tag=None,
     )
 
@@ -103,7 +113,7 @@ def test_load_run_metadata_falls_back_to_parent_directory(tmp_path: Path) -> Non
     final_dir.mkdir(parents=True)
 
     expected_metadata = {
-        "reward_profile_name": "basic",
+        "reward_preset_name": "basic",
         "tb_log_name": "trainning_log__monitor_best__430p0_100p0__basic",
     }
     metadata_path = save_run_metadata(run_dir, expected_metadata)

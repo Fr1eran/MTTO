@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import functools
 import json
 import math
 from collections.abc import Callable, Sequence
@@ -19,7 +20,7 @@ from dp.experiment_utils import (
     load_dp_curve_artifact,
     resolve_dp_curve_artifact,
 )
-from model.common import ORS
+from model.common import min_operation_time
 from utils.plot_utils import set_global_plot_style
 from utils.scenario import build_scenario
 
@@ -630,7 +631,12 @@ def main() -> None:
             metrics,
             train_service=train_service,
         )
-        ors = ORS(vehicle=vehicle, track=track, factor=safeguard_utility.gamma)
+        min_remaining_time_fn = functools.partial(
+            min_operation_time,
+            vehicle=vehicle,
+            track=track,
+            gamma=safeguard_utility.gamma,
+        )
         redundancy_series = load_or_reconstruct_redundant_operation_time(
             npz_path=artifact.npz_path,
             pos_arr=pos_arr,
@@ -640,7 +646,7 @@ def main() -> None:
             target_position=target_position,
             target_speed=target_speed,
             redundant_key=args.redundant_key,
-            min_remaining_time_fn=ors.calc_min_operation_time,
+            min_remaining_time_fn=min_remaining_time_fn,
         )
         initial_redundant_s = (
             float(args.initial_redundant_s)

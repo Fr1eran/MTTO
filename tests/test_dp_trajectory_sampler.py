@@ -10,10 +10,10 @@ import pytest
 from model.common import calc_transition_from_acc_scalar_numba
 from model.ocs import TrainService
 from model.ocs.stopping_points_stepping import SPSState
+from rl.context_pool import ContextPool, ContextPoolBuilder
 from rl.dp_trajectory_reader import DPTrajectoryReader
 from rl.operational_state import OperationalState, OperationalTransition, ViolationCode
 from rl.operational_stepper import OperationalStepper
-from rl.reference_trajectory_sampler import ReferenceTrajectorySampler
 from utils.io_utils import save_curve_and_metrics
 from utils.trajectory import OptimizedCurveArtifact
 
@@ -97,7 +97,7 @@ def test_dp_adapter_selects_newest_matching_artifact(
 
 class _FakeStepper:
     def __init__(
-        self, *, max_step_distance_m: float = 5.0, truncate_step: int | None = None
+        self, *, step_distance_m: float = 5.0, truncate_step: int | None = None
     ):
         self.train_service: TrainService = TrainService(
             start_position=0.0,
@@ -110,7 +110,7 @@ class _FakeStepper:
         )
         self.direction: int = 1
         self.whole_distance_m: float = 9.0
-        self.max_step_distance_m: float = max_step_distance_m
+        self.step_distance_m: float = step_distance_m
         self.vehicle: object = SimpleNamespace(max_dec=-2.5, max_acc=2.5)
         self._truncate_step: int | None = truncate_step
         self.requested_distances: list[float] = []
@@ -176,49 +176,40 @@ class _FakeStepper:
         )
 
 
-def _build_reference_sampler(
+def _build_context_pool(
     *,
     stepper: _FakeStepper | None = None,
-) -> tuple[ReferenceTrajectorySampler, _FakeStepper]:
+) -> tuple[ContextPool, _FakeStepper]:
     resolved_stepper = stepper or _FakeStepper()
-    sampler = ReferenceTrajectorySampler.from_arrays(
+    context_pool = ContextPoolBuilder.from_arrays(
         position_m=[0.0, 4.0, 9.0],
         speed_mps=[0.0, 4.0, 0.0],
         cumulative_time_s=[0.0, 2.0, 4.5],
         stepper=cast(OperationalStepper, cast(object, resolved_stepper)),
     )
-    return sampler, resolved_stepper
+    return context_pool, resolved_stepper
 
 
-def test_reference_sampler_resamples_and_replays_complete_runtime_states() -> None:
-    sampler, stepper = _build_reference_sampler()
+def test_context_pool_builder_resamples_and_replays_complete_runtime_states() -> None:
+    context_pool, stepper = _build_context_pool()
 
-    assert sampler.node_count == 3
-    assert sampler.eligible_node_count == 2
+    assert context_pool.context_count == 2
     np.testing.assert_allclose(stepper.requested_distances, [5.0, 4.0])
-    middle = sampler.state_at(1)
-    assert middle.position_m == pytest.approx(5.0)
-    assert middle.runtime_state.step_count == 1
-    assert middle.runtime_state.sps_state.target_stopping_point_index == 1
-    assert middle.runtime_state.energy_consumption_kj == pytest.approx(5.0)
-    assert sampler.state_at(2).runtime_state.step_count == 2
+    middle = context_pool.context_at(1)
+    assert middle.initial_state.position_m == pytest.approx(5.0)
+    assert middle.initial_state.step_count == 1
+    assert middle.initial_state.sps_state.target_stopping_point_index == 1
+    assert middle.initial_state.energy_consumption_kj == pytest.approx(5.0)
 
 
-def test_reference_sampler_weighted_sampling_excludes_terminal_node() -> None:
-    sampler, _ = _build_reference_sampler()
-
-    sampled = sampler.sample(
-        np.random.default_rng(42), weights=np.asarray([0.0, 1.0, 100.0])
-    )
-
-    assert sampled.reference_index == 1
-    with pytest.raises(ValueError, match="non-terminal"):
-        _ = sampler.sample(np.random.default_rng(1), index_range=(2, 2))
+def test_context_pool_excludes_terminal_node() -> None:
+    context_pool, _ = _build_context_pool()
+    assert [context.context_index for context in context_pool.contexts] == [0, 1]
 
 
 def test_reference_sampler_rejects_inconsistent_source_time() -> None:
     with pytest.raises(ValueError, match="cumulative time"):
-        _ = ReferenceTrajectorySampler.from_arrays(
+        _ = ContextPoolBuilder.from_arrays(
             position_m=[0.0, 4.0, 9.0],
             speed_mps=[0.0, 4.0, 0.0],
             cumulative_time_s=[0.0, 3.0, 4.5],
@@ -228,4 +219,4 @@ def test_reference_sampler_rejects_inconsistent_source_time() -> None:
 
 def test_reference_sampler_rejects_early_truncation() -> None:
     with pytest.raises(ValueError, match="becomes done"):
-        _ = _build_reference_sampler(stepper=_FakeStepper(truncate_step=1))
+        _ = _build_context_pool(stepper=_FakeStepper(truncate_step=1))

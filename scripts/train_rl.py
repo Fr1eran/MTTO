@@ -2,13 +2,15 @@ import argparse
 
 from rl.experiment_utils import (
     DEFAULT_CURRICULUM_PROFILE_NAME,
+    DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
     DEFAULT_REWARD_DISCOUNT,
-    DEFAULT_REWARD_PROFILE_NAME,
+    DEFAULT_REWARD_PRESET_NAME,
     DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
+    DEFAULT_SCHEDULE_TIME_S,
     TrainingRunSpec,
     curriculum_profile_names,
     resolve_training_run_spec,
-    reward_profile_names,
+    reward_preset_names,
     train_single_experiment,
 )
 
@@ -26,20 +28,22 @@ def build_cli_parser() -> argparse.ArgumentParser:
     _ = parser.add_argument(
         "--schedule-time-s",
         type=float,
-        default=430.0,
+        default=DEFAULT_SCHEDULE_TIME_S,
         help="规划运行时间(s)",
     )
     _ = parser.add_argument(
+        "--step-distance",
         "--max-step-distance",
+        dest="step_distance",
         type=float,
         default=30.0,
-        help="训练环境相邻状态转移间的最大移动距离。",
+        help="训练环境固定空间控制步长；--max-step-distance 为兼容别名。",
     )
     _ = parser.add_argument(
-        "--reward-profile",
+        "--reward-preset",
         type=str,
-        choices=tuple(reward_profile_names()),
-        default=DEFAULT_REWARD_PROFILE_NAME,
+        choices=tuple(reward_preset_names()),
+        default=DEFAULT_REWARD_PRESET_NAME,
         help=(
             "奖励配置预设。basic 固定包含 energy/comfort；"
             "其余预设仅沿 safety/stopping 两个 shaping 维度逐级打开。"
@@ -50,7 +54,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=str,
         choices=tuple(curriculum_profile_names()),
         default=DEFAULT_CURRICULUM_PROFILE_NAME,
-        help="初态课程预设。none 保持真实起点训练；fixed_reverse 启用固定逆向课程。",
+        help="初态课程预设。none 保持真实起点训练；dspdl 启用离散自步课程。",
     )
     _ = parser.add_argument(
         "--reference-curve-dir",
@@ -84,22 +88,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="启用 Tensorboard 日志记录。",
     )
     _ = parser.add_argument(
-        "--enable-callback",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="启用 Tensorboard 回调。",
-    )
-    _ = parser.add_argument(
         "--enable-monitor",
         action=argparse.BooleanOptionalAction,
         default=None,
         help="启用 VecMonitor 包装器。",
-    )
-    _ = parser.add_argument(
-        "--enable-env-diagnostics",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="启用训练过程诊断信息收集功能。",
     )
     _ = parser.add_argument(
         "--enable-auto-analysis",
@@ -108,7 +100,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="启用训练后自动分析。",
     )
     _ = parser.add_argument(
-        "--enable-best-eval",
+        "--enable-best-evaluation-artifacts",
         action=argparse.BooleanOptionalAction,
         default=None,
         help="启用最佳轨迹评估。",
@@ -124,12 +116,6 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=float,
         default=5.0,
         help="每1万步最低可接受平均样本数。仅在启用日志记录功能时生效。",
-    )
-    _ = parser.add_argument(
-        "--analysis-min-unique-episodes",
-        type=int,
-        default=100,
-        help="最低可接受唯一回合数。仅在启用日志记录功能时生效。",
     )
     _ = parser.add_argument(
         "--analysis-sampling-quality-mode",
@@ -195,72 +181,34 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="PPO log_interval。仅在启用日志记录功能时生效。`tune`模式下默认为1。",
     )
     _ = parser.add_argument(
-        "--tb-sample-interval-steps",
+        "--evaluation-interval-rollouts",
         type=int,
-        default=1,
-        help="Tensorboard 回调记录数据的最小间隔步数。",
+        default=DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
+        help="两次策略评估之间完成的 PPO rollout 数。",
     )
     _ = parser.add_argument(
-        "--env-diagnostics-interval-steps",
-        type=int,
-        default=None,
-        help="环境诊断信息的记录间隔。默认与 tb-sample-interval-steps 一致。",
-    )
-    _ = parser.add_argument(
-        "--force-dump-interval-steps",
-        type=int,
-        default=0,
-        help="(legacy)Tensorboard 回调中强制刷新数据缓存的间隔步数。",
-    )
-    _ = parser.add_argument(
-        "--tb-batch-dump-records",
-        type=int,
-        default=0,
-        help="Tensorboard 事件缓冲区的记录上限。\
-             达到上限后，将刷写文件；如果设置为0，则会在训练结束后一次刷写全部内容。",
-    )
-    _ = parser.add_argument(
-        "--best-eval-trigger-mode",
-        type=str,
-        choices=["steps", "episodes"],
-        default="steps",
-        help="最优评估回调的触发模式。",
-    )
-    _ = parser.add_argument(
-        "--best-eval-trigger-interval",
-        type=int,
-        default=100_000,
-        help="根据 best-eval-trigger-mode 的设置，\
-             以步数或回合数为单位的最佳评估触发间隔。",
-    )
-    _ = parser.add_argument(
-        "--best-eval-deterministic",
+        "--evaluation-deterministic",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="在运行最佳评估回放时，使用确定性策略。",
     )
     _ = parser.add_argument(
-        "--enable-safety-violation-bins",
+        "--evaluation-history-path",
+        type=str,
+        default=None,
+        help="可选的策略评估历史 NPZ 输出路径。",
+    )
+    _ = parser.add_argument(
+        "--enable-safety-truncation-histogram",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="是否在训练过程中按位置区段记录安全约束违规率。",
+        help="记录 worker 汇总的安全截断位置直方图；tune 模式默认启用。",
     )
     _ = parser.add_argument(
-        "--safety-position-bin-size-m",
+        "--safety-truncation-bin-size-m",
         type=float,
         default=5000.0,
-        help="安全违规位置统计使用的位置分桶长度(m)。",
-    )
-    _ = parser.add_argument(
-        "--rollout-record-trigger-mode",
-        type=str,
-        choices=["steps", "episodes"],
-        default="steps",
-        help=(
-            "EpisodeMetricsCollector 记录触发模式。"
-            "steps=按训练步数采样滑动窗口均值；"
-            "episodes=每个回合终止时记录该回合的原始 reward 与长度。"
-        ),
+        help="安全截断位置直方图使用的位置分桶长度(m)。",
     )
     _ = parser.add_argument(
         "--seed", type=int, default=None, help="Random seed for reproducibility."
@@ -285,20 +233,21 @@ def print_training_run_spec(spec: TrainingRunSpec) -> None:
 
     print("Training runtime switches:")
     print(f"- run_mode={spec.run_mode}")
-    print(f"- reward_profile={spec.reward_profile.name}")
+    print(f"- reward_preset={spec.reward_preset.name}")
     print(f"- reward_config={spec.run_metadata['reward_config']}")
-    print(f"- curriculum_profile={spec.curriculum_profile.name}")
-    if spec.curriculum_profile.enabled:
+    print(f"- curriculum_profile={spec.curriculum_profile}")
+    if spec.curriculum_profile == "dspdl":
         print(f"- reference_curve_dir={spec.reference_curve_dir}")
     print(f"- enable_tb={spec.enable_tb}")
-    print(f"- enable_callback={spec.enable_callback}")
     print(f"- enable_monitor={spec.enable_monitor}")
-    print(f"- enable_env_diagnostics={spec.enable_env_diagnostics}")
     print(f"- enable_auto_analysis={spec.enable_auto_analysis}")
-    print(f"- enable_best_eval={spec.enable_best_eval}")
+    print(
+        "- enable_best_evaluation_artifacts="
+        + f"{spec.enable_best_evaluation_artifacts}"
+    )
     print(f"- reward_discount={spec.reward_discount}")
     print(f"- schedule_time_s={spec.schedule_time_s}")
-    print(f"- max_step_distance={spec.max_step_distance}")
+    print(f"- step_distance={spec.step_distance}")
     print(f"- num_envs={spec.num_envs}")
     print(f"- vec_env_type={spec.resolved_vec_env_type}")
     if spec.use_subproc:
@@ -317,31 +266,22 @@ def print_training_run_spec(spec: TrainingRunSpec) -> None:
     else:
         print(f"- tb_log_name=ignored (resolved name would be {spec.tb_log_name})")
         print("- log_interval=ignored (logging disabled by current switches)")
-    print(f"- tb_sample_interval_steps={spec.tb_sample_interval_steps}")
-    print(f"- env_diagnostics_interval_steps={spec.env_diagnostics_interval_steps}")
-    print(f"- force_dump_interval_steps={spec.force_dump_interval_steps}")
-    print(f"- tb_batch_dump_records={spec.tb_batch_dump_records}")
-    print(f"- best_eval_trigger_mode={spec.best_eval_trigger_mode}")
-    print(f"- best_eval_trigger_interval={spec.best_eval_trigger_interval}")
+    print(f"- reward_diagnostics_path={spec.reward_diagnostics_path}")
+    print(
+        "- evaluation_interval_rollouts="
+        + f"{spec.evaluation_interval_rollouts}"
+    )
     print(f"- best_eval_output_dir={spec.best_eval_output_dir}")
-    print(f"- best_eval_deterministic={spec.best_eval_deterministic}")
-    print(f"- enable_safety_violation_bins={spec.enable_safety_violation_bins}")
-    print(f"- safety_position_bin_size_m={spec.safety_position_bin_size_m}")
-    print(f"- rollout_record_trigger_mode={spec.rollout_record_trigger_mode}")
+    print(f"- evaluation_deterministic={spec.evaluation_deterministic}")
+    print(f"- evaluation_history_path={spec.evaluation_history_path}")
+    print(
+        "- enable_safety_truncation_histogram="
+        + f"{spec.enable_safety_truncation_histogram}"
+    )
+    print(f"- safety_truncation_bin_size_m={spec.safety_truncation_bin_size_m}")
     print(f"- device={spec.device}")
     print(f"- seed={spec.seed}")
     print(f"- dry_run={spec.dry_run}")
-    if spec.enable_auto_analysis and not spec.enable_tb:
-        print(
-            "- warning: enable_auto_analysis=True while enable_tb=False; "
-            + f"analysis will use existing logs in \
-            {spec.tensorboard_log_dir} if available."
-        )
-    if spec.enable_auto_analysis and not spec.enable_callback:
-        print(
-            "- warning: enable_auto_analysis=True while enable_callback=False; "
-            + "analysis may miss high-frequency state/constraint diagnostics."
-        )
 
 
 def main() -> None:

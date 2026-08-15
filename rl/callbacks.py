@@ -2,15 +2,12 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, cast, override
+from typing import Any, Protocol, override
 
 import numpy as np
-import torch as th
 from numpy.typing import NDArray
-from stable_baselines3.common.callbacks import BaseCallback
-from stable_baselines3.common.policies import ActorCriticPolicy
+from stable_baselines3.common.callbacks import EventCallback
 
 from rl.evaluation import (
     PolicyEvaluationResult,
@@ -18,862 +15,64 @@ from rl.evaluation import (
     evaluate_policy_once,
     save_policy_evaluation_curve,
 )
+from rl.operational_state import ViolationCode
+from rl.reward_diagnostics import (
+    REWARD_DIAGNOSTICS_SCHEMA_VERSION,
+    REWARD_NAMES,
+    REWARD_SIGNAL_COUNT,
+)
+
+DEFAULT_EVALUATION_INTERVAL_ROLLOUTS = 12
 
 
-def _safe_mean(values: Sequence[float]) -> float:
-    if not values:
-        return 0.0
-    return float(np.mean(values))
+@dataclass(frozen=True, slots=True)
+class PolicyEvaluationEvent:
+    result: PolicyEvaluationResult
+    training_step: int
+    rollout_index: int
 
 
-@dataclass(frozen=True)
-class BufferedScalarEvent:
-    step: int
-    scalars: dict[str, float]
+class EvaluationResultHandler(Protocol):
+    def initialize(self, host: ScheduledPolicyEvaluationCallback) -> None: ...
 
-
-class FixedReverseCurriculumCallback(BaseCallback):
-    """Broadcast a deterministic reverse-curriculum reset distribution."""
-
-    def __init__(
+    def handle_evaluation(
         self,
-        *,
-        remaining_distances_m: np.ndarray,
-        whole_distance_m: float,
-        total_timesteps: int,
-        profile: Any,
-        verbose: int = 0,
-    ) -> None:
-        super().__init__(verbose)
-        remaining = np.asarray(remaining_distances_m, dtype=np.float64)
-        if remaining.ndim != 1 or remaining.size == 0:
-            raise ValueError("remaining_distances_m must be a non-empty 1-D array")
-        if not np.all(np.isfinite(remaining)) or np.any(remaining < 0.0):
-            raise ValueError("remaining_distances_m must be finite and non-negative")
-        if not np.isfinite(whole_distance_m) or whole_distance_m <= 0.0:
-            raise ValueError("whole_distance_m must be finite and positive")
-        if total_timesteps <= 0:
-            raise ValueError("total_timesteps must be positive")
-        if getattr(profile, "controller_kind", None) != "fixed_reverse":
-            raise ValueError("profile must use the fixed_reverse controller")
-        self._remaining_distances_m: NDArray[np.float64] = remaining
-        self._whole_distance_m: float = float(whole_distance_m)
-        self._total_timesteps: int = int(total_timesteps)
-        self._profile: Any = profile
-        self._version: int = 0
-        self._rollout_index: int = 0
-        self._start_index: int = int(np.argmax(remaining))
-        self._current_weights: NDArray[np.float64] = self._weights_for_progress(0.0)
+        host: ScheduledPolicyEvaluationCallback,
+        event: PolicyEvaluationEvent,
+    ) -> None: ...
 
-    def initial_weights(self) -> np.ndarray:
-        """Return the distribution required before SB3's first environment reset."""
-        return self._current_weights.copy()
-
-    @override
-    def _on_rollout_start(self) -> None:
-        if self._rollout_index > 0:
-            progress = min(1.0, float(self.num_timesteps) / self._total_timesteps)
-            weights = self._weights_for_progress(progress)
-            if not np.array_equal(weights, self._current_weights):
-                self._version += 1
-                _ = self.training_env.env_method(
-                    "set_reference_initial_state_distribution",
-                    weights,
-                    version=self._version,
-                )
-                self._current_weights = weights
-        self._rollout_index += 1
-
-    @override
-    def _on_step(self) -> bool:
-        return True
-
-    @override
-    def _on_training_end(self) -> None:
-        # Do not alter workers here: only release the schedule data retained by
-        # the callback after learning has finished.
-        self._remaining_distances_m = np.empty(0, dtype=np.float64)
-
-    def _weights_for_progress(self, progress: float) -> np.ndarray:
-        start = float(self._profile.expansion_start_ratio)
-        end = float(self._profile.expansion_end_ratio)
-        start_only = float(self._profile.start_only_ratio)
-        minimum = float(self._profile.min_remaining_distance_m)
-        base_start_probability = float(self._profile.base_start_probability)
-        initial_cap = min(
-            float(self._profile.initial_max_remaining_distance_m),
-            self._whole_distance_m,
-        )
-
-        if progress < start:
-            cap = initial_cap
-            start_probability = base_start_probability
-        elif progress < end:
-            ratio = (progress - start) / max(end - start, 1e-12)
-            cap = initial_cap + ratio * (self._whole_distance_m - initial_cap)
-            start_probability = base_start_probability
-        elif progress < start_only:
-            cap = self._whole_distance_m
-            ratio = (progress - end) / max(start_only - end, 1e-12)
-            start_probability = (
-                base_start_probability + (1.0 - base_start_probability) * ratio
-            )
-        else:
-            result = np.zeros_like(self._remaining_distances_m)
-            result[self._start_index] = 1.0
-            return result
-
-        base_mask = (self._remaining_distances_m >= minimum) & (
-            self._remaining_distances_m <= cap
-        )
-        if not np.any(base_mask):
-            raise ValueError(
-                "fixed reverse curriculum range contains no eligible nodes"
-            )
-        base_weights = base_mask.astype(np.float64)
-        base_weights /= float(np.sum(base_weights))
-        if not 0.0 <= start_probability <= 1.0:
-            raise ValueError("base_start_probability must be within [0, 1]")
-        start_weights = np.zeros_like(base_weights)
-        start_weights[self._start_index] = 1.0
-        return (
-            1.0 - start_probability
-        ) * base_weights + start_probability * start_weights
+    def finalize(self, host: ScheduledPolicyEvaluationCallback) -> None: ...
 
 
-@dataclass(frozen=True)
-class _SPDLContextSample:
-    reference_index: int
+class RolloutAggregationCallback(EventCallback):
+    """Base for callbacks whose business work runs only at rollout boundaries."""
+
+    def __init__(self, *, verbose: int = 0) -> None:
+        super().__init__(callback=None, verbose=verbose)
 
 
-class SPDLReferenceCurriculumCallback(BaseCallback):
-    """Discrete SPDL driven by Critic values over the full reference-context pool."""
+class RewardDiagnosticsArtifactCallback(RolloutAggregationCallback):
+    """Drain worker reward moments per rollout and persist one final artifact."""
 
-    _KL_TOLERANCE: float = 1e-10
-    _TARGET_KL_TOLERANCE: float = 1e-8
-
-    def __init__(
-        self,
-        *,
-        remaining_distances_m: np.ndarray,
-        reference_observations: np.ndarray,
-        gamma: float,
-        profile: Any,
-        verbose: int = 0,
-    ) -> None:
-        super().__init__(verbose)
-        remaining = np.asarray(remaining_distances_m, dtype=np.float64)
-        observations = np.asarray(reference_observations, dtype=np.float32)
-        if remaining.ndim != 1 or remaining.size == 0:
-            raise ValueError("remaining_distances_m must be a non-empty 1-D array")
-        if not np.all(np.isfinite(remaining)) or np.any(remaining < 0.0):
-            raise ValueError("remaining_distances_m must be finite and non-negative")
-        if observations.ndim != 2 or observations.shape[0] != remaining.size:
-            raise ValueError(
-                "reference_observations must have one row per eligible reference node"
-            )
-        if not np.all(np.isfinite(observations)):
-            raise ValueError("reference_observations must be finite")
-        if not 0.0 < float(gamma) <= 1.0:
-            raise ValueError("gamma must be within (0, 1]")
-        if getattr(profile, "controller_kind", None) != "spdl":
-            raise ValueError("profile must use the spdl controller")
-
-        self._remaining_distances_m: NDArray[np.float64] = remaining
-        self._reference_observations: NDArray[np.float32] = observations
-        self._gamma: float = float(gamma)
-        self._profile: Any = profile
-        self._start_index: int = int(np.argmax(remaining))
-        self._validate_profile()
-        self._target_weights: NDArray[np.float64] = self._build_target_weights()
-        self._current_weights: NDArray[np.float64] = self._build_initial_weights()
-        self._version: int = 0
-        self._rollout_index: int = 0
-        self._context_update_count: int = 0
-        self._context_samples: list[_SPDLContextSample] = []
-        self._completed_returns: list[float] = []
-        self._active_context_by_env: dict[int, tuple[int, int, float, float]] = {}
-
-    def initial_weights(self) -> np.ndarray:
-        """Return the all-support distribution injected before the first reset."""
-        return self._current_weights.copy()
-
-    @property
-    def target_weights(self) -> np.ndarray:
-        return self._target_weights.copy()
-
-    @override
-    def _on_rollout_start(self) -> None:
-        if self._rollout_index > 0:
-            self._maybe_update_distribution()
-        self._rollout_index += 1
-
-    @override
-    def _on_step(self) -> bool:
-        infos = self.locals.get("infos", [])
-        rewards = self.locals.get("rewards", [])
-        dones_raw = self.locals.get("dones", [])
-        if not isinstance(infos, (list, tuple)):
-            return True
-        try:
-            dones = list(dones_raw)
-        except TypeError:
-            dones = [bool(dones_raw)]
-        reward_values = np.asarray(rewards, dtype=np.float64).reshape(-1)
-
-        for env_index, info in enumerate(infos):
-            if not isinstance(info, dict) or env_index >= reward_values.size:
-                continue
-            sample = self._context_from_info(info)
-            if sample is None:
-                continue
-            sample_id, reference_index = sample
-            if not 0 <= reference_index < self._current_weights.size:
-                continue
-            active = self._active_context_by_env.get(env_index)
-            if active is None or active[0] != sample_id:
-                self._context_samples.append(_SPDLContextSample(reference_index))
-                active = (sample_id, reference_index, 0.0, 1.0)
-
-            _, active_index, total_return, discount = active
-            total_return += discount * float(reward_values[env_index])
-            discount *= self._gamma
-            self._active_context_by_env[env_index] = (
-                sample_id,
-                active_index,
-                total_return,
-                discount,
-            )
-            if env_index < len(dones) and bool(dones[env_index]):
-                self._completed_returns.append(total_return)
-                _ = self._active_context_by_env.pop(env_index, None)
-        return True
-
-    @override
-    def _on_training_end(self) -> None:
-        self._context_samples.clear()
-        self._completed_returns.clear()
-        self._active_context_by_env.clear()
-        self._reference_observations = np.empty((0, 0), dtype=np.float32)
-
-    def _maybe_update_distribution(self) -> None:
-        min_context_samples = int(self._profile.spdl_min_context_samples)
-        if len(self._context_samples) < min_context_samples:
-            return
-
-        warmup_updates = int(self._profile.spdl_alpha_warmup_updates)
-        alpha = 0.0
-        if self._context_update_count >= warmup_updates:
-            min_completed = int(self._profile.spdl_min_completed_episodes)
-            if len(self._completed_returns) < min_completed:
-                return
-            mean_return = float(np.mean(self._completed_returns))
-            target_kl = self._kl_divergence(self._current_weights, self._target_weights)
-            if target_kl <= self._TARGET_KL_TOLERANCE:
-                self._clear_update_buffers()
-                return
-            alpha = float(self._profile.spdl_zeta) * max(0.0, mean_return) / target_kl
-
-        coefficients = self._all_context_critic_values()
-        candidate = self._solve_distribution(coefficients, alpha)
-        self._context_update_count += 1
-        self._clear_update_buffers()
-        if np.allclose(candidate, self._current_weights, rtol=1e-10, atol=1e-12):
-            return
-
-        self._version += 1
-        _ = self.training_env.env_method(
-            "set_reference_initial_state_distribution",
-            candidate,
-            version=self._version,
-        )
-        self._current_weights = candidate
-
-    def _all_context_critic_values(self) -> np.ndarray:
-        """Estimate $a_i$ for every eligible context with the current Critic."""
-        indices = np.arange(self._current_weights.size, dtype=np.int64)
-        return self._critic_values(indices)
-
-    def _critic_values(self, indices: np.ndarray) -> np.ndarray:
-        if indices.size == 0:
-            return np.empty(0, dtype=np.float64)
-        observations = np.asarray(
-            self._reference_observations[indices], dtype=np.float32
-        )
-        policy = cast(ActorCriticPolicy, self.model.policy)
-        observation_tensor, _ = policy.obs_to_tensor(observations)
-        with th.no_grad():
-            values = policy.predict_values(observation_tensor)
-        return values.detach().cpu().numpy().reshape(-1).astype(np.float64)
-
-    def _solve_distribution(self, coefficients: np.ndarray, alpha: float) -> np.ndarray:
-        bound = float(self._profile.spdl_relative_entropy_bound)
-        if alpha > 0.0:
-            unconstrained = self._weights_for_dual(coefficients, alpha, 0.0)
-            if self._kl_divergence(unconstrained, self._current_weights) <= bound:
-                return unconstrained
-
-        lower = 0.0
-        upper = 1.0
-        while (
-            self._kl_divergence(
-                self._weights_for_dual(coefficients, alpha, upper),
-                self._current_weights,
-            )
-            > bound
-        ):
-            upper *= 2.0
-            if upper > 1e12:
-                raise RuntimeError("could not satisfy the SPDL relative-entropy bound")
-
-        for _ in range(80):
-            middle = (lower + upper) / 2.0
-            candidate = self._weights_for_dual(coefficients, alpha, middle)
-            if self._kl_divergence(candidate, self._current_weights) > bound:
-                lower = middle
-            else:
-                upper = middle
-        return self._weights_for_dual(coefficients, alpha, upper)
-
-    def _weights_for_dual(
-        self, coefficients: np.ndarray, alpha: float, dual: float
-    ) -> np.ndarray:
-        denominator = alpha + dual
-        if denominator <= 0.0:
-            raise ValueError("SPDL dual denominator must be positive")
-        log_weights = (
-            coefficients / denominator
-            + alpha / denominator * np.log(self._target_weights)
-            + dual / denominator * np.log(self._current_weights)
-        )
-        log_weights -= float(np.max(log_weights))
-        weights = np.maximum(np.exp(log_weights), np.finfo(np.float64).tiny)
-        return weights / float(np.sum(weights))
-
-    def _build_initial_weights(self) -> np.ndarray:
-        easy_mask = (
-            self._remaining_distances_m >= float(self._profile.min_remaining_distance_m)
-        ) & (
-            self._remaining_distances_m
-            <= float(self._profile.initial_max_remaining_distance_m)
-        )
-        if not np.any(easy_mask):
-            raise ValueError("SPDL initial easy range contains no eligible nodes")
-        easy = easy_mask.astype(np.float64)
-        easy /= float(np.sum(easy))
-        start = np.zeros_like(easy)
-        start[self._start_index] = 1.0
-        uniform = np.full_like(easy, 1.0 / easy.size)
-        weights = (
-            float(self._profile.spdl_initial_easy_mass) * easy
-            + float(self._profile.spdl_initial_start_mass) * start
-            + float(self._profile.spdl_initial_uniform_mass) * uniform
-        )
-        return weights / float(np.sum(weights))
-
-    def _build_target_weights(self) -> np.ndarray:
-        uniform_mass = float(self._profile.spdl_target_uniform_mass)
-        target = np.full(
-            self._current_size(), uniform_mass / self._current_size(), dtype=np.float64
-        )
-        target[self._start_index] += 1.0 - uniform_mass
-        return target / float(np.sum(target))
-
-    def _current_size(self) -> int:
-        return int(self._remaining_distances_m.size)
-
-    def _validate_profile(self) -> None:
-        masses = np.asarray(
-            [
-                self._profile.spdl_initial_easy_mass,
-                self._profile.spdl_initial_start_mass,
-                self._profile.spdl_initial_uniform_mass,
-            ],
-            dtype=np.float64,
-        )
-        if not np.all(np.isfinite(masses)) or np.any(masses < 0.0):
-            raise ValueError("SPDL initial distribution masses must be non-negative")
-        if not np.isclose(float(np.sum(masses)), 1.0, atol=1e-12, rtol=0.0):
-            raise ValueError("SPDL initial distribution masses must sum to one")
-        target_uniform_mass = float(self._profile.spdl_target_uniform_mass)
-        if not 0.0 < target_uniform_mass < 1.0:
-            raise ValueError("SPDL target uniform mass must be within (0, 1)")
-        if int(self._profile.spdl_alpha_warmup_updates) < 0:
-            raise ValueError("SPDL alpha warm-up updates must be non-negative")
-        if not 0.0 < float(self._profile.spdl_relative_entropy_bound):
-            raise ValueError("SPDL relative-entropy bound must be positive")
-        if not 0.0 <= float(self._profile.spdl_zeta):
-            raise ValueError("SPDL zeta must be non-negative")
-        if int(self._profile.spdl_min_context_samples) <= 0:
-            raise ValueError("SPDL minimum context sample count must be positive")
-        if int(self._profile.spdl_min_completed_episodes) <= 0:
-            raise ValueError("SPDL minimum completed episode count must be positive")
-
-    @staticmethod
-    def _context_from_info(info: dict[str, object]) -> tuple[int, int] | None:
-        try:
-            return (
-                int(cast(int | float | str, info["reference_context_sample_id"])),
-                int(cast(int | float | str, info["reference_context_index"])),
-            )
-        except KeyError, TypeError, ValueError:
-            return None
-
-    def _clear_update_buffers(self) -> None:
-        self._context_samples.clear()
-        self._completed_returns.clear()
-
-    @staticmethod
-    def _kl_divergence(left: np.ndarray, right: np.ndarray) -> float:
-        smallest = np.finfo(np.float64).tiny
-        safe_left = np.maximum(left, smallest)
-        safe_right = np.maximum(right, smallest)
-        return float(np.sum(safe_left * (np.log(safe_left) - np.log(safe_right))))
-
-
-class TensorboardCallback(BaseCallback):
-    def __init__(
-        self,
-        verbose: int = 0,
-        tb_sample_interval_steps: int = 1,
-        force_dump_interval_steps: int | None = None,
-        batch_dump_records: int | None = None,
-        async_dump: bool = True,
-    ):
-        super().__init__(verbose)
-        self.min_tb_sample_interval_steps: int = max(1, int(tb_sample_interval_steps))
-        self.force_dump_interval_steps: int | None = (
-            None
-            if force_dump_interval_steps is None or int(force_dump_interval_steps) <= 0
-            else int(force_dump_interval_steps)
-        )
-        self.batch_dump_records: int | None = (
-            None
-            if batch_dump_records is None or int(batch_dump_records) <= 0
-            else int(batch_dump_records)
-        )
-        self._last_sample_step: int = -self.min_tb_sample_interval_steps
-        self._last_dump_step: int = 0
-        self._pending_sample_records: int = 0
-        self._pending_events: list[BufferedScalarEvent] = []
-        self._episode_ids_by_env: list[int] = []
-        self._tb_writer: Any = None
-        self._async_dump: bool = bool(async_dump)
-        self._async_executor: ThreadPoolExecutor | None = None
-        self._async_futures: list[Future[None]] = []
-
-    @override
-    def _init_callback(self) -> None:
-        self._tb_writer = self._resolve_tensorboard_writer()
-        if self._tb_writer is not None and self._async_dump:
-            self._start_async_writer()
-
-    def _resolve_tensorboard_writer(self):
-        output_formats = getattr(self.logger, "output_formats", None)
-        if not isinstance(output_formats, (list, tuple)):
-            return None
-        for fmt in output_formats:
-            writer = getattr(fmt, "writer", None)
-            if (
-                writer is not None
-                and hasattr(writer, "add_scalar")
-                and hasattr(writer, "flush")
-            ):
-                return writer
-        return None
-
-    def _start_async_writer(self) -> None:
-        self._async_executor = ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="tensorboard-callback-writer",
-        )
-
-    def _write_events_to_writer(
-        self,
-        writer: Any,
-        events: tuple[BufferedScalarEvent, ...],
-    ) -> None:
-        for event in events:
-            for tag, value in event.scalars.items():
-                writer.add_scalar(tag, value, event.step)
-
-        writer.flush()
-
-    def _raise_completed_async_errors(self) -> None:
-        if not self._async_futures:
-            return
-
-        pending_futures: list[Future[None]] = []
-        for future in self._async_futures:
-            if future.done():
-                future.result()
-            else:
-                pending_futures.append(future)
-        self._async_futures = pending_futures
-
-    def _dispatch_events_to_writer(
-        self, events: tuple[BufferedScalarEvent, ...]
-    ) -> None:
-        if not events:
-            return
-
-        if self._async_executor is None:
-            self._write_events_to_writer(self._tb_writer, events)
-            return
-
-        self._raise_completed_async_errors()
-        future = self._async_executor.submit(
-            self._write_events_to_writer,
-            self._tb_writer,
-            events,
-        )
-        self._async_futures.append(future)
-
-    def _finish_async_writer(self) -> None:
-        if self._async_executor is None:
-            return
-
-        async_executor = self._async_executor
-        try:
-            for future in self._async_futures:
-                future.result()
-        finally:
-            self._async_futures.clear()
-            self._async_executor = None
-            async_executor.shutdown(wait=True)
-
-    def _sync_episode_tracker(self, num_envs: int) -> None:
-        if num_envs < 0:
-            return
-        if len(self._episode_ids_by_env) != num_envs:
-            self._episode_ids_by_env = [0] * num_envs
-
-    def _advance_episode_tracker(self) -> None:
-        dones_raw = self.locals.get("dones")
-        if dones_raw is None:
-            return
-
-        try:
-            dones = list(dones_raw)
-        except TypeError:
-            return
-
-        self._sync_episode_tracker(len(dones))
-        for env_idx, done in enumerate(dones):
-            if bool(done):
-                self._episode_ids_by_env[env_idx] += 1
-
-    def _get_namespace_payloads_from_locals(
-        self, namespace: str
-    ) -> list[dict[str, float]]:
-        infos = self.locals.get("infos", [])
-        if not isinstance(infos, (list, tuple)):
-            return []
-
-        self._sync_episode_tracker(len(infos))
-
-        payloads: list[dict[str, float]] = []
-        for info in infos:
-            if not isinstance(info, dict):
-                continue
-            namespace_payload = info.get(namespace)
-            if isinstance(namespace_payload, dict):
-                payloads.append(namespace_payload)
-
-        return payloads
-
-    def _extract_all_namespace_payloads(self) -> dict[str, list[dict[str, float]]]:
-        infos = self.locals.get("infos", [])
-        if not isinstance(infos, (list, tuple)):
-            return {}
-
-        self._sync_episode_tracker(len(infos))
-
-        buckets = {
-            "rewards": [],
-            "outcome": [],
-            "constraint": [],
-            "event": [],
-            "basic": [],
+    def __init__(self, *, output_path: str, verbose: int = 0) -> None:
+        super().__init__(verbose=verbose)
+        self.output_path = str(output_path)
+        self._rollout_end_steps: list[int] = []
+        self._rollout_counts: list[int] = []
+        self._rollout_sums: list[NDArray[np.float64]] = []
+        self._rollout_abs_sums: list[NDArray[np.float64]] = []
+        self._rollout_nonzero_counts: list[NDArray[np.int64]] = []
+        self._rollout_cross_products: list[NDArray[np.float64]] = []
+        self._episode_chunks: dict[str, list[np.ndarray]] = {
+            "end_step": [],
+            "worker_rank": [],
+            "index": [],
+            "length": [],
+            "terminated": [],
+            "truncated": [],
+            "complete": [],
+            "reward_sums": [],
         }
-        for info in infos:
-            if not isinstance(info, dict):
-                continue
-            for ns in buckets:
-                payload = info.get(ns)
-                if isinstance(payload, dict):
-                    buckets[ns].append(payload)
-
-        return {ns: pl for ns, pl in buckets.items() if pl}
-
-    def _enrich_basic_payloads(
-        self, payloads: list[dict[str, float]]
-    ) -> list[dict[str, float]]:
-        enriched_payloads: list[dict[str, float]] = []
-        for env_idx, payload in enumerate(payloads):
-            payload_copy = dict(payload)
-            episode_id = (
-                self._episode_ids_by_env[env_idx]
-                if env_idx < len(self._episode_ids_by_env)
-                else 0
-            )
-            payload_copy["episode_id"] = float(episode_id)
-            enriched_payloads.append(payload_copy)
-
-        return enriched_payloads
-
-    def _collect_namespace_scalars(
-        self, namespace: str, payloads: list[dict[str, float]]
-    ) -> dict[str, float]:
-        if not payloads:
-            return {}
-        if namespace == "basic":
-            payloads = self._enrich_basic_payloads(payloads)
-
-        aggregated_values: dict[str, list[float]] = {}
-        for payload in payloads:
-            for key, value in payload.items():
-                try:
-                    scalar_value = float(value)
-                except TypeError, ValueError:
-                    continue
-                aggregated_values.setdefault(key, []).append(scalar_value)
-
-        namespace_scalars: dict[str, float] = {}
-        for key, values in aggregated_values.items():
-            if not values:
-                continue
-            namespace_scalars[f"{namespace}/{key}"] = sum(values) / len(values)
-
-        return namespace_scalars
-
-    def _build_sample_event(self, step: int) -> BufferedScalarEvent | None:
-        all_payloads = self._extract_all_namespace_payloads()
-
-        scalars: dict[str, float] = {}
-        for namespace, payloads in all_payloads.items():
-            namespace_scalars = self._collect_namespace_scalars(namespace, payloads)
-            if namespace_scalars:
-                scalars.update(namespace_scalars)
-
-        if not scalars:
-            return None
-
-        return BufferedScalarEvent(step=step, scalars=scalars)
-
-    def _record_all_namespaces_legacy(self) -> None:
-        all_payloads = self._extract_all_namespace_payloads()
-        for namespace, payloads in all_payloads.items():
-            namespace_scalars = self._collect_namespace_scalars(namespace, payloads)
-            for key, value in namespace_scalars.items():
-                self.logger.record(key, value)
-
-    def _record_namespace_legacy(self, namespace: str) -> None:
-        payloads = self._get_namespace_payloads_from_locals(namespace)
-        namespace_scalars = self._collect_namespace_scalars(namespace, payloads)
-        for key, value in namespace_scalars.items():
-            self.logger.record(key, value)
-
-    def _flush_pending_events(self) -> None:
-        if not self._pending_events:
-            return
-
-        writer = self._tb_writer
-        if writer is None:
-            for event in self._pending_events:
-                for tag, value in event.scalars.items():
-                    self.logger.record(tag, value)
-                self.logger.dump(event.step)
-            self._pending_events.clear()
-            self._pending_sample_records = 0
-            self._last_dump_step = int(self.num_timesteps)
-            return
-
-        events_to_flush = tuple(self._pending_events)
-        self._dispatch_events_to_writer(events_to_flush)
-        self._pending_events.clear()
-        self._pending_sample_records = 0
-        self._last_dump_step = int(self.num_timesteps)
-
-    def _should_dump(self, current_step: int) -> bool:
-        if (
-            self.batch_dump_records is not None
-            and self._pending_sample_records >= self.batch_dump_records
-        ):
-            return True
-
-        if self.force_dump_interval_steps is not None:
-            if (current_step - self._last_dump_step) >= self.force_dump_interval_steps:
-                if self._tb_writer is None:
-                    return True
-                return bool(self._pending_events)
-
-        return False
-
-    @override
-    def _on_step(self) -> bool:
-        current_step = int(self.num_timesteps)
-
-        should_sample = (
-            current_step - self._last_sample_step
-        ) >= self.min_tb_sample_interval_steps
-
-        if should_sample:
-            self._last_sample_step = current_step
-            if self._tb_writer is None:
-                self._record_all_namespaces_legacy()
-                self._pending_sample_records += 1
-            else:
-                sample_event = self._build_sample_event(step=current_step)
-                if sample_event is not None:
-                    self._pending_events.append(sample_event)
-                    self._pending_sample_records += 1
-
-        if self._should_dump(current_step):
-            if self._tb_writer is None:
-                self.logger.dump(current_step)
-                self._last_dump_step = current_step
-                self._pending_sample_records = 0
-            else:
-                self._flush_pending_events()
-
-        self._advance_episode_tracker()
-
-        return True
-
-    @override
-    def _on_training_end(self) -> None:
-        if self._pending_events:
-            self._flush_pending_events()
-            self._finish_async_writer()
-            return
-
-        if self._pending_sample_records > 0:
-            current_step = int(self.num_timesteps)
-            self.logger.dump(current_step)
-            self._last_dump_step = current_step
-            self._pending_sample_records = 0
-
-        self._finish_async_writer()
-
-
-class BestTrajectoryRecorder:
-    def __init__(
-        self,
-        *,
-        output_dir: str,
-        artifact_metadata: Mapping[str, object] | None = None,
-    ):
-        self.output_dir: str = output_dir
-        self.artifact_metadata: dict[str, object] = dict(artifact_metadata or {})
-        self.best_result: PolicyEvaluationResult | None = None
-        self.best_trigger_interval: int | None = None
-
-    def init_callback(self, _callback: BaseCallback) -> None:
-        os.makedirs(self.output_dir, exist_ok=True)
-
-    def _save_best_artifacts(
-        self,
-        callback: BaseCallback,
-        result: PolicyEvaluationResult,
-        *,
-        eval_trigger_interval: int,
-        best_update_reason: str,
-    ) -> None:
-        model_path = os.path.join(self.output_dir, "best_model")
-        trajectory_path = os.path.join(self.output_dir, "best_trajectory.npz")
-
-        callback.model.save(model_path)
-
-        extra_metrics = result.to_metrics(
-            num_timesteps=int(callback.num_timesteps),
-            eval_trigger_mode=getattr(callback, "eval_trigger_mode", None),
-            eval_trigger_interval=eval_trigger_interval,
-        )
-        extra_metrics.update(self.artifact_metadata)
-        extra_metrics["trajectory_source"] = "best"
-        extra_metrics["best_update_reason"] = best_update_reason
-        _ = save_policy_evaluation_curve(
-            result,
-            trajectory_path,
-            extra_metrics=extra_metrics,
-        )
-
-    def on_evaluation(
-        self,
-        callback: BaseCallback,
-        result: PolicyEvaluationResult,
-        *,
-        eval_trigger_interval: int,
-    ) -> None:
-        callback.logger.record("best_eval/last_success", float(result.success))
-        callback.logger.record(
-            "best_eval/last_precise_arrival", float(result.precise_arrival)
-        )
-        callback.logger.record(
-            "best_eval/last_punctual_arrival", float(result.punctual_arrival)
-        )
-        callback.logger.record("best_eval/last_total_reward", result.total_reward)
-        callback.logger.record("best_eval/last_stop_error_m", result.stop_error_m)
-        callback.logger.record("best_eval/last_time_error_s", result.time_error_s)
-        callback.logger.record("best_eval/last_total_energy_j", result.total_energy_j)
-
-        best_update_reason = describe_best_update_reason(result, self.best_result)
-        if best_update_reason is None:
-            return
-
-        self._save_best_artifacts(
-            callback,
-            result,
-            eval_trigger_interval=eval_trigger_interval,
-            best_update_reason=best_update_reason,
-        )
-        self.best_result = result
-        self.best_trigger_interval = eval_trigger_interval
-
-        callback.logger.record("best_eval/best_success", float(result.success))
-        callback.logger.record(
-            "best_eval/best_precise_arrival", float(result.precise_arrival)
-        )
-        callback.logger.record(
-            "best_eval/best_punctual_arrival", float(result.punctual_arrival)
-        )
-        callback.logger.record("best_eval/best_total_reward", result.total_reward)
-        callback.logger.record("best_eval/best_stop_error_m", result.stop_error_m)
-        callback.logger.record("best_eval/best_time_error_s", result.time_error_s)
-        callback.logger.record("best_eval/best_total_energy_j", result.total_energy_j)
-
-        if callback.verbose > 0:
-            print(
-                "New best trajectory saved: "
-                + f"mode={getattr(callback, 'eval_trigger_mode', None)}, "
-                + f"trigger_interval={eval_trigger_interval}, "
-                + f"success={result.success}, "
-                + f"total_reward={result.total_reward:.6f}"
-            )
-
-
-class SafetyViolationPositionRecorder(BaseCallback):
-    SPEED_LOW_VIOLATION_CODE: int = 2
-    SPEED_HIGH_VIOLATION_CODE: int = 3
-
-    def __init__(
-        self,
-        *,
-        output_path: str,
-        position_bin_size_m: float = 5000.0,
-        verbose: int = 0,
-    ):
-        super().__init__(verbose)
-        self.output_path: str = str(output_path)
-        self.position_bin_size_m: float = max(1.0, float(position_bin_size_m))
-        self._sample_exposure_by_bin: dict[int, int] = {}
-        self._sample_violation_by_bin: dict[int, int] = {}
-        self._episode_exposure_by_bin: dict[int, int] = {}
-        self._episode_violation_by_bin: dict[int, int] = {}
-        self._safety_truncation_by_bin: dict[int, int] = {}
-        self._episode_bins_by_env: list[set[int]] = []
-        self._episode_violation_bins_by_env: list[set[int]] = []
 
     @override
     def _init_callback(self) -> None:
@@ -881,410 +80,530 @@ class SafetyViolationPositionRecorder(BaseCallback):
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
 
-    def _sync_episode_trackers(self, num_envs: int) -> None:
-        if num_envs < 0:
-            return
-        while len(self._episode_bins_by_env) < num_envs:
-            self._episode_bins_by_env.append(set())
-            self._episode_violation_bins_by_env.append(set())
-        if len(self._episode_bins_by_env) > num_envs:
-            self._episode_bins_by_env = self._episode_bins_by_env[:num_envs]
-            self._episode_violation_bins_by_env = self._episode_violation_bins_by_env[
-                :num_envs
-            ]
-
-    def _bin_index_for_position(self, position: float) -> int:
-        return int(np.floor(float(position) / self.position_bin_size_m))
-
     @staticmethod
-    def _increment(counter: dict[int, int], bin_index: int, value: int = 1) -> None:
-        counter[bin_index] = counter.get(bin_index, 0) + int(value)
+    def _array(
+        payload: dict[str, object],
+        key: str,
+        *,
+        dtype: np.dtype[Any] | type[Any],
+        shape: tuple[int | None, ...],
+    ) -> np.ndarray:
+        if key not in payload:
+            raise ValueError(f"reward diagnostics payload is missing '{key}'")
+        value = np.asarray(payload[key], dtype=dtype)
+        if value.ndim != len(shape) or any(
+            expected is not None and value.shape[index] != expected
+            for index, expected in enumerate(shape)
+        ):
+            raise ValueError(f"reward diagnostics payload has invalid '{key}' shape")
+        return value
 
-    @classmethod
-    def _is_safety_violation(cls, constraint: dict[str, object]) -> bool:
-        violation_code = int(
-            round(float(cast(int | float | str, constraint.get("violation_code", 0.0))))
+    def _drain_worker_batches(self, *, finalize: bool) -> None:
+        payloads = self.training_env.env_method(
+            "drain_reward_diagnostics", finalize=finalize
         )
-        if violation_code in {
-            cls.SPEED_LOW_VIOLATION_CODE,
-            cls.SPEED_HIGH_VIOLATION_CODE,
-        }:
-            return True
+        rollout_count = 0
+        reward_sum = np.zeros(REWARD_SIGNAL_COUNT, dtype=np.float64)
+        reward_abs_sum = np.zeros(REWARD_SIGNAL_COUNT, dtype=np.float64)
+        reward_nonzero_count = np.zeros(REWARD_SIGNAL_COUNT, dtype=np.int64)
+        reward_cross_product = np.zeros(
+            (REWARD_SIGNAL_COUNT, REWARD_SIGNAL_COUNT), dtype=np.float64
+        )
+        num_envs = int(self.training_env.num_envs)
 
-        margin_to_vmax = constraint.get("margin_to_vmax_mps")
-        margin_to_vmin = constraint.get("margin_to_vmin_mps")
-        if margin_to_vmax is None or margin_to_vmin is None:
-            return False
-        try:
-            margin_high = float(cast(int | float | str, margin_to_vmax))
-            margin_low = float(cast(int | float | str, margin_to_vmin))
-        except TypeError, ValueError:
-            return False
-        return bool(margin_high < 0.0 or margin_low < 0.0)
-
-    def _extract_position(self, info: dict[str, object]) -> float | None:
-        basic = info.get("basic")
-        if isinstance(basic, dict) and "position" in basic:
-            return float(basic["position"])
-        # Compatibility with diagnostics emitted before basic_info absorbed
-        # the state namespace.
-        state = info.get("state")
-        if isinstance(state, dict) and "position" in state:
-            return float(state["position"])
-        if "position" in info:
-            return float(cast(int | float | str, info["position"]))
-        return None
-
-    def _flush_episode(self, env_idx: int) -> None:
-        if env_idx >= len(self._episode_bins_by_env):
-            return
-        for bin_index in self._episode_bins_by_env[env_idx]:
-            self._increment(self._episode_exposure_by_bin, bin_index)
-        for bin_index in self._episode_violation_bins_by_env[env_idx]:
-            self._increment(self._episode_violation_by_bin, bin_index)
-        self._episode_bins_by_env[env_idx] = set()
-        self._episode_violation_bins_by_env[env_idx] = set()
-
-    @override
-    def _on_step(self) -> bool:
-        infos = self.locals.get("infos", [])
-        if not isinstance(infos, (list, tuple)):
-            return True
-
-        self._sync_episode_trackers(len(infos))
-        dones_raw = self.locals.get("dones", [])
-        try:
-            dones = list(dones_raw)
-        except TypeError:
-            dones = [bool(dones_raw)]
-
-        for env_idx, info in enumerate(infos):
-            if not isinstance(info, dict):
-                continue
-            constraint = info.get("constraint")
-            if not isinstance(constraint, dict):
-                continue
-            try:
-                position = self._extract_position(info)
-            except TypeError, ValueError:
-                continue
-            if position is None:
-                continue
-
-            bin_index = self._bin_index_for_position(position)
-            is_violation = self._is_safety_violation(constraint)
-            outcome = info.get("outcome")
-            is_truncated = (
-                bool(outcome.get("truncated", False))
-                if isinstance(outcome, dict)
-                else bool(constraint.get("is_truncated", False))
+        for payload_raw in payloads:
+            if not isinstance(payload_raw, dict):
+                raise TypeError("reward diagnostics payload must be a dictionary")
+            payload = payload_raw
+            count = self._array(payload, "transition_count", dtype=np.int64, shape=(1,))
+            worker_count = int(count[0])
+            if worker_count < 0:
+                raise ValueError(
+                    "reward diagnostics transition count must be nonnegative"
+                )
+            rollout_count += worker_count
+            reward_sum += self._array(
+                payload,
+                "reward_sum",
+                dtype=np.float64,
+                shape=(REWARD_SIGNAL_COUNT,),
+            )
+            reward_abs_sum += self._array(
+                payload,
+                "reward_abs_sum",
+                dtype=np.float64,
+                shape=(REWARD_SIGNAL_COUNT,),
+            )
+            reward_nonzero_count += self._array(
+                payload,
+                "reward_nonzero_count",
+                dtype=np.int64,
+                shape=(REWARD_SIGNAL_COUNT,),
+            )
+            reward_cross_product += self._array(
+                payload,
+                "reward_cross_product",
+                dtype=np.float64,
+                shape=(REWARD_SIGNAL_COUNT, REWARD_SIGNAL_COUNT),
             )
 
-            self._increment(self._sample_exposure_by_bin, bin_index)
-            self._episode_bins_by_env[env_idx].add(bin_index)
-            if is_violation:
-                self._increment(self._sample_violation_by_bin, bin_index)
-                self._episode_violation_bins_by_env[env_idx].add(bin_index)
-                if is_truncated:
-                    self._increment(self._safety_truncation_by_bin, bin_index)
+            end_worker_step = self._array(
+                payload, "episode_end_worker_step", dtype=np.int64, shape=(None,)
+            )
+            episode_count = end_worker_step.size
+            episode_arrays = {
+                "end_step": end_worker_step * num_envs,
+                "worker_rank": self._array(
+                    payload,
+                    "episode_worker_rank",
+                    dtype=np.int16,
+                    shape=(episode_count,),
+                ),
+                "index": self._array(
+                    payload,
+                    "episode_index",
+                    dtype=np.int64,
+                    shape=(episode_count,),
+                ),
+                "length": self._array(
+                    payload,
+                    "episode_length",
+                    dtype=np.int32,
+                    shape=(episode_count,),
+                ),
+                "terminated": self._array(
+                    payload,
+                    "episode_terminated",
+                    dtype=np.bool_,
+                    shape=(episode_count,),
+                ),
+                "truncated": self._array(
+                    payload,
+                    "episode_truncated",
+                    dtype=np.bool_,
+                    shape=(episode_count,),
+                ),
+                "complete": self._array(
+                    payload,
+                    "episode_complete",
+                    dtype=np.bool_,
+                    shape=(episode_count,),
+                ),
+                "reward_sums": self._array(
+                    payload,
+                    "episode_reward_sums",
+                    dtype=np.float64,
+                    shape=(episode_count, REWARD_SIGNAL_COUNT),
+                ),
+            }
+            if episode_count:
+                for key, value in episode_arrays.items():
+                    self._episode_chunks[key].append(value)
 
-            if env_idx < len(dones) and bool(dones[env_idx]):
-                self._flush_episode(env_idx)
+        if rollout_count:
+            self._rollout_end_steps.append(int(self.num_timesteps))
+            self._rollout_counts.append(rollout_count)
+            self._rollout_sums.append(reward_sum)
+            self._rollout_abs_sums.append(reward_abs_sum)
+            self._rollout_nonzero_counts.append(reward_nonzero_count)
+            self._rollout_cross_products.append(reward_cross_product)
 
-        return True
+    @override
+    def _on_rollout_end(self) -> None:
+        self._drain_worker_batches(finalize=False)
+
+    @staticmethod
+    def _stack_or_empty(
+        values: list[np.ndarray], *, shape: tuple[int, ...], dtype: np.dtype[Any]
+    ) -> np.ndarray:
+        if values:
+            return np.stack(values).astype(dtype, copy=False)
+        return np.empty(shape, dtype=dtype)
+
+    @staticmethod
+    def _concat_or_empty(
+        values: list[np.ndarray], *, shape: tuple[int, ...], dtype: np.dtype[Any]
+    ) -> np.ndarray:
+        if values:
+            return np.concatenate(values, axis=0).astype(dtype, copy=False)
+        return np.empty(shape, dtype=dtype)
 
     @override
     def _on_training_end(self) -> None:
-        for env_idx in range(len(self._episode_bins_by_env)):
-            self._flush_episode(env_idx)
+        self._drain_worker_batches(finalize=True)
+        rollout_count = len(self._rollout_counts)
+        fields = {
+            "schema_version": np.asarray(
+                [REWARD_DIAGNOSTICS_SCHEMA_VERSION], dtype=np.int16
+            ),
+            "reward_names": np.asarray(REWARD_NAMES),
+            "rollout_end_step": np.asarray(self._rollout_end_steps, dtype=np.int64),
+            "rollout_transition_count": np.asarray(
+                self._rollout_counts, dtype=np.int64
+            ),
+            "rollout_reward_sum": self._stack_or_empty(
+                self._rollout_sums,
+                shape=(0, REWARD_SIGNAL_COUNT),
+                dtype=np.dtype(np.float64),
+            ),
+            "rollout_reward_abs_sum": self._stack_or_empty(
+                self._rollout_abs_sums,
+                shape=(0, REWARD_SIGNAL_COUNT),
+                dtype=np.dtype(np.float64),
+            ),
+            "rollout_reward_nonzero_count": self._stack_or_empty(
+                self._rollout_nonzero_counts,
+                shape=(0, REWARD_SIGNAL_COUNT),
+                dtype=np.dtype(np.int64),
+            ),
+            "rollout_reward_cross_product": self._stack_or_empty(
+                self._rollout_cross_products,
+                shape=(0, REWARD_SIGNAL_COUNT, REWARD_SIGNAL_COUNT),
+                dtype=np.dtype(np.float64),
+            ),
+            "episode_end_step": self._concat_or_empty(
+                self._episode_chunks["end_step"],
+                shape=(0,),
+                dtype=np.dtype(np.int64),
+            ),
+            "episode_worker_rank": self._concat_or_empty(
+                self._episode_chunks["worker_rank"],
+                shape=(0,),
+                dtype=np.dtype(np.int16),
+            ),
+            "episode_index": self._concat_or_empty(
+                self._episode_chunks["index"],
+                shape=(0,),
+                dtype=np.dtype(np.int64),
+            ),
+            "episode_length": self._concat_or_empty(
+                self._episode_chunks["length"],
+                shape=(0,),
+                dtype=np.dtype(np.int32),
+            ),
+            "episode_terminated": self._concat_or_empty(
+                self._episode_chunks["terminated"],
+                shape=(0,),
+                dtype=np.dtype(np.bool_),
+            ),
+            "episode_truncated": self._concat_or_empty(
+                self._episode_chunks["truncated"],
+                shape=(0,),
+                dtype=np.dtype(np.bool_),
+            ),
+            "episode_complete": self._concat_or_empty(
+                self._episode_chunks["complete"],
+                shape=(0,),
+                dtype=np.dtype(np.bool_),
+            ),
+            "episode_reward_sums": self._concat_or_empty(
+                self._episode_chunks["reward_sums"],
+                shape=(0, REWARD_SIGNAL_COUNT),
+                dtype=np.dtype(np.float64),
+            ),
+        }
+        if fields["rollout_end_step"].shape != (rollout_count,):
+            raise ValueError("reward diagnostics rollout arrays are inconsistent")
+        episode_order = np.lexsort(
+            (
+                fields["episode_index"],
+                fields["episode_worker_rank"],
+                fields["episode_end_step"],
+            )
+        )
+        for key in (
+            "episode_end_step",
+            "episode_worker_rank",
+            "episode_index",
+            "episode_length",
+            "episode_terminated",
+            "episode_truncated",
+            "episode_complete",
+            "episode_reward_sums",
+        ):
+            fields[key] = fields[key][episode_order]
+        temporary_path = f"{self.output_path}.tmp.npz"
+        np.savez(temporary_path, **fields)
+        os.replace(temporary_path, self.output_path)
 
-        all_bins = sorted(
-            set(self._sample_exposure_by_bin)
-            | set(self._sample_violation_by_bin)
-            | set(self._episode_exposure_by_bin)
-            | set(self._episode_violation_by_bin)
-            | set(self._safety_truncation_by_bin)
-        )
-        if not all_bins:
-            return
 
-        bin_start = np.asarray(
-            [bin_index * self.position_bin_size_m for bin_index in all_bins],
-            dtype=np.float64,
-        )
-        bin_end = bin_start + self.position_bin_size_m
-        sample_exposure = np.asarray(
-            [self._sample_exposure_by_bin.get(bin_index, 0) for bin_index in all_bins],
-            dtype=np.float64,
-        )
-        sample_violation = np.asarray(
-            [self._sample_violation_by_bin.get(bin_index, 0) for bin_index in all_bins],
-            dtype=np.float64,
-        )
-        episode_exposure = np.asarray(
-            [self._episode_exposure_by_bin.get(bin_index, 0) for bin_index in all_bins],
-            dtype=np.float64,
-        )
-        episode_violation = np.asarray(
-            [
-                self._episode_violation_by_bin.get(bin_index, 0)
-                for bin_index in all_bins
-            ],
-            dtype=np.float64,
-        )
-        safety_truncation = np.asarray(
-            [
-                self._safety_truncation_by_bin.get(bin_index, 0)
-                for bin_index in all_bins
-            ],
-            dtype=np.float64,
-        )
+class SafetyTruncationPositionHistogramCallback(RolloutAggregationCallback):
+    """Collect worker-buffered safety truncations and persist position bins."""
 
+    def __init__(
+        self,
+        *,
+        output_path: str,
+        position_bin_size_m: float = 5000.0,
+        verbose: int = 0,
+    ) -> None:
+        super().__init__(verbose=verbose)
+        self.output_path = str(output_path)
+        self.position_bin_size_m = float(position_bin_size_m)
+        if not np.isfinite(self.position_bin_size_m) or self.position_bin_size_m <= 0:
+            raise ValueError("position_bin_size_m must be finite and positive")
+        self._position_chunks: list[NDArray[np.float32]] = []
+        self._violation_code_chunks: list[NDArray[np.int8]] = []
+
+    @override
+    def _init_callback(self) -> None:
+        output_dir = os.path.dirname(self.output_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+
+    def _drain_worker_batches(self) -> None:
+        payloads = self.training_env.env_method("drain_safety_truncations")
+        valid_codes = np.asarray(
+            [int(ViolationCode.SPEED_LOW), int(ViolationCode.SPEED_HIGH)],
+            dtype=np.int8,
+        )
+        for payload in payloads:
+            if not isinstance(payload, dict):
+                raise TypeError("safety truncation payload must be a dictionary")
+            if "position_m" not in payload or "violation_code" not in payload:
+                raise ValueError("safety truncation payload is missing required fields")
+            positions = np.asarray(payload["position_m"], dtype=np.float32).reshape(-1)
+            codes = np.asarray(payload["violation_code"], dtype=np.int8).reshape(-1)
+            if positions.shape != codes.shape:
+                raise ValueError(
+                    "safety truncation payload arrays must have equal shape"
+                )
+            if not np.all(np.isfinite(positions)):
+                raise ValueError("safety truncation positions must be finite")
+            if codes.size and not np.all(np.isin(codes, valid_codes)):
+                raise ValueError("safety truncation payload contains an invalid code")
+            if positions.size:
+                self._position_chunks.append(positions)
+                self._violation_code_chunks.append(codes)
+
+    @override
+    def _on_rollout_end(self) -> None:
+        self._drain_worker_batches()
+
+    @override
+    def _on_training_end(self) -> None:
+        self._drain_worker_batches()
+        if self._position_chunks:
+            positions = np.concatenate(self._position_chunks).astype(np.float64)
+            codes = np.concatenate(self._violation_code_chunks)
+            absolute_bins, inverse = np.unique(
+                np.floor(positions / self.position_bin_size_m).astype(np.int64),
+                return_inverse=True,
+            )
+            bin_count = absolute_bins.size
+            total = np.bincount(inverse, minlength=bin_count).astype(np.int64)
+            low = np.bincount(
+                inverse[codes == int(ViolationCode.SPEED_LOW)], minlength=bin_count
+            ).astype(np.int64)
+            high = np.bincount(
+                inverse[codes == int(ViolationCode.SPEED_HIGH)], minlength=bin_count
+            ).astype(np.int64)
+            starts = absolute_bins.astype(np.float64) * self.position_bin_size_m
+            ends = starts + self.position_bin_size_m
+            shares = total.astype(np.float64) / float(total.sum())
+        else:
+            starts = ends = shares = np.empty(0, dtype=np.float64)
+            total = low = high = np.empty(0, dtype=np.int64)
         np.savez(
             self.output_path,
-            bin_start_m=bin_start,
-            bin_end_m=bin_end,
-            sample_exposure_count=sample_exposure,
-            sample_violation_count=sample_violation,
-            sample_violation_rate=np.divide(
-                sample_violation,
-                sample_exposure,
-                out=np.zeros_like(sample_violation, dtype=np.float64),
-                where=sample_exposure > 0.0,
-            ),
-            episode_exposure_count=episode_exposure,
-            episode_violation_count=episode_violation,
-            episode_violation_rate=np.divide(
-                episode_violation,
-                episode_exposure,
-                out=np.zeros_like(episode_violation, dtype=np.float64),
-                where=episode_exposure > 0.0,
-            ),
-            safety_truncation_count=safety_truncation,
+            bin_start_m=starts,
+            bin_end_m=ends,
+            safety_truncation_count=total,
+            low_safety_truncation_count=low,
+            high_safety_truncation_count=high,
+            global_safety_truncation_share=shares,
             position_bin_size_m=np.asarray(
                 [self.position_bin_size_m], dtype=np.float64
             ),
         )
 
 
-class PeriodicEvalCallback(BaseCallback):
+class BestEvaluationArtifactHandler:
+    def __init__(
+        self,
+        *,
+        output_dir: str,
+        artifact_metadata: Mapping[str, object] | None = None,
+    ) -> None:
+        self.output_dir = str(output_dir)
+        self.artifact_metadata = dict(artifact_metadata or {})
+        self.best_result: PolicyEvaluationResult | None = None
+
+    def initialize(self, host: ScheduledPolicyEvaluationCallback) -> None:
+        del host
+        os.makedirs(self.output_dir, exist_ok=True)
+
+    @staticmethod
+    def _log_result(
+        host: ScheduledPolicyEvaluationCallback,
+        result: PolicyEvaluationResult,
+        *,
+        prefix: str,
+    ) -> None:
+        values = {
+            "success": float(result.success),
+            "precise_arrival": float(result.precise_arrival),
+            "punctual_arrival": float(result.punctual_arrival),
+            "total_reward": result.total_reward,
+            "stop_error_m": result.stop_error_m,
+            "time_error_s": result.time_error_s,
+            "abs_time_error_s": abs(result.time_error_s),
+            "total_energy_j": result.total_energy_j,
+            "comfort_tav": result.comfort_tav,
+            "comfort_er_pct": result.comfort_er_pct,
+            "comfort_rms": result.comfort_rms,
+        }
+        for name, value in values.items():
+            host.logger.record(f"best_eval/{prefix}_{name}", value)
+
+    def handle_evaluation(
+        self,
+        host: ScheduledPolicyEvaluationCallback,
+        event: PolicyEvaluationEvent,
+    ) -> None:
+        self._log_result(host, event.result, prefix="last")
+        reason = describe_best_update_reason(event.result, self.best_result)
+        if reason is None:
+            return
+        tracked = event.result
+        host.model.save(os.path.join(self.output_dir, "best_model"))
+        metrics = tracked.to_metrics(
+            num_timesteps=event.training_step,
+            evaluation_rollout_index=event.rollout_index,
+        )
+        metrics.update(self.artifact_metadata)
+        metrics["trajectory_source"] = "best"
+        metrics["best_update_reason"] = reason
+        save_policy_evaluation_curve(
+            tracked,
+            os.path.join(self.output_dir, "best_trajectory.npz"),
+            extra_metrics=metrics,
+        )
+        self.best_result = tracked
+        self._log_result(host, tracked, prefix="best")
+
+    def finalize(self, host: ScheduledPolicyEvaluationCallback) -> None:
+        del host
+
+
+class EvaluationHistoryArtifactHandler:
+    """Persist fixed-start metrics from every scheduled policy evaluation."""
+
+    def __init__(self, *, output_path: str) -> None:
+        self.output_path = str(output_path)
+        self._events: list[PolicyEvaluationEvent] = []
+
+    def initialize(self, host: ScheduledPolicyEvaluationCallback) -> None:
+        del host
+        output_dir = os.path.dirname(self.output_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+
+    def handle_evaluation(
+        self,
+        host: ScheduledPolicyEvaluationCallback,
+        event: PolicyEvaluationEvent,
+    ) -> None:
+        del host
+        self._events.append(event)
+
+    def finalize(self, host: ScheduledPolicyEvaluationCallback) -> None:
+        del host
+        positions = [
+            np.asarray(event.result.safety_violation_positions_m, dtype=np.float64)
+            for event in self._events
+        ]
+        offsets = np.zeros(len(positions) + 1, dtype=np.int64)
+        for index, values in enumerate(positions, start=1):
+            offsets[index] = offsets[index - 1] + values.size
+        flattened = (
+            np.concatenate(positions)
+            if offsets[-1] > 0
+            else np.empty(0, dtype=np.float64)
+        )
+        np.savez(
+            self.output_path,
+            training_steps=np.asarray(
+                [event.training_step for event in self._events], dtype=np.int64
+            ),
+            rollout_indices=np.asarray(
+                [event.rollout_index for event in self._events], dtype=np.int64
+            ),
+            total_reward=np.asarray(
+                [event.result.total_reward for event in self._events], dtype=np.float64
+            ),
+            episode_steps=np.asarray(
+                [event.result.episode_steps for event in self._events], dtype=np.int64
+            ),
+            success=np.asarray(
+                [event.result.success for event in self._events], dtype=np.bool_
+            ),
+            stop_error_m=np.asarray(
+                [event.result.stop_error_m for event in self._events], dtype=np.float64
+            ),
+            abs_time_error_s=np.asarray(
+                [abs(event.result.time_error_s) for event in self._events],
+                dtype=np.float64,
+            ),
+            total_energy_kj=np.asarray(
+                [event.result.total_energy_kj for event in self._events],
+                dtype=np.float64,
+            ),
+            comfort_tav=np.asarray(
+                [event.result.comfort_tav for event in self._events], dtype=np.float64
+            ),
+            safety_violation_positions_m=flattened,
+            safety_violation_position_offsets=offsets,
+        )
+
+
+class ScheduledPolicyEvaluationCallback(RolloutAggregationCallback):
     def __init__(
         self,
         *,
         eval_env: Any,
-        output_dir: str | None = None,
-        artifact_metadata: Mapping[str, object] | None = None,
-        recorders: Sequence[object] | None = None,
-        eval_trigger_mode: str = "steps",
-        eval_trigger_interval: int = 10_000,
+        handlers: Sequence[EvaluationResultHandler],
+        evaluation_interval_rollouts: int = DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
         deterministic: bool = True,
         verbose: int = 0,
-    ):
-        super().__init__(verbose)
-        if eval_trigger_mode not in ("steps", "episodes"):
-            raise ValueError("trigger mode must be 'steps' or 'episodes'")
-        if eval_trigger_interval <= 0:
-            raise ValueError("trigger_interval must be positive")
-
-        self.eval_env: Any = eval_env
-        self.eval_trigger_mode: str = eval_trigger_mode
-        self.trigger_interval: int = int(eval_trigger_interval)
-        self.deterministic: bool = deterministic
-        if recorders is None:
-            if output_dir is None:
-                raise ValueError(
-                    "output_dir is required when recorders are not provided"
-                )
-            self.recorders: list[object] = [
-                BestTrajectoryRecorder(
-                    output_dir=output_dir,
-                    artifact_metadata=artifact_metadata,
-                )
-            ]
-        else:
-            self.recorders = list(recorders)
-        self._episodes_seen: int = 0
-        self._next_trigger_value: int = self.trigger_interval
-
-    @property
-    def best_recorder(self) -> BestTrajectoryRecorder | None:
-        for recorder in self.recorders:
-            if isinstance(recorder, BestTrajectoryRecorder):
-                return recorder
-        return None
-
-    @property
-    def best_result(self) -> PolicyEvaluationResult | None:
-        recorder = self.best_recorder
-        return None if recorder is None else recorder.best_result
-
-    @property
-    def best_trigger_interval(self) -> int | None:
-        recorder = self.best_recorder
-        return None if recorder is None else recorder.best_trigger_interval
+    ) -> None:
+        super().__init__(verbose=verbose)
+        if evaluation_interval_rollouts <= 0:
+            raise ValueError("evaluation_interval_rollouts must be positive")
+        self.eval_env = eval_env
+        self.handlers = list(handlers)
+        self.evaluation_interval_rollouts = int(evaluation_interval_rollouts)
+        self.deterministic = bool(deterministic)
+        self._rollouts_completed = 0
 
     @override
     def _init_callback(self) -> None:
-        for recorder in self.recorders:
-            init_fn = getattr(recorder, "init_callback", None)
-            if callable(init_fn):
-                _ = init_fn(self)
+        for handler in self.handlers:
+            handler.initialize(self)
 
-    def _count_completed_episodes(self) -> int:
-        dones_raw = self.locals.get("dones")
-        if dones_raw is None:
-            return 0
-
-        try:
-            return sum(1 for done in dones_raw if bool(done))
-        except TypeError:
-            return int(bool(dones_raw))
-
-    def _advance_trigger_threshold(self, current_value: int) -> None:
-        while self._next_trigger_value <= current_value:
-            self._next_trigger_value += self.trigger_interval
-
-    def _run_evaluation(self, *, eval_trigger_interval: int) -> None:
-        result = evaluate_policy_once(
-            self.model,
-            self.eval_env,
-            deterministic=self.deterministic,
+    def run_evaluation(self) -> PolicyEvaluationResult:
+        return evaluate_policy_once(
+            self.model, self.eval_env, deterministic=self.deterministic
         )
 
-        for recorder in self.recorders:
-            on_evaluation = getattr(recorder, "on_evaluation", None)
-            if callable(on_evaluation):
-                _ = on_evaluation(
-                    self,
-                    result,
-                    eval_trigger_interval=eval_trigger_interval,
-                )
-
     @override
-    def _on_step(self) -> bool:
-        if self.eval_trigger_mode == "episodes":
-            self._episodes_seen += self._count_completed_episodes()
-            current_value = self._episodes_seen
-        else:
-            current_value = int(self.num_timesteps)
-
-        if current_value < self._next_trigger_value:
-            return True
-
-        self._run_evaluation(eval_trigger_interval=current_value)
-        self._advance_trigger_threshold(current_value)
-        return True
+    def _on_rollout_end(self) -> None:
+        self._rollouts_completed += 1
+        if self._rollouts_completed % self.evaluation_interval_rollouts != 0:
+            return
+        result = self.run_evaluation()
+        event = PolicyEvaluationEvent(
+            result=result,
+            training_step=int(self.num_timesteps),
+            rollout_index=self._rollouts_completed,
+        )
+        for handler in self.handlers:
+            handler.handle_evaluation(self, event)
 
     @override
     def _on_training_end(self) -> None:
-        for recorder in self.recorders:
-            on_training_end = getattr(recorder, "on_training_end", None)
-            if callable(on_training_end):
-                _ = on_training_end(self)
-
-        close_fn = getattr(self.eval_env, "close", None)
-        if callable(close_fn):
-            _ = close_fn()
-
-
-class EpisodeMetricsCollector(BaseCallback):
-    def __init__(
-        self,
-        output_path: str,
-        collect_interval_steps: int = 1024,
-        record_trigger_mode: str = "steps",
-        verbose: int = 0,
-    ):
-        super().__init__(verbose)
-        if record_trigger_mode not in ("steps", "episodes"):
-            raise ValueError(
-                "record_trigger_mode must be 'steps' or 'episodes', "
-                + f"got '{record_trigger_mode}'"
-            )
-        self._output_path: str = output_path
-        self._record_trigger_mode: str = record_trigger_mode
-        self._collect_interval: int = max(1, int(collect_interval_steps))
-        self._last_collect_step: int = -self._collect_interval
-        self._steps: list[int] = []
-        self._rewards: list[float] = []
-        self._lengths: list[float] = []
-        self._episode_indices: list[int] = []
-
-    @override
-    def _on_step(self) -> bool:
-        if self._record_trigger_mode == "episodes":
-            return self._on_step_episodes_mode()
-        return self._on_step_steps_mode()
-
-    def _on_step_steps_mode(self) -> bool:
-        current_step = int(self.num_timesteps)
-        if current_step - self._last_collect_step < self._collect_interval:
-            return True
-
-        buf = getattr(self.model, "ep_info_buffer", None)
-        if buf is None or len(buf) == 0 or len(buf[0]) == 0:
-            return True
-
-        reward_mean = _safe_mean([ep_info["r"] for ep_info in buf])
-        len_mean = _safe_mean([ep_info["l"] for ep_info in buf])
-
-        self._steps.append(current_step)
-        self._rewards.append(reward_mean)
-        self._lengths.append(len_mean)
-        self._last_collect_step = current_step
-        return True
-
-    def _on_step_episodes_mode(self) -> bool:
-        dones_raw = self.locals.get("dones")
-        if dones_raw is None:
-            return True
-
-        try:
-            dones = list(dones_raw)
-        except TypeError:
-            return True
-
-        infos = self.locals.get("infos", [])
-        if not isinstance(infos, (list, tuple)):
-            return True
-
-        for env_idx, done in enumerate(dones):
-            if not bool(done):
-                continue
-            if env_idx >= len(infos):
-                continue
-            info = infos[env_idx]
-            if not isinstance(info, dict):
-                continue
-            episode_info = info.get("episode")
-            if not isinstance(episode_info, dict):
-                continue
-            r_val = episode_info.get("r")
-            l_val = episode_info.get("l")
-            if r_val is None or l_val is None:
-                continue
-
-            self._episode_indices.append(len(self._episode_indices))
-            self._rewards.append(float(r_val))
-            self._lengths.append(float(l_val))
-
-        return True
-
-    @override
-    def _on_training_end(self) -> None:
-        if self._record_trigger_mode == "episodes":
-            if self._episode_indices:
-                np.savez(
-                    self._output_path,
-                    index=np.asarray(self._episode_indices, dtype=np.float64),
-                    ep_reward=np.asarray(self._rewards, dtype=np.float64),
-                    ep_len=np.asarray(self._lengths, dtype=np.float64),
-                )
-        else:
-            if self._steps:
-                np.savez(
-                    self._output_path,
-                    index=np.asarray(self._steps, dtype=np.float64),
-                    ep_reward=np.asarray(self._rewards, dtype=np.float64),
-                    ep_len=np.asarray(self._lengths, dtype=np.float64),
-                )
+        for handler in self.handlers:
+            handler.finalize(self)
+        close = getattr(self.eval_env, "close", None)
+        if callable(close):
+            close()

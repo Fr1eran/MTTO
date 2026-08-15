@@ -1,5 +1,4 @@
 from dataclasses import replace
-from types import SimpleNamespace
 from typing import TypedDict, Unpack, cast
 
 import numpy as np
@@ -10,13 +9,18 @@ from gymnasium.utils.env_checker import (
 from numpy.typing import NDArray
 
 from model.ocs import SafeGuardUtility, TrainService
-from model.track import TrackInfo
+from model.track import TrackInfo, get_slope_scalar_numba
 from model.vehicle import VehicleInfo, calc_levi_deceleration_scalar_numba
+from rl.context_pool import Context
+from rl.context_sampler import ContextSampler
+from rl.dspdl import DSPDLEpisodeAccumulator
 from rl.evaluation import evaluate_operational_policy_once, evaluate_policy_once
 from rl.mtto_env import MTTOEnv
+from rl.observation_builder import ObservationBuilder
 from rl.operational_state import OperationalState, OperationalTransition, ViolationCode
-from rl.reference_initial_state_provider import ReferenceInitialStateProvider
 from rl.reward_calculator import RewardConfig
+from rl.reward_diagnostics import RewardDiagnosticsAccumulator
+from rl.safety_statistics import SafetyTruncationBuffer
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
     load_safeguard_curves,
@@ -27,8 +31,10 @@ from utils.data_loader import (
 
 
 class _MTTOEnvOverrides(TypedDict, total=False):
-    reference_initial_state_provider: ReferenceInitialStateProvider | None
+    context_sampler: ContextSampler | None
+    dspdl_accumulator: DSPDLEpisodeAccumulator | None
     enable_trajectory_tracking: bool
+    safety_truncation_buffer: SafetyTruncationBuffer | None
 
 
 @pytest.fixture(scope="module")
@@ -83,7 +89,7 @@ def mtto_env():
         safeguard_utility=safeguard_utility,
         train_service=train_service,
         gamma=0.995,
-        max_step_distance=10.0,
+        step_distance=10.0,
         reward_config=RewardConfig(),
     )
     return maglevttoenv
@@ -114,7 +120,7 @@ def _build_env_like(
         safeguard_utility=source_env.safeguard_utility,
         train_service=train_service or _clone_train_service(source_env.train_service),
         gamma=source_env.gamma,
-        max_step_distance=source_env.max_step_distance,
+        step_distance=source_env.step_distance,
         reward_config=reward_config if reward_config is not None else RewardConfig(),
         **kwargs,
     )
@@ -151,42 +157,47 @@ def test_reset(mtto_env: MTTOEnv):
     np.testing.assert_allclose(obs[8], 0.0)  # current_slope
     np.testing.assert_allclose(
         obs[9],
-        mtto_env.observation_builder.calc_lookahead_avg_slope(mtto_env.state)
+        mtto_env.observation_builder.get_lookahead_avg_slope(
+            mtto_env.state.step_count
+        )
         / mtto_env.vehicle.max_slope_capacity,
     )  # lookahead_avg_slope
     np.testing.assert_allclose(
         obs[10],
-        mtto_env.observation_builder.calc_lookahead_avg_upper_speed(mtto_env.state)
+        mtto_env.observation_builder.get_lookahead_avg_upper_speed(
+            mtto_env.state.step_count
+        )
         / mtto_env.vehicle.max_speed,
     )  # lookahead_avg_upper_speed
     np.testing.assert_allclose(obs[11], 0.0)  # approach_progress
     assert info == {}
 
 
-class _ReferenceProviderStub:
-    def __init__(self, runtime_state: object) -> None:
-        self.runtime_state: object = runtime_state
+class _ContextSamplerStub:
+    def __init__(self, initial_state: OperationalState) -> None:
+        self.initial_state = initial_state
+        self.version = 0
         self.reseeded_with: int | None = None
         self.updated: tuple[object, int] | None = None
 
     def reseed(self, seed: int) -> None:
         self.reseeded_with = seed
 
-    def sample(self) -> object:
-        return SimpleNamespace(
-            runtime_state=self.runtime_state,
-            sample_id=11,
-            reference_index=2,
-            distribution_version=4,
+    def sample(self) -> Context:
+        return Context(
+            context_index=2,
+            remaining_distance_m=100.0,
+            initial_state=self.initial_state,
         )
 
-    def set_sampling_distribution(
+    def update_distribution(
         self, weights: NDArray[np.floating] | list[float], *, version: int
     ) -> None:
-        self.updated = (weights, version)
+        self.updated = (np.asarray(weights, dtype=np.float64), version)
+        self.version = version
 
 
-def test_reset_can_use_reference_provider_and_clears_episode_state(
+def test_reset_can_sample_context_and_collect_dspdl_statistics(
     mtto_env: MTTOEnv,
 ) -> None:
     reference_state = replace(
@@ -196,33 +207,37 @@ def test_reset_can_use_reference_provider_and_clears_episode_state(
         energy_consumption_kj=12.0,
         step_count=3,
     )
-    provider = _ReferenceProviderStub(reference_state)
+    sampler = _ContextSamplerStub(reference_state)
+    accumulator = DSPDLEpisodeAccumulator(context_count=3, gamma=mtto_env.gamma)
     env = _build_env_like(
         mtto_env,
-        reference_initial_state_provider=cast(
-            ReferenceInitialStateProvider, cast(object, provider)
-        ),
+        context_sampler=cast(ContextSampler, cast(object, sampler)),
+        dspdl_accumulator=accumulator,
         enable_trajectory_tracking=True,
     )
-    env.last_transition = None
     env._comfort_tav = 8.0
 
     observation, info = env.reset(seed=123)
 
     assert info == {}
-    assert provider.reseeded_with == 123
+    assert sampler.reseeded_with == 123
     assert env.state is reference_state
-    assert env.last_transition is None
     assert env._comfort_tav == 0.0
     assert env.trajectory_pos == [reference_state.position_m]
     assert observation[0] < 1.0
     _, _, _, _, info = env.step(np.asarray([0.0], dtype=np.float32))
-    assert info["reference_context_sample_id"] == 11
-    assert info["reference_context_index"] == 2
-    assert info["reference_context_distribution_version"] == 4
+    assert "reference_context_sample_id" not in info
+    assert "reference_context_index" not in info
+    assert "reference_context_distribution_version" not in info
 
-    env.set_reference_initial_state_distribution([1.0], version=4)
-    assert provider.updated == ([1.0], 4)
+    statistics = env.drain_dspdl_statistics(version=0)
+    np.testing.assert_array_equal(statistics["context_counts"], [0, 0, 1])
+
+    env.set_dspdl_distribution([1.0], version=1)
+    assert sampler.updated is not None
+    np.testing.assert_array_equal(sampler.updated[0], [1.0])
+    assert sampler.updated[1] == 1
+    assert accumulator.accepted_version == 1
 
 
 @pytest.mark.parametrize(
@@ -375,45 +390,115 @@ def test_get_upper_speed_or_zero_returns_zero_outside_lut(
     assert mtto_env.stepper.get_upper_speed_or_zero(121.0) == pytest.approx(0.0)
 
 
-def test_lookahead_avg_upper_speed_uses_window_average(
+def test_lookahead_cache_matches_window_average(mtto_env: MTTOEnv) -> None:
+    _ = mtto_env.reset()
+    builder = mtto_env.observation_builder
+    step_index = 3
+    position_m = (
+        mtto_env.train_service.start_position
+        + mtto_env.stepper.direction * step_index * mtto_env.stepper.step_distance_m
+    )
+    offsets = np.linspace(
+        builder.step_distance_m,
+        builder.lookahead_distance_m,
+        builder.lookahead_num_samples,
+    )
+    expected_slope = np.mean(
+        [
+            get_slope_scalar_numba(
+                position_m + mtto_env.stepper.direction * float(offset),
+                mtto_env.track.slopes,
+                mtto_env.track.slope_intervals,
+            )
+            for offset in offsets
+        ]
+    )
+    expected_upper_speed = np.mean(
+        [
+            mtto_env.stepper.get_upper_speed_or_zero(
+                position_m + mtto_env.stepper.direction * float(offset)
+            )
+            for offset in offsets
+        ]
+    )
+
+    np.testing.assert_allclose(
+        builder.get_lookahead_avg_slope(step_index), expected_slope
+    )
+    np.testing.assert_allclose(
+        builder.get_lookahead_avg_upper_speed(step_index), expected_upper_speed
+    )
+
+
+def test_lookahead_features_are_read_only_and_not_recomputed_during_build(
     mtto_env: MTTOEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _ = mtto_env.reset()
-    mtto_env.state = replace(mtto_env.state, position_m=0.0, speed_mps=5.0)
-    monkeypatch.setattr(mtto_env.stepper, "_upper_speed_lut_pos_min", 0.0)
-    monkeypatch.setattr(mtto_env.stepper, "_upper_speed_lut_step", 10.0)
-    monkeypatch.setattr(
-        mtto_env.stepper,
-        "_upper_speed_lut_speed_arr",
-        np.asarray([20.0, 20.0, 20.0, 20.0, 20.0, 20.0], dtype=np.float32),
-    )
+    builder = mtto_env.observation_builder
 
-    avg_upper_speed = mtto_env.observation_builder.calc_lookahead_avg_upper_speed(
-        mtto_env.state,
-        lookahead_distance_m=100.0,
-        num_samples=2,
-    )
+    def fail(*_args: object, **_kwargs: object) -> float:
+        raise AssertionError("lookahead feature was recomputed during build")
 
-    np.testing.assert_allclose(avg_upper_speed, 10.0)
+    monkeypatch.setattr("rl.observation_builder.get_slope_scalar_numba", fail)
+    monkeypatch.setattr(builder, "_get_upper_speed_or_zero", fail)
+
+    observation = builder.build(mtto_env.state)
+
+    assert observation.shape == (12,)
+    assert builder._lookahead_avg_slope_by_step.flags.writeable is False
+    assert builder._lookahead_avg_upper_speed_by_step.flags.writeable is False
 
 
-def test_lookahead_avg_slope_uses_window_average(
+@pytest.mark.parametrize("step_index", (-1, 10**9))
+def test_lookahead_cache_rejects_out_of_range_index(
     mtto_env: MTTOEnv,
-    monkeypatch: pytest.MonkeyPatch,
+    step_index: int,
 ) -> None:
-    _ = mtto_env.reset()
-    mtto_env.state = replace(mtto_env.state, position_m=0.0)
-    monkeypatch.setattr(mtto_env.track, "slopes", np.asarray([0.0, 4.0]))
-    monkeypatch.setattr(mtto_env.track, "slope_intervals", np.asarray([0.0, 50.0]))
+    with pytest.raises(IndexError, match="cached lookahead range"):
+        _ = mtto_env.observation_builder.get_lookahead_avg_slope(step_index)
 
-    avg_slope = mtto_env.observation_builder.calc_lookahead_avg_slope(
-        mtto_env.state,
-        lookahead_distance_m=100.0,
-        num_samples=2,
+
+def test_lookahead_cache_rejects_noninteger_index(mtto_env: MTTOEnv) -> None:
+    with pytest.raises(TypeError, match="step_index must be an integer"):
+        _ = mtto_env.observation_builder.get_lookahead_avg_upper_speed(  # type: ignore[arg-type]
+            1.5
+        )
+
+
+def test_reverse_direction_lookahead_cache_uses_step_index_grid() -> None:
+    vehicle = VehicleInfo(mass=100.0, numoftrainsets=1, length=10.0)
+    track = TrackInfo(
+        slopes=np.asarray([1.0, 3.0]),
+        slope_intervals=np.asarray([0.0, 50.0]),
+        speed_limits=np.asarray([20.0]),
+        speed_limit_intervals=np.asarray([0.0, 100.0]),
     )
+    service = TrainService(100.0, 0.0, 0.0, 10.0, 0.75, 0.05, 1.0)
+    upper_speed_query_count = 0
 
-    np.testing.assert_allclose(avg_slope, 2.0)
+    def get_upper_speed(position_m: float) -> float:
+        nonlocal upper_speed_query_count
+        upper_speed_query_count += 1
+        return max(position_m, 0.0)
+
+    builder = ObservationBuilder(
+        vehicle=vehicle,
+        track=track,
+        train_service=service,
+        step_distance_m=10.0,
+        direction=-1,
+        whole_distance_m=100.0,
+        get_upper_speed_or_zero=get_upper_speed,
+    )
+    expected_node_count = 11
+    expected_query_count = expected_node_count * builder.lookahead_num_samples
+
+    assert builder._lookahead_avg_slope_by_step.size == expected_node_count
+    assert upper_speed_query_count == expected_query_count
+    assert builder.get_lookahead_avg_upper_speed(0) == pytest.approx(9.0)
+    assert builder.get_lookahead_avg_slope(0) == pytest.approx(1.2)
+    assert upper_speed_query_count == expected_query_count
 
 
 def test_cal_energy_consumption(mtto_env: MTTOEnv):
@@ -452,80 +537,38 @@ def test_whole_env(mtto_env: MTTOEnv):
     check_env(mtto_env)
 
 
-def test_step_without_diagnostics_keeps_tb_dicts_empty(mtto_env: MTTOEnv):
-    mtto_env.enable_diagnostics = False
+def test_step_info_excludes_reward_diagnostics(mtto_env: MTTOEnv):
+    _ = mtto_env.reset()
+    action = mtto_env.action_space.sample()
+    _, _, terminated, truncated, info = mtto_env.step(action)
+
+    assert "basic" in info
+    assert "outcome" in info
+    assert info["outcome"] == {
+        "terminated": terminated,
+        "truncated": truncated,
+    }
+    assert "rewards" not in info
+
+
+def test_compact_training_info_is_empty_and_worker_accumulator_records(
+    mtto_env: MTTOEnv,
+):
+    mtto_env.reward_diagnostics_accumulator = RewardDiagnosticsAccumulator(
+        worker_rank=0, rollout_capacity=2
+    )
+    mtto_env.compact_training_info = True
     try:
         _ = mtto_env.reset()
         action = mtto_env.action_space.sample()
-        _, _, terminated, truncated, info = mtto_env.step(action)
-
-        assert mtto_env.rewards_info == {}
-        assert mtto_env.constraint_info == {}
-        assert mtto_env.event_info == {}
-
-        expected_runtime_keys = {
-            "energy_consumption",
-            "operation_time",
-            "redundant_operation_time",
-            "position",
-            "stopping_point_index",
-        }
-        runtime_namespace = "basic" if "basic" in info else "runtime"
-        assert runtime_namespace in info
-        runtime = info[runtime_namespace]
-        assert isinstance(runtime, dict)
-        assert expected_runtime_keys.issubset(set(runtime.keys()))
-        assert expected_runtime_keys.issubset(set(mtto_env.basic_info.keys()))
-        assert info["outcome"] == {
-            "terminated": terminated,
-            "truncated": truncated,
-        }
-        assert "rewards" not in info
-        assert "state" not in info
-        assert "constraint" not in info
-        assert "event" not in info
-        assert "tb_diagnostics" not in info
+        _, _, _, _, info = mtto_env.step(action)
+        assert info == {}
+        batch = mtto_env.drain_reward_diagnostics()
+        np.testing.assert_array_equal(batch["transition_count"], [1])
+        assert batch["reward_sum"].shape == (9,)
     finally:
-        mtto_env.enable_diagnostics = True
-
-
-def test_step_with_diagnostics_puts_namespaces_at_info_top_level(
-    mtto_env: MTTOEnv,
-):
-    mtto_env.enable_diagnostics = True
-    mtto_env.diagnostics_interval_steps = 1
-
-    _ = mtto_env.reset()
-    action = mtto_env.action_space.sample()
-    _, _, _, _, info = mtto_env.step(action)
-
-    assert "tb_diagnostics" not in info
-    runtime_namespace = "basic" if "basic" in info else "runtime"
-    assert runtime_namespace in info
-    assert "outcome" in info
-    assert "rewards" in info
-    assert "state" not in info
-    assert "constraint" in info
-    assert "event" in info
-    assert set(cast(dict[str, object], info["constraint"])) == {
-        "margin_to_vmax_mps",
-        "margin_to_vmin_mps",
-        "violation_code",
-        "speed_limit_segment",
-    }
-
-    runtime = info[runtime_namespace]
-    assert isinstance(runtime, dict)
-    assert "position" in runtime
-    assert "stopping_position" not in runtime
-
-    expected_runtime_keys = {
-        "energy_consumption",
-        "operation_time",
-        "position",
-        "stopping_point_index",
-    }
-    assert expected_runtime_keys.issubset(set(runtime.keys()))
+        mtto_env.compact_training_info = False
+        mtto_env.reward_diagnostics_accumulator = None
 
 
 def test_no_trajectory_tracking_data_when_disabled(mtto_env: MTTOEnv):
@@ -603,8 +646,6 @@ def test_step_failed_stop_is_truncated_with_fixed_penalty(
     mtto_env: MTTOEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    mtto_env.enable_diagnostics = True
-    mtto_env.diagnostics_interval_steps = 1
     _ = mtto_env.reset()
     _patch_step_dependencies_for_outcome_tests(mtto_env, monkeypatch, next_speed=0.0)
 
@@ -616,18 +657,52 @@ def test_step_failed_stop_is_truncated_with_fixed_penalty(
     assert truncated is True
     assert reward == pytest.approx(-2.0)
     assert info["outcome"] == {"terminated": False, "truncated": True}
-    assert "constraint" in info
-    assert cast(dict[str, object], info["constraint"])["violation_code"] == int(
-        ViolationCode.FAILED_STOP
-    )
+    assert "constraint" not in info
+
+
+def test_step_buffers_speed_safety_truncation_inside_worker(
+    mtto_env: MTTOEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    buffer = SafetyTruncationBuffer()
+    env = _build_env_like(mtto_env, safety_truncation_buffer=buffer)
+    _ = env.reset()
+
+    def _advance(state: OperationalState, acceleration: float):
+        next_state = replace(
+            state,
+            position_m=1234.0,
+            acceleration_mps2=acceleration,
+            step_count=state.step_count + 1,
+        )
+        return OperationalTransition(
+            state,
+            next_state,
+            acceleration,
+            0.0,
+            0.0,
+            0.0,
+            False,
+            True,
+            ViolationCode.SPEED_LOW,
+        )
+
+    monkeypatch.setattr(env.stepper, "advance", _advance)
+
+    _, _, _, truncated, info = env.step(np.asarray([0.0], dtype=np.float32))
+    batch = env.drain_safety_truncations()
+
+    assert truncated is True
+    assert "safety" not in info
+    np.testing.assert_allclose(batch["position_m"], [1234.0])
+    np.testing.assert_array_equal(batch["violation_code"], [2])
+    assert env.drain_safety_truncations()["position_m"].size == 0
 
 
 def test_step_success_is_terminated_without_truncation(
     mtto_env: MTTOEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    mtto_env.enable_diagnostics = True
-    mtto_env.diagnostics_interval_steps = 1
     _ = mtto_env.reset()
     _patch_step_dependencies_for_outcome_tests(mtto_env, monkeypatch, next_speed=0.0)
     mtto_env.state = replace(
@@ -644,10 +719,8 @@ def test_step_success_is_terminated_without_truncation(
 
     assert terminated is True
     assert truncated is False
-    assert "constraint" in info
-    assert cast(dict[str, object], info["constraint"])["violation_code"] == int(
-        ViolationCode.ONGOING
-    )
+    assert info["outcome"] == {"terminated": True, "truncated": False}
+    assert "constraint" not in info
 
 
 def test_stepper_truncates_at_required_transition_budget(
@@ -729,7 +802,7 @@ def test_stepper_custom_requested_distance_matches_default_at_maximum(
     explicit_transition = stepper.advance(
         state,
         0.0,
-        requested_distance_m=stepper.max_step_distance_m,
+        requested_distance_m=stepper.step_distance_m,
     )
 
     assert explicit_transition.distance_m == pytest.approx(

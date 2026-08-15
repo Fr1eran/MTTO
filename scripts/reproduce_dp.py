@@ -8,6 +8,7 @@ from dp.core import (
     ParallelPrecomputeExitedError,
     VariableSpacingDPOptimizer,
 )
+from rl.experiment_utils import DEFAULT_SCHEDULE_TIME_S
 from utils.io_utils import format_float_token, save_curve_and_metrics
 from utils.scenario import build_scenario
 from utils.trajectory import compute_comfort_metrics_from_trajectory
@@ -26,7 +27,7 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     _ = parser.add_argument(
         "--schedule-time-s",
         type=float,
-        default=430.0,
+        default=DEFAULT_SCHEDULE_TIME_S,
         help="规划运行时间(s)。",
     )
     _ = parser.add_argument(

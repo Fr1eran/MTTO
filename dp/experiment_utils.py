@@ -139,7 +139,7 @@ def compute_dp_reference_curve(
     skip_disk_cache: bool = False,
     show_precompute_progress: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, object]]:
-    """Compute, save, and return a DP trajectory usable as an ORS reference."""
+    """Compute, save, and return a DP trajectory usable as a min-time reference."""
     if abs(float(target_speed)) > 1e-9:
         raise ValueError("VariableSpacingDPOptimizer currently requires target_speed=0")
 

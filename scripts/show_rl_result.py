@@ -23,7 +23,7 @@ def _print_metrics(metrics: dict[str, object]) -> None:
     print("Loaded metrics:")
     for key in [
         "trajectory_source",
-        "reward_profile_name",
+        "reward_preset_name",
         "total_reward",
         "target_time_s",
         "total_time_s",
@@ -48,8 +48,7 @@ def _print_metrics(metrics: dict[str, object]) -> None:
         "selection_comparison_key",
         "best_update_reason",
         "num_timesteps",
-        "eval_trigger_mode",
-        "eval_trigger_interval",
+        "evaluation_rollout_index",
         "created_at",
     ]:
         if key in metrics:
@@ -67,7 +66,7 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         "--trajectory-source",
         choices=_RL_TRAJECTORY_SOURCE_CHOICES,
         default="best",
-        help="选择加载哪条保存的轨迹: 'best' 'best_steps' 'best_episodes' 'final'",
+        help="选择加载哪条保存的轨迹: 'best' 'best_rollouts' 'final'",
     )
     _ = parser.add_argument(
         "--no-safeguard",

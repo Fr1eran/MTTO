@@ -346,6 +346,8 @@ $$
 
 离散型 SPDL 将任务采样分布作为外层变量，将策略优化与评论家训练交由内层 Actor–Critic 学习器完成。为保持方法的通用性，将内层更新抽象为 `UpdateActorCritic`，将任务价值估计抽象为 `EvaluateContextValues`。前者可由 PPO、SAC、TD3 或 DDPG 等算法实例化，后者按照式（5）输出完整任务池的价值向量。
 
+在本文配套项目中，理论方法仍称为离散型 SPDL，代码实现统一采用 `DSPDL` 前缀以避免与连续上下文实现混淆。实现对象依次为：`ReferenceTrajectory` 表示 DP 参考轨迹，`ContextPoolBuilder` 负责在父进程中采样并重建参考状态，`ContextPool` 保存有限任务池，`Context` 表示单个参考状态上下文，`ContextSampler` 持有当前版本的采样分布；每个训练环境外挂 `DSPDLEpisodeAccumulator` 统计当前版本数据，`DSPDLCallback` 按课程更新周期汇总统计并评估完整任务池，`DSPDLDistributionSolver` 执行下述 KL 约束分布求解，全部超参数集中在 `DSPDLConfig` 中。
+
 ```text
 Algorithm 1: Discrete-SPDL-Distribution-Update
 Input: a[1:N], q[1:N], mu[1:N], alpha, epsilon, tol, max_iter

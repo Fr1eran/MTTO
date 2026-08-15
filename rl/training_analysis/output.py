@@ -16,11 +16,11 @@ def build_analysis_payload(
     available_tags: list[str],
     regular_metrics: dict[str, Any],
     best_eval_metrics: dict[str, Any] | None = None,
-    reward_component_impact: dict[str, Any] | None = None,
-    constraint_diagnostic: dict[str, Any] | None = None,
-    evolution_metrics: dict[str, Any] | None = None,
+    trajectory_evaluation_metrics: dict[str, Any] | None = None,
+    reward_component_analysis: dict[str, Any] | None = None,
+    curriculum_distribution_metrics: dict[str, Any] | None = None,
+    safety_truncation_position_metrics: dict[str, Any] | None = None,
     step_snapshots: list[dict[str, Any]] | None = None,
-    episode_snapshots: list[dict[str, Any]] | None = None,
     config: dict[str, Any] | None = None,
     data_quality: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -34,14 +34,12 @@ def build_analysis_payload(
         },
         "regular_metrics": regular_metrics,
         "best_eval_metrics": best_eval_metrics or {},
-        "reward_component_impact": reward_component_impact or {},
-        "constraint_diagnostic": constraint_diagnostic or {},
-        "evolution_metrics": evolution_metrics or {},
+        "trajectory_evaluation_metrics": trajectory_evaluation_metrics or {},
+        "reward_component_analysis": reward_component_analysis or {},
+        "curriculum_distribution_metrics": curriculum_distribution_metrics or {},
+        "safety_truncation_position_metrics": safety_truncation_position_metrics or {},
         "data_quality": data_quality or {},
-        "snapshots": {
-            "by_step": step_snapshots or [],
-            "by_episode": episode_snapshots or [],
-        },
+        "snapshots": {"by_step": step_snapshots or []},
     }
 
 
@@ -154,6 +152,9 @@ BEST_EVAL_DISPLAY_METRICS = [
     "time_error_s",
     "total_reward",
     "total_energy_j",
+    "comfort_tav",
+    "comfort_er_pct",
+    "comfort_rms",
 ]
 
 
@@ -189,34 +190,14 @@ def _short_component_name(tag: str) -> str:
     return tag
 
 
-def _append_transition_matrix(
-    lines: list[str],
-    *,
-    matrix: Any,
-    labels: list[str],
-) -> None:
-    if not isinstance(matrix, list) or not matrix:
-        lines.append("- violation_transition_matrix: unavailable")
-        return
-
-    lines.append("| from \\ to | " + " | ".join(labels) + " |")
-    lines.append("| --- | " + " | ".join(["---"] * len(labels)) + " |")
-    for row_label, row in zip(labels, matrix, strict=False):
-        if not isinstance(row, list):
-            continue
-        values = [str(int(v)) for v in row[: len(labels)]]
-        if len(values) < len(labels):
-            values.extend(["0"] * (len(labels) - len(values)))
-        lines.append("| " + row_label + " | " + " | ".join(values) + " |")
-
-
 def _generate_markdown_report(payload: dict[str, Any]) -> str:
     meta = payload.get("meta", {})
     config = meta.get("config", {})
     regular = payload.get("regular_metrics", {})
-    reward_impact = payload.get("reward_component_impact", {})
-    constraint = payload.get("constraint_diagnostic", {})
-    evolution = payload.get("evolution_metrics", {})
+    reward_analysis = payload.get("reward_component_analysis", {})
+    trajectory_eval = payload.get("trajectory_evaluation_metrics", {})
+    curriculum = payload.get("curriculum_distribution_metrics", {})
+    safety_position = payload.get("safety_truncation_position_metrics", {})
     snapshots = payload.get("snapshots", {})
 
     convergence = regular.get("convergence_speed_quality", {})
@@ -224,32 +205,21 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
     critic = regular.get("critic_foresight", {})
     update_safety = regular.get("update_safety", {})
 
-    dominance = reward_impact.get("dominance", {})
-    stage_component_profile = reward_impact.get("stage_component_profile", [])
-    aggregation_order = reward_impact.get("aggregation_order", "unknown")
-    strong_negative_pairs = (reward_impact.get("objective_correlation", {}) or {}).get(
-        "strong_negative_pairs", []
-    )
-
-    gfd = constraint.get("geographic_failure_distribution", {})
-    sbt = constraint.get("safety_band_tolerance", {})
-    boundary_adhesion = constraint.get("boundary_adhesion", {})
-    critical_points = constraint.get("critical_point_risk", {})
-
-    evolution_available = bool(evolution.get("available", False))
-    evolution_stage_profiles = evolution.get("stage_profiles", [])
-    state_labels = evolution.get(
-        "state_labels", ["normal", "terminal_failure", "speed_violation"]
-    )
-    overall_transition_matrix = evolution.get("overall_transition_matrix", [])
+    components = reward_analysis.get("components", {})
+    episode_correlation = reward_analysis.get("episode_return_correlation", {})
+    strong_negative_pairs = episode_correlation.get("strong_negative_pairs", [])
 
     bar_width = (
         int(config.get("report_bar_width", 24)) if isinstance(config, dict) else 24
     )
 
-    top_dominance = sorted(
-        ((key, value) for key, value in dominance.items()),
-        key=lambda item: item[1],
+    top_activity = sorted(
+        (
+            (key, value.get("absolute_activity_share", 0.0))
+            for key, value in components.items()
+            if isinstance(value, dict)
+        ),
+        key=lambda item: float(item[1]),
         reverse=True,
     )
 
@@ -260,35 +230,6 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
     lines.append("")
     lines.append(
         f"- final_ep_rew_mean: {_format_number(convergence.get('final_ep_rew_mean'))}"
-    )
-    lines.append(
-        "- boundary_adhesion_ratio_by_distance: "
-        + f"{_format_percent(boundary_adhesion.get('near_miss_distance_ratio'))}"
-    )
-    lines.append(
-        "- mean_survival_distance_m: "
-        + f"{_format_number(evolution.get('mean_survival_distance_m'))}"
-    )
-    lines.append(
-        "- overall_normal_to_speed_violation_transition_rate: "
-        + f"{
-            _format_percent(
-                (evolution.get('overall_transition_probabilities') or [[0, 0, 0]])[0][2]
-                if evolution.get('overall_transition_probabilities')
-                else 0.0
-            )
-        }"
-    )
-    sample_count = float(sbt.get("sample_count", 0.0)) if isinstance(sbt, dict) else 0.0
-    failure_count = (
-        float(gfd.get("truncated_count", 0.0)) if isinstance(gfd, dict) else 0.0
-    )
-    failure_ratio = (failure_count / sample_count) if sample_count > 0 else 0.0
-    lines.append(
-        "- safety_signal_ratio(sample): "
-        + f"failure={_format_percent(failure_ratio)}, "
-        + f"violation={_format_percent(sbt.get('violation_ratio'))}, "
-        + f"near_miss={_format_percent(sbt.get('near_miss_ratio'))}"
     )
 
     best_eval = payload.get("best_eval_metrics", {})
@@ -313,10 +254,10 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
             }"
         )
 
-    top3 = top_dominance[:3]
+    top3 = top_activity[:3]
     if top3:
         lines.append(
-            "- top_dominance: "
+            "- top_reward_activity: "
             + ", ".join(
                 f"{_short_component_name(tag)}={_format_percent(val)}"
                 for tag, val in top3
@@ -331,12 +272,6 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
             + f" (pearson={_format_number(top_conflict.get('pearson'))})"
         )
 
-    survival_slope = evolution.get("survival_distance_slope_per_stage")
-    if survival_slope is not None:
-        lines.append(
-            f"- survival_distance_slope_per_stage: {_format_number(survival_slope)}"
-        )
-
     lines.append("")
     lines.append("## Run Metadata")
     lines.append("")
@@ -344,8 +279,13 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
     lines.append(f"- generated_at_utc: {meta.get('generated_at_utc', 'unknown')}")
     lines.append(f"- run_directory: {meta.get('run_directory', 'unknown')}")
     lines.append(f"- tags_count: {len(meta.get('available_tags', []))}")
-    lines.append(f"- aggregation_order(reward): {aggregation_order}")
-    lines.append(f"- stage_basis(evolution): {evolution.get('stage_basis', 'unknown')}")
+    if reward_analysis.get("available", False):
+        lines.append(
+            "- reward_diagnostics: "
+            + f"transitions={reward_analysis.get('transition_count', 0)}, "
+            + f"complete_episodes={reward_analysis.get('complete_episode_count', 0)}, "
+            + f"partial_episodes={reward_analysis.get('partial_episode_count', 0)}"
+        )
 
     lines.append("")
     lines.append("## Core Training Performance")
@@ -408,18 +348,26 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
                 lines.append(f"  - {key}: {_format_number(entry.get('final'))}")
 
     lines.append("")
-    lines.append("## Reward Quality (Episode -> Stage)")
+    lines.append("## Reward Component Diagnostics")
     lines.append("")
-    if top_dominance:
-        lines.append("- dominance_by_component:")
-        for tag, value in top_dominance:
-            tag_label = _short_component_name(tag)
+    if top_activity:
+        lines.append("- absolute_activity_share:")
+        for name, value in top_activity:
+            metrics = components.get(name, {})
             lines.append(
-                f"  - {tag_label}: \
-                {_ascii_bar(value, width=bar_width)}"
+                f"  - {name}: {_ascii_bar(value, width=bar_width)}, "
+                + "signed_return_ratio="
+                + _format_number(metrics.get("signed_return_ratio"))
+                + ", nonzero_frequency="
+                + _format_percent(metrics.get("nonzero_frequency"))
+                + ", active_mean_absolute_strength="
+                + _format_number(metrics.get("active_mean_absolute_strength"))
             )
     else:
-        lines.append("- dominance_by_component: unavailable")
+        lines.append(
+            "- unavailable: "
+            + str(reward_analysis.get("reason", "reward artifact unavailable"))
+        )
 
     if strong_negative_pairs:
         lines.append("- objective_conflicts(top):")
@@ -432,205 +380,109 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
     else:
         lines.append("- objective_conflicts: no strong negative pairs detected")
 
-    if isinstance(stage_component_profile, list) and stage_component_profile:
-        component_keys = sorted(
-            {
-                key
-                for stage in stage_component_profile
-                if isinstance(stage, dict)
-                for key in (stage.get("mean_ratio", {}) or {}).keys()
-            }
+    lines.append("")
+    lines.append("## Evaluation Trend")
+    lines.append("")
+    if isinstance(trajectory_eval, dict) and trajectory_eval.get("available", False):
+        for name, entry in trajectory_eval.get("metrics", {}).items():
+            if not isinstance(entry, dict):
+                continue
+            lines.append(
+                f"- {name}: final={_format_number(entry.get('final'))}, "
+                + "trend_slope_per_step="
+                + f"{_format_number(entry.get('trend_slope_per_step'))}"
+            )
+    else:
+        lines.append("- unavailable")
+
+    lines.append("")
+    lines.append("## DSPDL Distribution")
+    lines.append("")
+    if isinstance(curriculum, dict) and curriculum.get("available", False):
+        empirical = curriculum.get("empirical_to_target_kl", {})
+        lines.append(
+            "- empirical_to_target_kl: "
+            + f"final={_format_number(empirical.get('final'))}, "
+            + "trend_slope_per_step="
+            + f"{_format_number(empirical.get('trend_slope_per_step'))}"
         )
-        if component_keys:
-            lines.append("")
-            header = (
-                "| stage | episode_range | "
-                + " | ".join(_short_component_name(key) for key in component_keys)
-                + " |"
-            )
-            divider = (
-                "| --- | --- | " + " | ".join(["---"] * len(component_keys)) + " |"
-            )
-            lines.append(header)
-            lines.append(divider)
-            for stage in stage_component_profile[:10]:
-                if not isinstance(stage, dict):
-                    continue
-                ratio_map = stage.get("mean_ratio", {}) or {}
-                ratio_cells = [
-                    _format_percent(ratio_map.get(key, 0.0)) for key in component_keys
-                ]
-                lines.append(
-                    "| "
-                    + f"{stage.get('window_index', 'N/A')} | "
-                    + f"[{stage.get('episode_start', 'N/A')}, "
-                    + f"{stage.get('episode_end', 'N/A')}) | "
-                    + " | ".join(ratio_cells)
-                    + " |"
+        diagnostics = curriculum.get("diagnostics", {})
+        if isinstance(diagnostics, dict):
+            for key in (
+                "converged",
+                "alpha",
+                "update_kl",
+                "critic_values_duration_s",
+                "distribution_solve_duration_s",
+                "critic_return_mae",
+                "critic_return_pearson",
+            ):
+                entry = diagnostics.get(key, {})
+                if isinstance(entry, dict):
+                    lines.append(
+                        f"- {key}: final={_format_number(entry.get('final'))}, "
+                        + "trend_slope_per_step="
+                        + f"{_format_number(entry.get('trend_slope_per_step'))}"
+                    )
+    else:
+        lines.append("- unavailable: no DSPDL distribution KL logged")
+
+    lines.append("")
+    lines.append("## Safety Truncation Positions")
+    lines.append("")
+    highest_truncation = (
+        safety_position.get("highest_safety_truncation_bin")
+        if isinstance(safety_position, dict)
+        else None
+    )
+    if isinstance(safety_position, dict) and safety_position.get("available"):
+        lines.append(
+            "- total_safety_truncation_count: "
+            + _format_number(safety_position.get("total_safety_truncation_count"))
+        )
+        if isinstance(highest_truncation, dict):
+            lines.append(
+                "- highest_safety_truncation_bin: "
+                + f"[{_format_number(highest_truncation.get('bin_start_m'))}, "
+                + f"{_format_number(highest_truncation.get('bin_end_m'))}) m, "
+                + "count="
+                + _format_number(highest_truncation.get("safety_truncation_count"))
+                + ", global_share="
+                + _format_percent(
+                    highest_truncation.get("global_safety_truncation_share")
                 )
-
-    lines.append("")
-    lines.append("## Physical Trajectory and Compliance")
-    lines.append("")
-    lines.append(
-        "- boundary_adhesion_ratio_by_distance: "
-        + f"{
-            _ascii_bar(
-                boundary_adhesion.get('near_miss_distance_ratio', 0.0),
-                width=bar_width,
             )
-        }"
-    )
-    lines.append(
-        "- boundary_adhesion_distance: "
-        + f"near_miss_distance_m={
-            _format_number(boundary_adhesion.get('near_miss_distance_m'))
-        }, "
-        + "total_distance_m="
-        + f"{_format_number(boundary_adhesion.get('total_distance_m'))}"
-    )
-    lines.append(
-        "- geographic_failure_distribution: "
-        + f"truncated_count={gfd.get('truncated_count', 0)}"
-    )
-    lines.append(
-        "- safety_band_tolerance: "
-        + f"avg_distance_to_vmax={
-            _format_number(sbt.get('average_distance_to_vmax_mps'))
-        }, "
-        + f"avg_distance_to_vmin={
-            _format_number(sbt.get('average_distance_to_vmin_mps'))
-        }, "
-        + f"near_miss_ratio(sample)={_format_percent(sbt.get('near_miss_ratio'))}"
-    )
-
-    top_risk_bins = gfd.get("top_risk_bins", [])
-    if isinstance(top_risk_bins, list) and top_risk_bins:
-        lines.append("")
-        lines.append("### Violation Spatial Distribution (Top Risk Bins)")
-        lines.append("")
-        lines.append(
-            "| bin_m | exposure | near_miss | violation | failure | near_miss_risk | violation_risk | failure_risk | chart |"  # noqa: E501
+        bins = safety_position.get("bins", [])
+        if isinstance(bins, list) and bins:
+            lines.append("- bins:")
+            for entry in bins:
+                if not isinstance(entry, dict):
+                    continue
+                lines.append(
+                    "  - "
+                    + f"[{_format_number(entry.get('bin_start_m'))}, "
+                    + f"{_format_number(entry.get('bin_end_m'))}) m: "
+                    + "count="
+                    + _format_number(entry.get("safety_truncation_count"))
+                    + ", low_count="
+                    + _format_number(entry.get("low_safety_truncation_count"))
+                    + ", high_count="
+                    + _format_number(entry.get("high_safety_truncation_count"))
+                    + ", global_share="
+                    + _format_percent(entry.get("global_safety_truncation_share"))
+                )
+        else:
+            lines.append("- no safety truncations observed")
+    else:
+        reason = (
+            safety_position.get("reason") if isinstance(safety_position, dict) else None
         )
-        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
-        for item in top_risk_bins[:10]:
-            if not isinstance(item, dict):
-                continue
-            lines.append(
-                "| "
-                + f"[{_format_number(item.get('bin_start_m'))}, "
-                + f"{_format_number(item.get('bin_end_m'))}) | "
-                + f"{item.get('exposure_count', 0)} | "
-                + f"{item.get('near_miss_count', 0)} | "
-                + f"{item.get('violation_count', 0)} | "
-                + f"{item.get('failure_count', 0)} | "
-                + f"{_format_percent(item.get('near_miss_risk'))} | "
-                + f"{_format_percent(item.get('violation_risk'))} | "
-                + f"{_format_percent(item.get('failure_risk'))} | "
-                + f"{_ascii_bar(item.get('near_miss_risk', 0.0), width=bar_width)} |"
-            )
-
-    top_risky_points = critical_points.get("top_risky_points", [])
-    sps_top_risky_points = []
-    if isinstance(top_risky_points, list):
-        sps_top_risky_points = [
-            item
-            for item in top_risky_points
-            if isinstance(item, dict)
-            and item.get("type") in {"sps_zone_center", "sps_switch"}
-        ]
-
-    if sps_top_risky_points:
-        lines.append("")
-        lines.append("### SPS Zone Center Neighborhood Risk Attribution")
-        lines.append("")
-        lines.append(
-            "| type | point_m | exposure | near_miss | violation | failure | near_miss_risk | violation_risk | failure_risk |"  # noqa: E501
-        )
-        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
-        for item in sps_top_risky_points[:10]:
-            failure_risk = item.get("failure_risk", item.get("risk"))
-            lines.append(
-                "| "
-                + f"{item.get('type', 'N/A')} | "
-                + f"{_format_number(item.get('point_m'))} | "
-                + f"{item.get('exposure_count', 0)} | "
-                + f"{item.get('near_miss_count', 0)} | "
-                + f"{item.get('violation_count', 0)} | "
-                + f"{item.get('failure_count', 0)} | "
-                + f"{_format_percent(item.get('near_miss_risk'))} | "
-                + f"{_format_percent(item.get('violation_risk'))} | "
-                + f"{_format_percent(failure_risk)} |"
-            )
-
-    lines.append("")
-    lines.append("## Evolution Metrics")
-    lines.append("")
-    lines.append(
-        "- survival_distance_slope_per_stage: "
-        + f"{_format_number(evolution.get('survival_distance_slope_per_stage'))}"
-    )
-    lines.append(
-        "- mean_survival_distance_m: "
-        + f"{_format_number(evolution.get('mean_survival_distance_m'))}"
-    )
-    lines.append(
-        "- truncated_episode_ratio: "
-        + f"{_format_percent(evolution.get('truncated_episode_ratio'))}"
-    )
-
-    if evolution_available:
-        lines.append("")
-        lines.append("### Violation Type Transition Matrix (Overall)")
-        lines.append("")
-        _append_transition_matrix(
-            lines,
-            matrix=overall_transition_matrix,
-            labels=[str(label) for label in state_labels],
-        )
-
-    if isinstance(evolution_stage_profiles, list) and evolution_stage_profiles:
-        lines.append("")
-        lines.append("### Stage Evolution")
-        lines.append("")
-        lines.append(
-            "| stage | episode_range | avg_survival_m | growth_vs_prev | normal->speed | terminal_failure->speed | speed->terminal_failure |"  # noqa: E501
-        )
-        lines.append("| --- | --- | --- | --- | --- | --- | --- |")
-        for stage in evolution_stage_profiles[:10]:
-            if not isinstance(stage, dict):
-                continue
-            growth = stage.get("survival_growth_rate_vs_prev")
-            growth_text = _format_percent(growth) if growth is not None else "N/A"
-            normal_to_speed_rate = stage.get(
-                "normal_to_speed_violation_transition_rate",
-                stage.get("normal_to_high_transition_rate"),
-            )
-            terminal_to_speed_rate = stage.get(
-                "terminal_failure_to_speed_violation_transition_rate",
-                stage.get("low_to_high_transition_rate"),
-            )
-            speed_to_terminal_rate = stage.get(
-                "speed_violation_to_terminal_failure_transition_rate",
-                stage.get("high_to_low_transition_rate"),
-            )
-            lines.append(
-                "| "
-                + f"{stage.get('window_index', 'N/A')} | "
-                + f"[{stage.get('episode_start', 'N/A')}, "
-                + f"{stage.get('episode_end', 'N/A')}) | "
-                + f"{_format_number(stage.get('avg_survival_distance_m'))} | "
-                + f"{growth_text} | "
-                + f"{_format_percent(normal_to_speed_rate)} | "
-                + f"{_format_percent(terminal_to_speed_rate)} | "
-                + f"{_format_percent(speed_to_terminal_rate)} |"
-            )
+        lines.append(f"- unavailable: {reason}" if reason else "- unavailable")
 
     lines.append("")
     lines.append("## Artifact Summary")
     lines.append("")
     lines.append(f"- step_snapshots_count: {len(snapshots.get('by_step', []))}")
-    lines.append(f"- episode_snapshots_count: {len(snapshots.get('by_episode', []))}")
     lines.append(
         f"- export_csv: {
             bool(config.get('export_csv', False)) if isinstance(config, dict) else False
@@ -684,20 +536,26 @@ def write_analysis_outputs(
     )
     summary_metrics.update(
         _flatten_numeric_fields(
-            payload.get("reward_component_impact", {}),
-            prefix="reward_impact",
+            payload.get("trajectory_evaluation_metrics", {}),
+            prefix="trajectory_evaluation",
         )
     )
     summary_metrics.update(
         _flatten_numeric_fields(
-            payload.get("constraint_diagnostic", {}),
-            prefix="constraint",
+            payload.get("curriculum_distribution_metrics", {}),
+            prefix="curriculum_distribution",
         )
     )
     summary_metrics.update(
         _flatten_numeric_fields(
-            payload.get("evolution_metrics", {}),
-            prefix="evolution",
+            payload.get("safety_truncation_position_metrics", {}),
+            prefix="safety_truncation_position",
+        )
+    )
+    summary_metrics.update(
+        _flatten_numeric_fields(
+            payload.get("reward_component_analysis", {}),
+            prefix="reward_component",
         )
     )
     _write_csv(
@@ -724,24 +582,5 @@ def write_analysis_outputs(
             )
             _write_csv(step_csv_path, columns=step_columns, rows=step_rows)
             output_paths["step_snapshots_csv"] = str(step_csv_path)
-
-        episode_snapshots = payload.get("snapshots", {}).get("by_episode", [])
-        if episode_snapshots:
-            episode_csv_path = output_dir / "episode_snapshots.csv"
-            episode_columns, episode_rows = _snapshot_rows(
-                episode_snapshots,
-                key_fields=[
-                    "window_type",
-                    "window_index",
-                    "episode_start",
-                    "episode_end",
-                    "step_start",
-                    "step_end",
-                    "sample_count",
-                    "severity",
-                ],
-            )
-            _write_csv(episode_csv_path, columns=episode_columns, rows=episode_rows)
-            output_paths["episode_snapshots_csv"] = str(episode_csv_path)
 
     return output_paths

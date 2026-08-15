@@ -5,7 +5,13 @@ import math
 import numpy as np
 from numpy.typing import NDArray
 
-from model.common import ECC, ORS, calc_transition_from_acc_scalar_numba
+from model.common import (
+    ECC,
+    calc_transition_from_acc_scalar_numba,
+    max_energy_and_min_operation_time,
+    min_operation_time_curve,
+    min_operation_time_numba,
+)
 from model.ocs import SPS, SafeGuardUtility, SPSState, TrainService
 from model.track import TrackInfo, get_slope_scalar_numba
 from model.vehicle import VehicleInfo
@@ -22,13 +28,15 @@ class OperationalStepper:
         track: TrackInfo,
         safeguard_utility: SafeGuardUtility,
         train_service: TrainService,
-        max_step_distance_m: float,
+        step_distance_m: float,
     ) -> None:
         self.vehicle: VehicleInfo = vehicle
         self.track: TrackInfo = track
         self.safeguard_utility: SafeGuardUtility = safeguard_utility
         self.train_service: TrainService = train_service
-        self.max_step_distance_m: float = float(max_step_distance_m)
+        self.step_distance_m: float = float(step_distance_m)
+        if not math.isfinite(self.step_distance_m) or self.step_distance_m <= 0.0:
+            raise ValueError("step_distance_m must be finite and positive")
         self.whole_distance_m: float = abs(
             train_service.target_position - train_service.start_position
         )
@@ -38,7 +46,7 @@ class OperationalStepper:
         # The final transition is available to complete the task.  A
         # non-terminal transition at this boundary is truncated in advance().
         self.required_episode_steps: int = math.ceil(
-            self.whole_distance_m / self.max_step_distance_m
+            self.whole_distance_m / self.step_distance_m
         )
         # Compatibility name retained for reward normalization and callers.
         self.max_episode_steps: int = self.required_episode_steps
@@ -51,16 +59,16 @@ class OperationalStepper:
             Psi_fd=3.9629,
             k_c=0.8,
         )
-        self.ors: ORS = ORS(
-            vehicle=vehicle, track=track, factor=safeguard_utility.gamma
-        )
         self.sps: SPS = SPS(
             sgu=safeguard_utility,
             ASA_ap_list=track.ASA_aps,
             ASA_dp_list=track.ASA_dps,
             T_s=2.0,
         )
-        profile_pos, profile_speed = self.ors.calc_min_operation_time_curve(
+        profile_pos, profile_speed = min_operation_time_curve(
+            vehicle=vehicle,
+            track=track,
+            factor=safeguard_utility.gamma,
             begin_pos=train_service.start_position,
             begin_speed=train_service.start_speed,
             end_pos=train_service.target_position + train_service.max_stop_error * 20,
@@ -75,15 +83,16 @@ class OperationalStepper:
             self._upper_speed_lut_speed_arr,
         ) = self._build_upper_speed_lookup_table(profile_pos, profile_speed)
         self.min_operation_time_s: float
-        mec, lec, self.min_operation_time_s = (
-            self.ors.calc_max_energy_and_min_operation_time(
-                begin_pos=train_service.start_position,
-                begin_speed=train_service.start_speed,
-                end_pos=train_service.target_position,
-                end_speed=0.0,
-                distance=train_service.target_position - train_service.start_position,
-                energy_con_calc=self.ecc,
-            )
+        mec, lec, self.min_operation_time_s = max_energy_and_min_operation_time(
+            vehicle=vehicle,
+            track=track,
+            factor=safeguard_utility.gamma,
+            energy_con_calc=self.ecc,
+            begin_pos=train_service.start_position,
+            begin_speed=train_service.start_speed,
+            end_pos=train_service.target_position,
+            end_speed=0.0,
+            distance=train_service.target_position - train_service.start_position,
         )
         self.max_energy_consumption_kj: float = float(mec + lec)
 
@@ -144,11 +153,18 @@ class OperationalStepper:
     def _calc_redundant_operation_time(
         self, position_m: float, speed_mps: float, operation_time_s: float
     ) -> float:
-        min_remaining = self.ors.calc_min_operation_time(
-            begin_pos=position_m,
-            begin_speed=speed_mps,
-            end_pos=self.train_service.target_position,
-            end_speed=0.0,
+        min_remaining = min_operation_time_numba(
+            position_m,
+            speed_mps,
+            self.train_service.target_position,
+            0.0,
+            self.track.speed_limits,
+            self.track.speed_limit_intervals,
+            float(self.safeguard_utility.gamma),
+            float(self.vehicle.max_acc),
+            float(self.vehicle.max_dec),
+            float(self.vehicle.max_dec_abs),
+            1e-9,
         )
         return self.train_service.schedule_time - operation_time_s - min_remaining
 
@@ -221,21 +237,21 @@ class OperationalStepper:
 
         ``requested_distance_m`` is primarily intended for replaying a
         reference trajectory whose final segment is shorter than the regular
-        RL step.  Normal environment interaction leaves it as ``None`` and
-        therefore preserves the configured fixed-step behaviour.
+        RL control step. Normal environment interaction leaves it as ``None``
+        and therefore preserves the configured fixed-step behaviour.
         """
         if requested_distance_m is None:
-            step_distance_m = self.max_step_distance_m
+            step_distance_m = self.step_distance_m
         else:
             step_distance_m = float(requested_distance_m)
             if (
                 not math.isfinite(step_distance_m)
                 or step_distance_m <= 0.0
-                or step_distance_m > self.max_step_distance_m
+                or step_distance_m > self.step_distance_m
             ):
                 raise ValueError(
                     "requested_distance_m must be finite, positive, and no greater "
-                    + "than max_step_distance_m"
+                    + "than step_distance_m"
                 )
         next_speed, distance, duration = calc_transition_from_acc_scalar_numba(
             state.speed_mps, float(acceleration_mps2), step_distance_m

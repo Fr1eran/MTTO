@@ -28,16 +28,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Output directory for analysis artifacts.",
     )
     _ = parser.add_argument(
+        "--final-output-dir",
+        type=str,
+        default=None,
+        help=(
+            "Final training artifact directory containing "
+            "reward_diagnostics.npz and optional safety histogram data."
+        ),
+    )
+    _ = parser.add_argument(
         "--step-window-size",
         type=int,
         default=5000,
         help="Step-based snapshot window size.",
-    )
-    _ = parser.add_argument(
-        "--episode-window-size",
-        type=int,
-        default=20,
-        help="Episode-based snapshot window size.",
     )
     _ = parser.add_argument(
         "--ema-alpha",
@@ -50,36 +53,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.03,
         help="Approx KL safety threshold.",
-    )
-    _ = parser.add_argument(
-        "--near-miss-threshold-mps",
-        type=float,
-        default=1.0,
-        help="Near-miss threshold for safety margin diagnostics.",
-    )
-    _ = parser.add_argument(
-        "--position-bin-size-m",
-        type=float,
-        default=500.0,
-        help="Position bin size for geographic failure distribution.",
-    )
-    _ = parser.add_argument(
-        "--critical-point-radius-m",
-        type=float,
-        default=300.0,
-        help="Radius for SPS zone-center neighborhood risk attribution.",
-    )
-    _ = parser.add_argument(
-        "--top-k-spatial-bins",
-        type=int,
-        default=8,
-        help="Top-K spatial risk bins rendered in report.",
-    )
-    _ = parser.add_argument(
-        "--top-k-critical-points",
-        type=int,
-        default=8,
-        help="Top-K critical points rendered in report.",
     )
     _ = parser.add_argument(
         "--report-bar-width",
@@ -98,12 +71,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=5.0,
         help="Minimum acceptable mean samples per 10k steps for sampling quality.",
-    )
-    _ = parser.add_argument(
-        "--min-unique-episodes",
-        type=int,
-        default=100,
-        help="Minimum acceptable unique episodes for sampling quality.",
     )
     _ = parser.add_argument(
         "--rollout-steps-per-update",
@@ -148,20 +115,14 @@ def main() -> None:
 
     config = AnalysisConfig(
         step_window_size=args.step_window_size,
-        episode_window_size=args.episode_window_size,
         ema_alpha=args.ema_alpha,
         kl_threshold=args.kl_threshold,
-        near_miss_threshold_mps=args.near_miss_threshold_mps,
-        position_bin_size_m=args.position_bin_size_m,
-        critical_point_radius_m=args.critical_point_radius_m,
-        top_k_spatial_bins=args.top_k_spatial_bins,
-        top_k_critical_points=args.top_k_critical_points,
         report_bar_width=args.report_bar_width,
         training_log_interval=args.training_log_interval,
         min_points_per_10k_steps=args.min_points_per_10k_steps,
-        min_unique_episodes=args.min_unique_episodes,
         rollout_steps_per_update=args.rollout_steps_per_update,
         sampling_quality_mode=args.sampling_quality_mode,
+        final_output_dir=args.final_output_dir,
         export_csv=args.export_csv,
         include_snapshots=args.include_snapshots,
         output_root=args.output_root,

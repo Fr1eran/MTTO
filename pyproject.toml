@@ -15,8 +15,17 @@ dependencies = [
     "scipy>=1.17.1",
     "stable-baselines3>=2.7.1",
     "tensorboard>=2.21.0",
+    "torch>=2.3,<3",
     "tqdm>=4.67.3",
 ]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

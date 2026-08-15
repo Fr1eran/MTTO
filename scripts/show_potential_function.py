@@ -64,7 +64,7 @@ def _smooth_softplus_risk(
     )
 
 
-def _potential_safety_speed_asymmetric_v3(
+def _potential_safety_speed(
     pos: NDArray[np.floating],
     speed: NDArray[np.floating],
     min_speed: NDArray[np.floating],
@@ -96,20 +96,34 @@ def _potential_safety_speed_asymmetric_v3(
     return K_Safety * (phi_upper + phi_lower)
 
 
-def _potential_stopping_v3(
+def _potential_stopping(
     pos: NDArray[np.floating] | float,
     speed: NDArray[np.floating] | float,
     target_pos: float,
     max_speed_mps: NDArray[np.floating] | float,
     *,
-    target_attraction_domain_radius_m: float = 3000.0,
+    distance_scale_m: float = 1500.0,
+    potential_scale: float = 1.0,
+    max_exp: float = 2.0,
 ) -> NDArray[np.float64]:
-    """停站势函数，与 :class:`RewardCalculator` 的实现保持一致。"""
-    distance = np.abs(pos - target_pos)
-    sigma_distance = 0.1 * target_attraction_domain_radius_m
-    sigma_speed = 0.2 * max_speed_mps + 1.0
-    potential = 10.0 * np.exp(-distance / sigma_distance - speed / sigma_speed)
-    return np.where(distance <= target_attraction_domain_radius_m, potential, 0.0)
+    """Direction-free Laplace attraction with a clipped negative plateau."""
+    if distance_scale_m <= 0.0:
+        raise ValueError("distance_scale_m must be positive")
+    if potential_scale <= 0.0:
+        raise ValueError("potential_scale must be positive")
+    if max_exp <= 0.0:
+        raise ValueError("max_exp must be positive")
+
+    distance_array = np.abs(np.asarray(pos, dtype=np.float64) - target_pos)
+    speed_array = np.asarray(speed, dtype=np.float64)
+    local_max_speed = np.maximum(np.asarray(max_speed_mps, dtype=np.float64), 0.0)
+    speed_scale = 0.5 * local_max_speed + 1.0
+    normalized_error = np.minimum(
+        distance_array / distance_scale_m + speed_array / speed_scale, max_exp
+    )
+    clipped_exponential = np.exp(-normalized_error)
+
+    return (-potential_scale * (1.0 - clipped_exponential)).astype(np.float64)
 
 
 def infer_position_from_speed(
@@ -222,7 +236,7 @@ def _calculate_guidance_potentials(
 ) -> tuple[np.ndarray, np.ndarray]:
     """只在速度上下限约束内计算安全势函数与停站势函数。"""
     safety_potential = np.full(field.position_grid.shape, np.nan)
-    safety_potential[field.feasible_mask] = _potential_safety_speed_asymmetric_v3(
+    safety_potential[field.feasible_mask] = _potential_safety_speed(
         field.position_grid[field.feasible_mask],
         field.speed_grid_mps[field.feasible_mask],
         field.min_speed_grid_mps[field.feasible_mask],
@@ -230,7 +244,7 @@ def _calculate_guidance_potentials(
         field.target_pos,
     )
     stopping_potential = np.full(field.position_grid.shape, np.nan)
-    stopping_potential[field.feasible_mask] = _potential_stopping_v3(
+    stopping_potential[field.feasible_mask] = _potential_stopping(
         field.position_grid[field.feasible_mask],
         field.speed_grid_mps[field.feasible_mask],
         field.target_pos,
@@ -296,10 +310,10 @@ def plot_guidance_potentials_wide(*, minimal: bool = False) -> Figure:
         field.position_grid,
         field.speed_grid_mps * 3.6,
         stopping_potential,
-        cmap=plt.get_cmap("YlOrRd"),
+        cmap=plt.get_cmap("viridis"),
         shading="auto",
-        vmin=0.0,
-        vmax=10.0,
+        vmin=-(1.0 - np.exp(-2.0)),
+        vmax=0.0,
     )
 
     min_speed_line, max_speed_line, target_position_line = _plot_guidance_boundaries(
@@ -553,11 +567,11 @@ def plot_stopping_potential_heatmap(
             field.position_grid[::surface_step, ::surface_step],
             (field.speed_grid_mps * 3.6)[::surface_step, ::surface_step],
             stopping_potential[::surface_step, ::surface_step],
-            cmap=plt.get_cmap("YlOrRd"),
+            cmap=plt.get_cmap("viridis"),
             linewidth=0,
             antialiased=False,
-            vmin=0.0,
-            vmax=10.0,
+            vmin=-(1.0 - np.exp(-2.0)),
+            vmax=0.0,
         )
         _ = ax.plot(
             field.pos_array,
@@ -575,7 +589,7 @@ def plot_stopping_potential_heatmap(
         )
         ax.set_xlim(field.pos_array[0], field.pos_array[-1])
         ax.set_ylim(0.0, field.speed_array_mps[-1] * 3.6)
-        ax.set_zlim(0.0, 10.2)
+        ax.set_zlim(-(1.0 - np.exp(-2.0)), 0.0)
         ax.view_init(elev=28, azim=-130)
         if minimal:
             _apply_minimal_axis_style(ax)
@@ -591,10 +605,10 @@ def plot_stopping_potential_heatmap(
         field.position_grid,
         field.speed_grid_mps * 3.6,
         stopping_potential,
-        cmap=plt.get_cmap("YlOrRd"),
+        cmap=plt.get_cmap("viridis"),
         shading="auto",
-        vmin=0.0,
-        vmax=10.0,
+        vmin=-(1.0 - np.exp(-2.0)),
+        vmax=0.0,
     )
     min_speed_line, max_speed_line, target_position_line = _plot_guidance_boundaries(
         ax, field
@@ -645,20 +659,21 @@ def plot_stopping_potential_slices(*, minimal: bool = False) -> Figure:
         )
     )
 
-    scale_pos = 300.0  # m, 即 sigma_distance
-    scale_speed = 0.2 * max_speed_mps + 1.0  # m/s, 即 sigma_speed
+    distance_scale_m = 1500.0
+    speed_scale_mps = 0.5 * max_speed_mps + 1.0
+    max_exp = 2.0
 
-    distance_error_array = np.linspace(-600.0, 600.0, 1200)
+    distance_error_array = np.linspace(-7500.0, 7500.0, 1800)
     pos_array = target_pos + distance_error_array
-    speed_array_ms = np.linspace(0.0, max_speed_mps, 1200)
+    speed_array_ms = np.linspace(0.0, max(max_speed_mps, 2.5 * speed_scale_mps), 1200)
 
-    potential_vs_distance = _potential_stopping_v3(
+    potential_vs_distance = _potential_stopping(
         pos=pos_array,
         speed=0.0,
         target_pos=target_pos,
         max_speed_mps=max_speed_mps,
     )
-    potential_vs_speed = _potential_stopping_v3(
+    potential_vs_speed = _potential_stopping(
         pos=target_pos,
         speed=speed_array_ms,
         target_pos=target_pos,
@@ -676,24 +691,28 @@ def plot_stopping_potential_slices(*, minimal: bool = False) -> Figure:
         _apply_minimal_axis_style(axes[1])
     else:
         axes[0].axvline(0.0, color="black", linestyle="--", linewidth=1.2)
-        axes[0].axvline(scale_pos, color="gray", linestyle=":", linewidth=1.2)
-        axes[0].axvline(-scale_pos, color="gray", linestyle=":", linewidth=1.2)
+        position_plateau_m = max_exp * distance_scale_m
+        axes[0].axvline(position_plateau_m, color="gray", linestyle=":", linewidth=1.2)
+        axes[0].axvline(-position_plateau_m, color="gray", linestyle=":", linewidth=1.2)
         axes[0].set_xlabel("stopping error (m)")
         axes[0].set_ylabel(r"$\Phi_D$")
         axes[0].set_title("v = 0")
         axes[0].grid(True, alpha=0.3, linestyle=":")
 
         axes[1].axvline(0.0, color="black", linestyle="--", linewidth=1.2)
-        axes[1].axvline(scale_speed * 3.6, color="gray", linestyle=":", linewidth=1.2)
+        speed_plateau_mps = max_exp * speed_scale_mps
+        axes[1].axvline(
+            speed_plateau_mps * 3.6,
+            color="gray",
+            linestyle=":",
+            linewidth=1.2,
+        )
         axes[1].set_xlabel("speed (km/h)")
         axes[1].set_ylabel(r"$\Phi_D$")
         axes[1].set_title(rf"d = 0, $v_{{\max}}={max_speed_mps * 3.6:.1f}$ km/h")
         axes[1].grid(True, alpha=0.3, linestyle=":")
 
-        _ = fig.suptitle(
-            r"$\Phi_D$ slice",
-            fontsize=13,
-        )
+        _ = fig.suptitle(r"Clipped Laplace stopping-potential slices", fontsize=13)
     _apply_transparent_background(fig)
     plt.tight_layout()
     return fig

@@ -43,8 +43,6 @@ class RewardCalculator:
         whole_distance_m: float,
         max_energy_consumption_kj: float,
         gamma: float,
-        vehicle_max_speed_mps: float,
-        target_attraction_domain_radius_m: float = 3000.0,
         reward_config: RewardConfig | None = None,
     ) -> None:
         self.train_service: TrainService = train_service
@@ -52,10 +50,6 @@ class RewardCalculator:
         self.whole_distance_m: float = whole_distance_m
         self.max_energy_consumption_kj: float = max(max_energy_consumption_kj, 1e-12)
         self.gamma: float = float(gamma)
-        self.vehicle_max_speed_mps: float = float(vehicle_max_speed_mps)
-        self.target_attraction_domain_radius_m: float = float(
-            target_attraction_domain_radius_m
-        )
         self.reward_config: RewardConfig = reward_config or RewardConfig()
 
     def calculate(self, transition: OperationalTransition) -> RewardBreakdown:
@@ -183,19 +177,23 @@ class RewardCalculator:
             speed_mps=current.speed_mps,
             max_speed_mps=current.max_speed_mps,
         )
+
         return self.gamma * phi_current - phi_previous
 
     def _potential_stopping(
-        self, *, position_m: float, speed_mps: float, max_speed_mps: float
+        self,
+        *,
+        position_m: float,
+        speed_mps: float,
+        max_speed_mps: float,
     ) -> float:
-        """Stopping potential with a state-local speed scale.
-
-        ``max_speed_mps`` is the operational upper speed limit in the evaluated
-        state, rather than the vehicle's global design speed.
-        """
+        """Direction-free Laplace attraction with a clipped negative plateau."""
+        K_stopping = 1.0
+        distance_scale_m = 1500.0
+        speed_scale_mps = 0.5 * max(max_speed_mps, 0.0) + 1.0
         distance = abs(position_m - self.train_service.target_position)
-        if distance > self.target_attraction_domain_radius_m:
-            return 0.0
-        sigma_distance = 0.1 * self.target_attraction_domain_radius_m
-        sigma_speed = 0.2 * max_speed_mps + 1.0
-        return 10.0 * math.exp(-distance / sigma_distance - speed_mps / sigma_speed)
+        cliped_error = min(
+            distance / distance_scale_m + speed_mps / speed_scale_mps, 2.0
+        )
+        clipped_exponential = math.exp(-cliped_error)
+        return -K_stopping * (1.0 - clipped_exponential)
