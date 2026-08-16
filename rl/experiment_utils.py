@@ -58,6 +58,10 @@ __all__ = [
     "DEFAULT_EVALUATION_INTERVAL_ROLLOUTS",
     "DEFAULT_ROLLOUT_STEPS_PER_UPDATE",
     "DEFAULT_STEP_DISTANCE",
+    "DEFAULT_NUM_ENVS",
+    "DEFAULT_VEC_ENV_TYPE",
+    "VEC_ENV_TYPE_CHOICES",
+    "DEFAULT_DEVICE",
     "DEFAULT_REWARD_PRESET_NAME",
     "DEFAULT_CURRICULUM_PROFILE_NAME",
     # dataclass
@@ -123,7 +127,11 @@ DEFAULT_SCHEDULE_TIME_S = 465.0
 DEFAULT_REWARD_DISCOUNT = 0.998
 DEFAULT_ROLLOUT_STEPS_PER_UPDATE = 8192
 DEFAULT_STEP_DISTANCE = 30.0
-DEFAULT_REWARD_PRESET_NAME = "basic_safety_stopping"
+DEFAULT_NUM_ENVS = 8
+DEFAULT_VEC_ENV_TYPE = "dummy"
+VEC_ENV_TYPE_CHOICES = ("dummy", "subproc")
+DEFAULT_DEVICE = "cpu"
+DEFAULT_REWARD_PRESET_NAME = "basic_safety"
 DEFAULT_CURRICULUM_PROFILE_NAME = "none"
 
 # =============================================================================
@@ -144,8 +152,6 @@ class RewardPreset:
         components: list[str] = []
         if self.config.enable_potential_safety:
             components.append("safety")
-        if self.config.enable_potential_stopping:
-            components.append("stopping")
         return tuple(components)
 
     def to_metadata(self) -> dict[str, Any]:
@@ -228,7 +234,6 @@ REWARD_PRESETS: dict[str, RewardPreset] = {
         description="Base reward only: energy and comfort are always enabled.",
         config=RewardConfig(
             enable_potential_safety=False,
-            enable_potential_stopping=False,
         ),
     ),
     "basic_safety": RewardPreset(
@@ -237,37 +242,14 @@ REWARD_PRESETS: dict[str, RewardPreset] = {
         description="Base reward plus safety PBRS shaping.",
         config=RewardConfig(
             enable_potential_safety=True,
-            enable_potential_stopping=False,
-        ),
-    ),
-    "basic_stopping": RewardPreset(
-        name="basic_stopping",
-        label="basic+stopping",
-        description="Base reward plus stopping PBRS shaping.",
-        config=RewardConfig(
-            enable_potential_safety=False,
-            enable_potential_stopping=True,
-        ),
-    ),
-    "basic_safety_stopping": RewardPreset(
-        name="basic_safety_stopping",
-        label="basic+safety+stopping",
-        description="Base reward plus safety and stopping PBRS shaping.",
-        config=RewardConfig(
-            enable_potential_safety=True,
-            enable_potential_stopping=True,
         ),
     ),
 }
 
 REWARD_PRESET_ALIASES: dict[str, str] = {
     "default": DEFAULT_REWARD_PRESET_NAME,
-    "all": DEFAULT_REWARD_PRESET_NAME,
-    "full": DEFAULT_REWARD_PRESET_NAME,
     "basic": "basic",
     "basic+safety": "basic_safety",
-    "basic+stopping": "basic_stopping",
-    "basic+safety+stopping": "basic_safety_stopping",
 }
 
 
@@ -312,7 +294,7 @@ def resolve_reward_preset(preset_name: str | None = None) -> RewardPreset:
     """将奖励情形名称（含别名）解析为 RewardPreset 实例。
 
     Args:
-        preset_name: 预设名，支持 ``basic``、``default``、``all`` 和 ``full``。
+        preset_name: 预设名，支持 ``basic``、``basic_safety`` 和 ``default``。
 
     Returns:
         对应的 RewardPreset 实例。
@@ -363,20 +345,13 @@ def _build_experiment_token(
     reward_preset_name: str | None = None,
     curriculum_profile_name: str | None = None,
     experiment_tag: str | None = None,
-    include_default_preset: bool = False,
 ) -> str:
     schedule_token = format_float_token(schedule_time_s)
     step_token = format_float_token(step_distance)
     preset = resolve_reward_preset(reward_preset_name)
     curriculum_profile = resolve_curriculum_profile_name(curriculum_profile_name)
 
-    tokens = [f"{schedule_token}_{step_token}"]
-    if (
-        include_default_preset
-        or preset.name != DEFAULT_REWARD_PRESET_NAME
-        or experiment_tag
-    ):
-        tokens.append(preset.name)
+    tokens = [f"{schedule_token}_{step_token}", preset.name]
     if curriculum_profile == "dspdl":
         tokens.append(curriculum_profile)
     if experiment_tag:
@@ -447,7 +422,6 @@ def resolve_tb_log_name(
         reward_preset_name=reward_preset_name,
         curriculum_profile_name=curriculum_profile_name,
         experiment_tag=experiment_tag,
-        include_default_preset=True,
     )
     return f"train_log__{_sanitize_identifier_token(run_mode)}__{experiment_token}"
 
@@ -556,7 +530,6 @@ def build_run_metadata(
         reward_preset_name=reward_preset.name,
         curriculum_profile_name=resolved_curriculum,
         experiment_tag=experiment_tag,
-        include_default_preset=True,
     )
     if experiment_tag is not None:
         metadata["experiment_tag"] = str(experiment_tag)
@@ -694,9 +667,9 @@ def build_default_training_args() -> argparse.Namespace:
         analysis_min_points_per_10k_steps=5.0,
         analysis_sampling_quality_mode="warn_only",
         reward_discount=DEFAULT_REWARD_DISCOUNT,
-        num_envs=1,
-        vec_env_type="subproc",
-        rollout_steps_per_update=2048,
+        num_envs=DEFAULT_NUM_ENVS,
+        vec_env_type=DEFAULT_VEC_ENV_TYPE,
+        rollout_steps_per_update=DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
         n_steps_per_env=None,
         total_timesteps=100_000,
         tensorboard_log_dir="mtto_ppo_tb_logs",
@@ -708,7 +681,7 @@ def build_default_training_args() -> argparse.Namespace:
         enable_safety_truncation_histogram=False,
         safety_truncation_bin_size_m=5000.0,
         seed=None,
-        device="cpu",
+        device=DEFAULT_DEVICE,
         dry_run=False,
     )
 

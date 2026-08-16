@@ -12,10 +12,14 @@ import numpy as np
 from matplotlib.figure import Figure
 
 from rl.experiment_utils import (
+    DEFAULT_DEVICE,
     DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
+    DEFAULT_NUM_ENVS,
     DEFAULT_REWARD_DISCOUNT,
     DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
     DEFAULT_SCHEDULE_TIME_S,
+    DEFAULT_VEC_ENV_TYPE,
+    VEC_ENV_TYPE_CHOICES,
     TrainingRunSpec,
     apply_rl_curve_plot_style,
     build_default_training_args,
@@ -46,7 +50,8 @@ DEFAULT_SEEDS: tuple[int, ...] = (
 )  # 5个随机数种子
 DEFAULT_OUTPUT_ROOT = "output/optimal/rl/step_distance_ablation"
 STEP_DISTANCE_MANIFEST_FILENAME = "step_distance_ablation_manifest.json"
-FIXED_REWARD_PRESET = "basic_safety_stopping"
+MANIFEST_VERSION = 1
+FIXED_REWARD_PRESET = "basic_safety"
 FINAL_TRAJECTORY_METRICS_FILENAME = "final_trajectory_metrics.json"
 BEST_TRAJECTORY_METRICS_FILENAME = "best_trajectory_metrics.json"
 TRAJECTORY_METRIC_KEYS: tuple[str, ...] = (
@@ -143,11 +148,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     _ = train_parser.add_argument(
         "--reward-discount", type=float, default=DEFAULT_REWARD_DISCOUNT
     )
-    _ = train_parser.add_argument("--num-envs", type=int, default=1)
+    _ = train_parser.add_argument("--num-envs", type=int, default=DEFAULT_NUM_ENVS)
     _ = train_parser.add_argument(
         "--vec-env-type",
-        choices=("dummy", "subproc"),
-        default="subproc",
+        choices=VEC_ENV_TYPE_CHOICES,
+        default=DEFAULT_VEC_ENV_TYPE,
     )
     _ = train_parser.add_argument(
         "--rollout-steps-per-update", type=int, default=DEFAULT_ROLLOUT_STEPS_PER_UPDATE
@@ -158,7 +163,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
         help="Completed-rollout interval for best trajectory evaluation.",
     )
-    _ = train_parser.add_argument("--device", default="cpu")
+    _ = train_parser.add_argument("--device", default=DEFAULT_DEVICE)
     _ = train_parser.add_argument(
         "--dry-run",
         action=argparse.BooleanOptionalAction,
@@ -297,6 +302,30 @@ def resolve_step_distance_run_matrix(
     return run_entries
 
 
+def _training_signature(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "schedule_time_s": float(args.schedule_time_s),
+        "reward_discount": float(args.reward_discount),
+        "num_envs": int(args.num_envs),
+        "vec_env_type": str(args.vec_env_type),
+        "rollout_steps_per_update": int(args.rollout_steps_per_update),
+        "n_steps_per_env": None,
+        "total_timesteps": int(args.total_timesteps),
+        "device": str(args.device),
+        "enable_monitor": True,
+        "enable_auto_analysis": False,
+        "enable_best_evaluation_artifacts": bool(args.enable_best_evaluation_artifacts),
+        "evaluation_interval_rollouts": (
+            max(1, int(args.evaluation_interval_rollouts))
+            if args.enable_best_evaluation_artifacts
+            else None
+        ),
+        "evaluation_deterministic": (
+            True if args.enable_best_evaluation_artifacts else None
+        ),
+    }
+
+
 def build_step_distance_manifest(
     args: argparse.Namespace,
     run_entries: list[StepDistanceRunEntry],
@@ -332,35 +361,14 @@ def build_step_distance_manifest(
         )
 
     return {
+        "manifest_version": MANIFEST_VERSION,
         "output_root": args.output_root,
         "reward_preset": FIXED_REWARD_PRESET,
         "curriculum_profile": "dspdl",
         "reference_curve_dir": args.reference_curve_dir,
         "step_distances": [float(value) for value in DEFAULT_STEP_DISTANCES],
         "seed_list": [int(seed) for seed in DEFAULT_SEEDS],
-        "training": {
-            "schedule_time_s": float(args.schedule_time_s),
-            "reward_discount": float(args.reward_discount),
-            "num_envs": int(args.num_envs),
-            "vec_env_type": str(args.vec_env_type),
-            "rollout_steps_per_update": int(args.rollout_steps_per_update),
-            "n_steps_per_env": None,
-            "total_timesteps": int(args.total_timesteps),
-            "device": str(args.device),
-            "enable_monitor": True,
-            "enable_auto_analysis": False,
-            "enable_best_evaluation_artifacts": bool(
-                args.enable_best_evaluation_artifacts
-            ),
-            "evaluation_interval_rollouts": (
-                max(1, int(args.evaluation_interval_rollouts))
-                if args.enable_best_evaluation_artifacts
-                else None
-            ),
-            "evaluation_deterministic": (
-                True if args.enable_best_evaluation_artifacts else None
-            ),
-        },
+        "training": _training_signature(args),
         "runs": runs,
     }
 
@@ -379,6 +387,48 @@ def load_step_distance_manifest(output_root: str) -> dict[str, Any]:
         raise FileNotFoundError(f"Step-distance manifest not found: {manifest_path}")
     with manifest_path.open("r", encoding="utf-8") as file_obj:
         return json.load(file_obj)
+
+
+def _validate_manifest_compatibility(
+    manifest: dict[str, Any], args: argparse.Namespace
+) -> None:
+    if manifest.get("manifest_version") != MANIFEST_VERSION:
+        raise ValueError("Existing step-distance manifest has an incompatible version")
+    if manifest.get("reward_preset") != FIXED_REWARD_PRESET:
+        raise ValueError(
+            "Existing step-distance manifest uses a different reward preset"
+        )
+    if manifest.get("curriculum_profile") != "dspdl":
+        raise ValueError(
+            "Existing step-distance manifest uses a different curriculum profile"
+        )
+    if manifest.get("reference_curve_dir") != args.reference_curve_dir:
+        raise ValueError(
+            "Existing step-distance manifest uses a different reference curve"
+        )
+    if manifest.get("step_distances") != [
+        float(value) for value in DEFAULT_STEP_DISTANCES
+    ]:
+        raise ValueError(
+            "Existing step-distance manifest uses a different distance matrix"
+        )
+    if manifest.get("seed_list") != [int(seed) for seed in DEFAULT_SEEDS]:
+        raise ValueError("Existing step-distance manifest uses different seeds")
+    expected_training = _training_signature(args)
+    actual_training = manifest.get("training")
+    if actual_training != expected_training:
+        raise ValueError(
+            "Existing step-distance manifest uses different training settings: "
+            f"expected={expected_training}, actual={actual_training}"
+        )
+
+
+def _validate_existing_manifest(args: argparse.Namespace) -> None:
+    path = Path(args.output_root) / STEP_DISTANCE_MANIFEST_FILENAME
+    if path.is_file():
+        _validate_manifest_compatibility(
+            load_step_distance_manifest(args.output_root), args
+        )
 
 
 def train_step_distance_run(
@@ -952,6 +1002,7 @@ def _run_train_command(args: argparse.Namespace) -> int:
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
+    _validate_existing_manifest(args)
     _print_run_matrix(run_entries)
     if args.dry_run:
         print("Dry run completed: step-distance run matrix resolved.")

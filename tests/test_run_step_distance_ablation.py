@@ -7,7 +7,7 @@ import pytest
 from matplotlib.figure import Figure
 
 import scripts.run_step_distance_ablation as step_distance_ablation
-from rl.reward_diagnostics import REWARD_NAMES
+from rl.reward_diagnostics import REWARD_DIAGNOSTICS_SCHEMA_VERSION, REWARD_NAMES
 from scripts.run_step_distance_ablation import (
     DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
     DEFAULT_OUTPUT_ROOT,
@@ -47,7 +47,7 @@ def _write_reward_diagnostics_npz(
     end_steps = np.arange(1, len(rewards) + 1, dtype=np.int64)
     np.savez(
         reward_diagnostics_path,
-        schema_version=np.asarray([1], dtype=np.int16),
+        schema_version=np.asarray([REWARD_DIAGNOSTICS_SCHEMA_VERSION], dtype=np.int16),
         reward_names=np.asarray(REWARD_NAMES),
         rollout_end_step=np.asarray([end_steps[-1]]),
         rollout_transition_count=np.asarray([int(sum(lengths))]),
@@ -116,6 +116,10 @@ def test_train_cli_defaults() -> None:
     args = parser.parse_args(["train", "--reference-curve-dir", "."])
 
     assert args.output_root == DEFAULT_OUTPUT_ROOT
+    assert args.num_envs == 8
+    assert args.vec_env_type == "dummy"
+    assert args.rollout_steps_per_update == 8192
+    assert args.device == "cpu"
     assert not hasattr(args, "step_distances")
     assert not hasattr(args, "seed_list")
     assert not hasattr(args, "ablation_tag")
@@ -314,6 +318,39 @@ def test_manifest_uses_total_timesteps_training_budget(
     assert manifest["training"]["total_timesteps"] == int(args.total_timesteps)
     assert "stop_mode" not in manifest
     assert "max_train_episodes" not in manifest
+
+
+def test_train_rejects_incompatible_existing_manifest(tmp_path: Path) -> None:
+    parser = build_arg_parser()
+    args = parser.parse_args(
+        [
+            "train",
+            "--reference-curve-dir",
+            ".",
+            "--output-root",
+            str(tmp_path),
+            "--dry-run",
+        ]
+    )
+    entries = resolve_step_distance_run_matrix(args)
+    manifest = build_step_distance_manifest(args, entries)
+    _ = (tmp_path / STEP_DISTANCE_MANIFEST_FILENAME).write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="different training settings"):
+        _ = step_distance_ablation.main(
+            [
+                "train",
+                "--reference-curve-dir",
+                ".",
+                "--output-root",
+                str(tmp_path),
+                "--num-envs",
+                "1",
+                "--dry-run",
+            ]
+        )
 
 
 def test_train_step_distance_run_delegates_to_train_single_experiment(

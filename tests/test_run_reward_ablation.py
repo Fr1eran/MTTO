@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 import scripts.run_reward_ablation as reward_ablation
-from rl.reward_diagnostics import REWARD_NAMES
+from rl.reward_diagnostics import REWARD_DIAGNOSTICS_SCHEMA_VERSION, REWARD_NAMES
 
 
 def _train_args(tmp_path: Path, *extra: str) -> argparse.Namespace:
@@ -22,7 +22,7 @@ def _write_reward_diagnostics(path: Path, reward_offset: float = 0.0) -> None:
     episode_sums[:, -1] = np.asarray([1.0, 2.0]) + reward_offset
     np.savez(
         path,
-        schema_version=np.asarray([1], dtype=np.int16),
+        schema_version=np.asarray([REWARD_DIAGNOSTICS_SCHEMA_VERSION], dtype=np.int16),
         reward_names=np.asarray(REWARD_NAMES),
         rollout_end_step=np.asarray([200]),
         rollout_transition_count=np.asarray([19]),
@@ -81,6 +81,10 @@ def test_default_matrix_uses_all_profiles_and_configured_seeds(tmp_path: Path) -
     runs = reward_ablation.resolve_run_matrix(args)
 
     assert args.evaluation_interval_rollouts == 12
+    assert args.num_envs == 8
+    assert args.vec_env_type == "dummy"
+    assert args.rollout_steps_per_update == 8192
+    assert args.device == "cpu"
     assert all(run.spec.evaluation_interval_rollouts == 12 for run in runs)
     assert len(runs) == len(reward_ablation.REWARD_ABLATIONS) * len(
         reward_ablation.DEFAULT_SEEDS
@@ -88,8 +92,6 @@ def test_default_matrix_uses_all_profiles_and_configured_seeds(tmp_path: Path) -
     assert {run.ablation.preset for run in runs} == {
         "basic",
         "basic_safety",
-        "basic_stopping",
-        "basic_safety_stopping",
     }
     assert {run.seed for run in runs} == set(reward_ablation.DEFAULT_SEEDS)
     assert all(run.train_args.curriculum_profile == "none" for run in runs)
@@ -110,20 +112,20 @@ def test_profile_subset_preserves_order_and_removes_duplicates(tmp_path: Path) -
     args = _train_args(
         tmp_path,
         "--reward-presets",
-        "basic_stopping",
+        "basic_safety",
         "basic",
-        "basic_stopping",
+        "basic_safety",
     )
 
     selected = reward_ablation.resolve_reward_ablation_specs(args.reward_presets)
     runs = reward_ablation.resolve_run_matrix(args)
 
-    assert [item.preset for item in selected] == ["basic_stopping", "basic"]
+    assert [item.preset for item in selected] == ["basic_safety", "basic"]
     assert [
         run.ablation.preset
         for run in runs[:: len(reward_ablation.DEFAULT_SEEDS)]
     ] == [
-        "basic_stopping",
+        "basic_safety",
         "basic",
     ]
 
@@ -147,6 +149,24 @@ def test_manifest_round_trip_and_training_compatibility(tmp_path: Path) -> None:
         assert "different training settings" in str(exc)
     else:
         raise AssertionError("incompatible manifest was accepted")
+
+
+def test_legacy_vector_settings_require_explicit_cli_values(tmp_path: Path) -> None:
+    legacy_args = _train_args(
+        tmp_path,
+        "--num-envs",
+        "1",
+        "--vec-env-type",
+        "subproc",
+    )
+    runs = reward_ablation.resolve_run_matrix(legacy_args)
+    payload = reward_ablation.build_manifest(legacy_args, runs)
+
+    reward_ablation._validate_manifest_compatibility(payload, legacy_args)
+    with pytest.raises(ValueError, match="different training settings"):
+        reward_ablation._validate_manifest_compatibility(
+            payload, _train_args(tmp_path)
+        )
 
 
 def test_completed_run_is_skipped_only_when_all_artifacts_exist(
@@ -276,7 +296,7 @@ def test_train_dry_run_does_not_create_manifest(tmp_path: Path) -> None:
     args = _train_args(
         tmp_path,
         "--reward-presets",
-        "basic_stopping",
+        "basic_safety",
         "--dry-run",
     )
 

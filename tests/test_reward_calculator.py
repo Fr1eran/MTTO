@@ -1,5 +1,3 @@
-import math
-
 import pytest
 
 from model.ocs import SPSState, TrainService
@@ -131,100 +129,43 @@ def test_safety_potential_uses_v3_pbrs_difference(calculator: RewardCalculator) 
     assert reward.safety == pytest.approx(expected)
 
 
-def test_stopping_potential_uses_pbrs_difference(
+def test_terminal_stopping_is_rewarded_only_on_termination(
     calculator: RewardCalculator,
 ) -> None:
-    previous = _state(position=-1000.0, speed=30.0)
-    current = _state(position=-50.0, speed=5.0)
-    transition = OperationalTransition(
-        previous,
-        current,
-        0.0,
-        950.0,
-        1.0,
-        0.0,
-        False,
-        False,
-        ViolationCode.ONGOING,
+    previous = _state(position=90.0)
+    current = _state(position=100.0)
+    terminal_reward = calculator.calculate(
+        OperationalTransition(
+            previous,
+            current,
+            0.0,
+            10.0,
+            1.0,
+            0.0,
+            True,
+            False,
+            ViolationCode.ONGOING,
+        )
     )
-    reward = calculator.calculate(transition)
-    expected = calculator.gamma * calculator._potential_stopping(
-        position_m=current.position_m,
-        speed_mps=current.speed_mps,
-        max_speed_mps=current.max_speed_mps,
-    ) - calculator._potential_stopping(
-        position_m=previous.position_m,
-        speed_mps=previous.speed_mps,
-        max_speed_mps=previous.max_speed_mps,
-    )
-    assert reward.stopping == pytest.approx(expected)
-
-
-def test_stopping_potential_forms_symmetric_clipped_laplace_attraction(
-    calculator: RewardCalculator,
-) -> None:
-    target = calculator.train_service.target_position
-    at_target = calculator._potential_stopping(
-        position_m=target,
-        speed_mps=0.0,
-        max_speed_mps=20.0,
-    )
-    z_one = calculator._potential_stopping(
-        position_m=target + 1500.0,
-        speed_mps=0.0,
-        max_speed_mps=20.0,
-    )
-    plateau = calculator._potential_stopping(
-        position_m=target - 9000.0,
-        speed_mps=0.0,
-        max_speed_mps=20.0,
-    )
-    mirrored = calculator._potential_stopping(
-        position_m=target + 9000.0,
-        speed_mps=0.0,
-        max_speed_mps=20.0,
+    dense_reward = calculator.calculate(
+        OperationalTransition(
+            previous,
+            current,
+            0.0,
+            10.0,
+            1.0,
+            0.0,
+            False,
+            False,
+            ViolationCode.ONGOING,
+        )
     )
 
-    assert at_target == pytest.approx(0.0)
-    assert z_one == pytest.approx(-(1.0 - math.exp(-1.0)))
-    assert plateau == pytest.approx(-(1.0 - math.exp(-2.0)))
-    assert mirrored == pytest.approx(plateau)
+    assert terminal_reward.terminal_stopping > 0.0
+    assert dense_reward.terminal_stopping == 0.0
 
 
-def test_successful_terminal_state_uses_actual_stopping_potential_in_pbrs(
-    calculator: RewardCalculator,
-) -> None:
-    previous = _state(position=90.0, speed=1.0)
-    current = _state(position=91.0, speed=0.0)
-    transition = OperationalTransition(
-        previous,
-        current,
-        0.0,
-        1.0,
-        1.0,
-        0.0,
-        True,
-        False,
-        ViolationCode.ONGOING,
-    )
-    reward = calculator.calculate(transition)
-    phi_previous = calculator._potential_stopping(
-        position_m=previous.position_m,
-        speed_mps=previous.speed_mps,
-        max_speed_mps=previous.max_speed_mps,
-    )
-    phi_current = calculator._potential_stopping(
-        position_m=current.position_m,
-        speed_mps=current.speed_mps,
-        max_speed_mps=current.max_speed_mps,
-    )
-
-    assert reward.stopping == pytest.approx(
-        calculator.gamma * phi_current - phi_previous
-    )
-
-
-def test_potential_flags_disable_only_their_own_components() -> None:
+def test_safety_potential_can_be_disabled() -> None:
     service = TrainService(0.0, 0.0, 100.0, 20.0, 1.0, 1.0, 2.0)
     calculator = RewardCalculator(
         service,
@@ -232,9 +173,7 @@ def test_potential_flags_disable_only_their_own_components() -> None:
         whole_distance_m=100.0,
         max_energy_consumption_kj=100.0,
         gamma=0.995,
-        reward_config=RewardConfig(
-            enable_potential_safety=False, enable_potential_stopping=False
-        ),
+        reward_config=RewardConfig(enable_potential_safety=False),
     )
     reward = calculator.calculate(
         OperationalTransition(
@@ -250,4 +189,3 @@ def test_potential_flags_disable_only_their_own_components() -> None:
         )
     )
     assert reward.safety == 0.0
-    assert reward.stopping == 0.0

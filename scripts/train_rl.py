@@ -2,11 +2,16 @@ import argparse
 
 from rl.experiment_utils import (
     DEFAULT_CURRICULUM_PROFILE_NAME,
+    DEFAULT_DEVICE,
     DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
+    DEFAULT_NUM_ENVS,
     DEFAULT_REWARD_DISCOUNT,
     DEFAULT_REWARD_PRESET_NAME,
     DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
     DEFAULT_SCHEDULE_TIME_S,
+    DEFAULT_STEP_DISTANCE,
+    DEFAULT_VEC_ENV_TYPE,
+    VEC_ENV_TYPE_CHOICES,
     TrainingRunSpec,
     curriculum_profile_names,
     resolve_training_run_spec,
@@ -36,7 +41,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--max-step-distance",
         dest="step_distance",
         type=float,
-        default=30.0,
+        default=DEFAULT_STEP_DISTANCE,
         help="训练环境固定空间控制步长；--max-step-distance 为兼容别名。",
     )
     _ = parser.add_argument(
@@ -46,7 +51,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=DEFAULT_REWARD_PRESET_NAME,
         help=(
             "奖励配置预设。basic 固定包含 energy/comfort；"
-            "其余预设仅沿 safety/stopping 两个 shaping 维度逐级打开。"
+            "basic_safety 额外启用安全 PBRS。"
         ),
     )
     _ = parser.add_argument(
@@ -133,15 +138,15 @@ def build_cli_parser() -> argparse.ArgumentParser:
     _ = parser.add_argument(
         "--num-envs",
         type=int,
-        default=1,
+        default=DEFAULT_NUM_ENVS,
         help="训练环境数量。",
     )
     _ = parser.add_argument(
         "--vec-env-type",
         type=str,
-        choices=["dummy", "subproc"],
-        default="subproc",
-        help="向量化环境后端。subproc 在 num_envs > 1 时启用并行采样。",
+        choices=VEC_ENV_TYPE_CHOICES,
+        default=DEFAULT_VEC_ENV_TYPE,
+        help="向量化环境后端；默认使用低开销的 DummyVecEnv。",
     )
     _ = parser.add_argument(
         "--rollout-steps-per-update",
@@ -216,7 +221,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     _ = parser.add_argument(
         "--device",
         type=str,
-        default="cpu",
+        default=DEFAULT_DEVICE,
         help="指定运行 PPO 算法的硬件设备，例如 'cpu' 或 'cuda'。",
     )
     _ = parser.add_argument(

@@ -6,11 +6,15 @@ import numpy as np
 import pytest
 
 from rl.experiment_utils import (
+    DEFAULT_DEVICE,
+    DEFAULT_NUM_ENVS,
+    DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
+    DEFAULT_VEC_ENV_TYPE,
     resolve_log_interval,
     resolve_run_mode,
     resolve_training_run_spec,
 )
-from rl.reward_diagnostics import REWARD_NAMES
+from rl.reward_diagnostics import REWARD_DIAGNOSTICS_SCHEMA_VERSION, REWARD_NAMES
 from rl.training_analysis.analyze import (
     compute_best_eval_metrics,
     compute_curriculum_distribution_metrics,
@@ -23,6 +27,7 @@ from rl.training_analysis.collect import (
     RewardDiagnosticsArtifact,
     ScalarSeries,
     compute_sampling_health,
+    load_reward_diagnostics_artifact,
     with_legacy_info_tag_aliases,
 )
 from rl.training_analysis.output import build_analysis_payload, write_analysis_outputs
@@ -81,10 +86,10 @@ def test_regular_training_metrics_basic():
 def _reward_artifact() -> RewardDiagnosticsArtifact:
     transitions = np.asarray(
         [
-            [1.0, -0.2, -0.1, 0.3, 0, 0, 0, 0],
-            [1.2, -0.3, -0.2, 0.2, 0, 0, 0, 0],
-            [1.1, -0.4, -0.1, 0.1, 0, 0, 0, 0],
-            [1.3, -0.5, -0.3, 0.4, 0, 0, 0, 0],
+            [1.0, -0.2, -0.1, 0, 0, 0, 0],
+            [1.2, -0.3, -0.2, 0, 0, 0, 0],
+            [1.1, -0.4, -0.1, 0, 0, 0, 0],
+            [1.3, -0.5, -0.3, 0, 0, 0, 0],
         ],
         dtype=np.float64,
     )
@@ -122,12 +127,16 @@ def _reward_artifact() -> RewardDiagnosticsArtifact:
     )
 
 
-def _write_reward_artifact(path: Path) -> None:
+def _write_reward_artifact(
+    path: Path,
+    *,
+    schema_version: int = REWARD_DIAGNOSTICS_SCHEMA_VERSION,
+) -> None:
     artifact = _reward_artifact()
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(
         path,
-        schema_version=np.asarray([1], dtype=np.int16),
+        schema_version=np.asarray([schema_version], dtype=np.int16),
         reward_names=np.asarray(artifact.reward_names),
         **{
             field: getattr(artifact, field)
@@ -135,6 +144,14 @@ def _write_reward_artifact(path: Path) -> None:
             if field != "reward_names"
         },
     )
+
+
+def test_reward_diagnostics_rejects_removed_schema(tmp_path: Path) -> None:
+    artifact_path = tmp_path / "reward_diagnostics.npz"
+    _write_reward_artifact(artifact_path, schema_version=1)
+
+    with pytest.raises(ValueError, match="Unsupported reward diagnostics schema"):
+        _ = load_reward_diagnostics_artifact(artifact_path)
 
 
 def test_reward_component_analysis_uses_episode_and_transition_data():
@@ -783,13 +800,13 @@ def test_train_rl_cli_accepts_reward_preset_and_experiment_tag() -> None:
     args = parser.parse_args(
         [
             "--reward-preset",
-            "basic_safety_stopping",
+            "basic_safety",
             "--experiment-tag",
             "trial_a",
         ]
     )
 
-    assert args.reward_preset == "basic_safety_stopping"
+    assert args.reward_preset == "basic_safety"
     assert args.experiment_tag == "trial_a"
 
 
@@ -847,6 +864,15 @@ def test_train_rl_cli_accepts_dry_run() -> None:
     assert args.reward_preset == "basic"
 
 
+def test_train_rl_cli_uses_shared_vector_environment_defaults() -> None:
+    args = build_train_rl_arg_parser().parse_args([])
+
+    assert args.num_envs == DEFAULT_NUM_ENVS
+    assert args.vec_env_type == DEFAULT_VEC_ENV_TYPE
+    assert args.rollout_steps_per_update == DEFAULT_ROLLOUT_STEPS_PER_UPDATE
+    assert args.device == DEFAULT_DEVICE
+
+
 def test_train_rl_cli_rejects_removed_subproc_start_method_option() -> None:
     parser = build_train_rl_arg_parser()
     with pytest.raises(SystemExit):
@@ -877,6 +903,10 @@ def test_resolve_training_run_spec_plans_paths_and_switches() -> None:
     assert Path(spec.output_dir).name == "465p0_30p0__basic_safety__batch_a"
     assert Path(spec.run_metadata_path).name == "run_metadata.json"
     assert spec.run_metadata["reward_preset_name"] == "basic_safety"
+    assert spec.num_envs == DEFAULT_NUM_ENVS
+    assert spec.resolved_vec_env_type == DEFAULT_VEC_ENV_TYPE
+    assert spec.n_steps_per_env == 1024
+    assert spec.rollout_steps_per_update == DEFAULT_ROLLOUT_STEPS_PER_UPDATE
     assert spec.subproc_start_method is None
     assert "subproc_start_method" not in spec.run_metadata
     assert spec.dry_run is True

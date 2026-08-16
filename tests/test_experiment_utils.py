@@ -4,9 +4,15 @@ import matplotlib.pyplot as plt
 import pytest
 
 from rl.experiment_utils import (
+    DEFAULT_DEVICE,
+    DEFAULT_NUM_ENVS,
     DEFAULT_REWARD_PRESET_NAME,
+    DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
+    DEFAULT_VEC_ENV_TYPE,
     RUN_METADATA_FILENAME,
+    VEC_ENV_TYPE_CHOICES,
     add_panel_label,
+    build_default_training_args,
     build_reward_config,
     build_rl_trajectory_comparison_key,
     curriculum_profile_names,
@@ -18,6 +24,18 @@ from rl.experiment_utils import (
     reward_preset_names,
     save_run_metadata,
 )
+
+
+def test_default_training_args_use_shared_vector_environment_defaults() -> None:
+    args = build_default_training_args()
+
+    assert DEFAULT_NUM_ENVS == 8
+    assert DEFAULT_VEC_ENV_TYPE == "dummy"
+    assert VEC_ENV_TYPE_CHOICES == ("dummy", "subproc")
+    assert args.num_envs == DEFAULT_NUM_ENVS
+    assert args.vec_env_type == DEFAULT_VEC_ENV_TYPE
+    assert args.rollout_steps_per_update == DEFAULT_ROLLOUT_STEPS_PER_UPDATE
+    assert args.device == DEFAULT_DEVICE
 
 
 def test_curriculum_profiles_resolve_with_disabled_default() -> None:
@@ -41,45 +59,53 @@ def test_curriculum_profile_scopes_nonbaseline_output_name() -> None:
 
 
 def test_reward_preset_names_include_real_pbrs_ablation_profiles() -> None:
-    assert reward_preset_names() == (
-        "basic",
-        "basic_safety",
-        "basic_stopping",
-        "basic_safety_stopping",
-    )
+    assert reward_preset_names() == ("basic", "basic_safety")
 
 
 @pytest.mark.parametrize(
     "profile_name",
-    ("full_shaping", "basic_safety_stopping_punctuality"),
+    (
+        "basic_stopping",
+        "basic_safety_stopping",
+        "all",
+        "full",
+        "full_shaping",
+        "basic_safety_stopping_punctuality",
+    ),
 )
-def test_removed_punctuality_profiles_are_rejected(profile_name: str) -> None:
+def test_removed_reward_profiles_are_rejected(profile_name: str) -> None:
     with pytest.raises(ValueError):
         _ = resolve_reward_preset(profile_name)
 
 
 def test_reward_presets_keep_energy_comfort_and_toggle_pbrs() -> None:
     expected_flags = {
-        "basic": (False, False),
-        "basic_safety": (True, False),
-        "basic_stopping": (False, True),
-        "basic_safety_stopping": (True, True),
+        "basic": False,
+        "basic_safety": True,
     }
     for profile_name, expected in expected_flags.items():
         reward_config = build_reward_config(profile_name)
         assert reward_config.enable_energy is True
         assert reward_config.enable_comfort is True
-        assert (
-            reward_config.enable_potential_safety,
-            reward_config.enable_potential_stopping,
-        ) == expected
+        assert reward_config.enable_potential_safety is expected
 
 
 def test_reward_preset_owns_the_runtime_config() -> None:
-    preset = resolve_reward_preset("basic_stopping")
+    preset = resolve_reward_preset("basic_safety")
 
-    assert preset.config is build_reward_config("basic_stopping")
-    assert preset.enabled_shaping_components() == ("stopping",)
+    assert preset.config is build_reward_config("basic_safety")
+    assert preset.enabled_shaping_components() == ("safety",)
+
+
+def test_resolve_output_dir_always_scopes_default_reward_preset() -> None:
+    output_dir = resolve_output_dir(
+        output_root="output/optimal/rl",
+        schedule_time_s=430.0,
+        step_distance=100.0,
+        reward_preset_name=DEFAULT_REWARD_PRESET_NAME,
+    )
+
+    assert Path(output_dir).name == "430p0_100p0__basic_safety"
 
 
 def test_resolve_output_dir_scopes_non_default_profile_and_experiment_tag() -> None:
@@ -104,7 +130,7 @@ def test_resolve_tb_log_name_generates_experiment_scoped_name() -> None:
         experiment_tag=None,
     )
 
-    assert tb_log_name == "train_log__monitor_best__430p0_100p0__basic_safety_stopping"
+    assert tb_log_name == "train_log__monitor_best__430p0_100p0__basic_safety"
 
 
 def test_load_run_metadata_falls_back_to_parent_directory(tmp_path: Path) -> None:

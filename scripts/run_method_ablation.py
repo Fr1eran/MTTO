@@ -14,10 +14,15 @@ import numpy as np
 from matplotlib.lines import Line2D
 
 from rl.experiment_utils import (
+    DEFAULT_DEVICE,
     DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
+    DEFAULT_NUM_ENVS,
     DEFAULT_REWARD_DISCOUNT,
+    DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
     DEFAULT_SCHEDULE_TIME_S,
     DEFAULT_STEP_DISTANCE,
+    DEFAULT_VEC_ENV_TYPE,
+    VEC_ENV_TYPE_CHOICES,
     TrainingRunSpec,
     apply_rl_curve_plot_style,
     build_default_training_args,
@@ -33,6 +38,7 @@ from rl.training_analysis.collect import (
 METHOD_ABLATION_MANIFEST_FILENAME = "method_ablation_manifest.json"
 EVALUATION_HISTORY_FILENAME = "evaluation_history.npz"
 FINAL_TRAJECTORY_METRICS_FILENAME = "final_trajectory_metrics.json"
+MANIFEST_VERSION = 1
 DEFAULT_OUTPUT_ROOT = "output/optimal/rl/method_ablation"
 DEFAULT_SEEDS = (11, 131, 239, 359, 443)
 SAFETY_BIN_SIZE_M = 5_000.0
@@ -49,12 +55,12 @@ class MethodSpec:
 
 METHODS = (
     MethodSpec("ppo", "PPO", "basic", "none", "#0072B2"),
-    MethodSpec("ppo_pbrs", "PPO+PBRS", "basic_safety_stopping", "none", "#E69F00"),
+    MethodSpec("ppo_pbrs", "PPO+PBRS", "basic_safety", "none", "#E69F00"),
     MethodSpec("ppo_dspdl", "PPO+DSPDL", "basic", "dspdl", "#CC79A7"),
     MethodSpec(
         "ppo_pbrs_dspdl",
         "PPO+PBRS+DSPDL",
-        "basic_safety_stopping",
+        "basic_safety",
         "dspdl",
         "#009E73",
     ),
@@ -103,17 +109,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
     train.add_argument("--schedule-time-s", type=float, default=DEFAULT_SCHEDULE_TIME_S)
     train.add_argument("--step-distance", type=float, default=DEFAULT_STEP_DISTANCE)
     train.add_argument("--reward-discount", type=float, default=DEFAULT_REWARD_DISCOUNT)
-    train.add_argument("--num-envs", type=int, default=1)
+    train.add_argument("--num-envs", type=int, default=DEFAULT_NUM_ENVS)
     train.add_argument(
-        "--vec-env-type", choices=("dummy", "subproc"), default="subproc"
+        "--vec-env-type",
+        choices=VEC_ENV_TYPE_CHOICES,
+        default=DEFAULT_VEC_ENV_TYPE,
     )
-    train.add_argument("--rollout-steps-per-update", type=int, default=8192)
+    train.add_argument(
+        "--rollout-steps-per-update",
+        type=int,
+        default=DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
+    )
     train.add_argument(
         "--evaluation-interval-rollouts",
         type=int,
         default=DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
     )
-    train.add_argument("--device", default="cpu")
+    train.add_argument("--device", default=DEFAULT_DEVICE)
     train.add_argument(
         "--dry-run", action=argparse.BooleanOptionalAction, default=False
     )
@@ -194,6 +206,20 @@ def resolve_run_matrix(args: argparse.Namespace) -> list[MethodRun]:
     return runs
 
 
+def _training_signature(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "total_timesteps": int(args.total_timesteps),
+        "schedule_time_s": float(args.schedule_time_s),
+        "step_distance": float(args.step_distance),
+        "reward_discount": float(args.reward_discount),
+        "num_envs": int(args.num_envs),
+        "vec_env_type": str(args.vec_env_type),
+        "rollout_steps_per_update": int(args.rollout_steps_per_update),
+        "evaluation_interval_rollouts": int(args.evaluation_interval_rollouts),
+        "device": str(args.device),
+    }
+
+
 def build_manifest(
     args: argparse.Namespace,
     runs: list[MethodRun],
@@ -201,16 +227,12 @@ def build_manifest(
 ) -> dict[str, Any]:
     statuses = statuses or {}
     return {
+        "manifest_version": MANIFEST_VERSION,
         "output_root": args.output_root,
         "reference_curve_dir": args.reference_curve_dir,
         "methods": [method.__dict__ for method in METHODS],
         "seed_list": list(DEFAULT_SEEDS),
-        "training": {
-            "total_timesteps": args.total_timesteps,
-            "schedule_time_s": args.schedule_time_s,
-            "step_distance": args.step_distance,
-            "evaluation_interval_rollouts": args.evaluation_interval_rollouts,
-        },
+        "training": _training_signature(args),
         "runs": [
             {
                 "method": run.method.name,
@@ -242,6 +264,38 @@ def load_manifest(root: str) -> dict[str, Any]:
     path = Path(root) / METHOD_ABLATION_MANIFEST_FILENAME
     with path.open(encoding="utf-8") as file_obj:
         return json.load(file_obj)
+
+
+def _validate_manifest_compatibility(
+    manifest: dict[str, Any], args: argparse.Namespace
+) -> None:
+    if manifest.get("manifest_version") != MANIFEST_VERSION:
+        raise ValueError(
+            "Existing method-ablation manifest has an incompatible version"
+        )
+    if manifest.get("reference_curve_dir") != args.reference_curve_dir:
+        raise ValueError(
+            "Existing method-ablation manifest uses a different reference curve"
+        )
+    if manifest.get("methods") != [method.__dict__ for method in METHODS]:
+        raise ValueError(
+            "Existing method-ablation manifest uses a different method matrix"
+        )
+    if manifest.get("seed_list") != list(DEFAULT_SEEDS):
+        raise ValueError("Existing method-ablation manifest uses different seeds")
+    expected_training = _training_signature(args)
+    actual_training = manifest.get("training")
+    if actual_training != expected_training:
+        raise ValueError(
+            "Existing method-ablation manifest uses different training settings: "
+            f"expected={expected_training}, actual={actual_training}"
+        )
+
+
+def _validate_existing_manifest(args: argparse.Namespace) -> None:
+    path = Path(args.output_root) / METHOD_ABLATION_MANIFEST_FILENAME
+    if path.is_file():
+        _validate_manifest_compatibility(load_manifest(args.output_root), args)
 
 
 def _method_by_name(name: str) -> MethodSpec:
@@ -508,6 +562,7 @@ def _save(fig: plt.Figure | None, path: Path | None, dpi: float) -> None:
 
 def run_train(args: argparse.Namespace) -> int:
     runs = resolve_run_matrix(args)
+    _validate_existing_manifest(args)
     if args.dry_run:
         for run in runs:
             print(f"{run.method.label} seed={run.seed} output={run.spec.output_dir}")

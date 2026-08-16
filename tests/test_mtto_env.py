@@ -19,7 +19,7 @@ from rl.mtto_env import MTTOEnv
 from rl.observation_builder import ObservationBuilder
 from rl.operational_state import OperationalState, OperationalTransition, ViolationCode
 from rl.reward_calculator import RewardConfig
-from rl.reward_diagnostics import RewardDiagnosticsAccumulator
+from rl.reward_diagnostics import REWARD_SIGNAL_COUNT, RewardDiagnosticsAccumulator
 from rl.safety_statistics import SafetyTruncationBuffer
 from utils.data_loader import (
     load_auxiliary_stopping_areas_ap_and_dp,
@@ -565,7 +565,7 @@ def test_compact_training_info_is_empty_and_worker_accumulator_records(
         assert info == {}
         batch = mtto_env.drain_reward_diagnostics()
         np.testing.assert_array_equal(batch["transition_count"], [1])
-        assert batch["reward_sum"].shape == (9,)
+        assert batch["reward_sum"].shape == (REWARD_SIGNAL_COUNT,)
     finally:
         mtto_env.compact_training_info = False
         mtto_env.reward_diagnostics_accumulator = None

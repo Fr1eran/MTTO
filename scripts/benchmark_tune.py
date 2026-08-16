@@ -11,7 +11,11 @@ from typing import Any
 import numpy as np
 
 from rl.env_factory import make_env
-from rl.experiment_utils import DEFAULT_SCHEDULE_TIME_S
+from rl.experiment_utils import (
+    DEFAULT_REWARD_DISCOUNT,
+    DEFAULT_SCHEDULE_TIME_S,
+    DEFAULT_STEP_DISTANCE,
+)
 from utils.scenario import build_scenario
 
 
@@ -24,8 +28,8 @@ def run_environment_benchmark(*, steps: int, rollout_capacity: int) -> dict[str,
         track=track,
         safeguard_utility=safeguard_utility,
         train_service=train_service,
-        gamma=0.998,
-        step_distance=30.0,
+        gamma=DEFAULT_REWARD_DISCOUNT,
+        step_distance=DEFAULT_STEP_DISTANCE,
         reward_diagnostics_worker_rank=0,
         reward_diagnostics_rollout_capacity=rollout_capacity,
         compact_training_info=True,

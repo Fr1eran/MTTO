@@ -9,12 +9,11 @@ from numpy.typing import NDArray
 
 from rl.reward_calculator import RewardBreakdown
 
-REWARD_DIAGNOSTICS_SCHEMA_VERSION: Final[int] = 1
+REWARD_DIAGNOSTICS_SCHEMA_VERSION: Final[int] = 2
 REWARD_NAMES: Final[tuple[str, ...]] = (
     "safety",
     "energy",
     "comfort",
-    "stopping",
     "terminal_stopping",
     "terminal_punctuality",
     "survival",
@@ -87,12 +86,11 @@ class RewardDiagnosticsAccumulator:
         vector[0] = reward.safety
         vector[1] = reward.energy
         vector[2] = reward.comfort
-        vector[3] = reward.stopping
-        vector[4] = reward.terminal_stopping
-        vector[5] = reward.terminal_punctuality
-        vector[6] = reward.survival
-        vector[7] = reward.truncation
-        vector[8] = reward.total
+        vector[3] = reward.terminal_stopping
+        vector[4] = reward.terminal_punctuality
+        vector[5] = reward.survival
+        vector[6] = reward.truncation
+        vector[7] = reward.total
         self._transition_count += 1
         self._worker_transition_step += 1
         self._episode_length += 1

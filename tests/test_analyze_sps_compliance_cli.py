@@ -190,7 +190,7 @@ def test_resolve_curve_artifacts_loads_latest_dp_and_latest_rl_best(
     new_dp_curve, new_dp_metrics = _write_dp_artifact(new_dp_dir)
 
     old_rl_dir = (
-        rl_root / "430p0_100p0__basic_safety_stopping" / "best_rollouts"
+        rl_root / "430p0_100p0__basic_safety" / "best_rollouts"
     )
     new_rl_dir = rl_root / "430p0_100p0__basic" / "best_rollouts"
     old_rl_dir.mkdir(parents=True)
@@ -222,7 +222,7 @@ def test_resolve_single_curve_artifact_by_kind(tmp_path: Path) -> None:
     dp_root = tmp_path / "dp_runs"
     rl_root = tmp_path / "rl_runs"
     dp_dir = dp_root / "run"
-    rl_dir = rl_root / "430p0_100p0__basic_safety_stopping" / "best_rollouts"
+    rl_dir = rl_root / "430p0_100p0__basic_safety" / "best_rollouts"
     dp_dir.mkdir(parents=True)
     rl_dir.mkdir(parents=True)
 

@@ -59,7 +59,7 @@ def test_resolve_rl_curve_artifact_prefers_latest_best_across_runs(
 ) -> None:
     curve_root = tmp_path / "runs"
     old_best_dir = (
-        curve_root / "430p0_100p0__basic_safety_stopping" / "best_rollouts"
+        curve_root / "430p0_100p0__basic_safety" / "best_rollouts"
     )
     new_best_dir = curve_root / "430p0_100p0__basic" / "best_rollouts"
     old_best_dir.mkdir(parents=True)

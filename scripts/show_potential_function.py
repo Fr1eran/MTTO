@@ -106,7 +106,7 @@ def _potential_stopping(
     potential_scale: float = 1.0,
     max_exp: float = 2.0,
 ) -> NDArray[np.float64]:
-    """Direction-free Laplace attraction with a clipped negative plateau."""
+    """Stopping-potential reference used only for visualization and analysis."""
     if distance_scale_m <= 0.0:
         raise ValueError("distance_scale_m must be positive")
     if potential_scale <= 0.0:

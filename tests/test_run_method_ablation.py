@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 import scripts.run_method_ablation as method_ablation
-from rl.reward_diagnostics import REWARD_NAMES
+from rl.reward_diagnostics import REWARD_DIAGNOSTICS_SCHEMA_VERSION, REWARD_NAMES
 
 
 def _write_reward_diagnostics(path: Path) -> None:
@@ -15,7 +15,7 @@ def _write_reward_diagnostics(path: Path) -> None:
     episode_sums[:, -1] = [1.0, 2.0]
     np.savez(
         path,
-        schema_version=np.asarray([1], dtype=np.int16),
+        schema_version=np.asarray([REWARD_DIAGNOSTICS_SCHEMA_VERSION], dtype=np.int16),
         reward_names=np.asarray(REWARD_NAMES),
         rollout_end_step=np.asarray([200]),
         rollout_transition_count=np.asarray([19]),
@@ -63,18 +63,22 @@ def test_run_matrix_maps_the_four_methods_to_expected_configurations() -> None:
         method_ablation.DEFAULT_SEEDS
     )
     assert args.evaluation_interval_rollouts == 12
+    assert args.num_envs == 8
+    assert args.vec_env_type == "dummy"
+    assert args.rollout_steps_per_update == 8192
+    assert args.device == "cpu"
     assert all(run.spec.evaluation_interval_rollouts == 12 for run in runs)
     first_by_method = {run.method.name: run for run in runs if run.repeat_index == 0}
     assert first_by_method["ppo"].train_args.reward_preset == "basic"
     assert first_by_method["ppo"].train_args.curriculum_profile == "none"
     assert (
-        first_by_method["ppo_pbrs"].train_args.reward_preset == "basic_safety_stopping"
+        first_by_method["ppo_pbrs"].train_args.reward_preset == "basic_safety"
     )
     assert first_by_method["ppo_dspdl"].train_args.curriculum_profile == "dspdl"
     assert first_by_method["ppo_dspdl"].train_args.reference_curve_dir == "."
     assert (
         first_by_method["ppo_pbrs_dspdl"].train_args.reward_preset
-        == "basic_safety_stopping"
+        == "basic_safety"
     )
     assert first_by_method["ppo_pbrs_dspdl"].train_args.curriculum_profile == "dspdl"
 
@@ -90,6 +94,39 @@ def test_train_cli_rejects_removed_step_evaluation_interval() -> None:
                 "100000",
             ]
         )
+
+
+def test_train_rejects_incompatible_existing_manifest(tmp_path: Path) -> None:
+    parser = method_ablation.build_arg_parser()
+    args = parser.parse_args(
+        [
+            "train",
+            "--reference-curve-dir",
+            ".",
+            "--output-root",
+            str(tmp_path),
+            "--dry-run",
+        ]
+    )
+    runs = method_ablation.resolve_run_matrix(args)
+    method_ablation._write_manifest(
+        str(tmp_path), method_ablation.build_manifest(args, runs)
+    )
+    changed_args = parser.parse_args(
+        [
+            "train",
+            "--reference-curve-dir",
+            ".",
+            "--output-root",
+            str(tmp_path),
+            "--num-envs",
+            "1",
+            "--dry-run",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="different training settings"):
+        _ = method_ablation.run_train(changed_args)
 
 
 def test_curve_and_final_aggregates_read_fixed_start_artifacts(tmp_path: Path) -> None:

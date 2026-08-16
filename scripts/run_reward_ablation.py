@@ -14,10 +14,15 @@ import numpy as np
 from matplotlib.lines import Line2D
 
 from rl.experiment_utils import (
+    DEFAULT_DEVICE,
     DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
+    DEFAULT_NUM_ENVS,
     DEFAULT_REWARD_DISCOUNT,
+    DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
     DEFAULT_SCHEDULE_TIME_S,
     DEFAULT_STEP_DISTANCE,
+    DEFAULT_VEC_ENV_TYPE,
+    VEC_ENV_TYPE_CHOICES,
     TrainingRunSpec,
     apply_rl_curve_plot_style,
     build_default_training_args,
@@ -34,14 +39,11 @@ from rl.training_analysis.collect import (
 REWARD_ABLATION_MANIFEST_FILENAME = "reward_ablation_manifest.json"
 EVALUATION_HISTORY_FILENAME = "evaluation_history.npz"
 FINAL_TRAJECTORY_METRICS_FILENAME = "final_trajectory_metrics.json"
-DEFAULT_OUTPUT_ROOT = "output/optimal/rl/reward_ablation"
-# DEFAULT_SEEDS = (11, 131, 239, 359, 443)
-DEFAULT_SEEDS = (
-    11,
-    131,
-)
+DEFAULT_OUTPUT_ROOT = "output/optimal/rl/reward_ablation_safety"
+DEFAULT_SEEDS = (11, 131, 239, 359, 443)
+
 SAFETY_BIN_SIZE_M = 5_000.0
-MANIFEST_VERSION = 2
+MANIFEST_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -54,12 +56,6 @@ class RewardAblationSpec:
 REWARD_ABLATIONS = (
     RewardAblationSpec("basic", "PPO", "#0072B2"),
     RewardAblationSpec("basic_safety", "PPO+Safety PBRS", "#E69F00"),
-    RewardAblationSpec("basic_stopping", "PPO+Stopping PBRS", "#CC79A7"),
-    RewardAblationSpec(
-        "basic_safety_stopping",
-        "PPO+Safety+Stopping PBRS",
-        "#009E73",
-    ),
 )
 
 
@@ -100,7 +96,7 @@ class FinalMetricAggregate:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run the four-factor PPO reward-ablation experiment."
+        description="Compare PPO with and without safety PBRS shaping."
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -116,17 +112,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
     train.add_argument("--schedule-time-s", type=float, default=DEFAULT_SCHEDULE_TIME_S)
     train.add_argument("--step-distance", type=float, default=DEFAULT_STEP_DISTANCE)
     train.add_argument("--reward-discount", type=float, default=DEFAULT_REWARD_DISCOUNT)
-    train.add_argument("--num-envs", type=int, default=1)
+    train.add_argument("--num-envs", type=int, default=DEFAULT_NUM_ENVS)
     train.add_argument(
-        "--vec-env-type", choices=("dummy", "subproc"), default="subproc"
+        "--vec-env-type",
+        choices=VEC_ENV_TYPE_CHOICES,
+        default=DEFAULT_VEC_ENV_TYPE,
     )
-    train.add_argument("--rollout-steps-per-update", type=int, default=8192)
+    train.add_argument(
+        "--rollout-steps-per-update",
+        type=int,
+        default=DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
+    )
     train.add_argument(
         "--evaluation-interval-rollouts",
         type=int,
         default=DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
     )
-    train.add_argument("--device", default="cpu")
+    train.add_argument("--device", default=DEFAULT_DEVICE)
     train.add_argument(
         "--dry-run", action=argparse.BooleanOptionalAction, default=False
     )
@@ -584,7 +586,7 @@ def _plot_learning_curves(aggregates: list[CurveAggregate]) -> plt.Figure | None
         axis.grid(True, alpha=0.3)
         axis.text(0.5, -0.23, panel, transform=axis.transAxes, ha="center")
     handles, labels = axes[0, 0].get_legend_handles_labels()
-    figure.legend(handles, labels, loc="upper center", ncol=4)
+    figure.legend(handles, labels, loc="upper center", ncol=len(aggregates))
     figure.tight_layout(rect=(0, 0, 1, 0.93))
     return figure
 

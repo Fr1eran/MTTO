@@ -22,6 +22,7 @@ from rl.evaluation import (
     get_strict_time_error_limit_s,
 )
 from rl.experiment_utils import (
+    DEFAULT_DEVICE,
     DEFAULT_REWARD_DISCOUNT,
     DEFAULT_REWARD_PRESET_NAME,
     DEFAULT_SCHEDULE_TIME_S,
@@ -224,7 +225,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     _ = evaluate_parser.add_argument(
         "--device",
         type=str,
-        default="cpu",
+        default=DEFAULT_DEVICE,
         help="Device used to load PPO.",
     )
     _ = evaluate_parser.add_argument(

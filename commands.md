@@ -75,8 +75,8 @@ uv run python -m scripts.train_rl \
   --step-distance 30.0 \
   --run-mode tune \
   --total-timesteps 1000000 \
-  --num-envs 4 \
-  --vec-env-type subproc \
+  --num-envs 8 \
+  --vec-env-type dummy \
   --rollout-steps-per-update 8192 \
   --evaluation-interval-rollouts 12 \
   --evaluation-deterministic \
@@ -92,8 +92,8 @@ uv run python -m scripts.train_rl \
   --step-distance 30.0 \
   --run-mode monitor_best \
   --total-timesteps 1000000 \
-  --num-envs 4 \
-  --vec-env-type subproc \
+  --num-envs 8 \
+  --vec-env-type dummy \
   --rollout-steps-per-update 8192 \
   --evaluation-interval-rollouts 12 \
   --evaluation-deterministic \
@@ -109,8 +109,8 @@ uv run python -m scripts.train_rl \
   --step-distance 30.0 \
   --run-mode reproduce \
   --total-timesteps 1000000 \
-  --num-envs 4 \
-  --vec-env-type subproc \
+  --num-envs 8 \
+  --vec-env-type dummy \
   --rollout-steps-per-update 8192 \
   --device cpu
 ```
@@ -122,13 +122,13 @@ uv run python -m scripts.train_rl \
   --output-root output/optimal/rl/dspdl/ \
   --schedule-time-s 465.0 \
   --step-distance 30.0 \
-  --reward-preset basic_safety_stopping \
+  --reward-preset basic_safety \
   --curriculum-profile dspdl \
   --reference-curve-dir output/optimal/dp/465p0_0p1_uni30p0/ \
   --run-mode monitor_best \
   --total-timesteps 1000000 \
-  --num-envs 4 \
-  --vec-env-type subproc \
+  --num-envs 8 \
+  --vec-env-type dummy \
   --rollout-steps-per-update 8192 \
   --evaluation-interval-rollouts 12 \
   --seed 11 \
@@ -204,7 +204,7 @@ uv run python -m scripts.show_rl_result \
 ```bash
 uv run python -m scripts.run_step_distance_ablation train \
   --reference-curve-dir output/optimal/dp/465p0_0p1_uni30p0/ \
-  --num-envs 4 \
+  --num-envs 8 \
   --evaluation-interval-rollouts 12 \
   --dry-run
 ```
@@ -214,7 +214,7 @@ uv run python -m scripts.run_step_distance_ablation train \
 ```bash
 uv run python -m scripts.run_step_distance_ablation train \
   --reference-curve-dir output/optimal/dp/465p0_0p1_uni30p0/ \
-  --num-envs 4 \
+  --num-envs 8 \
   --evaluation-interval-rollouts 12
 
 uv run python -m scripts.run_step_distance_ablation show \
@@ -225,7 +225,7 @@ uv run python -m scripts.run_step_distance_ablation show \
 
 ```bash
 uv run python -m scripts.run_reward_ablation train \
-  --num-envs 4 \
+  --num-envs 8 \
   --evaluation-interval-rollouts 12 \
   --dry-run
 ```
@@ -234,11 +234,11 @@ uv run python -m scripts.run_reward_ablation train \
 
 ```bash
 uv run python -m scripts.run_reward_ablation train \
-  --num-envs 4 \
+  --num-envs 8 \
   --evaluation-interval-rollouts 12
 
 uv run python -m scripts.run_reward_ablation show \
-  --output-root output/optimal/rl/reward_ablation
+  --output-root output/optimal/rl/reward_ablation_safety
 ```
 
 预览方法消融运行矩阵：
@@ -246,7 +246,7 @@ uv run python -m scripts.run_reward_ablation show \
 ```bash
 uv run python -m scripts.run_method_ablation train \
   --reference-curve-dir output/optimal/dp/465p0_0p1_uni30p0/ \
-  --num-envs 4 \
+  --num-envs 8 \
   --evaluation-interval-rollouts 12 \
   --dry-run
 ```
@@ -256,7 +256,7 @@ uv run python -m scripts.run_method_ablation train \
 ```bash
 uv run python -m scripts.run_method_ablation train \
   --reference-curve-dir output/optimal/dp/465p0_0p1_uni30p0/ \
-  --num-envs 4 \
+  --num-envs 8 \
   --evaluation-interval-rollouts 12
 
 uv run python -m scripts.run_method_ablation show \

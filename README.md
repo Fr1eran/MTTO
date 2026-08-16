@@ -103,17 +103,21 @@ RL 工作流脚本 `train_rl`、`run_reward_ablation train/show`、`evaluate_rl`
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `--num-envs` | `int` | `1` | 并行采样环境数量 |
-| `--vec-env-type` | `str` | `subproc` | 向量化后端：`dummy` / `subproc`（仅 `num-envs>1` 时 `subproc` 生效 |
+| `--num-envs` | `int` | `8` | 向量化采样环境数量 |
+| `--vec-env-type` | `str` | `dummy` | 向量化后端：`dummy` / `subproc`；默认使用低开销的 `DummyVecEnv` |
 | `--step-distance` | `float` | `30.0` | 固定空间控制步长 (m)，`--max-step-distance` 为兼容别名 |
-| `--schedule-time-s` | `float` | `430.0` | 规划运行时间 (s) |
+| `--schedule-time-s` | `float` | `465.0` | 规划运行时间 (s) |
+
+训练入口与奖励、方法、步长消融脚本共享上述环境默认值。显式指定
+`--vec-env-type subproc` 时仍会启用多进程后端；消融输出目录中如果已经存在训练配置
+不兼容的 manifest，新训练会拒绝覆盖，历史结果展示不受影响。
 
 #### DSPDL 课程学习
 
 通过 `--curriculum-profile dspdl --reference-curve-dir <dp-output-dir>` 启用离散型
 SPDL 课程。代码层统一使用 DSPDL 命名：父进程读取 `ReferenceTrajectory`，由
 `ContextPoolBuilder` 对 DP 轨迹采样并重建为只读 `ContextPool`，再将同一逻辑任务池
-交给所有训练环境。并行 worker 只创建轻量的 `ContextSampler` 和
+交给所有训练环境。每个训练环境只创建轻量的 `ContextSampler` 和
 `DSPDLEpisodeAccumulator`，不会重复读取或重建 DP 轨迹。
 
 每个环境在本地累计当前分布版本的上下文计数与折扣回报；`DSPDLCallback` 仅在课程
@@ -127,10 +131,10 @@ SPDL 课程。代码层统一使用 DSPDL 命名：父进程读取 `ReferenceTra
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `--reward-preset` | `str` | `basic_safety_stopping` | 奖励预设：`basic`、`basic_safety`、`basic_stopping`、`basic_safety_stopping` |
+| `--reward-preset` | `str` | `basic_safety` | 奖励预设：`basic`、`basic_safety` |
 | `--experiment-tag` | `str` | `None` | 附加实验标签，用于隔离输出目录与 TensorBoard 运行名 |
 
-`basic` 固定包含 `energy + comfort`；其余预设仅沿 `safety / stopping` 两个 shaping 维度逐级打开。准点要求仅通过成功到站后的终端奖励和评估指标表达。
+`basic` 固定包含 `energy + comfort`，`basic_safety` 在此基础上启用安全 PBRS。停站精度与准点要求只通过成功到站后的终端奖励和评估指标表达，不参与势函数塑形。
 
 #### PPO 超参数
 
@@ -184,7 +188,7 @@ Best-eval 排序规则：
 
 如果后续要执行 PBRS 消融实验，建议统一使用 `monitor_best` 模式，以保留 rollout 基础监控和训练期最优轨迹评估，同时避免高频诊断采样带来的额外开销。
 
-当前 PBRS 仅包含安全势函数与停站势函数：`basic` 不启用势函数，`basic_safety` 仅启用安全势函数，`basic_stopping` 仅启用停站势函数，`basic_safety_stopping` 同时启用两者。准点仅在成功到站时通过终端奖励计分，不包含准点势函数或准点稠密奖励。
+当前 PBRS 仅包含安全势函数：`basic` 不启用势函数，`basic_safety` 启用安全势函数。停站与准点均只在成功到站时通过终端奖励计分，不包含对应的势函数或稠密奖励。`scripts/show_potential_function.py` 中保留的停站势函数仅用于独立可视化与设计分析，不接入训练奖励链路。
 
 #### 训练后自动分析
 
@@ -210,8 +214,8 @@ python -m scripts.train_rl --run-mode reproduce
 # 关闭高频回调，保留基础监控 + best-eval
 python -m scripts.train_rl --run-mode monitor_best
 
-# 使用 basic+safety+stopping 预设，并附加实验标签
-python -m scripts.train_rl --run-mode monitor_best --reward-preset basic_safety_stopping --experiment-tag exp_a
+# 使用安全 PBRS 预设，并附加实验标签
+python -m scripts.train_rl --run-mode monitor_best --reward-preset basic_safety --experiment-tag exp_a
 
 # 仅预览 monitor_best 训练配置与输出路径
 python -m scripts.train_rl --run-mode monitor_best --reward-preset basic_safety --dry-run
@@ -220,33 +224,33 @@ python -m scripts.train_rl --run-mode monitor_best --reward-preset basic_safety 
 python -m scripts.train_rl --run-mode best_only
 
 # 430s tune，每 12 个 rollouts 触发一次 best-eval
-python -m scripts.train_rl --output-root output/optimal/rl/ --schedule-time-s 430.0 --step-distance 100.0 --run-mode tune --total-timesteps 1000000 --num-envs 4 --vec-env-type subproc --evaluation-interval-rollouts 12 --evaluation-deterministic --device cpu
+python -m scripts.train_rl --output-root output/optimal/rl/ --schedule-time-s 430.0 --step-distance 100.0 --run-mode tune --total-timesteps 1000000 --num-envs 8 --vec-env-type dummy --evaluation-interval-rollouts 12 --evaluation-deterministic --device cpu
 
 # 430s monitor_best，每 6 个 rollouts 评估一次
-python -m scripts.train_rl --output-root output/optimal/rl/safety_speed/ --schedule-time-s 430.0 --step-distance 100.0 --run-mode monitor_best --total-timesteps 1000000 --num-envs 4 --vec-env-type subproc --evaluation-interval-rollouts 6 --evaluation-deterministic --device cpu
+python -m scripts.train_rl --output-root output/optimal/rl/safety_speed/ --schedule-time-s 430.0 --step-distance 100.0 --run-mode monitor_best --total-timesteps 1000000 --num-envs 8 --vec-env-type dummy --evaluation-interval-rollouts 6 --evaluation-deterministic --device cpu
 ```
 
 ---
 
 ### 奖励消融实验 · `run_reward_ablation`
 
-统一完成奖励消融的训练、断点恢复、固定起点评估和结果展示。实验固定关闭 DSPDL，避免课程分布与奖励设计混杂；四组全因子配置分别为 `basic`、`basic_safety`、`basic_stopping` 和 `basic_safety_stopping`，每组默认使用固定种子 `11 / 131 / 239 / 359 / 443`。
+统一完成奖励消融的训练、断点恢复、固定起点评估和结果展示。实验固定关闭 DSPDL，避免课程分布与奖励设计混杂；两组配置分别为 `basic` 和 `basic_safety`，用于单独衡量安全 PBRS 的效果，每组默认使用固定种子 `11 / 131`。新版实验使用独立根目录 `output/optimal/rl/reward_ablation_safety`，不会复用旧四组消融的 manifest。
 
 训练采用低开销 `reproduce` 配置，保留 VecMonitor 和回合指标采集，关闭 TensorBoard、高频环境诊断、best-eval 与自动分析。每隔 `--evaluation-interval-rollouts` 个 rollouts 执行一次确定性真实起点评估，并在训练结束后保存最终策略评估。
 
 ```bash
-# 展开默认 4 × 5 运行矩阵，不写文件
+# 展开默认 2 × 2 运行矩阵，不写文件
 python -m scripts.run_reward_ablation train --dry-run
 
 # 训练全部奖励组；中断后执行同一命令会跳过产物完整的 completed 运行
 python -m scripts.run_reward_ablation train \
-    --output-root output/optimal/rl/reward_ablation \
+    --output-root output/optimal/rl/reward_ablation_safety \
     --total-timesteps 1000000 \
-    --num-envs 4
+    --num-envs 8
 
-# 只补跑基础奖励与仅停站 PBRS
+# 只补跑基础奖励与安全 PBRS
 python -m scripts.run_reward_ablation train \
-    --reward-presets basic basic_stopping
+    --reward-presets basic basic_safety
 ```
 
 批次根目录中的 `reward_ablation_manifest.json` 记录完整训练参数、每个 profile/seed 的产物路径和 `pending/running/completed/failed` 状态。重复运行仅跳过状态为 `completed` 且回合、周期评估、最终评估三类产物完整的任务；失败任务会被记录，但不会阻止其余组合继续运行。
@@ -255,8 +259,8 @@ python -m scripts.run_reward_ablation train \
 
 ```bash
 python -m scripts.run_reward_ablation show \
-    --output-file output/optimal/rl/reward_ablation/learning_curves.png \
-    --safety-output-file output/optimal/rl/reward_ablation/safety_violations.png \
+    --output-file output/optimal/rl/reward_ablation_safety/learning_curves.png \
+    --safety-output-file output/optimal/rl/reward_ablation_safety/safety_violations.png \
     --no-show
 
 # 只检查 manifest 与可用产物
@@ -275,7 +279,7 @@ python -m scripts.run_reward_ablation show --dry-run
 | `--reward-discount` | `float` | 从 `run_metadata.json` 读取，否则 `0.995` | 折扣因子（重建环境用） |
 | `--schedule-time-s` | `float` | 从 `run_metadata.json` 读取，否则 `430.0` | 规划运行时间 |
 | `--step-distance` | `float` | 从 `run_metadata.json` 读取，否则 `30.0` | 环境固定空间控制步长 (m) |
-| `--reward-preset` | `str` | 从 `run_metadata.json` 读取，否则 `basic_safety_stopping` | 评估所使用的奖励预设 |
+| `--reward-preset` | `str` | 从 `run_metadata.json` 读取，否则 `basic_safety` | 评估所使用的奖励预设 |
 | `--device` | `str` | `cpu` | 推理设备 |
 | `--deterministic` | `bool` | `True` | 是否使用确定性策略 |
 | `--record-video` | `bool` | `False` | 是否录制评估视频 |
@@ -303,7 +307,7 @@ python -m scripts.evaluate_rl \
 # 覆盖训练元数据中的 reward preset 与时间参数
 python -m scripts.evaluate_rl \
     --load-dir output/optimal/rl/.../final/ \
-    --reward-preset basic_safety_stopping \
+    --reward-preset basic_safety \
     --schedule-time-s 430.0
 
 # 仅预览有效评估配置
@@ -330,7 +334,7 @@ python -m scripts.evaluate_rl --load-dir output/optimal/rl/.../final/ --dry-run
 | `--reward-discount` | `float` | 从 `run_metadata.json` 读取，否则 `0.995` | 折扣因子（重建环境用） |
 | `--schedule-time-s` | `float` | 从 `run_metadata.json` 读取，否则 `430.0` | 突变前的初始规划运行时间 |
 | `--step-distance` | `float` | 从 `run_metadata.json` 读取，否则 `30.0` | 环境固定空间控制步长 (m) |
-| `--reward-preset` | `str` | 从 `run_metadata.json` 读取，否则 `basic_safety_stopping` | 评估所使用的奖励预设 |
+| `--reward-preset` | `str` | 从 `run_metadata.json` 读取，否则 `basic_safety` | 评估所使用的奖励预设 |
 | `--device` | `str` | `cpu` | 推理设备 |
 | `--deterministic` | `bool` | `True` | 是否使用确定性策略 |
 | `--change-distance-m` | `float` | `800.0` | 触发计划时间变化的位置 (m) |

@@ -3,6 +3,7 @@ import numpy as np
 from rl.reward_calculator import RewardBreakdown
 from rl.reward_diagnostics import (
     REWARD_SIGNAL_COUNT,
+    TOTAL_REWARD_INDEX,
     RewardDiagnosticsAccumulator,
 )
 
@@ -23,7 +24,9 @@ def test_accumulator_emits_rollout_moments_and_complete_episode() -> None:
     batch = accumulator.drain()
 
     np.testing.assert_array_equal(batch["transition_count"], [2])
-    np.testing.assert_allclose(batch["reward_sum"][[0, 1, 8]], [3.0, -0.75, 2.25])
+    np.testing.assert_allclose(
+        batch["reward_sum"][[0, 1, TOTAL_REWARD_INDEX]], [3.0, -0.75, 2.25]
+    )
     np.testing.assert_array_equal(batch["episode_worker_rank"], [2])
     np.testing.assert_array_equal(batch["episode_length"], [2])
     np.testing.assert_array_equal(batch["episode_complete"], [True])

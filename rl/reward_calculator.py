@@ -12,7 +12,6 @@ class RewardConfig:
     enable_energy: bool = True
     enable_comfort: bool = True
     enable_potential_safety: bool = True
-    enable_potential_stopping: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,7 +19,6 @@ class RewardBreakdown:
     safety: float = 0.0
     energy: float = 0.0
     comfort: float = 0.0
-    stopping: float = 0.0
     terminal_stopping: float = 0.0
     terminal_punctuality: float = 0.0
     survival: float = 0.0
@@ -31,8 +29,8 @@ class RewardBreakdown:
 class RewardCalculator:
     """Calculate reward from an explicit transition.
 
-    Safety v3 and the stopping PBRS term are the dense guidance terms.
-    Punctuality deliberately remains terminal-only.
+    Safety PBRS is the only dense potential-based guidance term. Stopping
+    accuracy and punctuality deliberately remain terminal-only objectives.
     """
 
     def __init__(
@@ -58,7 +56,7 @@ class RewardCalculator:
             progress = abs(state.position_m - self.train_service.target_position) / max(
                 self.whole_distance_m, 1e-12
             )
-            truncation = -1.0 - progress**2
+            truncation = -(1.0 + progress**2) * 5.0
             return RewardBreakdown(truncation=truncation, total=truncation)
 
         safety = (
@@ -79,12 +77,6 @@ class RewardCalculator:
             )
             norm_jerk = delta_acc / max(self.train_service.max_acc_change, 1e-12)
             comfort = -20.0 / self.max_episode_steps * norm_jerk**2
-        stopping = (
-            self._reward_stopping_potential(transition)
-            if self.reward_config.enable_potential_stopping
-            else 0.0
-        )
-
         terminal_stopping = 0.0
         terminal_punctuality = 0.0
         if transition.terminated:
@@ -100,7 +92,6 @@ class RewardCalculator:
             safety
             + energy
             + comfort
-            + stopping
             + terminal_stopping
             + terminal_punctuality
             + survival
@@ -109,7 +100,6 @@ class RewardCalculator:
             safety=safety,
             energy=energy,
             comfort=comfort,
-            stopping=stopping,
             terminal_stopping=terminal_stopping,
             terminal_punctuality=terminal_punctuality,
             survival=survival,
@@ -123,7 +113,7 @@ class RewardCalculator:
 
     def _punctuality_score(self, operation_time_s: float) -> float:
         time_error = abs(self.train_service.schedule_time - operation_time_s)
-        return math.exp(-time_error / 30.0)
+        return math.exp(-time_error / 45.0)
 
     def _reward_safety_potential(self, transition: OperationalTransition) -> float:
         previous = transition.previous_state
@@ -163,37 +153,3 @@ class RewardCalculator:
         else:
             phi_lower = 0.0
         return K_safety * (phi_upper + phi_lower)
-
-    def _reward_stopping_potential(self, transition: OperationalTransition) -> float:
-        previous = transition.previous_state
-        current = transition.next_state
-        phi_previous = self._potential_stopping(
-            position_m=previous.position_m,
-            speed_mps=previous.speed_mps,
-            max_speed_mps=previous.max_speed_mps,
-        )
-        phi_current = self._potential_stopping(
-            position_m=current.position_m,
-            speed_mps=current.speed_mps,
-            max_speed_mps=current.max_speed_mps,
-        )
-
-        return self.gamma * phi_current - phi_previous
-
-    def _potential_stopping(
-        self,
-        *,
-        position_m: float,
-        speed_mps: float,
-        max_speed_mps: float,
-    ) -> float:
-        """Direction-free Laplace attraction with a clipped negative plateau."""
-        K_stopping = 1.0
-        distance_scale_m = 1500.0
-        speed_scale_mps = 0.5 * max(max_speed_mps, 0.0) + 1.0
-        distance = abs(position_m - self.train_service.target_position)
-        cliped_error = min(
-            distance / distance_scale_m + speed_mps / speed_scale_mps, 2.0
-        )
-        clipped_exponential = math.exp(-cliped_error)
-        return -K_stopping * (1.0 - clipped_exponential)
