@@ -59,13 +59,25 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=str,
         choices=tuple(curriculum_profile_names()),
         default=DEFAULT_CURRICULUM_PROFILE_NAME,
-        help="初态课程预设。none 保持真实起点训练；dspdl 启用离散自步课程。",
+        help=(
+            "初态课程预设。none 保持真实起点训练；dspdl 使用 PPO Critic；"
+            "dspdl_completion 使用任务完成度 Critic。"
+        ),
     )
     _ = parser.add_argument(
         "--reference-curve-dir",
         type=str,
         default=None,
         help="启用课程时必填：包含任务匹配 DP 参考轨迹的目录。",
+    )
+    _ = parser.add_argument(
+        "--completion-alpha-max",
+        type=float,
+        default=None,
+        help=(
+            "仅用于 dspdl_completion：覆盖目标分布迁移强度 alpha 的上限；"
+            "未指定时使用 CompletionDSPDLConfig 默认值。"
+        ),
     )
     _ = parser.add_argument(
         "--experiment-tag",
@@ -241,7 +253,7 @@ def print_training_run_spec(spec: TrainingRunSpec) -> None:
     print(f"- reward_preset={spec.reward_preset.name}")
     print(f"- reward_config={spec.run_metadata['reward_config']}")
     print(f"- curriculum_profile={spec.curriculum_profile}")
-    if spec.curriculum_profile == "dspdl":
+    if spec.curriculum_profile != "none":
         print(f"- reference_curve_dir={spec.reference_curve_dir}")
     print(f"- enable_tb={spec.enable_tb}")
     print(f"- enable_monitor={spec.enable_monitor}")
@@ -272,10 +284,7 @@ def print_training_run_spec(spec: TrainingRunSpec) -> None:
         print(f"- tb_log_name=ignored (resolved name would be {spec.tb_log_name})")
         print("- log_interval=ignored (logging disabled by current switches)")
     print(f"- reward_diagnostics_path={spec.reward_diagnostics_path}")
-    print(
-        "- evaluation_interval_rollouts="
-        + f"{spec.evaluation_interval_rollouts}"
-    )
+    print("- evaluation_interval_rollouts=" + f"{spec.evaluation_interval_rollouts}")
     print(f"- best_eval_output_dir={spec.best_eval_output_dir}")
     print(f"- evaluation_deterministic={spec.evaluation_deterministic}")
     print(f"- evaluation_history_path={spec.evaluation_history_path}")

@@ -42,6 +42,7 @@ MTTO/
 │   ├── callbacks.py        #   训练回调（TensorBoard 日志 & 最优轨迹评估）
 │   ├── context_pool.py     #   DP 参考轨迹与不可变上下文池构建
 │   ├── context_sampler.py  #   持有版本化分布的上下文采样器
+│   ├── completion_critic.py #   任务完成度 Critic、缓冲区与课程回调
 │   ├── dspdl.py            #   DSPDL 配置、统计器、分布求解器与回调
 │   ├── env_factory.py      #   环境工厂
 │   ├── evaluation.py       #   评估辅助
@@ -125,6 +126,19 @@ SPDL 课程。代码层统一使用 DSPDL 命名：父进程读取 `ReferenceTra
 `DSPDLDistributionSolver` 更新分布。采样器的 `sample()` 只负责按内部权重抽样，权重
 及版本校验集中在更新接口中。达到目标分布阈值后，课程分布永久冻结，并释放各环境的
 统计缓冲区。
+
+使用 `--curriculum-profile dspdl_completion` 可启用基于任务完成度的 DSPDL。该配置
+保留相同的上下文池、初始/目标分布、KL 信赖域和更新周期，但以独立的
+`CompletionCritic` 预测 $[0,1]$ 区间内的任务完成度。每个完整回合的全部决策状态使用
+同一个终局完成度进行监督训练；网络结构、优化器、学习率调度、batch size、epoch 数和
+梯度裁剪均从 PPO value 分支解析，输出层改为 Sigmoid。迁移强度使用回合完成度 EMA，
+不会写入 PPO 模型或单独保存 Completion Critic checkpoint。训练时可在 TensorBoard
+查看 `completion/loss`、`completion/explained_variance`、
+`completion/learning_rate` 和 `dspdl/alpha`。
+
+配对实验表明，过大的迁移上限会使课程过早进入目标分布；当前
+`CompletionDSPDLConfig.alpha_max` 默认取 `0.05`。可通过
+`--completion-alpha-max <value>` 在独立实验中覆盖该值，覆盖结果会写入运行元数据。
 
 
 #### 奖励配置与实验标识

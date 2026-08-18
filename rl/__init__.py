@@ -1,3 +1,11 @@
+from .completion_critic import (
+    CompletionBuffer,
+    CompletionCritic,
+    CompletionCriticTrainer,
+    CompletionDSPDLCallback,
+    CompletionDSPDLConfig,
+    CompletionTrajectoryAccumulator,
+)
 from .context_pool import Context, ContextPool, ContextPoolBuilder, ReferenceTrajectory
 from .context_sampler import ContextSampler
 from .dp_trajectory_reader import DPTrajectoryReader
@@ -17,6 +25,12 @@ __all__ = [
     "ContextPool",
     "ContextPoolBuilder",
     "ContextSampler",
+    "CompletionBuffer",
+    "CompletionCritic",
+    "CompletionCriticTrainer",
+    "CompletionDSPDLCallback",
+    "CompletionDSPDLConfig",
+    "CompletionTrajectoryAccumulator",
     "DPTrajectoryReader",
     "DSPDLCallback",
     "DSPDLConfig",

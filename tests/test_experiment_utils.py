@@ -39,10 +39,13 @@ def test_default_training_args_use_shared_vector_environment_defaults() -> None:
 
 
 def test_curriculum_profiles_resolve_with_disabled_default() -> None:
-    assert curriculum_profile_names() == ("none", "dspdl")
+    assert curriculum_profile_names() == ("none", "dspdl", "dspdl_completion")
     assert resolve_curriculum_profile_name() == "none"
     assert resolve_curriculum_profile_name("dspdl") == "dspdl"
-    with pytest.raises(ValueError, match="Available profiles: none, dspdl"):
+    assert resolve_curriculum_profile_name("dspdl_completion") == "dspdl_completion"
+    with pytest.raises(
+        ValueError, match="Available profiles: none, dspdl, dspdl_completion"
+    ):
         _ = resolve_curriculum_profile_name("fixed_reverse")
 
 
@@ -56,6 +59,18 @@ def test_curriculum_profile_scopes_nonbaseline_output_name() -> None:
     )
 
     assert Path(output_dir).name == "430p0_30p0__basic__dspdl"
+
+
+def test_completion_curriculum_profile_has_an_independent_output_name() -> None:
+    output_dir = resolve_output_dir(
+        output_root="output/optimal/rl",
+        schedule_time_s=430.0,
+        step_distance=30.0,
+        reward_preset_name="basic",
+        curriculum_profile_name="dspdl_completion",
+    )
+
+    assert Path(output_dir).name == "430p0_30p0__basic__dspdl_completion"
 
 
 def test_reward_preset_names_include_real_pbrs_ablation_profiles() -> None:

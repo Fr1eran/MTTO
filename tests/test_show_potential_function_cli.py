@@ -267,7 +267,7 @@ def test_plot_safety_speed_minimal_keeps_upper_and_lower_bounds(
     ax = fig.axes[0]
 
     assert ax.axison is True
-    assert len(ax.lines) == 3
+    assert len(ax.lines) == 2
     assert len(fig.axes) == 1
     show_potential_function.plt.close(fig)
 
@@ -345,8 +345,12 @@ def test_safety_speed_single_plot_matches_guidance_wide_style(
     fig = show_potential_function.plot_safety_potential_heatmap_speed(minimal=False)
     ax, colorbar_axis = fig.axes
 
-    assert len(ax.lines) == 3
+    assert len(ax.lines) == 2
     assert len(fig.legends) == 1
+    assert [text.get_text() for text in fig.legends[0].get_texts()] == [
+        r"$v_{\min}(x)$",
+        r"$v_{\max}(x)$",
+    ]
     assert colorbar_axis.get_position().x0 > ax.get_position().x1
     assert colorbar_axis.get_ylabel() == ""
     show_potential_function.plt.close(fig)
@@ -364,7 +368,7 @@ def test_plot_guidance_potentials_wide_uses_shared_final_stop_domain(
     assert len(fig.axes) == 4
     np.testing.assert_allclose(ax_safety.get_xlim(), ax_stopping.get_xlim())
     np.testing.assert_allclose(ax_safety.get_ylim(), ax_stopping.get_ylim())
-    assert len(ax_safety.lines) == 3
+    assert len(ax_safety.lines) == 2
     assert len(ax_stopping.lines) == 3
     assert [text.get_text() for text in fig.texts] == ["(a)", "(b)"]
     assert len(fig.legends) == 1

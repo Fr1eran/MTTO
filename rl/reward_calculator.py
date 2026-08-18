@@ -80,8 +80,8 @@ class RewardCalculator:
         terminal_stopping = 0.0
         terminal_punctuality = 0.0
         if transition.terminated:
-            stopping_score = self._stopping_score(state.stop_error_m)
-            punctuality_score = self._punctuality_score(state.operation_time_s)
+            stopping_score = self.stopping_score(state.stop_error_m)
+            punctuality_score = self.punctuality_score(state.operation_time_s)
             terminal_stopping = stopping_score * 15.0
             terminal_punctuality = (
                 punctuality_score * 5.0 + stopping_score**2 * punctuality_score * 20.0
@@ -106,14 +106,42 @@ class RewardCalculator:
             total=total,
         )
 
-    def _stopping_score(self, stop_error_m: float) -> float:
+    def stopping_score(self, stop_error_m: float) -> float:
         beta = 0.8
         delta = max(0.0, abs(stop_error_m) - self.train_service.max_stop_error)
         return 1.0 / (1.0 + (delta / beta) ** 2)
 
-    def _punctuality_score(self, operation_time_s: float) -> float:
+    def punctuality_score(self, operation_time_s: float) -> float:
         time_error = abs(self.train_service.schedule_time - operation_time_s)
         return math.exp(-time_error / 45.0)
+
+    def task_completion(
+        self,
+        *,
+        terminated: bool,
+        truncated: bool,
+        stop_error_m: float,
+        operation_time_s: float,
+        success_base: float = 0.6,
+        stopping_weight: float = 0.25,
+        punctuality_weight: float = 0.15,
+    ) -> float:
+        """Return the bounded terminal task-completion target."""
+        if truncated or not terminated:
+            return 0.0
+        completion = (
+            float(success_base)
+            + float(stopping_weight) * self.stopping_score(stop_error_m)
+            + float(punctuality_weight) * self.punctuality_score(operation_time_s)
+        )
+        return min(1.0, max(0.0, completion))
+
+    # Private aliases retained for callers from earlier project revisions.
+    def _stopping_score(self, stop_error_m: float) -> float:
+        return self.stopping_score(stop_error_m)
+
+    def _punctuality_score(self, operation_time_s: float) -> float:
+        return self.punctuality_score(operation_time_s)
 
     def _reward_safety_potential(self, transition: OperationalTransition) -> float:
         previous = transition.previous_state

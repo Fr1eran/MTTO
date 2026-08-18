@@ -254,9 +254,12 @@ def _calculate_guidance_potentials(
 
 
 def _plot_guidance_boundaries(
-    ax: Axes, field: _SeventhAuxiliaryStopField
-) -> tuple[Line2D, Line2D, Line2D]:
-    """绘制与联合图一致的速度边界与目标位置。"""
+    ax: Axes,
+    field: _SeventhAuxiliaryStopField,
+    *,
+    show_target_position: bool = True,
+) -> tuple[Line2D, Line2D, Line2D | None]:
+    """绘制速度边界，并按需标出仅与停站势函数相关的目标位置。"""
     min_speed_line = ax.plot(
         field.pos_array,
         field.min_speed_profile_mps * 3.6,
@@ -269,11 +272,15 @@ def _plot_guidance_boundaries(
         color="tab:red",
         linewidth=1.2,
     )[0]
-    target_position_line = ax.axvline(
-        field.target_pos,
-        color="black",
-        linestyle="--",
-        linewidth=1.0,
+    target_position_line = (
+        ax.axvline(
+            field.target_pos,
+            color="black",
+            linestyle="--",
+            linewidth=1.0,
+        )
+        if show_target_position
+        else None
     )
     _ = ax.set_xlim(field.pos_array[0], field.pos_array[-1])
     _ = ax.set_ylim(0.0, field.speed_array_mps[-1] * 3.6)
@@ -316,10 +323,11 @@ def plot_guidance_potentials_wide(*, minimal: bool = False) -> Figure:
         vmax=0.0,
     )
 
-    min_speed_line, max_speed_line, target_position_line = _plot_guidance_boundaries(
-        ax_safety, field
+    min_speed_line, max_speed_line, _ = _plot_guidance_boundaries(
+        ax_safety, field, show_target_position=False
     )
-    _ = _plot_guidance_boundaries(ax_stopping, field)
+    _, _, target_position_line = _plot_guidance_boundaries(ax_stopping, field)
+    assert target_position_line is not None
 
     if minimal:
         _apply_minimal_axis_style(ax_safety)
@@ -405,8 +413,8 @@ def plot_safety_potential_heatmap_speed(*, minimal: bool = False) -> Figure:
         vmin=-1.0,
         vmax=0.0,
     )
-    min_speed_line, max_speed_line, target_position_line = _plot_guidance_boundaries(
-        ax, field
+    min_speed_line, max_speed_line, _ = _plot_guidance_boundaries(
+        ax, field, show_target_position=False
     )
 
     if minimal:
@@ -417,10 +425,10 @@ def plot_safety_potential_heatmap_speed(*, minimal: bool = False) -> Figure:
         _ = ax.set_ylabel("Velocity (km/h)")
         ax.grid(True, alpha=0.3, linestyle=":")
         _ = fig.legend(
-            (min_speed_line, max_speed_line, target_position_line),
-            (r"$v_{\min}(x)$", r"$v_{\max}(x)$", "Target position"),
+            (min_speed_line, max_speed_line),
+            (r"$v_{\min}(x)$", r"$v_{\max}(x)$"),
             loc="upper center",
-            ncols=3,
+            ncols=2,
             frameon=False,
             bbox_to_anchor=(0.5, 0.925),
         )

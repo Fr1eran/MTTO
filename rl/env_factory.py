@@ -4,6 +4,7 @@ from numpy.typing import NDArray
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
+from rl.completion_critic import CompletionDSPDLConfig, CompletionTrajectoryAccumulator
 from rl.context_pool import ContextPool
 from rl.context_sampler import ContextSampler
 from rl.dspdl import DSPDLEpisodeAccumulator
@@ -28,10 +29,16 @@ def make_env(
     initial_context_distribution: NDArray[np.floating] | list[float] | None = None,
     context_sampling_seed: int | None = None,
     enable_dspdl_accumulator: bool = False,
+    enable_completion_accumulator: bool = False,
+    completion_config: CompletionDSPDLConfig | None = None,
     enable_safety_truncation_tracking: bool = False,
     reward_diagnostics_worker_rank: int | None = None,
     reward_diagnostics_rollout_capacity: int | None = None,
 ):
+    if enable_dspdl_accumulator and enable_completion_accumulator:
+        raise ValueError(
+            "legacy and completion DSPDL accumulators are mutually exclusive"
+        )
     if (reward_diagnostics_worker_rank is None) != (
         reward_diagnostics_rollout_capacity is None
     ):
@@ -77,5 +84,13 @@ def make_env(
             env.dspdl_accumulator = DSPDLEpisodeAccumulator(
                 context_count=context_pool.context_count,
                 gamma=gamma,
+            )
+        if enable_completion_accumulator:
+            config = completion_config or CompletionDSPDLConfig()
+            env.completion_accumulator = CompletionTrajectoryAccumulator(
+                observation_shape=env.observation_space.shape,
+                success_base=config.success_base,
+                stopping_weight=config.stopping_weight,
+                punctuality_weight=config.punctuality_weight,
             )
     return env

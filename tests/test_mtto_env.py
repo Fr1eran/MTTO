@@ -11,6 +11,7 @@ from numpy.typing import NDArray
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo, get_slope_scalar_numba
 from model.vehicle import VehicleInfo, calc_levi_deceleration_scalar_numba
+from rl.completion_critic import CompletionTrajectoryAccumulator
 from rl.context_pool import Context
 from rl.context_sampler import ContextSampler
 from rl.dspdl import DSPDLEpisodeAccumulator
@@ -33,6 +34,7 @@ from utils.data_loader import (
 class _MTTOEnvOverrides(TypedDict, total=False):
     context_sampler: ContextSampler | None
     dspdl_accumulator: DSPDLEpisodeAccumulator | None
+    completion_accumulator: CompletionTrajectoryAccumulator | None
     enable_trajectory_tracking: bool
     safety_truncation_buffer: SafetyTruncationBuffer | None
 
@@ -157,9 +159,7 @@ def test_reset(mtto_env: MTTOEnv):
     np.testing.assert_allclose(obs[8], 0.0)  # current_slope
     np.testing.assert_allclose(
         obs[9],
-        mtto_env.observation_builder.get_lookahead_avg_slope(
-            mtto_env.state.step_count
-        )
+        mtto_env.observation_builder.get_lookahead_avg_slope(mtto_env.state.step_count)
         / mtto_env.vehicle.max_slope_capacity,
     )  # lookahead_avg_slope
     np.testing.assert_allclose(
@@ -237,6 +237,31 @@ def test_reset_can_sample_context_and_collect_dspdl_statistics(
     assert sampler.updated is not None
     np.testing.assert_array_equal(sampler.updated[0], [1.0])
     assert sampler.updated[1] == 1
+    assert accumulator.accepted_version == 1
+
+
+def test_reset_and_step_collect_completion_decision_states(mtto_env: MTTOEnv) -> None:
+    reference_state = mtto_env.stepper.reset()
+    sampler = _ContextSamplerStub(reference_state)
+    accumulator = CompletionTrajectoryAccumulator(observation_shape=(12,))
+    env = _build_env_like(
+        mtto_env,
+        context_sampler=cast(ContextSampler, cast(object, sampler)),
+        completion_accumulator=accumulator,
+    )
+
+    initial_observation, _ = env.reset()
+    assert len(accumulator._active_observations) == 1
+    np.testing.assert_allclose(accumulator._active_observations[0], initial_observation)
+
+    _, _, terminated, truncated, _ = env.step(np.asarray([0.0], dtype=np.float32))
+    if terminated or truncated:
+        payload = env.drain_completion_trajectories()
+        assert cast(np.ndarray, payload["observations"]).shape[0] == 1
+    else:
+        assert len(accumulator._active_observations) == 2
+
+    env.set_dspdl_distribution([1.0], version=1)
     assert accumulator.accepted_version == 1
 
 

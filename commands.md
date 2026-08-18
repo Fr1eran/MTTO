@@ -135,6 +135,13 @@ uv run python -m scripts.train_rl \
   --device cpu
 ```
 
+将上述命令中的课程配置改为以下值，可启用基于任务完成度的 DSPDL，同时保留旧
+`dspdl` 配置用于对照：
+
+```bash
+  --curriculum-profile dspdl_completion
+```
+
 使用 CUDA 训练时，将上述命令末尾的 `--device cpu` 改为 `--device cuda`。
 
 查看 TensorBoard：

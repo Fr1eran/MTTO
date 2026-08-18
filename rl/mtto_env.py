@@ -13,6 +13,7 @@ from numpy.typing import NDArray
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
+from rl.completion_critic import CompletionTrajectoryAccumulator
 from rl.context_sampler import ContextSampler
 from rl.dspdl import DSPDLEpisodeAccumulator
 from rl.observation_builder import ObservationBuilder
@@ -62,6 +63,7 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         reward_config: RewardConfig | None = None,
         context_sampler: ContextSampler | None = None,
         dspdl_accumulator: DSPDLEpisodeAccumulator | None = None,
+        completion_accumulator: CompletionTrajectoryAccumulator | None = None,
         safety_truncation_buffer: SafetyTruncationBuffer | None = None,
         reward_diagnostics_accumulator: RewardDiagnosticsAccumulator | None = None,
     ) -> None:
@@ -99,6 +101,7 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         self.reward_config: RewardConfig = self.reward_calculator.reward_config
         self.context_sampler = context_sampler
         self.dspdl_accumulator = dspdl_accumulator
+        self.completion_accumulator = completion_accumulator
         self.safety_truncation_buffer = safety_truncation_buffer
         self.reward_diagnostics_accumulator = reward_diagnostics_accumulator
         self.state: OperationalState = self.stepper.reset()
@@ -140,7 +143,7 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
     ) -> None:
         """Atomically validate and install the next DSPDL distribution."""
         sampler = self.context_sampler
-        accumulator = self.dspdl_accumulator
+        accumulator = self.dspdl_accumulator or self.completion_accumulator
         if sampler is None or accumulator is None:
             raise RuntimeError("DSPDL components are not configured")
         new_version = accumulator.validate_version_update(version)
@@ -157,6 +160,15 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         accumulator = self.dspdl_accumulator
         if accumulator is not None:
             accumulator.disable()
+        completion_accumulator = self.completion_accumulator
+        if completion_accumulator is not None:
+            completion_accumulator.disable()
+
+    def drain_completion_trajectories(self) -> dict[str, object]:
+        accumulator = self.completion_accumulator
+        if accumulator is None:
+            raise RuntimeError("completion accumulator is not configured")
+        return accumulator.drain()
 
     def drain_safety_truncations(self) -> SafetyTruncationBatch:
         buffer = self.safety_truncation_buffer
@@ -214,7 +226,10 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         self._comfort_tav = self._comfort_sum_sq_delta_acc = 0.0
         self._comfort_exceedance_count = 0
         self._reset_trajectory()
-        return self.observation_builder.build(self.state), {}
+        observation = self.observation_builder.build(self.state)
+        if self.completion_accumulator is not None:
+            self.completion_accumulator.begin_episode(observation)
+        return observation, {}
 
     @override
     def step(
@@ -225,6 +240,7 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         transition = self.stepper.advance(self.state, acceleration)
         reward = self.reward_calculator.calculate(transition)
         self.state = transition.next_state
+        next_observation = self.observation_builder.build(self.state)
         self.outcome_info = {
             "terminated": bool(transition.terminated),
             "truncated": bool(transition.truncated),
@@ -233,6 +249,28 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
             self.dspdl_accumulator.record_transition(
                 reward.total,
                 done=bool(transition.terminated or transition.truncated),
+            )
+        if self.completion_accumulator is not None:
+            success_base, stopping_weight, punctuality_weight = (
+                self.completion_accumulator.completion_weights
+            )
+            completion = self.reward_calculator.task_completion(
+                terminated=bool(transition.terminated),
+                truncated=bool(transition.truncated),
+                stop_error_m=self.state.stop_error_m,
+                operation_time_s=self.state.operation_time_s,
+                success_base=success_base,
+                stopping_weight=stopping_weight,
+                punctuality_weight=punctuality_weight,
+            )
+            self.completion_accumulator.record_transition(
+                next_observation,
+                done=bool(transition.terminated or transition.truncated),
+                completion=(
+                    completion
+                    if transition.terminated or transition.truncated
+                    else None
+                ),
             )
         if self.safety_truncation_buffer is not None:
             self.safety_truncation_buffer.record(
@@ -264,7 +302,7 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
             info = self._get_basic_info()
             info.update(outcome=dict(self.outcome_info))
         return (
-            self.observation_builder.build(self.state),
+            next_observation,
             reward.total,
             transition.terminated,
             transition.truncated,

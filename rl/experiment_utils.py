@@ -32,6 +32,11 @@ from rl.callbacks import (
     SafetyTruncationPositionHistogramCallback,
     ScheduledPolicyEvaluationCallback,
 )
+from rl.completion_critic import (
+    CompletionDSPDLCallback,
+    CompletionDSPDLConfig,
+    completion_critic_metadata,
+)
 from rl.context_pool import ContextPool, ContextPoolBuilder
 from rl.dp_trajectory_reader import DPTrajectoryReader
 from rl.dspdl import DSPDLCallback, DSPDLConfig
@@ -66,6 +71,7 @@ __all__ = [
     "DEFAULT_CURRICULUM_PROFILE_NAME",
     # dataclass
     "DSPDLConfig",
+    "CompletionDSPDLConfig",
     "RewardPreset",
     "TrainingRunSpec",
     # reward preset
@@ -164,7 +170,7 @@ class RewardPreset:
         }
 
 
-CurriculumProfileName = Literal["none", "dspdl"]
+CurriculumProfileName = Literal["none", "dspdl", "dspdl_completion"]
 
 
 @dataclass(frozen=True)
@@ -176,7 +182,7 @@ class TrainingRunSpec:
     reward_discount: float
     reward_preset: RewardPreset
     curriculum_profile: CurriculumProfileName
-    dspdl_config: DSPDLConfig | None
+    dspdl_config: DSPDLConfig | CompletionDSPDLConfig | None
     reference_curve_dir: str | None
     reference_curve_artifact_path: str | None
     reference_curve_metrics_path: str | None
@@ -259,7 +265,7 @@ def reward_preset_names() -> tuple[str, ...]:
 
 
 def curriculum_profile_names() -> tuple[str, ...]:
-    return ("none", "dspdl")
+    return ("none", "dspdl", "dspdl_completion")
 
 
 def resolve_curriculum_profile_name(
@@ -352,7 +358,7 @@ def _build_experiment_token(
     curriculum_profile = resolve_curriculum_profile_name(curriculum_profile_name)
 
     tokens = [f"{schedule_token}_{step_token}", preset.name]
-    if curriculum_profile == "dspdl":
+    if curriculum_profile != "none":
         tokens.append(curriculum_profile)
     if experiment_tag:
         tokens.append(_sanitize_identifier_token(experiment_tag))
@@ -435,7 +441,7 @@ def build_run_metadata(
     *,
     reward_preset: RewardPreset,
     curriculum_profile: CurriculumProfileName = DEFAULT_CURRICULUM_PROFILE_NAME,
-    dspdl_config: DSPDLConfig | None = None,
+    dspdl_config: DSPDLConfig | CompletionDSPDLConfig | None = None,
     reference_curve_dir: str | None = None,
     reference_curve_artifact_path: str | None = None,
     reference_curve_metrics_path: str | None = None,
@@ -496,15 +502,36 @@ def build_run_metadata(
     """
     metadata = reward_preset.to_metadata()
     resolved_curriculum = resolve_curriculum_profile_name(curriculum_profile)
-    curriculum_enabled = resolved_curriculum == "dspdl"
+    curriculum_enabled = resolved_curriculum != "none"
     resolved_dspdl_config = (
-        (dspdl_config if dspdl_config is not None else DSPDLConfig())
+        (
+            dspdl_config
+            if dspdl_config is not None
+            else (
+                CompletionDSPDLConfig()
+                if resolved_curriculum == "dspdl_completion"
+                else DSPDLConfig()
+            )
+        )
         if curriculum_enabled
         else None
     )
+    if resolved_curriculum == "dspdl_completion" and not isinstance(
+        resolved_dspdl_config, CompletionDSPDLConfig
+    ):
+        raise TypeError("completion DSPDL metadata requires CompletionDSPDLConfig")
+    if resolved_curriculum == "dspdl" and not isinstance(
+        resolved_dspdl_config, DSPDLConfig
+    ):
+        raise TypeError("legacy DSPDL metadata requires DSPDLConfig")
     metadata["curriculum"] = {
         "profile_name": resolved_curriculum,
         "enabled": curriculum_enabled,
+        "value_source": (
+            "task_completion"
+            if resolved_curriculum == "dspdl_completion"
+            else ("ppo_critic_return" if curriculum_enabled else None)
+        ),
         "dspdl_config": (
             asdict(resolved_dspdl_config) if resolved_dspdl_config is not None else None
         ),
@@ -514,6 +541,7 @@ def build_run_metadata(
         "rl_step_distance_m": (float(step_distance) if curriculum_enabled else None),
         "context_count": None,
         "initial_curriculum_version": (0 if curriculum_enabled else None),
+        "completion_critic": None,
     }
 
     metadata.update(
@@ -555,9 +583,7 @@ def build_run_metadata(
     if safety_truncation_bin_size_m is not None:
         metadata["safety_truncation_bin_size_m"] = float(safety_truncation_bin_size_m)
     if evaluation_interval_rollouts is not None:
-        metadata["evaluation_interval_rollouts"] = int(
-            evaluation_interval_rollouts
-        )
+        metadata["evaluation_interval_rollouts"] = int(evaluation_interval_rollouts)
     if evaluation_deterministic is not None:
         metadata["evaluation_deterministic"] = bool(evaluation_deterministic)
     if evaluation_history_path is not None:
@@ -657,6 +683,7 @@ def build_default_training_args() -> argparse.Namespace:
         reward_preset=DEFAULT_REWARD_PRESET_NAME,
         curriculum_profile=DEFAULT_CURRICULUM_PROFILE_NAME,
         reference_curve_dir=None,
+        completion_alpha_max=None,
         experiment_tag=None,
         run_mode="tune",
         enable_tb=None,
@@ -819,10 +846,31 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
     curriculum_profile = resolve_curriculum_profile_name(
         getattr(args, "curriculum_profile", DEFAULT_CURRICULUM_PROFILE_NAME)
     )
-    dspdl_config = DSPDLConfig() if curriculum_profile == "dspdl" else None
+    dspdl_config: DSPDLConfig | CompletionDSPDLConfig | None
+    if curriculum_profile == "dspdl":
+        dspdl_config = DSPDLConfig()
+    elif curriculum_profile == "dspdl_completion":
+        dspdl_config = CompletionDSPDLConfig()
+    else:
+        dspdl_config = None
+    completion_alpha_max = getattr(args, "completion_alpha_max", None)
+    if completion_alpha_max is not None:
+        if curriculum_profile != "dspdl_completion" or not isinstance(
+            dspdl_config, CompletionDSPDLConfig
+        ):
+            raise ValueError("completion_alpha_max is only valid with dspdl_completion")
+        resolved_alpha_max = float(completion_alpha_max)
+        if (
+            not math.isfinite(resolved_alpha_max)
+            or resolved_alpha_max < dspdl_config.alpha_min
+        ):
+            raise ValueError(
+                "completion_alpha_max must be finite and not smaller than alpha_min"
+            )
+        dspdl_config = replace(dspdl_config, alpha_max=resolved_alpha_max)
     reference_curve_dir_raw = getattr(args, "reference_curve_dir", None)
     reference_curve_dir: str | None = None
-    if curriculum_profile == "dspdl":
+    if curriculum_profile != "none":
         if (
             not isinstance(reference_curve_dir_raw, str)
             or not reference_curve_dir_raw.strip()
@@ -913,9 +961,7 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
         enable_best_evaluation_artifacts=bool(enable_best_evaluation_artifacts),
         enable_safety_truncation_histogram=bool(enable_safety_truncation_histogram),
         safety_truncation_bin_size_m=safety_truncation_bin_size_m,
-        evaluation_interval_rollouts=max(
-            1, int(args.evaluation_interval_rollouts)
-        ),
+        evaluation_interval_rollouts=max(1, int(args.evaluation_interval_rollouts)),
         evaluation_deterministic=bool(args.evaluation_deterministic),
         evaluation_history_path=evaluation_history_path,
         num_envs=int(num_envs),
@@ -965,9 +1011,7 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
         use_subproc=bool(use_subproc),
         resolved_vec_env_type=resolved_vec_env_type,
         subproc_start_method=subproc_start_method,
-        evaluation_interval_rollouts=max(
-            1, int(args.evaluation_interval_rollouts)
-        ),
+        evaluation_interval_rollouts=max(1, int(args.evaluation_interval_rollouts)),
         evaluation_deterministic=bool(args.evaluation_deterministic),
         evaluation_history_path=evaluation_history_path,
         enable_safety_truncation_histogram=bool(enable_safety_truncation_histogram),
@@ -1012,6 +1056,8 @@ def _build_env_initializer(
     initial_context_distribution: np.ndarray | None = None,
     context_sampling_seed: int | None = None,
     enable_dspdl_accumulator: bool = False,
+    enable_completion_accumulator: bool = False,
+    completion_config: CompletionDSPDLConfig | None = None,
     enable_safety_truncation_tracking: bool = False,
 ) -> Callable[[], Any]:
     def _init():
@@ -1028,6 +1074,8 @@ def _build_env_initializer(
             initial_context_distribution=initial_context_distribution,
             context_sampling_seed=context_sampling_seed,
             enable_dspdl_accumulator=enable_dspdl_accumulator,
+            enable_completion_accumulator=enable_completion_accumulator,
+            completion_config=completion_config,
             enable_safety_truncation_tracking=enable_safety_truncation_tracking,
             reward_diagnostics_worker_rank=worker_rank,
             reward_diagnostics_rollout_capacity=rollout_capacity,
@@ -1068,7 +1116,7 @@ def train_single_experiment(
     context_pool: ContextPool | None = None
     initial_context_distribution: np.ndarray | None = None
     curriculum_callback: BaseCallback | None = None
-    if resolved_spec.curriculum_profile == "dspdl":
+    if resolved_spec.curriculum_profile != "none":
         if resolved_spec.reference_curve_dir is None:
             raise RuntimeError("enabled curriculum is missing reference_curve_dir")
         artifact = DPTrajectoryReader.resolve_matching_artifact(
@@ -1108,11 +1156,25 @@ def train_single_experiment(
             ],
             axis=0,
         )
-        curriculum_callback = DSPDLCallback(
-            context_pool=context_pool,
-            context_observations=context_observations,
-            config=resolved_spec.dspdl_config,
-        )
+        if resolved_spec.curriculum_profile == "dspdl_completion":
+            if not isinstance(resolved_spec.dspdl_config, CompletionDSPDLConfig):
+                raise TypeError(
+                    "completion DSPDL curriculum has an invalid configuration"
+                )
+            curriculum_callback = CompletionDSPDLCallback(
+                context_pool=context_pool,
+                context_observations=context_observations,
+                config=resolved_spec.dspdl_config,
+                seed=resolved_spec.seed,
+            )
+        else:
+            if not isinstance(resolved_spec.dspdl_config, DSPDLConfig):
+                raise TypeError("legacy DSPDL curriculum has an invalid configuration")
+            curriculum_callback = DSPDLCallback(
+                context_pool=context_pool,
+                context_observations=context_observations,
+                config=resolved_spec.dspdl_config,
+            )
         initial_context_distribution = (
             curriculum_callback.initial_context_distribution()
         )
@@ -1155,7 +1217,15 @@ def train_single_experiment(
             context_sampling_seed=(
                 None if resolved_spec.seed is None else resolved_spec.seed + env_rank
             ),
-            enable_dspdl_accumulator=context_pool is not None,
+            enable_dspdl_accumulator=(resolved_spec.curriculum_profile == "dspdl"),
+            enable_completion_accumulator=(
+                resolved_spec.curriculum_profile == "dspdl_completion"
+            ),
+            completion_config=(
+                resolved_spec.dspdl_config
+                if isinstance(resolved_spec.dspdl_config, CompletionDSPDLConfig)
+                else None
+            ),
             enable_safety_truncation_tracking=(
                 resolved_spec.enable_safety_truncation_histogram
             ),
@@ -1200,6 +1270,14 @@ def train_single_experiment(
             net_arch=dict(pi=[64, 64], vf=[64, 64]),
         ),
     )
+
+    if resolved_spec.curriculum_profile == "dspdl_completion":
+        curriculum_metadata = dict(resolved_spec.run_metadata["curriculum"])
+        curriculum_metadata["completion_critic"] = completion_critic_metadata(model)
+        resolved_metadata = dict(resolved_spec.run_metadata)
+        resolved_metadata["curriculum"] = curriculum_metadata
+        resolved_spec = replace(resolved_spec, run_metadata=resolved_metadata)
+        _ = save_run_metadata(resolved_spec.output_dir, resolved_spec.run_metadata)
 
     callbacks: list[BaseCallback] = []
     if curriculum_callback is not None:

@@ -43,6 +43,30 @@ def calculator() -> RewardCalculator:
     )
 
 
+def test_task_completion_is_bounded_and_zero_for_unsuccessful_episodes(
+    calculator: RewardCalculator,
+) -> None:
+    assert calculator.task_completion(
+        terminated=False,
+        truncated=True,
+        stop_error_m=0.0,
+        operation_time_s=calculator.train_service.schedule_time,
+    ) == pytest.approx(0.0)
+    assert calculator.task_completion(
+        terminated=True,
+        truncated=False,
+        stop_error_m=0.0,
+        operation_time_s=calculator.train_service.schedule_time,
+    ) == pytest.approx(1.0)
+    completion = calculator.task_completion(
+        terminated=True,
+        truncated=False,
+        stop_error_m=calculator.train_service.max_stop_error + 100.0,
+        operation_time_s=calculator.train_service.schedule_time + 1000.0,
+    )
+    assert 0.6 <= completion <= 1.0
+
+
 def test_dense_reward_includes_energy_comfort_and_survival(
     calculator: RewardCalculator,
 ) -> None:

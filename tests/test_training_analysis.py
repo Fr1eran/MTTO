@@ -843,6 +843,63 @@ def test_train_rl_cli_resolves_dspdl_profile(tmp_path: Path) -> None:
     assert "dspdl" in Path(spec.output_dir).name
 
 
+def test_train_rl_cli_resolves_completion_dspdl_profile(tmp_path: Path) -> None:
+    parser = build_train_rl_arg_parser()
+    args = parser.parse_args(
+        [
+            "--curriculum-profile",
+            "dspdl_completion",
+            "--reference-curve-dir",
+            str(tmp_path),
+            "--dry-run",
+        ]
+    )
+
+    spec = resolve_training_run_spec(args)
+    assert spec.curriculum_profile == "dspdl_completion"
+    assert spec.dspdl_config is not None
+    curriculum = spec.run_metadata["curriculum"]
+    config = curriculum["dspdl_config"]
+    assert curriculum["profile_name"] == "dspdl_completion"
+    assert curriculum["enabled"] is True
+    assert curriculum["value_source"] == "task_completion"
+    assert config["zeta"] == pytest.approx(1.0)
+    assert config["completion_floor"] == pytest.approx(0.1)
+    assert config["completion_ema_alpha"] == pytest.approx(0.1)
+    assert config["alpha_min"] == pytest.approx(0.01)
+    assert config["alpha_max"] == pytest.approx(0.05)
+    assert "dspdl_completion" in Path(spec.output_dir).name
+
+
+def test_train_rl_cli_overrides_completion_alpha_max(tmp_path: Path) -> None:
+    parser = build_train_rl_arg_parser()
+    args = parser.parse_args(
+        [
+            "--curriculum-profile",
+            "dspdl_completion",
+            "--completion-alpha-max",
+            "0.05",
+            "--reference-curve-dir",
+            str(tmp_path),
+            "--dry-run",
+        ]
+    )
+
+    spec = resolve_training_run_spec(args)
+    assert spec.dspdl_config is not None
+    assert spec.run_metadata["curriculum"]["dspdl_config"]["alpha_max"] == (
+        pytest.approx(0.05)
+    )
+
+
+def test_completion_alpha_max_rejects_noncompletion_profile() -> None:
+    parser = build_train_rl_arg_parser()
+    args = parser.parse_args(["--completion-alpha-max", "0.05", "--dry-run"])
+
+    with pytest.raises(ValueError, match="only valid with dspdl_completion"):
+        _ = resolve_training_run_spec(args)
+
+
 def test_train_rl_curriculum_requires_existing_reference_directory() -> None:
     parser = build_train_rl_arg_parser()
     args = parser.parse_args(["--curriculum-profile", "dspdl"])
