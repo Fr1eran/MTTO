@@ -18,6 +18,7 @@ from stable_baselines3.common.torch_layers import MlpExtractor
 from stable_baselines3.common.utils import explained_variance, update_learning_rate
 
 from rl.context_pool import ContextPool
+from rl.context_sampler import CurriculumDistributionState
 from rl.dspdl import DSPDLDistributionSolver
 
 __all__ = [
@@ -481,8 +482,10 @@ class CompletionDSPDLCallback(BaseCallback):
         )
         self._start_index = int(np.argmax(context_pool.remaining_distances_m))
         self._target_distribution = self._build_target_distribution()
-        self._current_distribution = self._build_initial_distribution()
-        self._version = 0
+        self._distribution_state = CurriculumDistributionState(
+            context_count=context_pool.context_count,
+            initial_distribution=self._build_initial_distribution(),
+        )
         self._rollouts_since_update_attempt = 0
         self._converged = False
         self._completion_ema: float | None = None
@@ -493,7 +496,11 @@ class CompletionDSPDLCallback(BaseCallback):
         self._buffer: CompletionBuffer | None = None
 
     def initial_context_distribution(self) -> NDArray[np.float64]:
-        return self._current_distribution.copy()
+        return self._distribution_state.distribution
+
+    @property
+    def distribution_state(self) -> CurriculumDistributionState:
+        return self._distribution_state
 
     @property
     def target_context_distribution(self) -> NDArray[np.float64]:
@@ -616,7 +623,7 @@ class CompletionDSPDLCallback(BaseCallback):
         if self._converged or self._critic is None:
             return
         target_kl = self._solver.kl_divergence(
-            self._current_distribution, self._target_distribution
+            self._distribution_state.distribution, self._target_distribution
         )
         if target_kl <= self._config.target_kl_stop:
             self._mark_converged()
@@ -641,9 +648,10 @@ class CompletionDSPDLCallback(BaseCallback):
         alpha = float(np.clip(alpha, self._config.alpha_min, self._config.alpha_max))
         self._record_scalar("dspdl/alpha", alpha)
         try:
+            current_distribution = self._distribution_state.distribution
             candidate = self._solver.solve(
                 context_values=values.astype(np.float64),
-                current_distribution=self._current_distribution,
+                current_distribution=current_distribution,
                 target_distribution=self._target_distribution,
                 alpha=alpha,
             )
@@ -652,7 +660,7 @@ class CompletionDSPDLCallback(BaseCallback):
                 print(f"Completion DSPDL update skipped: {exc}")
             return
         if (
-            candidate.shape != self._current_distribution.shape
+            candidate.shape != current_distribution.shape
             or not np.all(np.isfinite(candidate))
             or np.any(candidate <= 0.0)
             or not np.isclose(float(np.sum(candidate)), 1.0)
@@ -663,13 +671,14 @@ class CompletionDSPDLCallback(BaseCallback):
             <= self._config.target_kl_stop
         )
         if not np.allclose(
-            candidate, self._current_distribution, rtol=1e-10, atol=1e-12
+            candidate, current_distribution, rtol=1e-10, atol=1e-12
         ):
-            self._version += 1
+            next_version = self._distribution_state.version + 1
             self.training_env.env_method(
-                "set_dspdl_distribution", candidate, version=self._version
+                "validate_dspdl_version", next_version
             )
-            self._current_distribution = candidate
+            self._distribution_state.update(candidate, version=next_version)
+            self.training_env.env_method("commit_dspdl_version", next_version)
         if reaches_target:
             self._mark_converged()
 

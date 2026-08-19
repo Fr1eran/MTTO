@@ -1,6 +1,3 @@
-from collections.abc import Callable
-from typing import cast
-
 import numpy as np
 from numba import (
     njit,
@@ -15,10 +12,6 @@ from model.vehicle import (
     calc_levi_deceleration,
     calc_levi_deceleration_scalar_numba,
 )
-from utils.type_utils import ScalarNumeric
-
-Numeric = float | np.floating | NDArray[np.floating]
-AccFunc = Callable[[Numeric, Numeric], Numeric]
 
 
 @njit(cache=True)
@@ -142,91 +135,54 @@ class SafeGuardCurves:
         self,
         begins: NDArray[np.floating],
         ds: float,
-        dec_func: AccFunc,
         *,
-        dec_mode: int | None = None,
-        vehicle: VehicleInfo | None = None,
+        dec_mode: int,
+        vehicle: VehicleInfo,
     ) -> list[NDArray[np.float64]]:
-        """
-        通用防护曲线计算方法
-        Args:
-            begins: 起点数组(apoffsets或dpoffsets)
-            ds: 距离步长
-            dec_func: 减速度大小函数，签名为 dec_func(speed, slope, *args)
-        Returns:
-            [np.ndarray[pos_array, speed_array], ...]
-        """
-        if dec_mode is not None and vehicle is not None:
-            mass = float(vehicle.mass)
-            numoftrainsets = float(vehicle.numoftrainsets)
-            curve_list = []
-            for i in range(len(begins)):
-                begin = float(begins[i])
-                pos_desc = np.arange(begin, 0.0, -ds)
-                slopes = np.asarray(
-                    get_slope(
-                        pos_desc,
-                        self.track.slopes,
-                        self.track.slope_intervals,
-                    ),
-                    dtype=np.float64,
-                )
-                speed_limits = np.asarray(
-                    get_speed_limit(
-                        pos_desc,
-                        self.track.speed_limits,
-                        self.track.speed_limit_intervals,
-                    ),
-                    dtype=np.float64,
-                )
-                pos_arr, speed_arr = _build_curve_backward_with_truncate_numba(
-                    begin=begin,
-                    ds=ds,
-                    slopes=slopes,
-                    speed_limits=speed_limits,
-                    mass=mass,
-                    numoftrainsets=numoftrainsets,
-                    dec_mode=dec_mode,
-                )
-                curve_list.append(
-                    np.stack([pos_arr, speed_arr], axis=0, dtype=np.float64)
-                )
-            return curve_list
+        """向后推导具有分段限速截断特性的安全防护曲线（Numba 加速）。
 
-        curve_list = []
+        Args:
+            begins: 起点数组 (apoffsets 或 dpoffsets)。
+            ds: 空间采样步长 (m)。
+            dec_mode: 0 表示悬浮减速度，1 表示制动减速度。
+            vehicle: 列车参数模型。
+
+        Returns:
+            list[NDArray[np.float64]]: 各目标点对应的 (位置, 速度) 曲线数组列表。
+        """
+        mass = float(vehicle.mass)
+        numoftrainsets = float(vehicle.numoftrainsets)
+        curve_list: list[NDArray[np.float64]] = []
         for i in range(len(begins)):
-            speed = 0.0  # 初速度
-            pos = begins[i]  # 初位置
-            max_steps = int(pos // ds)
-            speed_arr = np.empty(max_steps + 1)
-            pos_desc = np.arange(pos, 0.0, -ds)
-            slopes = get_slope(
-                pos_desc,
-                self.track.slopes,
-                self.track.slope_intervals,
+            begin = float(begins[i])
+            pos_desc = np.arange(begin, 0.0, -ds)
+            slopes = np.asarray(
+                get_slope(
+                    pos_desc,
+                    self.track.slopes,
+                    self.track.slope_intervals,
+                ),
+                dtype=np.float64,
             )
-            speed_limits = get_speed_limit(
-                pos_desc,
-                self.track.speed_limits,
-                self.track.speed_limit_intervals,
+            speed_limits = np.asarray(
+                get_speed_limit(
+                    pos_desc,
+                    self.track.speed_limits,
+                    self.track.speed_limit_intervals,
+                ),
+                dtype=np.float64,
             )
-            idx = 0
-            speed_arr[0] = 0.0
-            for j in range(max_steps):
-                dec = dec_func(speed, slopes[j])
-                next_speed_squared = speed**2 + 2 * dec * ds
-                next_speed = np.sqrt(next_speed_squared)
-                if next_speed >= speed_limits[j]:
-                    break
-                pos = pos - ds
-                speed = next_speed
-                idx += 1
-                speed_arr[idx] = next_speed
-            pos_arr = np.arange(begins[i], pos, -ds)
+            pos_arr, speed_arr = _build_curve_backward_with_truncate_numba(
+                begin=begin,
+                ds=ds,
+                slopes=slopes,
+                speed_limits=speed_limits,
+                mass=mass,
+                numoftrainsets=numoftrainsets,
+                dec_mode=dec_mode,
+            )
             curve_list.append(
-                np.stack(
-                    [pos_arr[::-1], speed_arr[:idx][::-1]], axis=0, dtype=np.float64
-                )
+                np.stack([pos_arr, speed_arr], axis=0, dtype=np.float64)
             )
         return curve_list
 
@@ -234,70 +190,51 @@ class SafeGuardCurves:
         self,
         begins: NDArray[np.floating],
         ds: float,
-        dec_func: AccFunc,
         *,
-        dec_mode: int | None = None,
-        vehicle: VehicleInfo | None = None,
+        dec_mode: int,
+        vehicle: VehicleInfo,
     ) -> list[NDArray[np.float64]]:
-        """
-        通用防护曲线计算方法
-        Args:
-            begins: 起点数组(apoffsets或dpoffsets)
-            ds: 距离步长
-            dec_func: 减速度大小函数，签名为 dec_func(speed, slope, *args)
-        Returns:
-            [np.ndarray[pos_array, speed_array], ...]
-        """
-        if dec_mode is not None and vehicle is not None:
-            mass = float(vehicle.mass)
-            numoftrainsets = float(vehicle.numoftrainsets)
-            curve_list = []
-            for i in range(len(begins)):
-                begin = float(begins[i])
-                pos_desc = np.arange(begin, 0.0, -ds)
-                slopes = np.asarray(
-                    get_slope(
-                        pos_desc,
-                        self.track.slopes,
-                        self.track.slope_intervals,
-                    ),
-                    dtype=np.float64,
-                )
-                pos_arr, speed_arr = _build_curve_backward_without_truncate_numba(
-                    begin=begin,
-                    ds=ds,
-                    slopes=slopes,
-                    mass=mass,
-                    numoftrainsets=numoftrainsets,
-                    dec_mode=dec_mode,
-                )
-                curve_list.append(
-                    np.stack([pos_arr, speed_arr], axis=0, dtype=np.float64)
-                )
-            return curve_list
+        """向后推导不带分段限速截断的安全防护基础曲线（Numba 加速）。
 
-        curve_list = []
+        Args:
+            begins: 起点数组 (apoffsets 或 dpoffsets)。
+            ds: 空间采样步长 (m)。
+            dec_mode: 0 表示悬浮减速度，1 表示制动减速度。
+            vehicle: 列车参数模型。
+
+        Returns:
+            list[NDArray[np.float64]]: 各目标点对应的 (位置, 速度) 曲线数组列表。
+        """
+        mass = float(vehicle.mass)
+        numoftrainsets = float(vehicle.numoftrainsets)
+        curve_list: list[NDArray[np.float64]] = []
         for i in range(len(begins)):
-            speed = 0.0  # 初速度
-            pos_arr = np.arange(begins[i], 0.0, -ds)
-            speed_arr = np.zeros_like(pos_arr)
-            slopes = get_slope(
-                pos_arr,
-                self.track.slopes,
-                self.track.slope_intervals,
+            begin = float(begins[i])
+            pos_desc = np.arange(begin, 0.0, -ds)
+            slopes = np.asarray(
+                get_slope(
+                    pos_desc,
+                    self.track.slopes,
+                    self.track.slope_intervals,
+                ),
+                dtype=np.float64,
             )
-            for j in range(1, speed_arr.shape[0]):
-                dec = dec_func(speed, slopes[j - 1])
-                next_speed_squared = speed**2 + 2 * dec * ds
-                next_speed = np.sqrt(next_speed_squared)
-                speed = next_speed
-                speed_arr[j] = next_speed
+            pos_arr, speed_arr = _build_curve_backward_without_truncate_numba(
+                begin=begin,
+                ds=ds,
+                slopes=slopes,
+                mass=mass,
+                numoftrainsets=numoftrainsets,
+                dec_mode=dec_mode,
+            )
             curve_list.append(
-                np.stack([pos_arr[::-1], speed_arr[::-1]], axis=0, dtype=np.float64)
+                np.stack([pos_arr, speed_arr], axis=0, dtype=np.float64)
             )
         return curve_list
 
-    def _get_deccelerate_for_min_curves(self, speed: Numeric, vehicle: VehicleInfo):
+    def _get_deccelerate_for_min_curves(
+        self, speed: float | NDArray[np.floating], vehicle: VehicleInfo
+    ):
         """
         获得计算最小速度曲线时的减速度大小
 
@@ -565,12 +502,6 @@ class SafeGuardCurves:
         return self._calculate_curves_backward_with_truncate(
             apoffsets,
             ds,
-            lambda speed, slope: calc_levi_deceleration(
-                mass=vehicle.mass,
-                numoftrainsets=vehicle.numoftrainsets,
-                speed=cast(NDArray[np.floating], speed),
-                slope=cast(ScalarNumeric | NDArray[np.floating], slope),
-            ),
             dec_mode=0,
             vehicle=vehicle,
         )
@@ -604,12 +535,6 @@ class SafeGuardCurves:
             self._calculate_curves_backward_without_truncate(
                 apoffsets,
                 ds,
-                lambda speed, slope: calc_levi_deceleration(
-                    mass=vehicle.mass,
-                    numoftrainsets=vehicle.numoftrainsets,
-                    speed=cast(NDArray[np.floating], speed),
-                    slope=cast(ScalarNumeric | NDArray[np.floating], slope),
-                ),
                 dec_mode=0,
                 vehicle=vehicle,
             )
@@ -659,13 +584,6 @@ class SafeGuardCurves:
         return self._calculate_curves_backward_with_truncate(
             dpoffsets,
             ds,
-            lambda speed, slope: calc_brake_deceleration(
-                mass=vehicle.mass,
-                numoftrainsets=vehicle.numoftrainsets,
-                speed=cast(NDArray[np.floating], speed),
-                slope=cast(ScalarNumeric | NDArray[np.floating], slope),
-                level=0,
-            ),
             dec_mode=1,
             vehicle=vehicle,
         )
@@ -698,13 +616,6 @@ class SafeGuardCurves:
             self._calculate_curves_backward_without_truncate(
                 dpoffsets,
                 ds,
-                lambda speed, slope: calc_brake_deceleration(
-                    mass=vehicle.mass,
-                    numoftrainsets=vehicle.numoftrainsets,
-                    speed=cast(NDArray[np.floating], speed),
-                    slope=cast(ScalarNumeric | NDArray[np.floating], slope),
-                    level=0,
-                ),
                 dec_mode=1,
                 vehicle=vehicle,
             )

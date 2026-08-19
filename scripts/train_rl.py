@@ -10,8 +10,6 @@ from rl.experiment_utils import (
     DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
     DEFAULT_SCHEDULE_TIME_S,
     DEFAULT_STEP_DISTANCE,
-    DEFAULT_VEC_ENV_TYPE,
-    VEC_ENV_TYPE_CHOICES,
     TrainingRunSpec,
     curriculum_profile_names,
     resolve_training_run_spec,
@@ -154,13 +152,6 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="训练环境数量。",
     )
     _ = parser.add_argument(
-        "--vec-env-type",
-        type=str,
-        choices=VEC_ENV_TYPE_CHOICES,
-        default=DEFAULT_VEC_ENV_TYPE,
-        help="向量化环境后端；默认使用低开销的 DummyVecEnv。",
-    )
-    _ = parser.add_argument(
         "--rollout-steps-per-update",
         type=int,
         default=DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
@@ -266,11 +257,6 @@ def print_training_run_spec(spec: TrainingRunSpec) -> None:
     print(f"- schedule_time_s={spec.schedule_time_s}")
     print(f"- step_distance={spec.step_distance}")
     print(f"- num_envs={spec.num_envs}")
-    print(f"- vec_env_type={spec.resolved_vec_env_type}")
-    if spec.use_subproc:
-        print(f"- subproc_start_method={spec.subproc_start_method}")
-    else:
-        print("- subproc_start_method=(not applicable)")
     print(f"- n_steps_per_env={spec.n_steps_per_env}")
     print(f"- rollout_steps_per_update={spec.rollout_steps_per_update}")
     print(f"- output_dir={spec.output_dir}")

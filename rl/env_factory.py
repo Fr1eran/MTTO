@@ -6,9 +6,10 @@ from model.track import TrackInfo
 from model.vehicle import VehicleInfo
 from rl.completion_critic import CompletionDSPDLConfig, CompletionTrajectoryAccumulator
 from rl.context_pool import ContextPool
-from rl.context_sampler import ContextSampler
-from rl.dspdl import DSPDLEpisodeAccumulator
+from rl.context_sampler import ContextSampler, CurriculumDistributionState
+from rl.dspdl import DSPDLStatisticsHub
 from rl.mtto_env import MTTOEnv
+from rl.operational_stepper import OperationalStepper
 from rl.reward_calculator import RewardConfig
 from rl.reward_diagnostics import RewardDiagnosticsAccumulator
 from rl.safety_statistics import SafetyTruncationBuffer
@@ -25,19 +26,26 @@ def make_env(
     enable_trajectory_tracking: bool = False,
     render_mode: str | None = None,
     reward_config: RewardConfig | None = None,
+    stepper: OperationalStepper | None = None,
     context_pool: ContextPool | None = None,
     initial_context_distribution: NDArray[np.floating] | list[float] | None = None,
+    curriculum_distribution_state: CurriculumDistributionState | None = None,
     context_sampling_seed: int | None = None,
-    enable_dspdl_accumulator: bool = False,
+    dspdl_statistics_hub: DSPDLStatisticsHub | None = None,
+    curriculum_env_rank: int | None = None,
     enable_completion_accumulator: bool = False,
     completion_config: CompletionDSPDLConfig | None = None,
     enable_safety_truncation_tracking: bool = False,
     reward_diagnostics_worker_rank: int | None = None,
     reward_diagnostics_rollout_capacity: int | None = None,
 ):
-    if enable_dspdl_accumulator and enable_completion_accumulator:
+    if (dspdl_statistics_hub is None) != (curriculum_env_rank is None):
         raise ValueError(
-            "legacy and completion DSPDL accumulators are mutually exclusive"
+            "DSPDL statistics hub and curriculum environment rank must be set together"
+        )
+    if dspdl_statistics_hub is not None and enable_completion_accumulator:
+        raise ValueError(
+            "traditional and completion DSPDL statistics are mutually exclusive"
         )
     if (reward_diagnostics_worker_rank is None) != (
         reward_diagnostics_rollout_capacity is None
@@ -45,6 +53,34 @@ def make_env(
         raise ValueError(
             "reward diagnostics worker rank and rollout capacity must be set together"
         )
+    context_sampler: ContextSampler | None = None
+    if context_pool is not None:
+        if (initial_context_distribution is None) == (
+            curriculum_distribution_state is None
+        ):
+            raise ValueError(
+                "exactly one curriculum distribution source is required "
+                "with context_pool"
+            )
+        if (
+            dspdl_statistics_hub is not None
+            and dspdl_statistics_hub.context_count != context_pool.context_count
+        ):
+            raise ValueError(
+                "statistics hub context count must match the context pool"
+            )
+        context_sampler = ContextSampler(
+            context_pool=context_pool,
+            initial_distribution=initial_context_distribution,
+            distribution_state=curriculum_distribution_state,
+            seed=context_sampling_seed,
+        )
+    elif (
+        initial_context_distribution is not None
+        or curriculum_distribution_state is not None
+        or dspdl_statistics_hub is not None
+    ):
+        raise ValueError("curriculum components require context_pool")
     env = MTTOEnv(
         vehicle=vehicle,
         track=track,
@@ -56,6 +92,10 @@ def make_env(
         enable_trajectory_tracking=enable_trajectory_tracking,
         render_mode=render_mode,
         reward_config=reward_config,
+        stepper=stepper,
+        context_sampler=context_sampler,
+        dspdl_statistics_hub=dspdl_statistics_hub,
+        curriculum_env_rank=curriculum_env_rank,
         safety_truncation_buffer=(
             SafetyTruncationBuffer() if enable_safety_truncation_tracking else None
         ),
@@ -70,21 +110,6 @@ def make_env(
         ),
     )
     if context_pool is not None:
-        if initial_context_distribution is None:
-            raise ValueError(
-                "initial_context_distribution is required with context_pool"
-            )
-        context_sampler = ContextSampler(
-            context_pool=context_pool,
-            initial_distribution=initial_context_distribution,
-            seed=context_sampling_seed,
-        )
-        env.context_sampler = context_sampler
-        if enable_dspdl_accumulator:
-            env.dspdl_accumulator = DSPDLEpisodeAccumulator(
-                context_count=context_pool.context_count,
-                gamma=gamma,
-            )
         if enable_completion_accumulator:
             config = completion_config or CompletionDSPDLConfig()
             env.completion_accumulator = CompletionTrajectoryAccumulator(

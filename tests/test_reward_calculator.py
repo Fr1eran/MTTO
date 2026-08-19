@@ -2,7 +2,13 @@ import pytest
 
 from model.ocs import SPSState, TrainService
 from rl.operational_state import OperationalState, OperationalTransition, ViolationCode
-from rl.reward_calculator import RewardCalculator, RewardConfig
+from rl.reward_calculator import (
+    DEFAULT_COMFORT_REWARD_SCALE,
+    DEFAULT_ENERGY_REWARD_SCALE,
+    DEFAULT_SURVIVAL_REWARD_SCALE,
+    RewardCalculator,
+    RewardConfig,
+)
 
 
 def _state(
@@ -78,7 +84,7 @@ def test_dense_reward_includes_energy_comfort_and_survival(
     reward = calculator.calculate(transition)
     assert reward.energy == pytest.approx(-0.75)
     assert reward.comfort == pytest.approx(-2.0)
-    assert reward.survival == pytest.approx(10.0)
+    assert reward.survival == pytest.approx(5.0)
     assert reward.safety == pytest.approx(0.0)
     assert reward.terminal_stopping == 0.0
     assert reward.terminal_punctuality == 0.0
@@ -121,7 +127,7 @@ def test_truncation_excludes_all_other_reward_components(
             ViolationCode.SPEED_HIGH,
         )
     )
-    assert reward.truncation == pytest.approx(-1.64)
+    assert reward.truncation == pytest.approx(-8.20)
     assert reward.total == reward.truncation
     assert reward.energy == reward.comfort == reward.survival == 0.0
 
@@ -213,3 +219,136 @@ def test_safety_potential_can_be_disabled() -> None:
         )
     )
     assert reward.safety == 0.0
+
+
+def test_survival_reward_scale_is_configurable() -> None:
+    service = TrainService(0.0, 0.0, 100.0, 20.0, 1.0, 1.0, 2.0)
+    calculator = RewardCalculator(
+        service,
+        max_episode_steps=10,
+        whole_distance_m=100.0,
+        max_energy_consumption_kj=100.0,
+        gamma=0.995,
+        reward_config=RewardConfig(survival_reward_scale=50.0),
+    )
+    reward = calculator.calculate(
+        OperationalTransition(
+            _state(),
+            _state(position=10.0),
+            1.0,
+            10.0,
+            1.0,
+            0.0,
+            False,
+            False,
+            ViolationCode.ONGOING,
+        )
+    )
+    assert reward.survival == pytest.approx(5.0)
+
+
+def test_dense_reward_scales_are_configurable() -> None:
+    service = TrainService(0.0, 0.0, 100.0, 20.0, 1.0, 1.0, 2.0)
+    calculator = RewardCalculator(
+        service,
+        max_episode_steps=10,
+        whole_distance_m=100.0,
+        max_energy_consumption_kj=100.0,
+        gamma=0.995,
+        reward_config=RewardConfig(
+            energy_reward_scale=30.0,
+            comfort_reward_scale=10.0,
+            survival_reward_scale=0.0,
+        ),
+    )
+    reward = calculator.calculate(
+        OperationalTransition(
+            _state(acc=0.0),
+            _state(position=10.0, energy=5.0, acc=1.0),
+            1.0,
+            10.0,
+            1.0,
+            5.0,
+            False,
+            False,
+            ViolationCode.ONGOING,
+        )
+    )
+
+    assert reward.energy == pytest.approx(-1.5)
+    assert reward.comfort == pytest.approx(-1.0)
+    assert reward.survival == 0.0
+
+
+def test_zero_dense_reward_scales_disable_components() -> None:
+    config = RewardConfig(energy_reward_scale=0.0, comfort_reward_scale=0.0)
+    service = TrainService(0.0, 0.0, 100.0, 20.0, 1.0, 1.0, 2.0)
+    calculator = RewardCalculator(
+        service,
+        max_episode_steps=10,
+        whole_distance_m=100.0,
+        max_energy_consumption_kj=100.0,
+        gamma=0.995,
+        reward_config=config,
+    )
+    reward = calculator.calculate(
+        OperationalTransition(
+            _state(acc=0.0),
+            _state(position=10.0, energy=5.0, acc=1.0),
+            1.0,
+            10.0,
+            1.0,
+            5.0,
+            False,
+            False,
+            ViolationCode.ONGOING,
+        )
+    )
+
+    assert reward.energy == 0.0
+    assert reward.comfort == 0.0
+
+
+@pytest.mark.parametrize(
+    "invalid_value",
+    (-1.0, float("nan"), float("inf"), float("-inf"), "invalid", None),
+)
+def test_reward_config_invalid_scales_fall_back_to_defaults(
+    invalid_value: object,
+) -> None:
+    config = RewardConfig(
+        energy_reward_scale=invalid_value,  # type: ignore[arg-type]
+        comfort_reward_scale=invalid_value,  # type: ignore[arg-type]
+        survival_reward_scale=invalid_value,  # type: ignore[arg-type]
+    )
+
+    assert config.energy_reward_scale == DEFAULT_ENERGY_REWARD_SCALE
+    assert config.comfort_reward_scale == DEFAULT_COMFORT_REWARD_SCALE
+    assert config.survival_reward_scale == DEFAULT_SURVIVAL_REWARD_SCALE
+
+
+def test_survival_reward_zero_disables_survival() -> None:
+    service = TrainService(0.0, 0.0, 100.0, 20.0, 1.0, 1.0, 2.0)
+    calculator = RewardCalculator(
+        service,
+        max_episode_steps=10,
+        whole_distance_m=100.0,
+        max_energy_consumption_kj=100.0,
+        gamma=0.995,
+        reward_config=RewardConfig(survival_reward_scale=0.0),
+    )
+    reward = calculator.calculate(
+        OperationalTransition(
+            _state(),
+            _state(position=10.0),
+            1.0,
+            10.0,
+            1.0,
+            0.0,
+            False,
+            False,
+            ViolationCode.ONGOING,
+        )
+    )
+    assert reward.survival == 0.0
+    assert RewardConfig().survival_reward_scale == 50.0

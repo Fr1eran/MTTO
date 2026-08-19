@@ -64,7 +64,7 @@ def test_run_matrix_maps_the_four_methods_to_expected_configurations() -> None:
     )
     assert args.evaluation_interval_rollouts == 12
     assert args.num_envs == 8
-    assert args.vec_env_type == "dummy"
+    assert not hasattr(args, "vec_env_type")
     assert args.rollout_steps_per_update == 8192
     assert args.device == "cpu"
     assert all(run.spec.evaluation_interval_rollouts == 12 for run in runs)
@@ -81,6 +81,21 @@ def test_run_matrix_maps_the_four_methods_to_expected_configurations() -> None:
         == "basic_safety"
     )
     assert first_by_method["ppo_pbrs_dspdl"].train_args.curriculum_profile == "dspdl"
+
+
+@pytest.mark.parametrize("vec_env_type", ("dummy", "subproc"))
+def test_train_cli_rejects_vec_env_type(vec_env_type: str) -> None:
+    parser = method_ablation.build_arg_parser()
+    with pytest.raises(SystemExit):
+        _ = parser.parse_args(
+            [
+                "train",
+                "--reference-curve-dir",
+                ".",
+                "--vec-env-type",
+                vec_env_type,
+            ]
+        )
 
 
 def test_train_cli_rejects_removed_step_evaluation_interval() -> None:

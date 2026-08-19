@@ -18,8 +18,6 @@ from rl.experiment_utils import (
     DEFAULT_REWARD_DISCOUNT,
     DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
     DEFAULT_SCHEDULE_TIME_S,
-    DEFAULT_VEC_ENV_TYPE,
-    VEC_ENV_TYPE_CHOICES,
     TrainingRunSpec,
     apply_rl_curve_plot_style,
     build_default_training_args,
@@ -150,11 +148,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     _ = train_parser.add_argument("--num-envs", type=int, default=DEFAULT_NUM_ENVS)
     _ = train_parser.add_argument(
-        "--vec-env-type",
-        choices=VEC_ENV_TYPE_CHOICES,
-        default=DEFAULT_VEC_ENV_TYPE,
-    )
-    _ = train_parser.add_argument(
         "--rollout-steps-per-update", type=int, default=DEFAULT_ROLLOUT_STEPS_PER_UPDATE
     )
     _ = train_parser.add_argument(
@@ -257,7 +250,6 @@ def _build_train_args(
     train_args.evaluation_deterministic = True
     train_args.reward_discount = args.reward_discount
     train_args.num_envs = args.num_envs
-    train_args.vec_env_type = args.vec_env_type
     train_args.rollout_steps_per_update = args.rollout_steps_per_update
     train_args.total_timesteps = args.total_timesteps
     train_args.tensorboard_log_dir = None
@@ -307,7 +299,6 @@ def _training_signature(args: argparse.Namespace) -> dict[str, Any]:
         "schedule_time_s": float(args.schedule_time_s),
         "reward_discount": float(args.reward_discount),
         "num_envs": int(args.num_envs),
-        "vec_env_type": str(args.vec_env_type),
         "rollout_steps_per_update": int(args.rollout_steps_per_update),
         "n_steps_per_env": None,
         "total_timesteps": int(args.total_timesteps),

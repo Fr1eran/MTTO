@@ -19,11 +19,12 @@
   - [RL 结果可视化 · `show_rl_result`](#rl-结果可视化--show_rl_result)
   - [DP 与 RL 对比可视化 · `compare_rl_dp`](#dp-与-rl-对比可视化--compare_rl_dp)
     - [SPS 合规分析 · `analyze_sps_compliance`](#sps-合规分析--analyze_sps_compliance)
-  - [防护曲线 · `show_safeguard_curves`](#防护曲线--show_safeguard_curves)
+  - [线路环境与防护曲线 · `show_env_data`](#线路环境与防护曲线--show_env_data)
   - [计算并保存防护曲线 · `calc_and_save_safeguard_curves`](#计算并保存防护曲线--calc_and_save_safeguard_curves)
   - [最短运行时间曲线 · `calc_min_operation_time_curve`](#最短运行时间曲线--calc_min_operation_time_curve)
   - [实际运营数据 · `show_real_operation_data`](#实际运营数据--show_real_operation_data)
   - [势函数展示 · `show_potential_function`](#势函数展示--show_potential_function)
+  - [终端评分函数可视化 · `show_score_function`](#终端评分函数可视化--show_score_function)
 - [测试](#测试)
 
 ---
@@ -75,13 +76,16 @@ MTTO/
 | 速度曲线对比可视化 | `python -m scripts.compare_speed_profiles` |
 | SPS 合规分析 | `python -m scripts.analyze_sps_compliance` |
 | 奖励消融结果展示 | `python -m scripts.run_reward_ablation show` |
-| 防护曲线可视化 | `python -m scripts.show_safeguard_curves` |
+| 生存奖励消融训练 | `python -m scripts.run_survival_reward_ablation train` |
+| 生存奖励消融展示 | `python -m scripts.run_survival_reward_ablation show` |
+| 线路环境与防护曲线可视化 | `python -m scripts.show_env_data` |
 | 计算并保存防护曲线 | `python -m scripts.calc_and_save_safeguard_curves` |
 | 最短运行时间曲线 | `python -m scripts.calc_min_operation_time_curve` |
 | 实际运营数据展示 | `python -m scripts.show_real_operation_data` |
 | 势函数可视化 | `python -m scripts.show_potential_function` |
+| 终端评分函数可视化 | `python -m scripts.show_score_function` |
 
-RL 工作流脚本 `train_rl`、`run_reward_ablation train/show`、`evaluate_rl`、`run_schedule_time_change evaluate`、`analyze_training_data` 和 `show_rl_result` 统一支持 `--dry-run`，用于预览有效配置、路径解析结果、运行矩阵或展示计划，而不执行训练、评估、分析或绘图。
+RL 工作流脚本 `train_rl`、`run_reward_ablation train/show`、`run_survival_reward_ablation train/show`、`evaluate_rl`、`run_schedule_time_change evaluate`、`analyze_training_data` 和 `show_rl_result` 统一支持 `--dry-run`，用于预览有效配置、路径解析结果、运行矩阵或展示计划，而不执行训练、评估、分析或绘图。
 
 ---
 
@@ -105,27 +109,28 @@ RL 工作流脚本 `train_rl`、`run_reward_ablation train/show`、`evaluate_rl`
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `--num-envs` | `int` | `8` | 向量化采样环境数量 |
-| `--vec-env-type` | `str` | `dummy` | 向量化后端：`dummy` / `subproc`；默认使用低开销的 `DummyVecEnv` |
 | `--step-distance` | `float` | `30.0` | 固定空间控制步长 (m)，`--max-step-distance` 为兼容别名 |
 | `--schedule-time-s` | `float` | `465.0` | 规划运行时间 (s) |
 
-训练入口与奖励、方法、步长消融脚本共享上述环境默认值。显式指定
-`--vec-env-type subproc` 时仍会启用多进程后端；消融输出目录中如果已经存在训练配置
-不兼容的 manifest，新训练会拒绝覆盖，历史结果展示不受影响。
+训练入口与奖励、方法、步长及生存奖励消融脚本统一使用 `DummyVecEnv`。
+`--num-envs` 大于 1 时会在同一进程内依次采样多个环境，不再提供多进程后端选项。
+消融输出目录中如果已经存在训练配置不兼容的 manifest，新训练会拒绝覆盖，历史结果
+展示不受影响。
 
 #### DSPDL 课程学习
 
 通过 `--curriculum-profile dspdl --reference-curve-dir <dp-output-dir>` 启用离散型
 SPDL 课程。代码层统一使用 DSPDL 命名：父进程读取 `ReferenceTrajectory`，由
 `ContextPoolBuilder` 对 DP 轨迹采样并重建为只读 `ContextPool`，再将同一逻辑任务池
-交给所有训练环境。每个训练环境只创建轻量的 `ContextSampler` 和
-`DSPDLEpisodeAccumulator`，不会重复读取或重建 DP 轨迹。
+交给所有训练环境。每个训练环境只创建轻量的 `ContextSampler`，不会重复读取或重建
+DP 轨迹；同一 `DummyVecEnv` 内的环境按固定 rank 写入共享的 `DSPDLStatisticsHub`。
 
-每个环境在本地累计当前分布版本的上下文计数与折扣回报；`DSPDLCallback` 仅在课程
-更新时统一拉取统计，使用缓存的完整任务 observation tensor 估值，再调用
-`DSPDLDistributionSolver` 更新分布。采样器的 `sample()` 只负责按内部权重抽样，权重
-及版本校验集中在更新接口中。达到目标分布阈值后，课程分布永久冻结，并释放各环境的
-统计缓冲区。
+共享 Hub 集中累计当前分布版本的上下文计数与各环境折扣回报；`DSPDLCallback` 在课程
+更新时直接读取不可变统计快照，使用缓存的完整任务 observation tensor 估值，再调用
+`DSPDLDistributionSolver` 更新分布。样本不足时统计窗口会跨更新尝试保留；成功求解后
+才消费窗口，并与共享课程分布进行事务式版本切换。采样器的 `sample()` 只负责按内部
+权重抽样，权重及版本校验集中在更新接口中。达到目标分布阈值后，课程分布永久冻结，
+并释放集中统计缓冲区。
 
 使用 `--curriculum-profile dspdl_completion` 可启用基于任务完成度的 DSPDL。该配置
 保留相同的上下文池、初始/目标分布、KL 信赖域和更新周期，但以独立的
@@ -238,10 +243,10 @@ python -m scripts.train_rl --run-mode monitor_best --reward-preset basic_safety 
 python -m scripts.train_rl --run-mode best_only
 
 # 430s tune，每 12 个 rollouts 触发一次 best-eval
-python -m scripts.train_rl --output-root output/optimal/rl/ --schedule-time-s 430.0 --step-distance 100.0 --run-mode tune --total-timesteps 1000000 --num-envs 8 --vec-env-type dummy --evaluation-interval-rollouts 12 --evaluation-deterministic --device cpu
+python -m scripts.train_rl --output-root output/optimal/rl/ --schedule-time-s 430.0 --step-distance 100.0 --run-mode tune --total-timesteps 1000000 --num-envs 8 --evaluation-interval-rollouts 12 --evaluation-deterministic --device cpu
 
 # 430s monitor_best，每 6 个 rollouts 评估一次
-python -m scripts.train_rl --output-root output/optimal/rl/safety_speed/ --schedule-time-s 430.0 --step-distance 100.0 --run-mode monitor_best --total-timesteps 1000000 --num-envs 8 --vec-env-type dummy --evaluation-interval-rollouts 6 --evaluation-deterministic --device cpu
+python -m scripts.train_rl --output-root output/optimal/rl/safety_speed/ --schedule-time-s 430.0 --step-distance 100.0 --run-mode monitor_best --total-timesteps 1000000 --num-envs 8 --evaluation-interval-rollouts 6 --evaluation-deterministic --device cpu
 ```
 
 ---
@@ -688,12 +693,26 @@ python -m scripts.analyze_sps_compliance \
 
 ---
 
-### 防护曲线 · `show_safeguard_curves`
+### 线路环境与防护曲线 · `show_env_data`
 
-可视化展示磁浮列车运行安全防护曲线，包括 Levi 曲线、制动曲线、最小/最大速度约束、区间限速、辅助停车区、车站、加速区等。
+可视化展示磁浮列车运行线路环境数据与安全防护曲线，支持 `--view {overview,full-curves,danger-region,all}` 视图切换：
+- `overview`（默认）：综合环境视图（上图为防护曲线+车站/加速区/ASA，下图为轨道坡度）。
+- `full-curves`：全量安全防护曲线视图（Safe levitation, safe braking, min/max curves 与基础设施）。
+- `danger-region`：危险交叉点与局部危险速度域视图。
+- `all`：同时生成并展示以上所有视图。
 
 ```bash
-python -m scripts.show_safeguard_curves
+# 默认展示综合环境视图（含坡度）
+python -m scripts.show_env_data
+
+# 展示全量安全防护曲线
+python -m scripts.show_env_data --view full-curves
+
+# 展示危险速度域与交叉点
+python -m scripts.show_env_data --view danger-region
+
+# 保存为图片且不弹出交互窗口
+python -m scripts.show_env_data --view overview --output-file output/figures/env_overview.png --no-show
 ```
 
 ---
@@ -739,12 +758,38 @@ python -m scripts.show_potential_function
 
 ---
 
-## 测试
+### 终端评分函数可视化 · `show_score_function`
+
+可视化展示停站精度评分函数 $f_s(x)$ 与准点率评分函数 $f_p(t)$（支持 `--plot {combined,stopping,punctuality}`）：
+- `combined`（默认）：停站与准点评分函数综合双子图。
+- `stopping`：停站误差评分曲线与死区/衰减阈值。
+- `punctuality`：准点时间误差评分衰减曲线。
+
+```bash
+# 展示停站与准点综合评分曲线
+python -m scripts.show_score_function --plot combined
+
+# 展示停站误差评分曲线
+python -m scripts.show_score_function --plot stopping
+
+# 展示准点时间误差评分曲线
+python -m scripts.show_score_function --plot punctuality
+
+# 保存为图片且不弹出交互窗口
+python -m scripts.show_score_function --plot combined --output-file output/figures/score_functions.png --no-show
+```
+
+---
+
+## 测试与代码检查
 
 ```bash
 # 全量测试
-pytest
+PYTHONPATH=. uv run pytest -q
 
-# 指定目录
-pytest tests/
+# 指定测试文件
+PYTHONPATH=. uv run pytest -q tests/test_mtto_env.py
+
+# 代码风格与静态检查
+uv run ruff check .
 ```

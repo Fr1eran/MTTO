@@ -12,13 +12,15 @@ from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo, get_slope_scalar_numba
 from model.vehicle import VehicleInfo, calc_levi_deceleration_scalar_numba
 from rl.completion_critic import CompletionTrajectoryAccumulator
-from rl.context_pool import Context
-from rl.context_sampler import ContextSampler
-from rl.dspdl import DSPDLEpisodeAccumulator
+from rl.context_pool import Context, ContextPool
+from rl.context_sampler import ContextSampler, CurriculumDistributionState
+from rl.dspdl import DSPDLStatisticsHub
+from rl.env_factory import make_env
 from rl.evaluation import evaluate_operational_policy_once, evaluate_policy_once
 from rl.mtto_env import MTTOEnv
 from rl.observation_builder import ObservationBuilder
 from rl.operational_state import OperationalState, OperationalTransition, ViolationCode
+from rl.operational_stepper import OperationalStepper
 from rl.reward_calculator import RewardConfig
 from rl.reward_diagnostics import REWARD_SIGNAL_COUNT, RewardDiagnosticsAccumulator
 from rl.safety_statistics import SafetyTruncationBuffer
@@ -32,8 +34,10 @@ from utils.data_loader import (
 
 
 class _MTTOEnvOverrides(TypedDict, total=False):
+    stepper: OperationalStepper | None
     context_sampler: ContextSampler | None
-    dspdl_accumulator: DSPDLEpisodeAccumulator | None
+    dspdl_statistics_hub: DSPDLStatisticsHub | None
+    curriculum_env_rank: int | None
     completion_accumulator: CompletionTrajectoryAccumulator | None
     enable_trajectory_tracking: bool
     safety_truncation_buffer: SafetyTruncationBuffer | None
@@ -173,6 +177,76 @@ def test_reset(mtto_env: MTTOEnv):
     assert info == {}
 
 
+def test_multiple_environments_can_share_one_stepper(mtto_env: MTTOEnv) -> None:
+    first = _build_env_like(
+        mtto_env,
+        train_service=mtto_env.train_service,
+        stepper=mtto_env.stepper,
+    )
+    second = _build_env_like(
+        mtto_env,
+        train_service=mtto_env.train_service,
+        stepper=mtto_env.stepper,
+    )
+
+    assert first.stepper is second.stepper is mtto_env.stepper
+    second_state = second.state
+    _ = first.step(np.asarray([0.0], dtype=np.float32))
+    assert second.state is second_state
+
+
+def test_environment_rejects_mismatched_injected_stepper(mtto_env: MTTOEnv) -> None:
+    with pytest.raises(ValueError, match="does not match"):
+        _ = _build_env_like(mtto_env, stepper=mtto_env.stepper)
+
+
+def test_factory_shares_stepper_and_curriculum_distribution(
+    mtto_env: MTTOEnv,
+) -> None:
+    pool = ContextPool(
+        (
+            Context(
+                context_index=0,
+                remaining_distance_m=mtto_env.stepper.whole_distance_m,
+                initial_state=mtto_env.stepper.reset(),
+            ),
+        )
+    )
+    distribution_state = CurriculumDistributionState(
+        context_count=1,
+        initial_distribution=[1.0],
+    )
+    statistics_hub = DSPDLStatisticsHub(
+        context_count=1, num_envs=2, gamma=mtto_env.gamma
+    )
+    kwargs = {
+        "vehicle": mtto_env.vehicle,
+        "track": mtto_env.track,
+        "safeguard_utility": mtto_env.safeguard_utility,
+        "train_service": mtto_env.train_service,
+        "gamma": mtto_env.gamma,
+        "step_distance": mtto_env.step_distance,
+        "stepper": mtto_env.stepper,
+        "context_pool": pool,
+        "curriculum_distribution_state": distribution_state,
+    }
+
+    first = make_env(
+        **kwargs, dspdl_statistics_hub=statistics_hub, curriculum_env_rank=0
+    )
+    second = make_env(
+        **kwargs, dspdl_statistics_hub=statistics_hub, curriculum_env_rank=1
+    )
+
+    assert first.stepper is second.stepper is mtto_env.stepper
+    assert first.context_sampler is not None
+    assert second.context_sampler is not None
+    assert first.context_sampler.distribution_state is distribution_state
+    assert second.context_sampler.distribution_state is distribution_state
+    assert first.dspdl_statistics_hub is statistics_hub
+    assert second.dspdl_statistics_hub is statistics_hub
+
+
 class _ContextSamplerStub:
     def __init__(self, initial_state: OperationalState) -> None:
         self.initial_state = initial_state
@@ -208,11 +282,14 @@ def test_reset_can_sample_context_and_collect_dspdl_statistics(
         step_count=3,
     )
     sampler = _ContextSamplerStub(reference_state)
-    accumulator = DSPDLEpisodeAccumulator(context_count=3, gamma=mtto_env.gamma)
+    statistics_hub = DSPDLStatisticsHub(
+        context_count=3, num_envs=1, gamma=mtto_env.gamma
+    )
     env = _build_env_like(
         mtto_env,
         context_sampler=cast(ContextSampler, cast(object, sampler)),
-        dspdl_accumulator=accumulator,
+        dspdl_statistics_hub=statistics_hub,
+        curriculum_env_rank=0,
         enable_trajectory_tracking=True,
     )
     env._comfort_tav = 8.0
@@ -230,14 +307,8 @@ def test_reset_can_sample_context_and_collect_dspdl_statistics(
     assert "reference_context_index" not in info
     assert "reference_context_distribution_version" not in info
 
-    statistics = env.drain_dspdl_statistics(version=0)
-    np.testing.assert_array_equal(statistics["context_counts"], [0, 0, 1])
-
-    env.set_dspdl_distribution([1.0], version=1)
-    assert sampler.updated is not None
-    np.testing.assert_array_equal(sampler.updated[0], [1.0])
-    assert sampler.updated[1] == 1
-    assert accumulator.accepted_version == 1
+    statistics = statistics_hub.snapshot(version=0)
+    np.testing.assert_array_equal(statistics.context_counts, [0, 0, 1])
 
 
 def test_reset_and_step_collect_completion_decision_states(mtto_env: MTTOEnv) -> None:
@@ -261,7 +332,8 @@ def test_reset_and_step_collect_completion_decision_states(mtto_env: MTTOEnv) ->
     else:
         assert len(accumulator._active_observations) == 2
 
-    env.set_dspdl_distribution([1.0], version=1)
+    env.validate_dspdl_version(1)
+    env.commit_dspdl_version(1)
     assert accumulator.accepted_version == 1
 
 
@@ -680,7 +752,7 @@ def test_step_failed_stop_is_truncated_with_fixed_penalty(
 
     assert terminated is False
     assert truncated is True
-    assert reward == pytest.approx(-2.0)
+    assert reward == pytest.approx(-10.0)
     assert info["outcome"] == {"terminated": False, "truncated": True}
     assert "constraint" not in info
 

@@ -117,7 +117,7 @@ def test_train_cli_defaults() -> None:
 
     assert args.output_root == DEFAULT_OUTPUT_ROOT
     assert args.num_envs == 8
-    assert args.vec_env_type == "dummy"
+    assert not hasattr(args, "vec_env_type")
     assert args.rollout_steps_per_update == 8192
     assert args.device == "cpu"
     assert not hasattr(args, "step_distances")
@@ -131,6 +131,20 @@ def test_train_cli_defaults() -> None:
     )
     assert not hasattr(args, "max_train_episodes")
     assert args.dry_run is False
+
+
+@pytest.mark.parametrize("vec_env_type", ("dummy", "subproc"))
+def test_train_cli_rejects_vec_env_type(vec_env_type: str) -> None:
+    with pytest.raises(SystemExit):
+        _ = build_arg_parser().parse_args(
+            [
+                "train",
+                "--reference-curve-dir",
+                ".",
+                "--vec-env-type",
+                vec_env_type,
+            ]
+        )
 
 
 def test_show_cli_accepts_compact_figure_options(tmp_path: Path) -> None:

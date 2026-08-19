@@ -1,9 +1,11 @@
 import argparse
+from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.figure import Figure
+from numpy.typing import NDArray
 
 from model.ocs import SafeGuardUtility
 from utils.data_loader import (
@@ -17,9 +19,35 @@ from utils.data_loader import (
 from utils.plot_utils import set_global_plot_style
 
 
+@dataclass
+class TrackEnvironmentData:
+    accessible_points: NDArray[np.float64]
+    dangerous_points: NDArray[np.float64]
+    stations_cor: NDArray[np.float64]
+    acceleration_zone_start: float
+    acceleration_zone_end: float
+    speed_limits: NDArray[np.float64]
+    speed_limit_intervals: NDArray[np.float64]
+    safeguard: SafeGuardUtility
+    slopes: NDArray[np.float64]
+    slope_intervals: NDArray[np.float64]
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Show environment data and optionally save a compact figure."
+        description="Show environment data and safeguard curves."
+    )
+    _ = parser.add_argument(
+        "--view",
+        choices=["overview", "full-curves", "danger-region", "all"],
+        default="overview",
+        help=(
+            "View mode to display: "
+            "'overview' (default): Combined full curves & track slope; "
+            "'full-curves': Full safeguard curves with track infrastructure; "
+            "'danger-region': Dangerous speed regions and intersecting points; "
+            "'all': Display all three figures."
+        ),
     )
     _ = parser.add_argument(
         "--output-file",
@@ -62,11 +90,9 @@ def set_plot_style():
     )
 
 
-def create_env_data_figure():
-    # 辅助停车区
+def load_track_environment_data() -> TrackEnvironmentData:
     accessible_points, dangerous_points = load_auxiliary_stopping_areas_ap_and_dp()
 
-    # 车站
     stations_data = load_stations()
     longyang_start = stations_data["start_station"]["start"]
     longyang_end = stations_data["start_station"]["end"]
@@ -76,15 +102,14 @@ def create_env_data_figure():
         [
             [longyang_start, putong_start],
             [longyang_end, putong_end],
-        ]
+        ],
+        dtype=np.float64,
     )
 
-    # 加速区
     acceleration_zone_data = load_acceleration_zones()
-    acceleration_zone_start = acceleration_zone_data["uplink"]["start"]
-    acceleration_zone_end = acceleration_zone_data["uplink"]["end"]
+    acceleration_zone_start = float(acceleration_zone_data["uplink"]["start"])
+    acceleration_zone_end = float(acceleration_zone_data["uplink"]["end"])
 
-    # 区间限速
     speed_limits, speed_limit_intervals = load_speed_limits(to_mps=True)
     levi_curves_list, brake_curves_list, min_curves_list, max_curves_list = (
         load_safeguard_curves(
@@ -104,45 +129,73 @@ def create_env_data_figure():
         factor=0.99,
     )
 
-    # 绘制区间限速、安全悬浮曲线、安全制动曲线、最小速度曲线
-    # 最大速度曲线、辅助停车区、车站、加速区
-    fig, (ax1, ax2) = plt.subplots(
-        2, 1, sharex=True, figsize=(8, 6), gridspec_kw={"height_ratios": [3, 1]}
+    slopes, slope_intervals = load_slopes()
+
+    return TrackEnvironmentData(
+        accessible_points=np.asarray(accessible_points, dtype=np.float64),
+        dangerous_points=np.asarray(dangerous_points, dtype=np.float64),
+        stations_cor=stations_cor,
+        acceleration_zone_start=acceleration_zone_start,
+        acceleration_zone_end=acceleration_zone_end,
+        speed_limits=speed_limits,
+        speed_limit_intervals=speed_limit_intervals,
+        safeguard=safeguard,
+        slopes=np.asarray(slopes, dtype=np.float64),
+        slope_intervals=np.asarray(slope_intervals, dtype=np.float64),
     )
-    safeguard.render(ax=ax1, layers=SafeGuardUtility.FULL_CURVE_VIEW_LAYERS)
-    ax1.hlines(
-        y=np.zeros_like(accessible_points),
-        xmin=accessible_points,
-        xmax=dangerous_points,
+
+
+def _draw_infrastructure_hlines(
+    ax,
+    data: TrackEnvironmentData,
+    *,
+    exclude_last_asa: bool = False,
+) -> None:
+    aps = data.accessible_points[:-1] if exclude_last_asa else data.accessible_points
+    dps = data.dangerous_points[:-1] if exclude_last_asa else data.dangerous_points
+    ax.hlines(
+        y=np.zeros_like(aps),
+        xmin=aps,
+        xmax=dps,
         colors="green",
         linestyles="solid",
         linewidth=8,
         label="Auxiliary stopping area",
         alpha=0.7,
     )
-    ax1.hlines(
+    ax.hlines(
         y=np.zeros(2),
-        xmin=stations_cor[0, :],
-        xmax=stations_cor[1, :],
+        xmin=data.stations_cor[0, :],
+        xmax=data.stations_cor[1, :],
         colors="blue",
         linestyles="solid",
         linewidth=8,
         label="Station",
         alpha=0.5,
     )
-    ax1.hlines(
+    ax.hlines(
         y=np.zeros(2),
-        xmin=acceleration_zone_start,
-        xmax=acceleration_zone_end,
+        xmin=data.acceleration_zone_start,
+        xmax=data.acceleration_zone_end,
         colors="yellow",
         linestyles="solid",
         linewidth=8,
         label="Acceleration zone",
         alpha=0.5,
     )
+
+
+def create_overview_figure(data: TrackEnvironmentData) -> Figure:
+    """创建综合环境视图：上方为全量防护曲线与设施，下方为轨道坡度阶梯图。"""
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, sharex=True, figsize=(8, 6), gridspec_kw={"height_ratios": [3, 1]}
+    )
+    data.safeguard.render(ax=ax1, layers=SafeGuardUtility.FULL_CURVE_VIEW_LAYERS)
+    _draw_infrastructure_hlines(ax1, data, exclude_last_asa=False)
+
     ax1.set_xlim((0.0, 30000.0))
     ax1.set_ylim((0.0, 500.0))
-    ax1.set_ylabel("Speed(km/h)")
+    ax1.set_ylabel("Speed (km/h)")
 
     handles, labels = ax1.get_legend_handles_labels()
     handle_by_label = dict(zip(labels, handles, strict=False))
@@ -174,12 +227,12 @@ def create_env_data_figure():
         bbox_to_anchor=(0.5, 1.0),
         ncol=4,
     )
+    ax1.grid(True, alpha=0.3)
 
     # 绘制轨道坡度
-    slopes, slope_intervals = load_slopes()
     ax2.stairs(
-        values=slopes,
-        edges=slope_intervals,
+        values=data.slopes,
+        edges=data.slope_intervals,
         color="saddlebrown",
         linewidth=1.0,
         fill=True,
@@ -196,34 +249,107 @@ def create_env_data_figure():
     return fig
 
 
-def save_compact_figure(
-    fig: Figure, output_file: Path, dpi: float, pad_inches: float
-) -> Path:
-    if output_file.suffix == "":
-        output_file = output_file.with_suffix(".png")
+def create_full_curves_figure(data: TrackEnvironmentData) -> Figure:
+    """创建全量安全防护曲线视图（Safe levitation, safe braking, min/max curves）。"""
+    fig, ax = plt.subplots(figsize=(8, 4.8))
+    data.safeguard.render(ax=ax, layers=SafeGuardUtility.FULL_CURVE_VIEW_LAYERS)
+    _draw_infrastructure_hlines(ax, data, exclude_last_asa=False)
+
+    ax.set_xlim((0.0, 30000.0))
+    ax.set_ylim((0.0, 500.0))
+    ax.set_xlabel("Position (m)")
+    ax.set_ylabel("Speed (km/h)")
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=4)
+    ax.grid(True, alpha=0.3)
+
+    return fig
+
+
+def create_danger_region_figure(data: TrackEnvironmentData) -> Figure:
+    """创建危险速度域视图（局部防护曲线、危险交叉点散点与危险区域填充）。"""
+    fig, ax = plt.subplots(figsize=(8, 4.8))
+    data.safeguard.render(ax=ax, layers=SafeGuardUtility.DANGER_VIEW_LAYERS)
+    _draw_infrastructure_hlines(ax, data, exclude_last_asa=True)
+
+    ax.set_xlim((0.0, 30000.0))
+    ax.set_ylim((0.0, 500.0))
+    ax.set_xlabel("Position (m)")
+    ax.set_ylabel("Speed (km/h)")
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=3)
+    ax.grid(True, alpha=0.3)
+
+    return fig
+
+
+def create_figures(
+    view_mode: str, data: TrackEnvironmentData
+) -> dict[str, Figure]:
+    """根据 view_mode 构建并返回对应的 Figure 字典。"""
+    if view_mode == "overview":
+        return {"overview": create_overview_figure(data)}
+    if view_mode == "full-curves":
+        return {"full_curves": create_full_curves_figure(data)}
+    if view_mode == "danger-region":
+        return {"danger_region": create_danger_region_figure(data)}
+    if view_mode == "all":
+        return {
+            "overview": create_overview_figure(data),
+            "full_curves": create_full_curves_figure(data),
+            "danger_region": create_danger_region_figure(data),
+        }
+    raise ValueError(f"Unsupported view mode: {view_mode}")
+
+
+def save_compact_figures(
+    figures: dict[str, Figure],
+    output_file: Path,
+    dpi: float,
+    pad_inches: float,
+) -> list[Path]:
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(
-        output_file,
-        dpi=dpi,
-        bbox_inches="tight",
-        pad_inches=pad_inches,
-    )
-    return output_file
+    suffix = output_file.suffix if output_file.suffix else ".png"
+    saved_paths: list[Path] = []
+
+    if len(figures) == 1:
+        single_fig = next(iter(figures.values()))
+        target_path = output_file.with_suffix(suffix)
+        single_fig.savefig(
+            target_path,
+            dpi=dpi,
+            bbox_inches="tight",
+            pad_inches=pad_inches,
+        )
+        saved_paths.append(target_path)
+    else:
+        base_stem = output_file.stem
+        for key, fig in figures.items():
+            target_path = output_file.parent / f"{base_stem}_{key}{suffix}"
+            fig.savefig(
+                target_path,
+                dpi=dpi,
+                bbox_inches="tight",
+                pad_inches=pad_inches,
+            )
+            saved_paths.append(target_path)
+
+    return saved_paths
 
 
 def main():
     args = parse_args()
     set_plot_style()
-    fig = create_env_data_figure()
+    data = load_track_environment_data()
+    figures = create_figures(args.view, data)
 
     if args.output_file is not None:
-        output_file = save_compact_figure(
-            fig,
+        saved_files = save_compact_figures(
+            figures,
             args.output_file,
             dpi=args.dpi,
             pad_inches=args.pad_inches,
         )
-        print(f"Saved compact figure to {output_file}")
+        for saved_file in saved_files:
+            print(f"Saved figure to {saved_file}")
 
     if not args.no_show:
         plt.show()
@@ -231,3 +357,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

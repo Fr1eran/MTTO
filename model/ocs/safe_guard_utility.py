@@ -140,6 +140,34 @@ def _get_min_and_max_speed_numba(
     return current_min_speed, current_max_speed
 
 
+@njit(cache=True)
+def _get_current_stopping_point_numba(
+    current_pos: float,
+    current_speed: float,
+    min_pos_packed: NDArray[np.float64],
+    min_speed_packed: NDArray[np.float64],
+    min_lengths: NDArray[np.int32],
+) -> int:
+    current_sp = -1
+    n_curves = min_lengths.size
+    for i in range(n_curves):
+        curve_len = int(min_lengths[i])
+        if curve_len <= 0:
+            continue
+        right_end_pos = min_pos_packed[i, curve_len - 1]
+        if current_pos <= right_end_pos:
+            min_speed = _interp_scalar_numba(
+                current_pos,
+                min_pos_packed[i],
+                min_speed_packed[i],
+                curve_len,
+            )
+            if current_speed <= min_speed:
+                break
+        current_sp += 1
+    return current_sp
+
+
 class SafeGuardUtility:
     """
     通用速度防护类
@@ -546,74 +574,27 @@ class SafeGuardUtility:
     def get_current_stopping_point(
         self, current_pos: ScalarNumeric, current_speed: ScalarNumeric
     ) -> int:
-        """
-        根据当前状态获得列车的目标停车点编号
+        """根据当前状态获得列车的目标停车点编号。
 
         Args:
-            current_pos: 当前位置
-            current_speed: 当前速度
+            current_pos: 当前位置 (m)
+            current_speed: 当前速度 (m/s)
 
         Returns:
-            目标停车点编号
-
+            int: 目标停车点编号 (0-indexed, 起始为 -1)
         """
-        # 设置初始停车点编号为-1
-        current_sp = -1
-        # 遍历所有停车点对应的最小速度曲线
-        for current_min_curve in self.min_curves_list:
-            if current_pos <= current_min_curve[0, -1]:
-                # 当前位置小于最小速度曲线的右端点
-                # 设置最小速度为最小速度曲线在当前位置的插值
-                min_speed = np.interp(
-                    current_pos, current_min_curve[0, :], current_min_curve[1, :]
-                )
-                # 未步进到当前停车点
-                if current_speed <= min_speed:
-                    break
-
-            current_sp += 1
-
-        return current_sp
-
-    def _get_min_and_max_speed_legacy(
-        self,
-        current_pos: float,
-        current_sp: int,
-    ) -> tuple[float, float]:
-        if current_sp == -1:
-            current_min_speed = 0.0
-        else:
-            current_min_curve = self.min_curves_list[current_sp]
-            if current_pos > current_min_curve[0, -1]:
-                current_min_speed = 0.0
-            else:
-                current_min_speed = np.interp(
-                    current_pos, current_min_curve[0, :], current_min_curve[1, :]
-                )
-
-        current_max_curve = self.max_curves_list[current_sp + 1]
-        if current_pos > current_max_curve[0, 0]:
-            current_max_speed = max(
-                0.0,
-                np.interp(
-                    current_pos,
-                    current_max_curve[0, :],
-                    current_max_curve[1, :],
-                ),
+        current_pos_value = float(current_pos)
+        current_speed_value = float(current_speed)
+        self._ensure_speed_query_cache()
+        return int(
+            _get_current_stopping_point_numba(
+                current_pos_value,
+                current_speed_value,
+                self._min_curves_pos_packed,
+                self._min_curves_speed_packed,
+                self._min_curves_lengths,
             )
-        else:
-            current_max_speed = (
-                self.speed_limits[
-                    np.clip(
-                        get_interval_index(current_pos, self.speed_limit_intervals),
-                        0,
-                        len(self.speed_limits) - 1,
-                    )
-                ]
-                * self.gamma
-            )
-
-        return float(current_min_speed), float(current_max_speed)
+        )
 
     def get_min_speed(self, current_pos: ScalarNumeric, current_sp: int) -> float:
         current_pos_value = float(current_pos)
@@ -649,17 +630,15 @@ class SafeGuardUtility:
     def get_min_and_max_speed(
         self, current_pos: ScalarNumeric, current_sp: int
     ) -> tuple[float, float]:
-        """
-        获得当前位置在目标辅助停车区下的最小防护速度和最大防护速度
+        """获得当前位置在目标辅助停车区下的最小防护速度和最大防护速度。
 
         Args:
-            current_pos: 当前位置
+            current_pos: 当前位置 (m)
             current_sp: 当前目标停车点编号
 
         Returns:
-            current_min_speed, current_max_speed
+            tuple[float, float]: (current_min_speed, current_max_speed)
         """
-
         current_pos_value = float(current_pos)
         current_sp_value = int(current_sp)
         self._ensure_speed_query_cache()
@@ -681,32 +660,25 @@ class SafeGuardUtility:
     def get_latest_traction_and_braking_intervention_points(
         self, current_speed: ScalarNumeric, current_sp: int
     ) -> tuple[float, float]:
-        """
-        根据速度反查最小位置和最大位置。
+        """根据速度反查最小位置和最大位置。
 
         Args:
             current_speed: 当前速度, 单位: m/s, 需大于等于0
             current_sp: 当前目标停车点编号
 
         Returns:
-            current_min_pos, current_max_pos
+            tuple[float, float]: (current_min_pos, current_max_pos)
         """
-
         current_speed_value = float(current_speed)
 
         if current_sp == -1:
             current_min_pos = 0.0
         else:
-            # if current_sp < -1 or current_sp >= len(self._min_curve_pos_list):
-            #     raise IndexError(f"current_sp {current_sp} 超出范围")
             current_min_pos = self._get_monotone_curve_position_by_speed(
                 curve_pos=self._min_curve_pos_list[current_sp],
                 curve_speed=self._min_curve_speed_list[current_sp],
                 current_speed=current_speed_value,
             )
-
-        # if current_sp + 1 >= len(self._max_curve_pos_list):
-        #     raise IndexError(f"current_sp {current_sp} 无法映射到最大速度曲线")
 
         current_max_pos = self._get_monotone_curve_position_by_speed(
             curve_pos=self._max_curve_pos_list[current_sp + 1],

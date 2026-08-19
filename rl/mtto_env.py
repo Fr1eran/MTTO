@@ -15,7 +15,7 @@ from model.track import TrackInfo
 from model.vehicle import VehicleInfo
 from rl.completion_critic import CompletionTrajectoryAccumulator
 from rl.context_sampler import ContextSampler
-from rl.dspdl import DSPDLEpisodeAccumulator
+from rl.dspdl import DSPDLStatisticsHub
 from rl.observation_builder import ObservationBuilder
 from rl.operational_state import OperationalState
 from rl.operational_stepper import OperationalStepper
@@ -61,26 +61,55 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         render_mode: str | None = None,
         use_animation: bool = False,
         reward_config: RewardConfig | None = None,
+        stepper: OperationalStepper | None = None,
         context_sampler: ContextSampler | None = None,
-        dspdl_accumulator: DSPDLEpisodeAccumulator | None = None,
+        dspdl_statistics_hub: DSPDLStatisticsHub | None = None,
+        curriculum_env_rank: int | None = None,
         completion_accumulator: CompletionTrajectoryAccumulator | None = None,
         safety_truncation_buffer: SafetyTruncationBuffer | None = None,
         reward_diagnostics_accumulator: RewardDiagnosticsAccumulator | None = None,
     ) -> None:
         super().__init__()
+        if (dspdl_statistics_hub is None) != (curriculum_env_rank is None):
+            raise ValueError(
+                "DSPDL statistics hub and curriculum environment rank "
+                "must be set together"
+            )
+        if dspdl_statistics_hub is not None and completion_accumulator is not None:
+            raise ValueError(
+                "traditional and completion DSPDL statistics are mutually exclusive"
+            )
+        if dspdl_statistics_hub is not None:
+            if context_sampler is None:
+                raise ValueError("DSPDL statistics require a context sampler")
+            if not isinstance(curriculum_env_rank, (int, np.integer)):
+                raise TypeError("curriculum_env_rank must be an integer")
+            if not 0 <= int(curriculum_env_rank) < dspdl_statistics_hub.num_envs:
+                raise IndexError("curriculum_env_rank is outside the statistics hub")
         self.vehicle: VehicleInfo = vehicle
         self.track: TrackInfo = track
         self.safeguard_utility: SafeGuardUtility = safeguard_utility
         self.train_service: TrainService = train_service
         self.gamma: float = gamma
         self.step_distance: float = float(step_distance)
-        self.stepper: OperationalStepper = OperationalStepper(
-            vehicle=vehicle,
-            track=track,
-            safeguard_utility=safeguard_utility,
-            train_service=train_service,
-            step_distance_m=step_distance,
-        )
+        if stepper is not None:
+            if (
+                stepper.vehicle is not vehicle
+                or stepper.track is not track
+                or stepper.safeguard_utility is not safeguard_utility
+                or stepper.train_service is not train_service
+                or not math.isclose(stepper.step_distance_m, float(step_distance))
+            ):
+                raise ValueError("injected stepper does not match environment inputs")
+            self.stepper = stepper
+        else:
+            self.stepper = OperationalStepper(
+                vehicle=vehicle,
+                track=track,
+                safeguard_utility=safeguard_utility,
+                train_service=train_service,
+                step_distance_m=step_distance,
+            )
         self.observation_builder: ObservationBuilder = ObservationBuilder(
             vehicle=vehicle,
             track=track,
@@ -100,10 +129,14 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         )
         self.reward_config: RewardConfig = self.reward_calculator.reward_config
         self.context_sampler = context_sampler
-        self.dspdl_accumulator = dspdl_accumulator
+        self.dspdl_statistics_hub = dspdl_statistics_hub
+        self.curriculum_env_rank = (
+            int(curriculum_env_rank) if curriculum_env_rank is not None else None
+        )
         self.completion_accumulator = completion_accumulator
         self.safety_truncation_buffer = safety_truncation_buffer
         self.reward_diagnostics_accumulator = reward_diagnostics_accumulator
+        self._pending_dspdl_version: int | None = None
         self.state: OperationalState = self.stepper.reset()
 
         low = np.array([0, 0, -1, -1, -1, -1, 0, 0, -1, -1, 0, 0], dtype=np.float32)
@@ -135,31 +168,22 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
             self.state = self.stepper.refresh_schedule_time(self.state)
         return self.observation_builder.build(self.state)
 
-    def set_dspdl_distribution(
-        self,
-        distribution: NDArray[np.floating] | list[float],
-        *,
-        version: int,
-    ) -> None:
-        """Atomically validate and install the next DSPDL distribution."""
-        sampler = self.context_sampler
-        accumulator = self.dspdl_accumulator or self.completion_accumulator
-        if sampler is None or accumulator is None:
+    def validate_dspdl_version(self, version: int) -> None:
+        accumulator = self.completion_accumulator
+        if self.context_sampler is None or accumulator is None:
             raise RuntimeError("DSPDL components are not configured")
-        new_version = accumulator.validate_version_update(version)
-        sampler.update_distribution(distribution, version=new_version)
-        accumulator.switch_version(new_version)
+        self._pending_dspdl_version = accumulator.validate_version_update(version)
 
-    def drain_dspdl_statistics(self, *, version: int) -> dict[str, object]:
-        accumulator = self.dspdl_accumulator
+    def commit_dspdl_version(self, version: int) -> None:
+        accumulator = self.completion_accumulator
         if accumulator is None:
             raise RuntimeError("DSPDL accumulator is not configured")
-        return accumulator.drain(version=version)
+        if self._pending_dspdl_version != int(version):
+            raise ValueError("DSPDL version was not validated before commit")
+        accumulator.switch_version(int(version))
+        self._pending_dspdl_version = None
 
     def disable_dspdl_accumulator(self) -> None:
-        accumulator = self.dspdl_accumulator
-        if accumulator is not None:
-            accumulator.disable()
         completion_accumulator = self.completion_accumulator
         if completion_accumulator is not None:
             completion_accumulator.disable()
@@ -216,8 +240,10 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
                 sampler.reseed(seed)
             context = sampler.sample()
             self.state = context.initial_state
-            if self.dspdl_accumulator is not None:
-                self.dspdl_accumulator.begin_episode(
+            if self.dspdl_statistics_hub is not None:
+                assert self.curriculum_env_rank is not None
+                self.dspdl_statistics_hub.begin_episode(
+                    env_rank=self.curriculum_env_rank,
                     context_index=context.context_index,
                     distribution_version=sampler.version,
                 )
@@ -245,8 +271,10 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
             "terminated": bool(transition.terminated),
             "truncated": bool(transition.truncated),
         }
-        if self.dspdl_accumulator is not None:
-            self.dspdl_accumulator.record_transition(
+        if self.dspdl_statistics_hub is not None:
+            assert self.curriculum_env_rank is not None
+            self.dspdl_statistics_hub.record_transition(
+                self.curriculum_env_rank,
                 reward.total,
                 done=bool(transition.terminated or transition.truncated),
             )

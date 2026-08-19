@@ -20,3 +20,8 @@ def test_training_cli_rejects_removed_evaluation_options(
 ) -> None:
     with pytest.raises(SystemExit):
         _ = build_cli_parser().parse_args([removed_option, "steps"])
+
+
+def test_training_cli_rejects_survival_reward_scale() -> None:
+    with pytest.raises(SystemExit):
+        _ = build_cli_parser().parse_args(["--survival-reward-scale", "50"])

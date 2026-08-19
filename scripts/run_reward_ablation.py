@@ -21,8 +21,6 @@ from rl.experiment_utils import (
     DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
     DEFAULT_SCHEDULE_TIME_S,
     DEFAULT_STEP_DISTANCE,
-    DEFAULT_VEC_ENV_TYPE,
-    VEC_ENV_TYPE_CHOICES,
     TrainingRunSpec,
     apply_rl_curve_plot_style,
     build_default_training_args,
@@ -114,11 +112,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     train.add_argument("--reward-discount", type=float, default=DEFAULT_REWARD_DISCOUNT)
     train.add_argument("--num-envs", type=int, default=DEFAULT_NUM_ENVS)
     train.add_argument(
-        "--vec-env-type",
-        choices=VEC_ENV_TYPE_CHOICES,
-        default=DEFAULT_VEC_ENV_TYPE,
-    )
-    train.add_argument(
         "--rollout-steps-per-update",
         type=int,
         default=DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
@@ -195,7 +188,6 @@ def _build_train_args(
     result.enable_best_evaluation_artifacts = False
     result.enable_safety_truncation_histogram = False
     result.num_envs = args.num_envs
-    result.vec_env_type = args.vec_env_type
     result.rollout_steps_per_update = args.rollout_steps_per_update
     result.total_timesteps = args.total_timesteps
     result.evaluation_interval_rollouts = args.evaluation_interval_rollouts
@@ -249,7 +241,6 @@ def _training_signature(args: argparse.Namespace) -> dict[str, Any]:
         "step_distance": float(args.step_distance),
         "reward_discount": float(args.reward_discount),
         "num_envs": int(args.num_envs),
-        "vec_env_type": str(args.vec_env_type),
         "rollout_steps_per_update": int(args.rollout_steps_per_update),
         "evaluation_interval_rollouts": int(args.evaluation_interval_rollouts),
         "device": str(args.device),

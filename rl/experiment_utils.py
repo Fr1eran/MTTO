@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import multiprocessing as mp
 import os
 import re
 from collections.abc import Callable, Mapping
@@ -15,11 +14,7 @@ import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.utils import set_random_seed
-from stable_baselines3.common.vec_env import (
-    DummyVecEnv,
-    SubprocVecEnv,
-    VecMonitor,
-)
+from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
 
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
@@ -38,13 +33,19 @@ from rl.completion_critic import (
     completion_critic_metadata,
 )
 from rl.context_pool import ContextPool, ContextPoolBuilder
+from rl.context_sampler import CurriculumDistributionState
 from rl.dp_trajectory_reader import DPTrajectoryReader
-from rl.dspdl import DSPDLCallback, DSPDLConfig
+from rl.dspdl import DSPDLCallback, DSPDLConfig, DSPDLStatisticsHub
 from rl.env_factory import make_env
 from rl.evaluation import build_single_eval_env, evaluate_and_save_final_policy
 from rl.observation_builder import ObservationBuilder
 from rl.operational_stepper import OperationalStepper
-from rl.reward_calculator import RewardConfig
+from rl.reward_calculator import (
+    DEFAULT_COMFORT_REWARD_SCALE,
+    DEFAULT_ENERGY_REWARD_SCALE,
+    DEFAULT_SURVIVAL_REWARD_SCALE,
+    RewardConfig,
+)
 from rl.reward_diagnostics import REWARD_DIAGNOSTICS_SCHEMA_VERSION
 from rl.training_analysis import AnalysisConfig, run_training_analysis
 from utils.io_utils import format_float_token, load_optimized_curve_and_metrics
@@ -64,11 +65,12 @@ __all__ = [
     "DEFAULT_ROLLOUT_STEPS_PER_UPDATE",
     "DEFAULT_STEP_DISTANCE",
     "DEFAULT_NUM_ENVS",
-    "DEFAULT_VEC_ENV_TYPE",
-    "VEC_ENV_TYPE_CHOICES",
     "DEFAULT_DEVICE",
     "DEFAULT_REWARD_PRESET_NAME",
     "DEFAULT_CURRICULUM_PROFILE_NAME",
+    "DEFAULT_ENERGY_REWARD_SCALE",
+    "DEFAULT_COMFORT_REWARD_SCALE",
+    "DEFAULT_SURVIVAL_REWARD_SCALE",
     # dataclass
     "DSPDLConfig",
     "CompletionDSPDLConfig",
@@ -78,6 +80,7 @@ __all__ = [
     "reward_preset_names",
     "resolve_reward_preset",
     "build_reward_config",
+    "resolve_survival_reward_scale",
     # curriculum profile
     "curriculum_profile_names",
     "resolve_curriculum_profile_name",
@@ -134,8 +137,6 @@ DEFAULT_REWARD_DISCOUNT = 0.998
 DEFAULT_ROLLOUT_STEPS_PER_UPDATE = 8192
 DEFAULT_STEP_DISTANCE = 30.0
 DEFAULT_NUM_ENVS = 8
-DEFAULT_VEC_ENV_TYPE = "dummy"
-VEC_ENV_TYPE_CHOICES = ("dummy", "subproc")
 DEFAULT_DEVICE = "cpu"
 DEFAULT_REWARD_PRESET_NAME = "basic_safety"
 DEFAULT_CURRICULUM_PROFILE_NAME = "none"
@@ -205,9 +206,6 @@ class TrainingRunSpec:
     num_envs: int
     n_steps_per_env: int
     rollout_steps_per_update: int
-    use_subproc: bool
-    resolved_vec_env_type: str
-    subproc_start_method: str | None
     evaluation_interval_rollouts: int
     evaluation_deterministic: bool
     evaluation_history_path: str | None
@@ -229,8 +227,19 @@ class TrainingRunSpec:
 # =============================================================================
 
 
-def _reward_config_to_dict(reward_config: RewardConfig) -> dict[str, bool]:
-    return {key: bool(value) for key, value in asdict(reward_config).items()}
+def resolve_survival_reward_scale(raw_scale: float | None) -> float:
+    """解析生存奖励尺度；无效值由 RewardConfig 回退为默认值。"""
+    value = DEFAULT_SURVIVAL_REWARD_SCALE if raw_scale is None else raw_scale
+    return RewardConfig(survival_reward_scale=value).survival_reward_scale
+
+
+def _reward_config_to_dict(reward_config: RewardConfig) -> dict[str, Any]:
+    return {
+        "energy_reward_scale": float(reward_config.energy_reward_scale),
+        "comfort_reward_scale": float(reward_config.comfort_reward_scale),
+        "enable_potential_safety": bool(reward_config.enable_potential_safety),
+        "survival_reward_scale": float(reward_config.survival_reward_scale),
+    }
 
 
 REWARD_PRESETS: dict[str, RewardPreset] = {
@@ -240,6 +249,7 @@ REWARD_PRESETS: dict[str, RewardPreset] = {
         description="Base reward only: energy and comfort are always enabled.",
         config=RewardConfig(
             enable_potential_safety=False,
+            survival_reward_scale=DEFAULT_SURVIVAL_REWARD_SCALE,
         ),
     ),
     "basic_safety": RewardPreset(
@@ -248,6 +258,7 @@ REWARD_PRESETS: dict[str, RewardPreset] = {
         description="Base reward plus safety PBRS shaping.",
         config=RewardConfig(
             enable_potential_safety=True,
+            survival_reward_scale=DEFAULT_SURVIVAL_REWARD_SCALE,
         ),
     ),
 }
@@ -319,16 +330,31 @@ def resolve_reward_preset(preset_name: str | None = None) -> RewardPreset:
     return preset
 
 
-def build_reward_config(preset_name: str | None = None) -> RewardConfig:
+def build_reward_config(
+    preset_name: str | None = None,
+    *,
+    survival_reward_scale: float | None = None,
+) -> RewardConfig:
     """根据奖励情形名构建 RewardConfig 实例。
 
     Args:
         preset_name: 预设名，同 resolve_reward_preset。
+        survival_reward_scale: 可选覆盖的生存奖励尺度；
+            若为负数或非有限数则覆写为默认值。
 
     Returns:
         用于初始化 MTTOEnv 的 RewardConfig。
     """
-    return resolve_reward_preset(preset_name).config
+    base_config = resolve_reward_preset(preset_name).config
+    if survival_reward_scale is None:
+        return base_config
+    effective_scale = resolve_survival_reward_scale(survival_reward_scale)
+    return RewardConfig(
+        energy_reward_scale=base_config.energy_reward_scale,
+        comfort_reward_scale=base_config.comfort_reward_scale,
+        enable_potential_safety=base_config.enable_potential_safety,
+        survival_reward_scale=effective_scale,
+    )
 
 
 # =============================================================================
@@ -461,8 +487,6 @@ def build_run_metadata(
     evaluation_deterministic: bool | None = None,
     evaluation_history_path: str | None = None,
     num_envs: int | None = None,
-    vec_env_type: str | None = None,
-    subproc_start_method: str | None = None,
     n_steps_per_env: int | None = None,
     rollout_steps_per_update: int | None = None,
     output_dir: str | None = None,
@@ -487,8 +511,6 @@ def build_run_metadata(
         enable_auto_analysis: 是否启用训练后自动分析。
         enable_best_evaluation_artifacts: 是否保存最优评估产物。
         num_envs: 训练环境数量。
-        vec_env_type: 向量化环境后端类型。
-        subproc_start_method: SubprocVecEnv 启动方法。
         n_steps_per_env: 每个环境的 rollout 步数。
         rollout_steps_per_update: 单次 PPO 更新的总 rollout 步数。
         output_dir: 输出目录。
@@ -591,10 +613,6 @@ def build_run_metadata(
 
     if num_envs is not None:
         metadata["num_envs"] = int(num_envs)
-    if vec_env_type is not None:
-        metadata["vec_env_type"] = str(vec_env_type)
-    if subproc_start_method is not None:
-        metadata["subproc_start_method"] = str(subproc_start_method)
     if n_steps_per_env is not None:
         metadata["n_steps_per_env"] = int(n_steps_per_env)
     if rollout_steps_per_update is not None:
@@ -693,9 +711,9 @@ def build_default_training_args() -> argparse.Namespace:
         analysis_output_root="mtto_train_reports",
         analysis_min_points_per_10k_steps=5.0,
         analysis_sampling_quality_mode="warn_only",
+        survival_reward_scale=None,
         reward_discount=DEFAULT_REWARD_DISCOUNT,
         num_envs=DEFAULT_NUM_ENVS,
-        vec_env_type=DEFAULT_VEC_ENV_TYPE,
         rollout_steps_per_update=DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
         n_steps_per_env=None,
         total_timesteps=100_000,
@@ -817,17 +835,6 @@ def _resolve_n_steps_per_env(args: argparse.Namespace, num_envs: int) -> int:
     return max(1, int(np.ceil(target_rollout_steps / max(1, int(num_envs)))))
 
 
-def _resolve_subproc_start_method() -> str:
-    """自动选择 SubprocVecEnv 的启动方法。
-
-    与 Stable-Baselines3 一致：优先 forkserver，不可用时回退到 spawn。
-    """
-    available_start_methods = set(mp.get_all_start_methods())
-    if "forkserver" in available_start_methods:
-        return "forkserver"
-    return "spawn"
-
-
 def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
     """将 CLI 解析后的参数转换为完整的 TrainingRunSpec。
 
@@ -843,6 +850,17 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
         raise ValueError("step_distance must be finite and positive")
     reward_discount = float(args.reward_discount)
     reward_preset = resolve_reward_preset(args.reward_preset)
+    raw_survival_scale = getattr(args, "survival_reward_scale", None)
+    if raw_survival_scale is not None:
+        effective_scale = resolve_survival_reward_scale(raw_survival_scale)
+        custom_reward_config = replace(
+            reward_preset.config,
+            survival_reward_scale=effective_scale,
+        )
+        reward_preset = replace(
+            reward_preset,
+            config=custom_reward_config,
+        )
     curriculum_profile = resolve_curriculum_profile_name(
         getattr(args, "curriculum_profile", DEFAULT_CURRICULUM_PROFILE_NAME)
     )
@@ -940,10 +958,6 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
     n_steps_per_env = _resolve_n_steps_per_env(args, num_envs)
     rollout_steps_per_update = n_steps_per_env * num_envs
 
-    use_subproc = num_envs > 1 and args.vec_env_type == "subproc"
-    resolved_vec_env_type = "subproc" if use_subproc else "dummy"
-    subproc_start_method = _resolve_subproc_start_method() if use_subproc else None
-
     run_metadata = build_run_metadata(
         reward_preset=reward_preset,
         curriculum_profile=curriculum_profile,
@@ -965,8 +979,6 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
         evaluation_deterministic=bool(args.evaluation_deterministic),
         evaluation_history_path=evaluation_history_path,
         num_envs=int(num_envs),
-        vec_env_type=resolved_vec_env_type,
-        subproc_start_method=subproc_start_method,
         n_steps_per_env=int(n_steps_per_env),
         rollout_steps_per_update=int(rollout_steps_per_update),
         output_dir=output_dir,
@@ -1008,9 +1020,6 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
         num_envs=int(num_envs),
         n_steps_per_env=int(n_steps_per_env),
         rollout_steps_per_update=int(rollout_steps_per_update),
-        use_subproc=bool(use_subproc),
-        resolved_vec_env_type=resolved_vec_env_type,
-        subproc_start_method=subproc_start_method,
         evaluation_interval_rollouts=max(1, int(args.evaluation_interval_rollouts)),
         evaluation_deterministic=bool(args.evaluation_deterministic),
         evaluation_history_path=evaluation_history_path,
@@ -1052,10 +1061,11 @@ def _build_env_initializer(
     worker_rank: int,
     rollout_capacity: int,
     reward_config: RewardConfig | None = None,
+    stepper: OperationalStepper | None = None,
     context_pool: ContextPool | None = None,
-    initial_context_distribution: np.ndarray | None = None,
+    curriculum_distribution_state: CurriculumDistributionState | None = None,
     context_sampling_seed: int | None = None,
-    enable_dspdl_accumulator: bool = False,
+    dspdl_statistics_hub: DSPDLStatisticsHub | None = None,
     enable_completion_accumulator: bool = False,
     completion_config: CompletionDSPDLConfig | None = None,
     enable_safety_truncation_tracking: bool = False,
@@ -1070,10 +1080,14 @@ def _build_env_initializer(
             step_distance=step_distance,
             compact_training_info=True,
             reward_config=reward_config,
+            stepper=stepper,
             context_pool=context_pool,
-            initial_context_distribution=initial_context_distribution,
+            curriculum_distribution_state=curriculum_distribution_state,
             context_sampling_seed=context_sampling_seed,
-            enable_dspdl_accumulator=enable_dspdl_accumulator,
+            dspdl_statistics_hub=dspdl_statistics_hub,
+            curriculum_env_rank=(
+                worker_rank if dspdl_statistics_hub is not None else None
+            ),
             enable_completion_accumulator=enable_completion_accumulator,
             completion_config=completion_config,
             enable_safety_truncation_tracking=enable_safety_truncation_tracking,
@@ -1112,9 +1126,17 @@ def train_single_experiment(
     vehicle, track, safeguard_utility, train_service = build_scenario(
         schedule_time_s=resolved_spec.schedule_time_s
     )
+    shared_stepper = OperationalStepper(
+        vehicle=vehicle,
+        track=track,
+        safeguard_utility=safeguard_utility,
+        train_service=train_service,
+        step_distance_m=resolved_spec.step_distance,
+    )
 
     context_pool: ContextPool | None = None
-    initial_context_distribution: np.ndarray | None = None
+    curriculum_distribution_state: CurriculumDistributionState | None = None
+    dspdl_statistics_hub: DSPDLStatisticsHub | None = None
     curriculum_callback: BaseCallback | None = None
     if resolved_spec.curriculum_profile != "none":
         if resolved_spec.reference_curve_dir is None:
@@ -1127,16 +1149,9 @@ def train_single_experiment(
             artifact=artifact,
             train_service=train_service,
         )
-        parent_stepper = OperationalStepper(
-            vehicle=vehicle,
-            track=track,
-            safeguard_utility=safeguard_utility,
-            train_service=train_service,
-            step_distance_m=resolved_spec.step_distance,
-        )
         context_pool = ContextPoolBuilder(
             reference_trajectory,
-            stepper=parent_stepper,
+            stepper=shared_stepper,
         ).build()
         if resolved_spec.dspdl_config is None:
             raise RuntimeError("DSPDL curriculum is missing its configuration")
@@ -1145,9 +1160,9 @@ def train_single_experiment(
             track=track,
             train_service=train_service,
             step_distance_m=resolved_spec.step_distance,
-            direction=parent_stepper.direction,
-            whole_distance_m=parent_stepper.whole_distance_m,
-            get_upper_speed_or_zero=parent_stepper.get_upper_speed_or_zero,
+            direction=shared_stepper.direction,
+            whole_distance_m=shared_stepper.whole_distance_m,
+            get_upper_speed_or_zero=shared_stepper.get_upper_speed_or_zero,
         )
         context_observations = np.stack(
             [
@@ -1167,17 +1182,24 @@ def train_single_experiment(
                 config=resolved_spec.dspdl_config,
                 seed=resolved_spec.seed,
             )
+            curriculum_distribution_state = curriculum_callback.distribution_state
         else:
             if not isinstance(resolved_spec.dspdl_config, DSPDLConfig):
-                raise TypeError("legacy DSPDL curriculum has an invalid configuration")
+                raise TypeError(
+                    "traditional DSPDL curriculum has an invalid configuration"
+                )
+            dspdl_statistics_hub = DSPDLStatisticsHub(
+                context_count=context_pool.context_count,
+                num_envs=resolved_spec.num_envs,
+                gamma=resolved_spec.reward_discount,
+            )
             curriculum_callback = DSPDLCallback(
                 context_pool=context_pool,
                 context_observations=context_observations,
                 config=resolved_spec.dspdl_config,
+                statistics_hub=dspdl_statistics_hub,
             )
-        initial_context_distribution = (
-            curriculum_callback.initial_context_distribution()
-        )
+            curriculum_distribution_state = curriculum_callback.distribution_state
         curriculum_metadata = dict(resolved_spec.run_metadata["curriculum"])
         curriculum_metadata.update(
             {
@@ -1212,12 +1234,13 @@ def train_single_experiment(
             worker_rank=env_rank,
             rollout_capacity=resolved_spec.n_steps_per_env,
             reward_config=resolved_spec.reward_config,
+            stepper=shared_stepper,
             context_pool=context_pool,
-            initial_context_distribution=initial_context_distribution,
+            curriculum_distribution_state=curriculum_distribution_state,
             context_sampling_seed=(
                 None if resolved_spec.seed is None else resolved_spec.seed + env_rank
             ),
-            enable_dspdl_accumulator=(resolved_spec.curriculum_profile == "dspdl"),
+            dspdl_statistics_hub=dspdl_statistics_hub,
             enable_completion_accumulator=(
                 resolved_spec.curriculum_profile == "dspdl_completion"
             ),
@@ -1232,17 +1255,7 @@ def train_single_experiment(
         )
         for env_rank in range(resolved_spec.num_envs)
     ]
-    if resolved_spec.use_subproc:
-        if resolved_spec.subproc_start_method is None:
-            raise ValueError(
-                "subproc_start_method must be resolved when SubprocVecEnv is used."
-            )
-        venv_train = SubprocVecEnv(
-            env_initializers,
-            start_method=resolved_spec.subproc_start_method,
-        )
-    else:
-        venv_train = DummyVecEnv(env_initializers)
+    venv_train = DummyVecEnv(env_initializers)
 
     if resolved_spec.enable_monitor:
         venv_train = VecMonitor(venv_train)

@@ -4,13 +4,13 @@ import matplotlib.pyplot as plt
 import pytest
 
 from rl.experiment_utils import (
+    DEFAULT_COMFORT_REWARD_SCALE,
     DEFAULT_DEVICE,
+    DEFAULT_ENERGY_REWARD_SCALE,
     DEFAULT_NUM_ENVS,
     DEFAULT_REWARD_PRESET_NAME,
     DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
-    DEFAULT_VEC_ENV_TYPE,
     RUN_METADATA_FILENAME,
-    VEC_ENV_TYPE_CHOICES,
     add_panel_label,
     build_default_training_args,
     build_reward_config,
@@ -30,10 +30,8 @@ def test_default_training_args_use_shared_vector_environment_defaults() -> None:
     args = build_default_training_args()
 
     assert DEFAULT_NUM_ENVS == 8
-    assert DEFAULT_VEC_ENV_TYPE == "dummy"
-    assert VEC_ENV_TYPE_CHOICES == ("dummy", "subproc")
     assert args.num_envs == DEFAULT_NUM_ENVS
-    assert args.vec_env_type == DEFAULT_VEC_ENV_TYPE
+    assert not hasattr(args, "vec_env_type")
     assert args.rollout_steps_per_update == DEFAULT_ROLLOUT_STEPS_PER_UPDATE
     assert args.device == DEFAULT_DEVICE
 
@@ -100,8 +98,8 @@ def test_reward_presets_keep_energy_comfort_and_toggle_pbrs() -> None:
     }
     for profile_name, expected in expected_flags.items():
         reward_config = build_reward_config(profile_name)
-        assert reward_config.enable_energy is True
-        assert reward_config.enable_comfort is True
+        assert reward_config.energy_reward_scale == DEFAULT_ENERGY_REWARD_SCALE
+        assert reward_config.comfort_reward_scale == DEFAULT_COMFORT_REWARD_SCALE
         assert reward_config.enable_potential_safety is expected
 
 
@@ -285,3 +283,32 @@ def test_add_panel_label_places_text_on_axes() -> None:
     assert text.get_va() == "top"
 
     plt.close(fig)
+
+
+def test_resolve_survival_reward_scale_fallback_on_negative_or_invalid() -> None:
+    from rl.experiment_utils import (
+        DEFAULT_SURVIVAL_REWARD_SCALE,
+        _reward_config_to_dict,
+        resolve_survival_reward_scale,
+    )
+
+    assert resolve_survival_reward_scale(None) == DEFAULT_SURVIVAL_REWARD_SCALE
+    assert resolve_survival_reward_scale(50.0) == 50.0
+    assert resolve_survival_reward_scale(0.0) == 0.0
+    assert resolve_survival_reward_scale(-10.0) == DEFAULT_SURVIVAL_REWARD_SCALE
+    assert resolve_survival_reward_scale(float("nan")) == DEFAULT_SURVIVAL_REWARD_SCALE
+    assert resolve_survival_reward_scale(float("inf")) == DEFAULT_SURVIVAL_REWARD_SCALE
+
+    cfg = build_reward_config("basic_safety", survival_reward_scale=-5.0)
+    assert cfg.survival_reward_scale == DEFAULT_SURVIVAL_REWARD_SCALE
+
+    cfg_custom = build_reward_config("basic", survival_reward_scale=30.0)
+    assert cfg_custom.survival_reward_scale == 30.0
+
+    d = _reward_config_to_dict(cfg_custom)
+    assert d["energy_reward_scale"] == DEFAULT_ENERGY_REWARD_SCALE
+    assert d["comfort_reward_scale"] == DEFAULT_COMFORT_REWARD_SCALE
+    assert d["survival_reward_scale"] == 30.0
+    assert d["enable_potential_safety"] is False
+    assert "enable_energy" not in d
+    assert "enable_comfort" not in d

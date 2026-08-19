@@ -13,12 +13,14 @@ from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.policies import ActorCriticPolicy
 
 from rl.context_pool import ContextPool
+from rl.context_sampler import CurriculumDistributionState
 
 __all__ = [
     "DSPDLCallback",
     "DSPDLConfig",
     "DSPDLDistributionSolver",
-    "DSPDLEpisodeAccumulator",
+    "DSPDLStatisticsHub",
+    "DSPDLStatisticsSnapshot",
 ]
 
 
@@ -37,23 +39,37 @@ class DSPDLConfig:
     min_completed_episodes_per_env: int = 2
 
 
-class DSPDLEpisodeAccumulator:
-    """Collect one worker's DSPDL statistics without per-step IPC."""
+@dataclass(frozen=True, slots=True)
+class DSPDLStatisticsSnapshot:
+    """Immutable snapshot of centralized DSPDL curriculum statistics."""
 
-    def __init__(self, *, context_count: int, gamma: float) -> None:
+    version: int
+    context_counts: NDArray[np.int64]
+    completed_context_indices: NDArray[np.int64]
+    completed_returns: NDArray[np.float64]
+
+
+class DSPDLStatisticsHub:
+    """Collect all DummyVecEnv DSPDL statistics in one shared state."""
+
+    def __init__(self, *, context_count: int, num_envs: int, gamma: float) -> None:
         if context_count <= 0:
             raise ValueError("context_count must be positive")
+        if num_envs <= 0:
+            raise ValueError("num_envs must be positive")
         if not 0.0 < float(gamma) <= 1.0:
             raise ValueError("gamma must be within (0, 1]")
         self._context_count = int(context_count)
+        self._num_envs = int(num_envs)
         self._gamma = float(gamma)
         self._enabled = True
         self._accepted_version = 0
-        self._active_context_index: int | None = None
-        self._active_version: int | None = None
-        self._active_return = 0.0
-        self._active_discount = 1.0
-        self._active_valid = False
+        self._pending_version: int | None = None
+        self._active_context_indices = np.full(self._num_envs, -1, dtype=np.int64)
+        self._active_versions = np.full(self._num_envs, -1, dtype=np.int64)
+        self._active_returns = np.zeros(self._num_envs, dtype=np.float64)
+        self._active_discounts = np.ones(self._num_envs, dtype=np.float64)
+        self._active_valid = np.zeros(self._num_envs, dtype=np.bool_)
         self._context_counts = np.zeros(self._context_count, dtype=np.int64)
         self._completed_context_indices: list[int] = []
         self._completed_returns: list[float] = []
@@ -66,93 +82,151 @@ class DSPDLEpisodeAccumulator:
     def accepted_version(self) -> int:
         return self._accepted_version
 
-    def begin_episode(self, *, context_index: int, distribution_version: int) -> None:
+    @property
+    def context_count(self) -> int:
+        return self._context_count
+
+    @property
+    def num_envs(self) -> int:
+        return self._num_envs
+
+    def begin_episode(
+        self,
+        *,
+        env_rank: int,
+        context_index: int,
+        distribution_version: int,
+    ) -> None:
         if not self._enabled:
             return
-        if not 0 <= int(context_index) < self._context_count:
+        rank = self._validate_env_rank(env_rank)
+        if not isinstance(context_index, (int, np.integer)):
+            raise TypeError("context_index must be an integer")
+        index = int(context_index)
+        if not 0 <= index < self._context_count:
             raise IndexError("context_index is outside the context pool")
+        if not isinstance(distribution_version, (int, np.integer)):
+            raise TypeError("distribution_version must be an integer")
         version = int(distribution_version)
-        self._active_context_index = int(context_index)
-        self._active_version = version
-        self._active_return = 0.0
-        self._active_discount = 1.0
-        self._active_valid = version == self._accepted_version
-        if self._active_valid:
-            self._context_counts[int(context_index)] += 1
+        self._active_context_indices[rank] = index
+        self._active_versions[rank] = version
+        self._active_returns[rank] = 0.0
+        self._active_discounts[rank] = 1.0
+        self._active_valid[rank] = version == self._accepted_version
+        if self._active_valid[rank]:
+            self._context_counts[index] += 1
 
-    def record_transition(self, reward: float, *, done: bool) -> None:
-        if not self._enabled or self._active_context_index is None:
+    def record_transition(self, env_rank: int, reward: float, *, done: bool) -> None:
+        if not self._enabled:
             return
-        if self._active_valid:
-            self._active_return += self._active_discount * float(reward)
-            self._active_discount *= self._gamma
+        rank = self._validate_env_rank(env_rank)
+        if self._active_context_indices[rank] < 0:
+            return
+        value = float(reward)
+        if not np.isfinite(value):
+            raise ValueError("DSPDL transition reward must be finite")
+        if self._active_valid[rank]:
+            self._active_returns[rank] += self._active_discounts[rank] * value
+            self._active_discounts[rank] *= self._gamma
         if done:
-            if self._active_valid:
-                self._completed_context_indices.append(self._active_context_index)
-                self._completed_returns.append(self._active_return)
-            self._clear_active_episode()
+            if self._active_valid[rank]:
+                self._completed_context_indices.append(
+                    int(self._active_context_indices[rank])
+                )
+                self._completed_returns.append(float(self._active_returns[rank]))
+            self._clear_active_episode(rank)
 
-    def switch_version(self, version: int) -> None:
-        new_version = self.validate_version_update(version)
-        self._commit_version_update(new_version)
+    def snapshot(self, *, version: int) -> DSPDLStatisticsSnapshot:
+        self._validate_requested_version(version)
+        if self._enabled:
+            counts = self._context_counts.copy()
+            indices = np.asarray(self._completed_context_indices, dtype=np.int64)
+            returns = np.asarray(self._completed_returns, dtype=np.float64)
+        else:
+            counts = np.zeros(self._context_count, dtype=np.int64)
+            indices = np.empty(0, dtype=np.int64)
+            returns = np.empty(0, dtype=np.float64)
+        for values in (counts, indices, returns):
+            values.flags.writeable = False
+        return DSPDLStatisticsSnapshot(
+            version=self._accepted_version,
+            context_counts=counts,
+            completed_context_indices=indices,
+            completed_returns=returns,
+        )
+
+    def clear_consumed(self, *, version: int) -> None:
+        self._validate_requested_version(version)
+        if self._enabled:
+            self._clear_completed_statistics()
 
     def validate_version_update(self, version: int) -> int:
-        """Validate a version update without changing collected statistics."""
+        if not self._enabled:
+            raise RuntimeError("DSPDL statistics hub is disabled")
         if not isinstance(version, (int, np.integer)):
-            raise TypeError("version must be an integer")
+            raise TypeError("statistics version must be an integer")
         new_version = int(version)
         if new_version <= self._accepted_version:
-            raise ValueError("accumulator version must increase")
+            raise ValueError("statistics version must increase")
+        if self._pending_version is not None:
+            raise RuntimeError("a statistics version update is already pending")
+        self._pending_version = new_version
         return new_version
 
-    def _commit_version_update(self, version: int) -> None:
-        new_version = int(version)
-        self._accepted_version = new_version
-        self._context_counts.fill(0)
-        self._completed_context_indices.clear()
-        self._completed_returns.clear()
-        if self._active_version != new_version:
-            self._active_valid = False
+    def cancel_version_update(self, version: int) -> None:
+        if self._pending_version != int(version):
+            raise ValueError("statistics version was not pending")
+        self._pending_version = None
 
-    def drain(self, *, version: int) -> dict[str, object]:
-        if int(version) != self._accepted_version:
-            raise ValueError("requested statistics version does not match accumulator")
-        if not self._enabled:
-            return self._empty_payload(version)
-        payload: dict[str, object] = {
-            "version": self._accepted_version,
-            "context_counts": self._context_counts.copy(),
-            "completed_context_indices": np.asarray(
-                self._completed_context_indices, dtype=np.int64
-            ),
-            "completed_returns": np.asarray(self._completed_returns, dtype=np.float64),
-        }
-        self._context_counts.fill(0)
-        self._completed_context_indices.clear()
-        self._completed_returns.clear()
-        return payload
+    def commit_version(self, version: int) -> None:
+        new_version = int(version)
+        if self._pending_version != new_version:
+            raise ValueError("statistics version was not validated before commit")
+        self._accepted_version = new_version
+        self._pending_version = None
+        self._clear_completed_statistics()
+        self._active_valid &= self._active_versions == new_version
 
     def disable(self) -> None:
+        if not self._enabled:
+            return
         self._enabled = False
+        self._pending_version = None
+        self._active_context_indices = np.empty(0, dtype=np.int64)
+        self._active_versions = np.empty(0, dtype=np.int64)
+        self._active_returns = np.empty(0, dtype=np.float64)
+        self._active_discounts = np.empty(0, dtype=np.float64)
+        self._active_valid = np.empty(0, dtype=np.bool_)
         self._context_counts = np.empty(0, dtype=np.int64)
         self._completed_context_indices.clear()
         self._completed_returns.clear()
-        self._clear_active_episode()
 
-    def _clear_active_episode(self) -> None:
-        self._active_context_index = None
-        self._active_version = None
-        self._active_return = 0.0
-        self._active_discount = 1.0
-        self._active_valid = False
+    def _validate_env_rank(self, env_rank: int) -> int:
+        if not isinstance(env_rank, (int, np.integer)):
+            raise TypeError("env_rank must be an integer")
+        rank = int(env_rank)
+        if not 0 <= rank < self._num_envs:
+            raise IndexError("env_rank is outside the statistics hub")
+        return rank
 
-    def _empty_payload(self, version: int) -> dict[str, object]:
-        return {
-            "version": int(version),
-            "context_counts": np.zeros(self._context_count, dtype=np.int64),
-            "completed_context_indices": np.empty(0, dtype=np.int64),
-            "completed_returns": np.empty(0, dtype=np.float64),
-        }
+    def _validate_requested_version(self, version: int) -> None:
+        if not isinstance(version, (int, np.integer)):
+            raise TypeError("statistics version must be an integer")
+        if int(version) != self._accepted_version:
+            raise ValueError("requested statistics version does not match the hub")
+
+    def _clear_completed_statistics(self) -> None:
+        if self._context_counts.size:
+            self._context_counts.fill(0)
+        self._completed_context_indices.clear()
+        self._completed_returns.clear()
+
+    def _clear_active_episode(self, rank: int) -> None:
+        self._active_context_indices[rank] = -1
+        self._active_versions[rank] = -1
+        self._active_returns[rank] = 0.0
+        self._active_discounts[rank] = 1.0
+        self._active_valid[rank] = False
 
 
 class DSPDLDistributionSolver:
@@ -273,7 +347,7 @@ class DSPDLDistributionSolver:
 
 
 class DSPDLCallback(BaseCallback):
-    """Coordinate DSPDL updates using worker-local episode statistics."""
+    """Coordinate DSPDL updates using centralized episode statistics."""
 
     def __init__(
         self,
@@ -281,6 +355,7 @@ class DSPDLCallback(BaseCallback):
         context_pool: ContextPool,
         context_observations: NDArray[np.float32],
         config: DSPDLConfig,
+        statistics_hub: DSPDLStatisticsHub,
         solver: DSPDLDistributionSolver | None = None,
         verbose: int = 0,
     ) -> None:
@@ -293,41 +368,64 @@ class DSPDLCallback(BaseCallback):
             raise ValueError("context_observations must have one row per context")
         if not np.all(np.isfinite(observations)):
             raise ValueError("context_observations must be finite")
+        if statistics_hub.context_count != context_pool.context_count:
+            raise ValueError(
+                "statistics hub context count must match the context pool"
+            )
         self._context_pool = context_pool
         self._context_observations = observations
         self._context_observation_tensor: th.Tensor | None = None
         self._config = config
+        self._statistics_hub = statistics_hub
         self._validate_config()
         self._solver = solver or DSPDLDistributionSolver(
             relative_entropy_bound=config.relative_entropy_bound
         )
         self._start_index = int(np.argmax(context_pool.remaining_distances_m))
         self._target_distribution = self._build_target_distribution()
-        self._current_distribution = self._build_initial_distribution()
-        self._version = 0
+        self._distribution_state = CurriculumDistributionState(
+            context_count=context_pool.context_count,
+            initial_distribution=self._build_initial_distribution(),
+        )
         self._rollouts_since_update_attempt = 0
         self._context_update_count = 0
-        self._context_counts = np.zeros(context_pool.context_count, dtype=np.int64)
-        self._completed_context_indices: list[int] = []
-        self._completed_returns: list[float] = []
-        self._num_envs = 1
         self._converged = False
 
     def initial_context_distribution(self) -> NDArray[np.float64]:
-        return self._current_distribution.copy()
+        return self._distribution_state.distribution
+
+    @property
+    def distribution_state(self) -> CurriculumDistributionState:
+        return self._distribution_state
 
     @property
     def target_context_distribution(self) -> NDArray[np.float64]:
         return self._target_distribution.copy()
+
+    @property
+    def statistics_hub(self) -> DSPDLStatisticsHub:
+        return self._statistics_hub
 
     @override
     def _on_training_start(self) -> None:
         policy = cast(ActorCriticPolicy, self.model.policy)
         tensor, _ = policy.obs_to_tensor(self._context_observations)
         self._context_observation_tensor = tensor
-        self._num_envs = int(self.training_env.num_envs)
+        if self._statistics_hub.num_envs != int(self.training_env.num_envs):
+            raise ValueError(
+                "statistics hub environment count must match the training environment"
+            )
+        if self._statistics_hub.accepted_version != self._distribution_state.version:
+            raise ValueError(
+                "statistics hub version must match the curriculum distribution"
+            )
         self._record_scalar("dspdl/converged", 0.0)
-        self._record_curriculum_metrics(empirical_distribution=None)
+        snapshot = self._statistics_hub.snapshot(
+            version=self._distribution_state.version
+        )
+        self._record_curriculum_metrics(
+            snapshot=snapshot, empirical_distribution=None
+        )
 
     @override
     def _on_rollout_start(self) -> None:
@@ -352,18 +450,26 @@ class DSPDLCallback(BaseCallback):
     def _on_training_end(self) -> None:
         self._context_observations = np.empty((0, 0), dtype=np.float32)
         self._context_observation_tensor = None
-        self._clear_parent_statistics()
+        self._statistics_hub.disable()
 
     def _maybe_update_curriculum(self) -> None:
         if self._converged:
             return
         update_started = perf_counter()
-        self._drain_worker_statistics()
-        empirical = self._empirical_context_distribution()
-        self._record_curriculum_metrics(empirical_distribution=empirical)
+        current_version = self._distribution_state.version
+        if self._statistics_hub.accepted_version != current_version:
+            raise ValueError(
+                "statistics hub version must match the curriculum distribution"
+            )
+        snapshot = self._statistics_hub.snapshot(version=current_version)
+        empirical = self._empirical_context_distribution(snapshot)
+        self._record_curriculum_metrics(
+            snapshot=snapshot, empirical_distribution=empirical
+        )
+        current_distribution = self._distribution_state.distribution
 
         target_kl = self._solver.kl_divergence(
-            self._current_distribution, self._target_distribution
+            current_distribution, self._target_distribution
         )
         if target_kl <= self._config.target_kl_stop:
             self._mark_converged()
@@ -373,11 +479,12 @@ class DSPDLCallback(BaseCallback):
         if self._context_update_count >= self._config.alpha_warmup_updates:
             minimum = max(
                 self._config.min_completed_episodes,
-                self._config.min_completed_episodes_per_env * self._num_envs,
+                self._config.min_completed_episodes_per_env
+                * self._statistics_hub.num_envs,
             )
-            if len(self._completed_returns) < minimum:
+            if snapshot.completed_returns.size < minimum:
                 return
-            mean_return = float(np.mean(self._completed_returns))
+            mean_return = float(np.mean(snapshot.completed_returns))
             alpha = self._config.zeta * max(0.0, mean_return) / target_kl
 
         critic_started = perf_counter()
@@ -388,69 +495,54 @@ class DSPDLCallback(BaseCallback):
         solve_started = perf_counter()
         candidate = self._solver.solve(
             context_values=context_values,
-            current_distribution=self._current_distribution,
+            current_distribution=current_distribution,
             target_distribution=self._target_distribution,
             alpha=alpha,
         )
         self._record_scalar(
             "dspdl/distribution_solve_duration_s", perf_counter() - solve_started
         )
-        self._record_context_value_calibration(context_values)
+        self._record_context_value_calibration(context_values, snapshot)
         self._context_update_count += 1
-        self._clear_parent_statistics()
         self._record_scalar("dspdl/alpha", alpha)
         self._record_scalar(
             "dspdl/update_kl",
-            self._solver.kl_divergence(candidate, self._current_distribution),
+            self._solver.kl_divergence(candidate, current_distribution),
         )
         reaches_target = (
             self._solver.kl_divergence(candidate, self._target_distribution)
             <= self._config.target_kl_stop
         )
         if not np.allclose(
-            candidate, self._current_distribution, rtol=1e-10, atol=1e-12
+            candidate, current_distribution, rtol=1e-10, atol=1e-12
         ):
-            self._version += 1
+            next_version = current_version + 1
             dispatch_started = perf_counter()
-            self.training_env.env_method(
-                "set_dspdl_distribution", candidate, version=self._version
-            )
-            self._current_distribution = candidate
+            self._statistics_hub.validate_version_update(next_version)
+            try:
+                self._distribution_state.update(candidate, version=next_version)
+            except Exception:
+                self._statistics_hub.cancel_version_update(next_version)
+                raise
+            self._statistics_hub.commit_version(next_version)
             self._record_scalar(
                 "dspdl/worker_distribution_duration_s",
                 perf_counter() - dispatch_started,
             )
+        else:
+            self._statistics_hub.clear_consumed(version=current_version)
         self._record_scalar("dspdl/update_duration_s", perf_counter() - update_started)
         if reaches_target:
             self._mark_converged()
 
-    def _drain_worker_statistics(self) -> None:
-        payloads = self.training_env.env_method(
-            "drain_dspdl_statistics", version=self._version
-        )
-        for raw_payload in payloads:
-            if not isinstance(raw_payload, dict):
-                raise TypeError("DSPDL statistics payload must be a dictionary")
-            if int(raw_payload["version"]) != self._version:
-                raise ValueError("DSPDL worker statistics version mismatch")
-            counts = np.asarray(raw_payload["context_counts"], dtype=np.int64)
-            indices = np.asarray(
-                raw_payload["completed_context_indices"], dtype=np.int64
-            )
-            returns = np.asarray(raw_payload["completed_returns"], dtype=np.float64)
-            if counts.shape != self._context_counts.shape:
-                raise ValueError("DSPDL context count payload has an invalid shape")
-            if indices.shape != returns.shape:
-                raise ValueError("DSPDL completed episode payload shapes differ")
-            self._context_counts += counts
-            self._completed_context_indices.extend(indices.tolist())
-            self._completed_returns.extend(returns.tolist())
-
-    def _empirical_context_distribution(self) -> NDArray[np.float64] | None:
-        count = int(np.sum(self._context_counts))
+    @staticmethod
+    def _empirical_context_distribution(
+        snapshot: DSPDLStatisticsSnapshot,
+    ) -> NDArray[np.float64] | None:
+        count = int(np.sum(snapshot.context_counts))
         if count <= 0:
             return None
-        return self._context_counts.astype(np.float64) / count
+        return snapshot.context_counts.astype(np.float64) / count
 
     def _evaluate_context_values(self) -> NDArray[np.float64]:
         tensor = self._context_observation_tensor
@@ -462,15 +554,18 @@ class DSPDLCallback(BaseCallback):
         return values.detach().cpu().numpy().reshape(-1).astype(np.float64)
 
     def _record_curriculum_metrics(
-        self, *, empirical_distribution: NDArray[np.float64] | None
+        self,
+        *,
+        snapshot: DSPDLStatisticsSnapshot,
+        empirical_distribution: NDArray[np.float64] | None,
     ) -> None:
         self._record_scalar(
             "dspdl/current_to_target_kl",
             self._solver.kl_divergence(
-                self._current_distribution, self._target_distribution
+                self._distribution_state.distribution, self._target_distribution
             ),
         )
-        count = float(np.sum(self._context_counts))
+        count = float(np.sum(snapshot.context_counts))
         self._record_scalar("dspdl/empirical_context_count", count)
         if empirical_distribution is not None:
             self._record_scalar(
@@ -480,11 +575,13 @@ class DSPDLCallback(BaseCallback):
                 ),
             )
 
-    def _record_context_value_calibration(self, values: np.ndarray) -> None:
-        if not self._completed_returns:
+    def _record_context_value_calibration(
+        self, values: np.ndarray, snapshot: DSPDLStatisticsSnapshot
+    ) -> None:
+        if snapshot.completed_returns.size == 0:
             return
-        indices = np.asarray(self._completed_context_indices, dtype=np.int64)
-        returns = np.asarray(self._completed_returns, dtype=np.float64)
+        indices = snapshot.completed_context_indices
+        returns = snapshot.completed_returns
         predictions = values[indices]
         self._record_scalar(
             "dspdl/critic_return_mae",
@@ -531,17 +628,11 @@ class DSPDLCallback(BaseCallback):
         ) * start + self._config.target_uniform_mass * uniform
         return result / float(np.sum(result))
 
-    def _clear_parent_statistics(self) -> None:
-        self._context_counts.fill(0)
-        self._completed_context_indices.clear()
-        self._completed_returns.clear()
-
     def _mark_converged(self) -> None:
         if self._converged:
             return
         self._converged = True
-        self._clear_parent_statistics()
-        self.training_env.env_method("disable_dspdl_accumulator")
+        self._statistics_hub.disable()
         self._record_scalar("dspdl/converged", 1.0)
 
     def _validate_config(self) -> None:

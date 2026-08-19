@@ -35,6 +35,11 @@ def test_evaluate_rl_cli_rejects_removed_punctuality_dense_reward_option() -> No
         _ = build_arg_parser().parse_args(["--plot-punctuality-dense-reward"])
 
 
+def test_evaluate_rl_cli_rejects_survival_reward_scale() -> None:
+    with pytest.raises(SystemExit):
+        _ = build_arg_parser().parse_args(["--survival-reward-scale", "50"])
+
+
 def test_build_initial_rollout_series_reads_reset_environment_state() -> None:
     class FakeVecEnv:
         values: dict[str, list[object]] = {

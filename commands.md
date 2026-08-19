@@ -76,7 +76,6 @@ uv run python -m scripts.train_rl \
   --run-mode tune \
   --total-timesteps 1000000 \
   --num-envs 8 \
-  --vec-env-type dummy \
   --rollout-steps-per-update 8192 \
   --evaluation-interval-rollouts 12 \
   --evaluation-deterministic \
@@ -93,7 +92,6 @@ uv run python -m scripts.train_rl \
   --run-mode monitor_best \
   --total-timesteps 1000000 \
   --num-envs 8 \
-  --vec-env-type dummy \
   --rollout-steps-per-update 8192 \
   --evaluation-interval-rollouts 12 \
   --evaluation-deterministic \
@@ -110,7 +108,6 @@ uv run python -m scripts.train_rl \
   --run-mode reproduce \
   --total-timesteps 1000000 \
   --num-envs 8 \
-  --vec-env-type dummy \
   --rollout-steps-per-update 8192 \
   --device cpu
 ```
@@ -128,7 +125,6 @@ uv run python -m scripts.train_rl \
   --run-mode monitor_best \
   --total-timesteps 1000000 \
   --num-envs 8 \
-  --vec-env-type dummy \
   --rollout-steps-per-update 8192 \
   --evaluation-interval-rollouts 12 \
   --seed 11 \
@@ -248,6 +244,28 @@ uv run python -m scripts.run_reward_ablation show \
   --output-root output/optimal/rl/reward_ablation_safety
 ```
 
+预览生存奖励尺度消融运行矩阵：
+
+```bash
+uv run python -m scripts.run_survival_reward_ablation train \
+  --survival-weights 0.0 20.0 50.0 100.0 200.0 \
+  --num-envs 8 \
+  --evaluation-interval-rollouts 12 \
+  --dry-run
+```
+
+执行生存奖励尺度消融并展示结果：
+
+```bash
+uv run python -m scripts.run_survival_reward_ablation train \
+  --survival-weights 0.0 20.0 50.0 100.0 200.0 \
+  --num-envs 8 \
+  --evaluation-interval-rollouts 12
+
+uv run python -m scripts.run_survival_reward_ablation show \
+  --output-root output/optimal/rl/survival_reward_ablation
+```
+
 预览方法消融运行矩阵：
 
 ```bash
@@ -333,6 +351,35 @@ uv run python -m scripts.analyze_sps_compliance \
   --json-output-path output/analysis/sps_compliance.json
 ```
 
+## 线路环境与防护曲线可视化
+
+展示综合环境视图（防护曲线 + 轨道坡度）：
+
+```bash
+uv run python -m scripts.show_env_data --view overview
+```
+
+展示全量安全防护曲线：
+
+```bash
+uv run python -m scripts.show_env_data --view full-curves
+```
+
+展示危险速度域与交叉点：
+
+```bash
+uv run python -m scripts.show_env_data --view danger-region
+```
+
+保存所有视图至指定目录且不弹出交互窗口：
+
+```bash
+uv run python -m scripts.show_env_data \
+  --view all \
+  --output-file output/figures/env_data.png \
+  --no-show
+```
+
 ## 势函数可视化
 
 ```bash
@@ -357,6 +404,35 @@ uv run python -m scripts.show_potential_function --plot-type stopping-slices
 uv run python -m scripts.show_potential_function \
   --plot-type guidance-wide \
   --output-file output/figures/guidance_wide.png \
+  --no-show
+```
+
+## 终端评分函数可视化
+
+展示停站与准点综合评分曲线：
+
+```bash
+uv run python -m scripts.show_score_function --plot combined
+```
+
+展示停站误差评分曲线：
+
+```bash
+uv run python -m scripts.show_score_function --plot stopping
+```
+
+展示准点时间误差评分曲线：
+
+```bash
+uv run python -m scripts.show_score_function --plot punctuality
+```
+
+保存为图片且不弹出交互窗口：
+
+```bash
+uv run python -m scripts.show_score_function \
+  --plot combined \
+  --output-file output/figures/score_functions.png \
   --no-show
 ```
 

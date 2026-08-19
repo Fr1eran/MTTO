@@ -252,7 +252,8 @@ class _CompletionEnv(gym.Env[np.ndarray, np.ndarray]):
         self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
         self.accumulator = CompletionTrajectoryAccumulator(observation_shape=(2,))
         self.steps = 0
-        self.distribution_updates: list[tuple[np.ndarray, int]] = []
+        self.validated_versions: list[int] = []
+        self.committed_versions: list[int] = []
 
     def reset(
         self,
@@ -284,9 +285,13 @@ class _CompletionEnv(gym.Env[np.ndarray, np.ndarray]):
     def drain_completion_trajectories(self) -> dict[str, object]:
         return self.accumulator.drain()
 
-    def set_dspdl_distribution(self, distribution: np.ndarray, *, version: int) -> None:
+    def validate_dspdl_version(self, version: int) -> None:
+        self.accumulator.validate_version_update(version)
+        self.validated_versions.append(version)
+
+    def commit_dspdl_version(self, version: int) -> None:
         self.accumulator.switch_version(version)
-        self.distribution_updates.append((np.asarray(distribution), version))
+        self.committed_versions.append(version)
 
     def disable_dspdl_accumulator(self) -> None:
         self.accumulator.disable()
@@ -316,6 +321,7 @@ def test_completion_callback_runs_through_ppo_rollout_lifecycle() -> None:
     model.learn(total_timesteps=12, callback=callback)
 
     assert callback.completion_ema == pytest.approx(1.0)
-    assert raw_env.distribution_updates
-    assert raw_env.distribution_updates[0][1] == 1
+    assert callback.distribution_state.version == 1
+    assert raw_env.validated_versions == [1]
+    assert raw_env.committed_versions == [1]
     env.close()

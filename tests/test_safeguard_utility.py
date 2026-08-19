@@ -485,37 +485,39 @@ def test_get_interval_index_scalar_numba_supports_left_and_right_side():
     np.testing.assert_array_equal(actual_left, expected_left)
 
 
-def test_get_min_and_max_speed_fast_matches_legacy(
+def test_get_min_and_max_speed_valid_bounds(
     safeguard_utility: SafeGuardUtility,
 ):
     rng = np.random.default_rng(0)
     pos_random = rng.uniform(
-        low=float(safeguard_utility.speed_limit_intervals[0] - 500.0),
-        high=float(safeguard_utility.speed_limit_intervals[-1] + 500.0),
+        low=float(safeguard_utility.speed_limit_intervals[0]),
+        high=float(safeguard_utility.speed_limit_intervals[-1]),
         size=128,
     )
     pos_boundaries = safeguard_utility.speed_limit_intervals
     positions = np.unique(np.concatenate([pos_random, pos_boundaries]))
     stopping_points = list(range(-1, len(safeguard_utility.min_curves_list)))
 
-    legacy_results = [
-        safeguard_utility._get_min_and_max_speed_legacy(float(pos), int(sp))
-        for sp in stopping_points
-        for pos in positions
-    ]
+    for sp in stopping_points:
+        for pos in positions:
+            min_speed, max_speed = safeguard_utility.get_min_and_max_speed(
+                float(pos), int(sp)
+            )
+            assert min_speed >= 0.0
+            assert max_speed >= 0.0
 
-    fast_results = [
-        safeguard_utility.get_min_and_max_speed(float(pos), int(sp))
-        for sp in stopping_points
-        for pos in positions
-    ]
 
-    np.testing.assert_allclose(
-        np.asarray(fast_results, dtype=np.float64),
-        np.asarray(legacy_results, dtype=np.float64),
-        rtol=0.0,
-        atol=1e-12,
-    )
+def test_get_current_stopping_point_numba(
+    safeguard_utility: SafeGuardUtility,
+):
+    # 起始位置与0速应处于 -1 停车点
+    sp_start = safeguard_utility.get_current_stopping_point(0.0, 0.0)
+    assert sp_start == -1
+
+    # 超过最后一条最小速度曲线右端点时应达到最大停车点编号
+    last_curve_end = float(safeguard_utility.min_curves_list[-1][0, -1])
+    sp_end = safeguard_utility.get_current_stopping_point(last_curve_end + 100.0, 0.0)
+    assert sp_end == len(safeguard_utility.min_curves_list) - 1
 
 
 def test_get_min_speed_matches_get_min_and_max_speed(

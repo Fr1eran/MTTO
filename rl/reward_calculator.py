@@ -6,12 +6,33 @@ from dataclasses import dataclass
 from model.ocs import TrainService
 from rl.operational_state import OperationalTransition
 
+DEFAULT_ENERGY_REWARD_SCALE: float = 15.0
+DEFAULT_COMFORT_REWARD_SCALE: float = 20.0
+DEFAULT_SURVIVAL_REWARD_SCALE: float = 50.0
+
 
 @dataclass(frozen=True, slots=True)
 class RewardConfig:
-    enable_energy: bool = True
-    enable_comfort: bool = True
+    energy_reward_scale: float = DEFAULT_ENERGY_REWARD_SCALE
+    comfort_reward_scale: float = DEFAULT_COMFORT_REWARD_SCALE
     enable_potential_safety: bool = True
+    survival_reward_scale: float = DEFAULT_SURVIVAL_REWARD_SCALE
+
+    def __post_init__(self) -> None:
+        defaults = {
+            "energy_reward_scale": DEFAULT_ENERGY_REWARD_SCALE,
+            "comfort_reward_scale": DEFAULT_COMFORT_REWARD_SCALE,
+            "survival_reward_scale": DEFAULT_SURVIVAL_REWARD_SCALE,
+        }
+        for field_name, default_value in defaults.items():
+            raw_value = getattr(self, field_name)
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError):
+                value = default_value
+            if not math.isfinite(value) or value < 0.0:
+                value = default_value
+            object.__setattr__(self, field_name, value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,18 +86,20 @@ class RewardCalculator:
             else 0.0
         )
         energy = (
-            -15.0 * transition.energy_delta_kj / self.max_energy_consumption_kj
-            if self.reward_config.enable_energy
-            else 0.0
+            -self.reward_config.energy_reward_scale
+            * transition.energy_delta_kj
+            / self.max_energy_consumption_kj
         )
-        comfort = 0.0
-        if self.reward_config.enable_comfort:
-            delta_acc = abs(
-                transition.acceleration_mps2
-                - transition.previous_state.acceleration_mps2
-            )
-            norm_jerk = delta_acc / max(self.train_service.max_acc_change, 1e-12)
-            comfort = -20.0 / self.max_episode_steps * norm_jerk**2
+        delta_acc = abs(
+            transition.acceleration_mps2
+            - transition.previous_state.acceleration_mps2
+        )
+        norm_jerk = delta_acc / max(self.train_service.max_acc_change, 1e-12)
+        comfort = (
+            -self.reward_config.comfort_reward_scale
+            / self.max_episode_steps
+            * norm_jerk**2
+        )
         terminal_stopping = 0.0
         terminal_punctuality = 0.0
         if transition.terminated:
@@ -87,7 +110,7 @@ class RewardCalculator:
                 punctuality_score * 5.0 + stopping_score**2 * punctuality_score * 20.0
             )
 
-        survival = 100.0 / self.max_episode_steps
+        survival = self.reward_config.survival_reward_scale / self.max_episode_steps
         total = (
             safety
             + energy
@@ -135,13 +158,6 @@ class RewardCalculator:
             + float(punctuality_weight) * self.punctuality_score(operation_time_s)
         )
         return min(1.0, max(0.0, completion))
-
-    # Private aliases retained for callers from earlier project revisions.
-    def _stopping_score(self, stop_error_m: float) -> float:
-        return self.stopping_score(stop_error_m)
-
-    def _punctuality_score(self, operation_time_s: float) -> float:
-        return self.punctuality_score(operation_time_s)
 
     def _reward_safety_potential(self, transition: OperationalTransition) -> float:
         previous = transition.previous_state

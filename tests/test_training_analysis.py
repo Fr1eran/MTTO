@@ -9,7 +9,6 @@ from rl.experiment_utils import (
     DEFAULT_DEVICE,
     DEFAULT_NUM_ENVS,
     DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
-    DEFAULT_VEC_ENV_TYPE,
     resolve_log_interval,
     resolve_run_mode,
     resolve_training_run_spec,
@@ -925,7 +924,7 @@ def test_train_rl_cli_uses_shared_vector_environment_defaults() -> None:
     args = build_train_rl_arg_parser().parse_args([])
 
     assert args.num_envs == DEFAULT_NUM_ENVS
-    assert args.vec_env_type == DEFAULT_VEC_ENV_TYPE
+    assert not hasattr(args, "vec_env_type")
     assert args.rollout_steps_per_update == DEFAULT_ROLLOUT_STEPS_PER_UPDATE
     assert args.device == DEFAULT_DEVICE
 
@@ -961,10 +960,9 @@ def test_resolve_training_run_spec_plans_paths_and_switches() -> None:
     assert Path(spec.run_metadata_path).name == "run_metadata.json"
     assert spec.run_metadata["reward_preset_name"] == "basic_safety"
     assert spec.num_envs == DEFAULT_NUM_ENVS
-    assert spec.resolved_vec_env_type == DEFAULT_VEC_ENV_TYPE
+    assert "vec_env_type" not in spec.run_metadata
     assert spec.n_steps_per_env == 1024
     assert spec.rollout_steps_per_update == DEFAULT_ROLLOUT_STEPS_PER_UPDATE
-    assert spec.subproc_start_method is None
     assert "subproc_start_method" not in spec.run_metadata
     assert spec.dry_run is True
 
@@ -978,54 +976,22 @@ def test_tune_mode_enables_safety_truncation_histogram() -> None:
     assert spec.enable_safety_truncation_histogram is True
 
 
-def test_resolve_training_run_spec_auto_selects_forkserver_when_available(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_multi_environment_training_omits_backend_metadata() -> None:
     parser = build_train_rl_arg_parser()
-    args = parser.parse_args(
-        [
-            "--num-envs",
-            "2",
-            "--vec-env-type",
-            "subproc",
-            "--dry-run",
-        ]
-    )
-    monkeypatch.setattr(
-        "rl.experiment_utils.mp.get_all_start_methods",
-        lambda: ["spawn", "forkserver"],
-    )
+    args = parser.parse_args(["--num-envs", "2", "--dry-run"])
 
     spec = resolve_training_run_spec(args)
 
-    assert spec.use_subproc is True
-    assert spec.subproc_start_method == "forkserver"
-    assert spec.run_metadata["subproc_start_method"] == "forkserver"
+    assert spec.num_envs == 2
+    assert "vec_env_type" not in spec.run_metadata
+    assert "subproc_start_method" not in spec.run_metadata
 
 
-def test_resolve_training_run_spec_falls_back_to_spawn_when_needed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+@pytest.mark.parametrize("vec_env_type", ("dummy", "subproc"))
+def test_train_rl_cli_rejects_vec_env_type_option(vec_env_type: str) -> None:
     parser = build_train_rl_arg_parser()
-    args = parser.parse_args(
-        [
-            "--num-envs",
-            "2",
-            "--vec-env-type",
-            "subproc",
-            "--dry-run",
-        ]
-    )
-    monkeypatch.setattr(
-        "rl.experiment_utils.mp.get_all_start_methods",
-        lambda: ["spawn"],
-    )
-
-    spec = resolve_training_run_spec(args)
-
-    assert spec.use_subproc is True
-    assert spec.subproc_start_method == "spawn"
-    assert spec.run_metadata["subproc_start_method"] == "spawn"
+    with pytest.raises(SystemExit):
+        _ = parser.parse_args(["--vec-env-type", vec_env_type])
 
 
 def test_train_rl_cli_rejects_removed_monitor_log_dir_option() -> None:

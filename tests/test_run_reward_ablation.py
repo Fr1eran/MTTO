@@ -82,7 +82,7 @@ def test_default_matrix_uses_all_profiles_and_configured_seeds(tmp_path: Path) -
 
     assert args.evaluation_interval_rollouts == 12
     assert args.num_envs == 8
-    assert args.vec_env_type == "dummy"
+    assert not hasattr(args, "vec_env_type")
     assert args.rollout_steps_per_update == 8192
     assert args.device == "cpu"
     assert all(run.spec.evaluation_interval_rollouts == 12 for run in runs)
@@ -141,6 +141,7 @@ def test_manifest_round_trip_and_training_compatibility(tmp_path: Path) -> None:
     reward_ablation._validate_manifest_compatibility(loaded, args)
 
     assert loaded == payload
+    assert "vec_env_type" not in loaded["training"]
     assert not (tmp_path / "reward_ablation_manifest.json.tmp").exists()
     changed_args = _train_args(tmp_path, "--total-timesteps", "123")
     try:
@@ -150,23 +151,23 @@ def test_manifest_round_trip_and_training_compatibility(tmp_path: Path) -> None:
     else:
         raise AssertionError("incompatible manifest was accepted")
 
-
-def test_legacy_vector_settings_require_explicit_cli_values(tmp_path: Path) -> None:
-    legacy_args = _train_args(
-        tmp_path,
-        "--num-envs",
-        "1",
-        "--vec-env-type",
-        "subproc",
-    )
-    runs = reward_ablation.resolve_run_matrix(legacy_args)
-    payload = reward_ablation.build_manifest(legacy_args, runs)
-
-    reward_ablation._validate_manifest_compatibility(payload, legacy_args)
+    legacy_manifest = {
+        **loaded,
+        "training": {
+            **loaded["training"],
+            "vec_env_type": "dummy",
+        },
+    }
     with pytest.raises(ValueError, match="different training settings"):
-        reward_ablation._validate_manifest_compatibility(
-            payload, _train_args(tmp_path)
-        )
+        reward_ablation._validate_manifest_compatibility(legacy_manifest, args)
+
+
+@pytest.mark.parametrize("vec_env_type", ("dummy", "subproc"))
+def test_train_cli_rejects_vec_env_type(
+    tmp_path: Path, vec_env_type: str
+) -> None:
+    with pytest.raises(SystemExit):
+        _ = _train_args(tmp_path, "--vec-env-type", vec_env_type)
 
 
 def test_completed_run_is_skipped_only_when_all_artifacts_exist(
