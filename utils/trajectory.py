@@ -360,7 +360,7 @@ def compute_cumulative_energy_from_trajectory(
                 vehicle=vehicle,
                 track=track,
             )
-            cum_energy[i + 1] = cum_energy[i] + (prop_e + levi_e) / 1000.0
+            cum_energy[i + 1] = cum_energy[i] + (prop_e + levi_e)
         except Exception:
             cum_energy[i + 1] = cum_energy[i]
 

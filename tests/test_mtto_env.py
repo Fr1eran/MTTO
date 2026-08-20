@@ -1037,3 +1037,42 @@ def test_gym_evaluation_uses_terminal_flags_without_persisting_violation_code(
     assert "violation_code" not in result.to_metrics()
     assert "terminated" not in result.to_metrics()
     assert "truncated" not in result.to_metrics()
+
+
+def test_observation_builder_supports_out_buffer(mtto_env: MTTOEnv) -> None:
+    _ = mtto_env.reset()
+    builder = mtto_env.observation_builder
+    custom_buf = np.zeros(ObservationBuilder.OBSERVATION_DIM, dtype=np.float32)
+
+    ret = builder.build(mtto_env.state, out=custom_buf)
+
+    assert ret is custom_buf
+    assert custom_buf.shape == (ObservationBuilder.OBSERVATION_DIM,)
+    assert np.any(custom_buf != 0.0)
+
+
+def test_observation_builder_reuses_internal_buffer_when_out_is_none(
+    mtto_env: MTTOEnv,
+) -> None:
+    _ = mtto_env.reset()
+    builder = mtto_env.observation_builder
+
+    obs1 = builder.build(mtto_env.state)
+    assert obs1 is builder._obs_buffer
+
+    # Verify that updating state updates builder._obs_buffer in place
+    mtto_env.state = replace(mtto_env.state, speed_mps=50.0)
+    obs2 = builder.build(mtto_env.state)
+    assert obs2 is builder._obs_buffer
+    assert obs1 is obs2
+    assert obs2[1] == pytest.approx(50.0 / mtto_env.vehicle.max_speed)
+
+
+def test_env_reset_and_step_reuse_observation_buffer(mtto_env: MTTOEnv) -> None:
+    obs_reset, _ = mtto_env.reset()
+    assert obs_reset is mtto_env._observation_buffer
+
+    obs_step, _, _, _, _ = mtto_env.step(np.asarray([0.0], dtype=np.float32))
+    assert obs_step is mtto_env._observation_buffer
+    assert obs_reset is obs_step
+

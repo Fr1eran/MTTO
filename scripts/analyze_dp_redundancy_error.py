@@ -635,7 +635,7 @@ def main() -> None:
             min_operation_time,
             vehicle=vehicle,
             track=track,
-            gamma=safeguard_utility.gamma,
+            factor=safeguard_utility.gamma,
         )
         redundancy_series = load_or_reconstruct_redundant_operation_time(
             npz_path=artifact.npz_path,

@@ -199,8 +199,7 @@ def _validate_common_target_position(profiles: list[SpeedProfile]) -> float:
     if mismatched:
         raise ValueError(
             "Trajectory target positions differ; select curves aligned to the same "
-            "station: "
-            + ", ".join(mismatched)
+            "station: " + ", ".join(mismatched)
         )
     return target_position_m
 
@@ -258,9 +257,11 @@ def format_comparison_table(
     ]
 
     def render_row(row: list[str]) -> str:
-        return "| " + " | ".join(
-            value.ljust(widths[index]) for index, value in enumerate(row)
-        ) + " |"
+        return (
+            "| "
+            + " | ".join(value.ljust(widths[index]) for index, value in enumerate(row))
+            + " |"
+        )
 
     separator = "|-" + "-|-".join("-" * width for width in widths) + "-|"
     rendered_rows = [
@@ -311,9 +312,7 @@ def _build_cli_parser() -> argparse.ArgumentParser:
 
 def _build_rl_curve_label(trajectory_source: str) -> str:
     return (
-        "RL final trajectory"
-        if trajectory_source == "final"
-        else "RL best trajectory"
+        "RL final trajectory" if trajectory_source == "final" else "RL best trajectory"
     )
 
 
@@ -360,7 +359,7 @@ def main() -> None:
     except (FileNotFoundError, ValueError) as exc:
         parser.error(str(exc))
 
-    vehicle, track, train_service, _ = build_scenario(schedule_time_s=target_time_s)
+    vehicle, track, _, train_service = build_scenario(schedule_time_s=target_time_s)
     ecc = _build_ecc()
     metrics_by_label = [
         (

@@ -330,10 +330,13 @@ def evaluate_operational_policy_once(
     speeds = [abs(state.speed_mps)]
     safety_margins: list[float] = []
     safety_violation_positions_m: list[float] = []
+    observation_buffer = np.empty(
+        ObservationBuilder.OBSERVATION_DIM, dtype=np.float32
+    )
     terminated = truncated = False
 
     while not (terminated or truncated):
-        observation = observation_builder.build(state)
+        observation = observation_builder.build(state, out=observation_buffer)
         if hasattr(policy, "predict"):
             action, _ = policy.predict(observation, deterministic=deterministic)
         else:

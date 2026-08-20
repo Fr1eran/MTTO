@@ -707,24 +707,36 @@ def min_operation_time_curve(
         max_dec_abs=float(vehicle.max_dec_abs),
         tol=1e-9,
     )
-    curve_pos_array = np.array([begin_pos], dtype=np.float64)
-    curve_speed_array = np.array([begin_speed], dtype=np.float64)
+    pos_parts: list[NDArray[np.float64]] = []
+    speed_parts: list[NDArray[np.float64]] = []
+    cur_pos = float(begin_pos)
+    cur_speed = float(begin_speed)
+
     for acc, operation_time in zip(acc_arr, time_arr, strict=True):
         operation_time_value = float(operation_time)
-        if operation_time_value <= 0:
+        if operation_time_value <= 0.0:
             continue
         dt = 0.1
         n_steps = max(int(np.floor(operation_time_value / dt)), 2)
         t_samples = np.linspace(
             0.0, operation_time_value, n_steps, endpoint=True, dtype=np.float64
         )
+        if pos_parts:
+            t_samples = t_samples[1:]
         acc_value = float(acc)
-        speeds = begin_speed + acc_value * t_samples
-        positions = begin_pos + begin_speed * t_samples + 0.5 * acc_value * t_samples**2
-        curve_pos_array = np.concatenate((curve_pos_array[:-1], positions))
-        curve_speed_array = np.concatenate((curve_speed_array[:-1], speeds))
-        begin_pos = curve_pos_array[-1]
-        begin_speed = curve_speed_array[-1]
+        speeds = cur_speed + acc_value * t_samples
+        positions = cur_pos + cur_speed * t_samples + 0.5 * acc_value * t_samples**2
+        pos_parts.append(positions)
+        speed_parts.append(speeds)
+        cur_pos = float(positions[-1])
+        cur_speed = float(speeds[-1])
+
+    if pos_parts:
+        curve_pos_array = np.concatenate(pos_parts)
+        curve_speed_array = np.concatenate(speed_parts)
+    else:
+        curve_pos_array = np.array([begin_pos], dtype=np.float64)
+        curve_speed_array = np.array([begin_speed], dtype=np.float64)
 
     if curve_pos_array.size > 1:
         keep_mask = np.empty(curve_pos_array.size, dtype=bool)

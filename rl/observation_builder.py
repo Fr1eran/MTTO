@@ -16,6 +16,7 @@ class ObservationBuilder:
     target_attraction_domain_radius_m: float = 3000.0
     lookahead_distance_m: float = 1000.0
     lookahead_num_samples: int = 10
+    OBSERVATION_DIM: int = 12
 
     def __init__(
         self,
@@ -45,33 +46,63 @@ class ObservationBuilder:
             self._lookahead_avg_slope_by_step,
             self._lookahead_avg_upper_speed_by_step,
         ) = self._build_lookahead_feature_cache()
+        self._obs_buffer: NDArray[np.float32] = np.empty(
+            self.OBSERVATION_DIM, dtype=np.float32
+        )
 
-    def build(self, state: OperationalState) -> NDArray[np.float32]:
+    def build(
+        self,
+        state: OperationalState,
+        out: NDArray[np.float32] | None = None,
+    ) -> NDArray[np.float32]:
+        target = self._obs_buffer if out is None else out
         distance = self.train_service.target_position - state.position_m
         suggested = self.calc_coasting_acc(state)
         if abs(distance) <= self.target_attraction_domain_radius_m:
             suggested = -(state.speed_mps**2) / (2.0 * max(abs(distance), 1e-6))
-        values = np.asarray(
-            [
-                distance / self.whole_distance_m,
-                state.speed_mps / self.vehicle.max_speed,
-                self.normalize_acc_to_action(state.acceleration_mps2),
-                self.normalize_acc_to_action(suggested),
+
+        target[0] = max(-1.0, min(1.0, distance / self.whole_distance_m))
+        target[1] = max(-1.0, min(1.0, state.speed_mps / self.vehicle.max_speed))
+        target[2] = self.normalize_acc_to_action(state.acceleration_mps2)
+        target[3] = self.normalize_acc_to_action(suggested)
+        target[4] = max(
+            -1.0,
+            min(
+                1.0,
                 (self.train_service.schedule_time - state.operation_time_s)
                 / self.train_service.schedule_time,
+            ),
+        )
+        target[5] = max(
+            -1.0,
+            min(
+                1.0,
                 state.redundant_operation_time_s / self.train_service.schedule_time,
-                state.max_speed_mps / self.vehicle.max_speed,
-                state.min_speed_mps / self.vehicle.max_speed,
-                state.slope_permille / self.vehicle.max_slope_capacity,
+            ),
+        )
+        target[6] = max(-1.0, min(1.0, state.max_speed_mps / self.vehicle.max_speed))
+        target[7] = max(-1.0, min(1.0, state.min_speed_mps / self.vehicle.max_speed))
+        target[8] = max(
+            -1.0, min(1.0, state.slope_permille / self.vehicle.max_slope_capacity)
+        )
+        target[9] = max(
+            -1.0,
+            min(
+                1.0,
                 self.get_lookahead_avg_slope(state.step_count)
                 / self.vehicle.max_slope_capacity,
+            ),
+        )
+        target[10] = max(
+            -1.0,
+            min(
+                1.0,
                 self.get_lookahead_avg_upper_speed(state.step_count)
                 / self.vehicle.max_speed,
-                self.calc_approach_progress(distance),
-            ],
-            dtype=np.float32,
+            ),
         )
-        return np.clip(values, -1.0, 1.0).astype(np.float32)
+        target[11] = self.calc_approach_progress(distance)
+        return target
 
     def normalize_acc_to_action(self, acc: float) -> float:
         value = (
@@ -80,7 +111,7 @@ class ObservationBuilder:
             / (self.vehicle.max_acc - self.vehicle.max_dec)
             - 1.0
         )
-        return float(np.clip(value, -1.0, 1.0))
+        return max(-1.0, min(1.0, value))
 
     def denormalize_action(self, action: float) -> float:
         value = (self.vehicle.max_acc + self.vehicle.max_dec) / 2.0 + float(action) * (
@@ -99,12 +130,12 @@ class ObservationBuilder:
         )
 
     def calc_approach_progress(self, distance_m: float) -> float:
-        return float(
-            np.clip(
-                1.0 - abs(float(distance_m)) / self.target_attraction_domain_radius_m,
-                0.0,
+        return max(
+            0.0,
+            min(
                 1.0,
-            )
+                1.0 - abs(float(distance_m)) / self.target_attraction_domain_radius_m,
+            ),
         )
 
     def _build_lookahead_feature_cache(

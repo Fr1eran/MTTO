@@ -1164,13 +1164,14 @@ def train_single_experiment(
             whole_distance_m=shared_stepper.whole_distance_m,
             get_upper_speed_or_zero=shared_stepper.get_upper_speed_or_zero,
         )
-        context_observations = np.stack(
-            [
-                observation_builder.build(context.initial_state)
-                for context in context_pool.contexts
-            ],
-            axis=0,
+        context_observations = np.empty(
+            (context_pool.context_count, ObservationBuilder.OBSERVATION_DIM),
+            dtype=np.float32,
         )
+        for idx, context in enumerate(context_pool.contexts):
+            _ = observation_builder.build(
+                context.initial_state, out=context_observations[idx]
+            )
         if resolved_spec.curriculum_profile == "dspdl_completion":
             if not isinstance(resolved_spec.dspdl_config, CompletionDSPDLConfig):
                 raise TypeError(

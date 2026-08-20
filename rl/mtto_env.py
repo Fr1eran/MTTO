@@ -143,6 +143,9 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         high = np.ones(12, dtype=np.float32)
         self.observation_space = gym.spaces.Box(low=low, high=high, dtype=np.float32)
         self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
+        self._observation_buffer: NDArray[np.float32] = np.empty(
+            self.observation_space.shape, dtype=np.float32
+        )
         self.compact_training_info: bool = bool(compact_training_info)
         self.basic_info: BasicInfo = {}
         self.outcome_info: OutcomeInfo = {"terminated": False, "truncated": False}
@@ -166,7 +169,7 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         if new_schedule_time != self.train_service.schedule_time:
             self.train_service.schedule_time = new_schedule_time
             self.state = self.stepper.refresh_schedule_time(self.state)
-        return self.observation_builder.build(self.state)
+        return self.observation_builder.build(self.state, out=self._observation_buffer)
 
     def validate_dspdl_version(self, version: int) -> None:
         accumulator = self.completion_accumulator
@@ -252,7 +255,9 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         self._comfort_tav = self._comfort_sum_sq_delta_acc = 0.0
         self._comfort_exceedance_count = 0
         self._reset_trajectory()
-        observation = self.observation_builder.build(self.state)
+        observation = self.observation_builder.build(
+            self.state, out=self._observation_buffer
+        )
         if self.completion_accumulator is not None:
             self.completion_accumulator.begin_episode(observation)
         return observation, {}
@@ -266,7 +271,9 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         transition = self.stepper.advance(self.state, acceleration)
         reward = self.reward_calculator.calculate(transition)
         self.state = transition.next_state
-        next_observation = self.observation_builder.build(self.state)
+        next_observation = self.observation_builder.build(
+            self.state, out=self._observation_buffer
+        )
         self.outcome_info = {
             "terminated": bool(transition.terminated),
             "truncated": bool(transition.truncated),
