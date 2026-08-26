@@ -169,7 +169,10 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         if new_schedule_time != self.train_service.schedule_time:
             self.train_service.schedule_time = new_schedule_time
             self.state = self.stepper.refresh_schedule_time(self.state)
-        return self.observation_builder.build(self.state, out=self._observation_buffer)
+        observation = self.observation_builder.build(
+            self.state, out=self._observation_buffer
+        )
+        return observation.copy()
 
     def validate_dspdl_version(self, version: int) -> None:
         accumulator = self.completion_accumulator
@@ -260,7 +263,10 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         )
         if self.completion_accumulator is not None:
             self.completion_accumulator.begin_episode(observation)
-        return observation, {}
+        # Gym/VecEnv may retain this observation as terminal_observation while
+        # immediately resetting the environment.  Do not expose the reusable
+        # scratch buffer across that ownership boundary.
+        return observation.copy(), {}
 
     @override
     def step(
@@ -337,7 +343,9 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
             info = self._get_basic_info()
             info.update(outcome=dict(self.outcome_info))
         return (
-            next_observation,
+            # See reset(): VecEnv may retain a terminal observation after this
+            # method returns, so it must not alias the reusable scratch buffer.
+            next_observation.copy(),
             reward.total,
             transition.terminated,
             transition.truncated,

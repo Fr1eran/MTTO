@@ -55,7 +55,9 @@ class ObservationBuilder:
         state: OperationalState,
         out: NDArray[np.float32] | None = None,
     ) -> NDArray[np.float32]:
-        target = self._obs_buffer if out is None else out
+        uses_internal_buffer = out is None
+        target = self._obs_buffer if uses_internal_buffer else out
+        assert target is not None
         distance = self.train_service.target_position - state.position_m
         suggested = self.calc_coasting_acc(state)
         if abs(distance) <= self.target_attraction_domain_radius_m:
@@ -102,7 +104,9 @@ class ObservationBuilder:
             ),
         )
         target[11] = self.calc_approach_progress(distance)
-        return target
+        # The internal buffer is scratch storage only.  Returning it would
+        # expose a mutable array that the next build() call overwrites.
+        return target.copy() if uses_internal_buffer else target
 
     def normalize_acc_to_action(self, acc: float) -> float:
         value = (

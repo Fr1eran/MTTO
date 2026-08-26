@@ -7,6 +7,7 @@ from gymnasium.utils.env_checker import (
     check_env,
 )
 from numpy.typing import NDArray
+from stable_baselines3.common.vec_env import DummyVecEnv
 
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo, get_slope_scalar_numba
@@ -1051,28 +1052,71 @@ def test_observation_builder_supports_out_buffer(mtto_env: MTTOEnv) -> None:
     assert np.any(custom_buf != 0.0)
 
 
-def test_observation_builder_reuses_internal_buffer_when_out_is_none(
+def test_observation_builder_returns_copy_when_out_is_none(
     mtto_env: MTTOEnv,
 ) -> None:
     _ = mtto_env.reset()
     builder = mtto_env.observation_builder
 
     obs1 = builder.build(mtto_env.state)
-    assert obs1 is builder._obs_buffer
+    assert obs1 is not builder._obs_buffer
+    obs1_snapshot = obs1.copy()
 
-    # Verify that updating state updates builder._obs_buffer in place
+    # Updating the internal scratch buffer must not mutate an earlier return.
     mtto_env.state = replace(mtto_env.state, speed_mps=50.0)
     obs2 = builder.build(mtto_env.state)
-    assert obs2 is builder._obs_buffer
-    assert obs1 is obs2
+    assert obs2 is not builder._obs_buffer
+    assert obs1 is not obs2
+    np.testing.assert_array_equal(obs1, obs1_snapshot)
     assert obs2[1] == pytest.approx(50.0 / mtto_env.vehicle.max_speed)
 
 
-def test_env_reset_and_step_reuse_observation_buffer(mtto_env: MTTOEnv) -> None:
+def test_env_reset_and_step_return_observation_copies(mtto_env: MTTOEnv) -> None:
     obs_reset, _ = mtto_env.reset()
-    assert obs_reset is mtto_env._observation_buffer
+    assert obs_reset is not mtto_env._observation_buffer
+    reset_snapshot = obs_reset.copy()
 
     obs_step, _, _, _, _ = mtto_env.step(np.asarray([0.0], dtype=np.float32))
-    assert obs_step is mtto_env._observation_buffer
-    assert obs_reset is obs_step
+    assert obs_step is not mtto_env._observation_buffer
+    assert obs_reset is not obs_step
+    np.testing.assert_array_equal(obs_reset, reset_snapshot)
 
+
+def test_dummy_vec_env_preserves_terminal_observation_across_auto_reset(
+    mtto_env: MTTOEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = _build_env_like(mtto_env)
+    initial = env.stepper.reset()
+    terminal = replace(
+        initial,
+        position_m=initial.position_m + 100.0,
+        speed_mps=5.0,
+        step_count=1,
+    )
+    transition = OperationalTransition(
+        initial,
+        terminal,
+        0.0,
+        100.0,
+        1.0,
+        0.0,
+        False,
+        True,
+        ViolationCode.STEP_LIMIT,
+    )
+    monkeypatch.setattr(env.stepper, "advance", lambda *_args: transition)
+    venv = DummyVecEnv([lambda: env])
+    try:
+        reset_observation = venv.reset().copy()
+        _, _, dones, infos = venv.step(np.asarray([[0.0]], dtype=np.float32))
+
+        assert dones[0]
+        terminal_observation = infos[0]["terminal_observation"]
+        assert terminal_observation is not env._observation_buffer
+        assert terminal_observation[0] != pytest.approx(reset_observation[0])
+        assert terminal_observation[1] == pytest.approx(
+            terminal.speed_mps / env.vehicle.max_speed
+        )
+    finally:
+        venv.close()
