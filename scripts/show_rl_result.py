@@ -13,6 +13,7 @@ from rl.experiment_utils import (
     render_rl_curve_on_axes,
     resolve_rl_curve_artifact,
 )
+from utils.plot_utils import apply_sci_figure_layout
 
 
 def _print_metrics(metrics: dict[str, object]) -> None:
@@ -98,7 +99,7 @@ def plot_rl_curve(
     factor: float,
 ) -> None:
     apply_rl_curve_plot_style()
-    _, ax = plt.subplots(figsize=(12, 7))
+    fig, ax = plt.subplots()
     render_rl_curve_on_axes(
         ax=ax,
         pos_arr=pos_arr,
@@ -109,7 +110,7 @@ def plot_rl_curve(
     )
     _ = ax.legend(loc="upper right")
 
-    plt.tight_layout()
+    apply_sci_figure_layout(fig, columns=2, height_in=3.4)
     plt.show()
 
 

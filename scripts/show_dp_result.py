@@ -14,7 +14,7 @@ from dp.experiment_utils import (
     render_dp_curve_on_axes,
 )
 from model.common import min_operation_time
-from utils.plot_utils import set_global_plot_style
+from utils.plot_utils import apply_sci_figure_layout, set_global_plot_style
 from utils.scenario import build_scenario
 from utils.trajectory import OptimizedCurveArtifact
 
@@ -177,7 +177,6 @@ def _render_redundant_operation_time_on_axes(
         alpha=0.6,
         label="No redundancy",
     )
-    _ = ax.set_title("DP redundant operation time over position")
     _ = ax.set_xlabel("Position (m)")
     _ = ax.set_ylabel("Redundant operation time (s)")
     _ = ax.grid(True, alpha=0.3)
@@ -248,10 +247,9 @@ def main() -> None:
         savefig_dpi=300.0,
     )
 
-    _, (ax_speed, ax_redundant) = plt.subplots(
+    fig, (ax_speed, ax_redundant) = plt.subplots(
         2,
         1,
-        figsize=(12, 9),
         sharex=True,
         gridspec_kw={"height_ratios": [2.0, 1.0]},
     )
@@ -272,8 +270,36 @@ def main() -> None:
         pos_arr=pos_arr,
         redundant_operation_time_arr=redundant_operation_time_arr,
     )
+    _ = ax_speed.text(
+        0.02,
+        0.98,
+        "(a)",
+        transform=ax_speed.transAxes,
+        ha="left",
+        va="top",
+        fontsize=10,
+        fontweight="bold",
+    )
+    _ = ax_redundant.text(
+        0.02,
+        0.98,
+        "(b)",
+        transform=ax_redundant.transAxes,
+        ha="left",
+        va="top",
+        fontsize=10,
+        fontweight="bold",
+    )
 
-    plt.tight_layout()
+    apply_sci_figure_layout(
+        fig,
+        columns=2,
+        height_in=4.4,
+        left=0.10,
+        bottom=0.12,
+        top=0.96,
+        hspace=0.22,
+    )
     plt.show()
 
 

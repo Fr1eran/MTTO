@@ -4,12 +4,14 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from matplotlib import pyplot as plt
 
 from scripts.run_schedule_time_change import (
     DEFAULT_DELTA_TIMES_S,
     DEFAULT_EVALUATE_LOAD_DIR,
     DEFAULT_OUTPUT_DIR,
     SUMMARY_FILENAME,
+    _add_schedule_change_legend,
     _as_batch_observation,
     build_arg_parser,
     build_schedule_change_case,
@@ -50,12 +52,46 @@ def test_cli_parses_custom_delta_times() -> None:
     assert args.delta_times_s == (0.0, -5.0, 7.5)
 
 
+def test_default_schedule_change_matrix_is_original_plus30_minus30() -> None:
+    assert DEFAULT_DELTA_TIMES_S == (0.0, 30.0, -30.0)
+
+
 def test_schedule_change_case_labels_and_tokens() -> None:
     assert build_schedule_change_case(0.0).label == "Original"
-    assert build_schedule_change_case(10.0).label == "Plus 10s"
-    assert build_schedule_change_case(-20.0).label == "Minus 20s"
-    assert build_schedule_change_case(10.0).token == "plus_10p0s"
-    assert build_schedule_change_case(-20.0).token == "minus_20p0s"
+    assert build_schedule_change_case(30.0).label == "Plus 30s"
+    assert build_schedule_change_case(-30.0).label == "Minus 30s"
+    assert build_schedule_change_case(30.0).token == "plus_30p0s"
+    assert build_schedule_change_case(-30.0).token == "minus_30p0s"
+
+
+def test_shared_legend_contains_only_cases_and_trigger_marker() -> None:
+    figure, axis = plt.subplots()
+    try:
+        _ = axis.plot([0.0, 1.0], [0.0, 1.0], label="Track speed limit")
+        original_handle = axis.plot([0.0, 1.0], [1.0, 1.0])[0]
+        plus_handle = axis.plot([0.0, 1.0], [1.5, 1.5])[0]
+        minus_handle = axis.plot([0.0, 1.0], [2.0, 2.0])[0]
+        trigger_handle = axis.scatter([0.5], [1.0], marker="*", color="#C44E52")
+
+        _add_schedule_change_legend(
+            figure,
+            case_handles=[original_handle, plus_handle, minus_handle],
+            case_labels=["Original", "Plus 30s", "Minus 30s"],
+            trigger_handle=trigger_handle,
+        )
+
+        assert axis.get_legend() is None
+        assert len(figure.legends) == 1
+        legend = figure.legends[0]
+        assert legend.get_frame_on() is False
+        assert [text.get_text() for text in legend.get_texts()] == [
+            "Original",
+            "Plus 30s",
+            "Minus 30s",
+            "Schedule change",
+        ]
+    finally:
+        plt.close(figure)
 
 
 def test_should_trigger_schedule_change_once_when_crossing_forward() -> None:

@@ -4,12 +4,15 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from matplotlib import pyplot as plt
 
 from scripts.compare_speed_profiles import (
     DEFAULT_REAL_CURVE_PATH,
     ProfileMetrics,
     SpeedProfile,
     _build_cli_parser,
+    _create_comparison_axes,
+    _finalize_comparison_figure,
     _resolve_target_schedule_time,
     _validate_common_target_position,
     format_comparison_table,
@@ -23,6 +26,41 @@ def test_compare_speed_profiles_cli_defaults() -> None:
     assert args.real_curve == DEFAULT_REAL_CURVE_PATH
     assert args.trajectory_source == "best"
     assert args.no_safeguard is False
+
+
+def test_comparison_figure_uses_one_trajectory_only_shared_legend() -> None:
+    figure, axes = plt.subplots(3, 1)
+    for axis in axes:
+        axis.set_title("remove me")
+        axis.plot([0.0, 1.0], [0.0, 1.0], label="environment")
+        axis.legend()
+
+    _finalize_comparison_figure(figure, tuple(axes))
+
+    assert [axis.get_title() for axis in axes] == ["", "", ""]
+    assert all(axis.get_legend() is None for axis in axes)
+    assert len(figure.legends) == 1
+    legend = figure.legends[0]
+    assert [text.get_text() for text in legend.texts] == [
+        "DP optimization",
+        "Proposed RL",
+        "Actual operation",
+    ]
+    assert [handle.get_color() for handle in legend.legend_handles] == [
+        "#333333",
+        "#E69F00",
+        "#7B61A8",
+    ]
+    plt.close(figure)
+
+
+def test_comparison_figure_layout_uses_shared_position_axis() -> None:
+    figure, axes = _create_comparison_axes()
+
+    assert axes[0].get_shared_x_axes().joined(axes[0], axes[1])
+    assert axes[1].get_shared_x_axes().joined(axes[1], axes[2])
+
+    plt.close(figure)
 
 
 def test_load_real_operation_profile_reads_required_aligned_arrays(

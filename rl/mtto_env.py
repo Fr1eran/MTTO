@@ -22,7 +22,7 @@ from rl.operational_stepper import OperationalStepper
 from rl.reward_calculator import RewardCalculator, RewardConfig
 from rl.reward_diagnostics import RewardDiagnosticsAccumulator, RewardDiagnosticsBatch
 from rl.safety_statistics import SafetyTruncationBatch, SafetyTruncationBuffer
-from utils.plot_utils import set_chinese_font
+from utils.plot_utils import sci_figure_size, set_chinese_font
 
 
 class BasicInfo(TypedDict, total=False):
@@ -324,6 +324,7 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
                 reward,
                 terminated=bool(transition.terminated),
                 truncated=bool(transition.truncated),
+                violation_code=int(transition.violation_code),
             )
         if not self.compact_training_info:
             delta_acc = abs(
@@ -403,7 +404,9 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         set_chinese_font()
         if mode == "human":
             _ = plt.ion()
-        self.fig, self.ax = plt.subplots(figsize=(10, 6))
+        self.fig, self.ax = plt.subplots(
+            figsize=sci_figure_size(columns=2, height_in=3.8)
+        )
         _ = self.fig.suptitle("磁悬浮列车智能体训练过程", fontsize=14)
         margin = self.stepper.whole_distance_m * 0.1
         _ = self.ax.set_xlim(

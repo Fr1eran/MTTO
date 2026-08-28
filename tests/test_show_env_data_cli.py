@@ -22,7 +22,7 @@ def test_show_env_data_cli_defaults():
     assert args.view == "overview"
     assert args.output_file is None
     assert args.dpi == pytest.approx(300.0)
-    assert args.pad_inches == pytest.approx(0.03)
+    assert args.pad_inches == pytest.approx(0.02)
     assert args.no_show is False
 
 
@@ -54,6 +54,13 @@ def test_create_figures_view_modes():
     figs_overview = create_figures("overview", data)
     assert set(figs_overview.keys()) == {"overview"}
     assert len(figs_overview["overview"].axes) == 2
+    overview_axes = figs_overview["overview"].axes
+    assert [
+        text.get_text()
+        for axis in overview_axes
+        for text in axis.texts
+        if text.get_text() in {"(a)", "(b)"}
+    ] == ["(a)", "(b)"]
 
     # full-curves
     figs_full = create_figures("full-curves", data)

@@ -11,6 +11,7 @@ from rl.reward_diagnostics import REWARD_DIAGNOSTICS_SCHEMA_VERSION, REWARD_NAME
 from scripts.run_step_distance_ablation import (
     DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
     DEFAULT_OUTPUT_ROOT,
+    DEFAULT_REFERENCE_CURVE_DIR,
     DEFAULT_SEEDS,
     DEFAULT_STEP_DISTANCES,
     FIXED_REWARD_PRESET,
@@ -64,6 +65,7 @@ def _write_reward_diagnostics_npz(
         episode_terminated=np.ones(len(rewards), dtype=np.bool_),
         episode_truncated=np.zeros(len(rewards), dtype=np.bool_),
         episode_complete=np.ones(len(rewards), dtype=np.bool_),
+        episode_violation_code=np.zeros(len(rewards), dtype=np.int8),
         episode_reward_sums=episode_sums,
     )
     return reward_diagnostics_path
@@ -113,9 +115,11 @@ def _write_run_metadata(
 
 def test_train_cli_defaults() -> None:
     parser = build_arg_parser()
-    args = parser.parse_args(["train", "--reference-curve-dir", "."])
+    args = parser.parse_args(["train"])
 
     assert args.output_root == DEFAULT_OUTPUT_ROOT
+    assert args.reference_curve_dir == DEFAULT_REFERENCE_CURVE_DIR
+    assert DEFAULT_STEP_DISTANCES == (10.0, 30.0, 50.0, 100.0)
     assert args.num_envs == 8
     assert not hasattr(args, "vec_env_type")
     assert args.rollout_steps_per_update == 8192
@@ -129,8 +133,25 @@ def test_train_cli_defaults() -> None:
         args.evaluation_interval_rollouts
         == DEFAULT_EVALUATION_INTERVAL_ROLLOUTS
     )
-    assert not hasattr(args, "max_train_episodes")
+    assert args.training_episodes == 7_000
     assert args.dry_run is False
+
+
+def test_train_cli_allows_reference_curve_override() -> None:
+    args = build_arg_parser().parse_args(
+        ["train", "--reference-curve-dir", "."]
+    )
+
+    assert args.reference_curve_dir == "."
+
+
+@pytest.mark.parametrize(
+    "removed_option",
+    ("--total-timesteps", "--target-completed-episodes"),
+)
+def test_train_cli_rejects_removed_timestep_budget_options(removed_option: str) -> None:
+    with pytest.raises(SystemExit):
+        _ = build_arg_parser().parse_args(["train", removed_option, "1"])
 
 
 @pytest.mark.parametrize("vec_env_type", ("dummy", "subproc"))
@@ -224,7 +245,26 @@ def test_resolve_run_matrix_expands_distances_and_seeds() -> None:
     ] * len(DEFAULT_SEEDS)
     assert [entry.seed for entry in first_distance_entries] == list(DEFAULT_SEEDS)
     assert run_entries[0].experiment_tag == "ds10p0__r01"
-    assert not hasattr(run_entries[0].train_args, "max_train_episodes")
+    assert run_entries[0].train_args.training_episodes == 7_000
+    first_by_distance = {
+        entry.step_distance: entry
+        for entry in run_entries
+        if entry.repeat_index == 0
+    }
+    assert (
+        first_by_distance[10.0].training_run_spec.max_episode_steps
+        > first_by_distance[100.0].training_run_spec.max_episode_steps
+    )
+    assert (
+        first_by_distance[10.0].training_run_spec.total_timesteps
+        > first_by_distance[100.0].training_run_spec.total_timesteps
+    )
+    assert all(
+        entry.training_run_spec.total_timesteps
+        % entry.training_run_spec.rollout_steps_per_update
+        == 0
+        for entry in run_entries
+    )
 
 
 def test_run_matrix_keeps_basic_reward_and_fixed_hyperparameters() -> None:
@@ -250,7 +290,7 @@ def test_run_matrix_keeps_basic_reward_and_fixed_hyperparameters() -> None:
     assert first.training_run_spec.reward_preset.name == FIXED_REWARD_PRESET
     assert first.training_run_spec.enable_monitor is True
     assert first.training_run_spec.enable_auto_analysis is False
-    assert first.training_run_spec.curriculum_profile == "dspdl"
+    assert first.training_run_spec.curriculum_profile == "dspdl_completion"
     assert first.training_run_spec.reference_curve_dir == "."
     assert first.training_run_spec.enable_best_evaluation_artifacts is False
     assert first.training_run_spec.evaluation_interval_rollouts == 7
@@ -298,6 +338,7 @@ def test_build_and_load_manifest_records_step_distance_runs(tmp_path: Path) -> N
     loaded = load_step_distance_manifest(str(tmp_path))
 
     assert loaded["reward_preset"] == FIXED_REWARD_PRESET
+    assert loaded["reference_curve_dir"] == "."
     assert loaded["step_distances"] == list(DEFAULT_STEP_DISTANCES)
     assert loaded["seed_list"] == list(DEFAULT_SEEDS)
     assert loaded["runs"][0]["status"] == "completed"
@@ -312,7 +353,51 @@ def test_build_and_load_manifest_records_step_distance_runs(tmp_path: Path) -> N
     assert loaded["training"]["enable_best_evaluation_artifacts"] is False
 
 
-def test_manifest_uses_total_timesteps_training_budget(
+def test_resume_keeps_only_completed_runs_with_final_artifacts(tmp_path: Path) -> None:
+    parser = build_arg_parser()
+    args = parser.parse_args(
+        [
+            "train",
+            "--reference-curve-dir",
+            ".",
+            "--output-root",
+            str(tmp_path),
+            "--resume",
+        ]
+    )
+    run_entries = resolve_step_distance_run_matrix(args)
+    completed = run_entries[0]
+    Path(completed.training_run_spec.final_model_save_path).parent.mkdir(
+        parents=True, exist_ok=True
+    )
+    Path(completed.training_run_spec.final_model_save_path).touch()
+    Path(completed.final_metrics_path).write_text("{}", encoding="utf-8")
+    _ = step_distance_ablation._write_manifest(
+        str(tmp_path),
+        build_step_distance_manifest(
+            args,
+            run_entries,
+            statuses={
+                (completed.step_distance, completed.repeat_index): {
+                    "status": "completed"
+                }
+            },
+        ),
+    )
+
+    statuses = step_distance_ablation._completed_statuses_for_resume(
+        args, run_entries
+    )
+
+    assert statuses == {
+        (completed.step_distance, completed.repeat_index): {
+            "status": "completed",
+            "final_metrics_path": completed.final_metrics_path,
+        }
+    }
+
+
+def test_manifest_uses_training_episode_budget(
     tmp_path: Path,
 ) -> None:
     parser = build_arg_parser()
@@ -329,9 +414,7 @@ def test_manifest_uses_total_timesteps_training_budget(
 
     manifest = build_step_distance_manifest(args, run_entries)
 
-    assert manifest["training"]["total_timesteps"] == int(args.total_timesteps)
-    assert "stop_mode" not in manifest
-    assert "max_train_episodes" not in manifest
+    assert manifest["training"]["training_episodes"] == 7_000
 
 
 def test_train_rejects_incompatible_existing_manifest(tmp_path: Path) -> None:
@@ -457,7 +540,7 @@ def test_train_command_runs_final_policy_evaluation(
             ".",
             "--output-root",
             str(tmp_path),
-            "--total-timesteps",
+            "--training-episodes",
             "1",
         ]
     )
@@ -528,13 +611,15 @@ def test_build_curve_aggregates_groups_monitor_data_by_step_distance(
         ],
     }
 
-    aggregates, warnings = build_curve_aggregates(manifest)
+    aggregates, warnings = build_curve_aggregates(
+        manifest, episode_smoothing_window=1
+    )
 
     assert warnings == []
     assert [aggregate.step_distance for aggregate in aggregates] == [50.0, 100.0]
     aggregate_50 = aggregates[0]
     assert aggregate_50.valid_run_count == 2
-    np.testing.assert_allclose(aggregate_50.reference_steps, [1.0, 2.0, 3.0])
+    np.testing.assert_allclose(aggregate_50.episode_numbers, [1.0, 2.0, 3.0])
     np.testing.assert_allclose(
         aggregate_50.mean_reward,
         [1.5, 3.5, 5.0],
@@ -543,6 +628,8 @@ def test_build_curve_aggregates_groups_monitor_data_by_step_distance(
         aggregate_50.mean_length,
         [11.0, 9.5, 8.0],
     )
+    np.testing.assert_allclose(aggregate_50.valid_seed_counts, [2, 2, 1])
+    assert np.isnan(aggregate_50.std_reward[-1])
 
 
 def test_build_metric_aggregates_groups_best_trajectory_metrics(
@@ -728,11 +815,12 @@ def test_show_command_saves_compact_figure_without_display(
 ) -> None:
     aggregate = StepDistanceCurveAggregate(
         step_distance=50.0,
-        reference_steps=np.asarray([10.0], dtype=np.float64),
+        episode_numbers=np.asarray([10.0], dtype=np.float64),
         mean_reward=np.asarray([1.0], dtype=np.float64),
         std_reward=np.asarray([0.1], dtype=np.float64),
         mean_length=np.asarray([12.0], dtype=np.float64),
         std_length=np.asarray([0.3], dtype=np.float64),
+        valid_seed_counts=np.asarray([1], dtype=np.int64),
         valid_run_count=1,
         reward_diagnostics_paths=("metrics.npz",),
     )
@@ -745,9 +833,9 @@ def test_show_command_saves_compact_figure_without_display(
         return {"step_distances": [50.0], "runs": []}
 
     def _fake_build_curve_aggregates(
-        manifest: object, step_distances: object = None
+        manifest: object, step_distances: object = None, **kwargs: object
     ) -> tuple[list[StepDistanceCurveAggregate], list[str]]:
-        del manifest, step_distances
+        del manifest, step_distances, kwargs
         return ([aggregate], [])
 
     def _fake_build_metric_aggregates(
@@ -820,7 +908,7 @@ def test_show_command_saves_compact_figure_without_display(
     assert show_calls == []
 
 
-def test_plot_curve_aggregates_uses_step_axis_and_deduped_legend(
+def test_plot_curve_aggregates_uses_episode_axis_and_deduped_legend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -831,21 +919,23 @@ def test_plot_curve_aggregates_uses_step_axis_and_deduped_legend(
     aggregates = [
         StepDistanceCurveAggregate(
             step_distance=50.0,
-            reference_steps=np.asarray([10.0, 20.0, 30.0], dtype=np.float64),
+            episode_numbers=np.asarray([10.0, 20.0, 30.0], dtype=np.float64),
             mean_reward=np.asarray([1.0, 2.0, 3.0], dtype=np.float64),
             std_reward=np.asarray([0.1, 0.2, 0.3], dtype=np.float64),
             mean_length=np.asarray([12.0, 11.0, 10.0], dtype=np.float64),
             std_length=np.asarray([0.3, 0.2, 0.1], dtype=np.float64),
+            valid_seed_counts=np.asarray([2, 2, 2], dtype=np.int64),
             valid_run_count=2,
             reward_diagnostics_paths=("a", "b"),
         ),
         StepDistanceCurveAggregate(
             step_distance=100.0,
-            reference_steps=np.asarray([10.0, 20.0, 30.0], dtype=np.float64),
+            episode_numbers=np.asarray([10.0, 20.0, 30.0], dtype=np.float64),
             mean_reward=np.asarray([0.5, 1.0, 1.5], dtype=np.float64),
             std_reward=np.asarray([0.1, 0.1, 0.1], dtype=np.float64),
             mean_length=np.asarray([14.0, 13.0, 12.0], dtype=np.float64),
             std_length=np.asarray([0.2, 0.2, 0.2], dtype=np.float64),
+            valid_seed_counts=np.asarray([2, 2, 2], dtype=np.int64),
             valid_run_count=2,
             reward_diagnostics_paths=("c", "d"),
         ),
@@ -856,15 +946,16 @@ def test_plot_curve_aggregates_uses_step_axis_and_deduped_legend(
     fig = step_distance_ablation.plt.gcf()
     assert returned_fig is fig
     assert len(fig.axes) == 2
-    np.testing.assert_allclose(fig.get_size_inches(), [9.2, 3.9])
-    assert fig.axes[0].get_xlabel() == "Training steps"
-    assert fig.axes[1].get_xlabel() == "Training steps"
+    np.testing.assert_allclose(fig.get_size_inches(), [180.0 / 25.4, 3.25])
+    assert fig.axes[0].get_xlabel() == "Training episodes"
+    assert fig.axes[1].get_xlabel() == "Training episodes"
     assert fig.axes[0].get_box_aspect() == pytest.approx(3 / 4)
     assert fig.axes[1].get_box_aspect() == pytest.approx(3 / 4)
 
     assert fig.legends, "Expected a figure-level legend."
     legend_labels = [text.get_text() for text in fig.legends[0].texts]
     assert legend_labels == ["50 m", "100 m"]
+    assert not fig.legends[0].get_frame_on()
     subplot_labels = [
         text.get_text()
         for ax in fig.axes
@@ -872,11 +963,18 @@ def test_plot_curve_aggregates_uses_step_axis_and_deduped_legend(
         if text.get_text() in {"(a)", "(b)"}
     ]
     assert subplot_labels == ["(a)", "(b)"]
-    subplot_label_y_positions = [
-        text.get_position()[1]
+    subplot_label_positions = [
+        text.get_position()
         for ax in fig.axes
         for text in ax.texts
         if text.get_text() in {"(a)", "(b)"}
     ]
-    assert subplot_label_y_positions == pytest.approx([-0.18, -0.18])
+    assert subplot_label_positions == pytest.approx([(0.02, 0.98), (0.02, 0.98)])
+    subplot_label_alignments = [
+        (text.get_horizontalalignment(), text.get_verticalalignment())
+        for ax in fig.axes
+        for text in ax.texts
+        if text.get_text() in {"(a)", "(b)"}
+    ]
+    assert subplot_label_alignments == [("left", "top"), ("left", "top")]
     step_distance_ablation.plt.close(fig)

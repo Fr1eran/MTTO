@@ -1,3 +1,5 @@
+import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from model.ocs.safe_guard_utility import SafeGuardUtility
@@ -5,37 +7,61 @@ from model.ocs.safe_guard_utility import SafeGuardUtility
 
 @dataclass(frozen=True, slots=True)
 class SPSState:
-    """Per-episode state for the stopping-point stepping mechanism."""
+    """Per-episode stopping-point target and an optional pending request time."""
 
     target_stopping_point_index: int = -1
-    request_pending: bool = False
-    request_timestamp_s: float = 0.0
+    request_started_at_s: float | None = None
+
+    @property
+    def request_pending(self) -> bool:
+        return self.request_started_at_s is not None
 
 
 class SPS:
-    """
-    停车点步进机制模拟
+    """Apply the discrete stopping-point stepping constraint.
 
-    列车状态一旦越过下个辅助停车区的最小速度曲线
-    则立即发起步进请求, 并在经过步进冗余时间T_r后
-    步进到下个辅助停车区
+    A request is made after the train satisfies the next stopping point's
+    minimum-speed trigger. It can complete only after ``step_delay_s`` and
+    before the current target's maximum-speed boundary is exceeded.
     """
 
     def __init__(
         self,
-        sgu: SafeGuardUtility,
-        ASA_ap_list: list[float],
-        ASA_dp_list: list[float],
-        T_s: float,
+        *,
+        safeguard_utility: SafeGuardUtility,
+        accessible_positions_m: Sequence[float],
+        danger_positions_m: Sequence[float],
+        step_delay_s: float,
     ) -> None:
-        self.sgu: SafeGuardUtility = sgu  # 进路安全防护实例
-        assert len(ASA_ap_list) == len(ASA_dp_list), "停车可达点与危险点数量应一致"
-        self.ASA_ap_list: list[float] = ASA_ap_list  # 停车区可达点列表
-        self.ASA_dp_list: list[float] = ASA_dp_list  # 停车区危险点列表
-        self.num_of_stopping_points: int = len(
-            self.ASA_ap_list
-        )  # 办理进路上停车区总数(加上车站)
-        self.T_s: float = T_s  # 步进从发起到完成的平均耗时
+        accessible = tuple(float(value) for value in accessible_positions_m)
+        danger = tuple(float(value) for value in danger_positions_m)
+        delay = float(step_delay_s)
+        if not accessible:
+            raise ValueError("at least one auxiliary stopping point is required")
+        if len(accessible) != len(danger):
+            raise ValueError("accessible and danger stopping-point counts must match")
+        if not math.isfinite(delay) or delay <= 0.0:
+            raise ValueError("step_delay_s must be finite and positive")
+        if not all(math.isfinite(value) for value in (*accessible, *danger)):
+            raise ValueError("stopping-point positions must be finite")
+        if any(
+            right <= left
+            for left, right in zip(accessible[:-1], accessible[1:], strict=True)
+        ):
+            raise ValueError("accessible stopping-point positions must increase")
+        if any(
+            right <= left for left, right in zip(danger[:-1], danger[1:], strict=True)
+        ):
+            raise ValueError("danger stopping-point positions must increase")
+        if any(ap > dp for ap, dp in zip(accessible, danger, strict=True)):
+            raise ValueError(
+                "each accessible position must not exceed its danger position"
+            )
+
+        self.safeguard_utility = safeguard_utility
+        self.accessible_positions_m = accessible
+        self.danger_positions_m = danger
+        self.step_delay_s = delay
 
     def initial_state(self) -> SPSState:
         return SPSState()
@@ -43,49 +69,52 @@ class SPS:
     def advance(
         self,
         state: SPSState,
-        current_pos: float,
-        current_speed: float,
-        current_time: float,
+        *,
+        position_m: float,
+        speed_mps: float,
+        time_s: float,
     ) -> SPSState:
-        """
-        根据当前状态发起停车点步进请求
+        """Return the next SPS state at one control-step endpoint."""
+        position = float(position_m)
+        speed = float(speed_mps)
+        time = float(time_s)
+        if not all(math.isfinite(value) for value in (position, speed, time)):
+            raise ValueError("position_m, speed_mps, and time_s must be finite")
 
-        Args:
-            current_pos: 当前位置
-            current_speed: 当前速度
-            current_time: 当前时间
-            current_sp: 当前目标停车点编号
-
-        Returns:
-            当前目标停车点
-        """
-        current_sp = state.target_stopping_point_index
-        next_sp = current_sp + 1
-        if not state.request_pending:
-            # 上一个步进请求已经执行
-            if next_sp <= self.num_of_stopping_points - 1:
-                # 未步进到最后一个停车点
-                # 可以尝试发起步进请求
-                next_guard_curve_min_speed = self.sgu.get_min_speed(
-                    current_pos=current_pos,
-                    current_sp=next_sp,
-                )
-                if current_speed > next_guard_curve_min_speed:
-                    # 满足步进速度条件，立即发起步进请求
-                    return SPSState(current_sp, True, current_time)
-            return state
-        else:
-            if current_time > state.request_timestamp_s + self.T_s:
-                # 此时已完成步进
-                # 设置执行完成标志
-                return SPSState(next_sp, False, state.request_timestamp_s)
-            else:
-                # 未完成步进
-                return state
-
-    def get_auxiliary_stopping_area_target_position(self, sp: int) -> float:
-        if sp < 0 or sp >= self.num_of_stopping_points:
-            raise IndexError(
-                f"停车点编号 {sp} 超出范围 [0, {self.num_of_stopping_points - 1}]"
+        current_index = state.target_stopping_point_index
+        next_index = current_index + 1
+        if state.request_pending:
+            current_max_speed = self.safeguard_utility.get_max_speed(
+                current_pos=position,
+                current_sp=current_index,
             )
-        return (self.ASA_ap_list[sp] + self.ASA_dp_list[sp]) / 2
+            # Keep the old target when its protection window has been missed.
+            # The caller then checks that old bound and truncates through its
+            # existing SPEED_HIGH path.
+            if speed > current_max_speed:
+                return state
+            assert state.request_started_at_s is not None
+            if time >= state.request_started_at_s + self.step_delay_s:
+                return SPSState(target_stopping_point_index=next_index)
+            return state
+
+        if next_index >= len(self.accessible_positions_m):
+            return state
+        next_min_speed = self.safeguard_utility.get_min_speed(
+            current_pos=position,
+            current_sp=next_index,
+        )
+        if speed > next_min_speed:
+            return SPSState(
+                target_stopping_point_index=current_index,
+                request_started_at_s=time,
+            )
+        return state
+
+    def target_position_m(self, index: int) -> float:
+        if not 0 <= index < len(self.accessible_positions_m):
+            raise IndexError(
+                f"stopping-point index {index} is outside "
+                + f"[0, {len(self.accessible_positions_m) - 1}]"
+            )
+        return (self.accessible_positions_m[index] + self.danger_positions_m[index]) / 2

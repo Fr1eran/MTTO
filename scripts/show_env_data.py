@@ -16,7 +16,12 @@ from utils.data_loader import (
     load_speed_limits,
     load_stations,
 )
-from utils.plot_utils import set_global_plot_style
+from utils.plot_utils import (
+    SCI_EXPORT_PAD_INCHES,
+    apply_sci_figure_layout,
+    save_sci_figure,
+    set_global_plot_style,
+)
 
 
 @dataclass
@@ -66,7 +71,7 @@ def parse_args():
     _ = parser.add_argument(
         "--pad-inches",
         type=float,
-        default=0.03,
+        default=SCI_EXPORT_PAD_INCHES,
         help="Padding around the tight saved figure.",
     )
     _ = parser.add_argument(
@@ -188,7 +193,16 @@ def _draw_infrastructure_hlines(
 def create_overview_figure(data: TrackEnvironmentData) -> Figure:
     """创建综合环境视图：上方为全量防护曲线与设施，下方为轨道坡度阶梯图。"""
     fig, (ax1, ax2) = plt.subplots(
-        2, 1, sharex=True, figsize=(8, 6), gridspec_kw={"height_ratios": [3, 1]}
+        2, 1, sharex=True, gridspec_kw={"height_ratios": [3, 1]}
+    )
+    apply_sci_figure_layout(
+        fig,
+        columns=2,
+        height_in=4.2,
+        left=0.09,
+        bottom=0.13,
+        top=0.82,
+        hspace=0.18,
     )
     data.safeguard.render(ax=ax1, layers=SafeGuardUtility.FULL_CURVE_VIEW_LAYERS)
     _draw_infrastructure_hlines(ax1, data, exclude_last_asa=False)
@@ -245,13 +259,34 @@ def create_overview_figure(data: TrackEnvironmentData) -> Figure:
     ax2.set_ylabel("Slope (‰)")
     ax2.legend()
     ax2.grid(True, alpha=0.3)
+    _ = ax1.text(
+        0.02,
+        0.98,
+        "(a)",
+        transform=ax1.transAxes,
+        ha="left",
+        va="top",
+        fontsize=10,
+        fontweight="bold",
+    )
+    _ = ax2.text(
+        0.02,
+        0.98,
+        "(b)",
+        transform=ax2.transAxes,
+        ha="left",
+        va="top",
+        fontsize=10,
+        fontweight="bold",
+    )
 
     return fig
 
 
 def create_full_curves_figure(data: TrackEnvironmentData) -> Figure:
     """创建全量安全防护曲线视图（Safe levitation, safe braking, min/max curves）。"""
-    fig, ax = plt.subplots(figsize=(8, 4.8))
+    fig, ax = plt.subplots()
+    apply_sci_figure_layout(fig, columns=2, height_in=3.2)
     data.safeguard.render(ax=ax, layers=SafeGuardUtility.FULL_CURVE_VIEW_LAYERS)
     _draw_infrastructure_hlines(ax, data, exclude_last_asa=False)
 
@@ -267,7 +302,8 @@ def create_full_curves_figure(data: TrackEnvironmentData) -> Figure:
 
 def create_danger_region_figure(data: TrackEnvironmentData) -> Figure:
     """创建危险速度域视图（局部防护曲线、危险交叉点散点与危险区域填充）。"""
-    fig, ax = plt.subplots(figsize=(8, 4.8))
+    fig, ax = plt.subplots()
+    apply_sci_figure_layout(fig, columns=2, height_in=3.2)
     data.safeguard.render(ax=ax, layers=SafeGuardUtility.DANGER_VIEW_LAYERS)
     _draw_infrastructure_hlines(ax, data, exclude_last_asa=True)
 
@@ -313,23 +349,13 @@ def save_compact_figures(
     if len(figures) == 1:
         single_fig = next(iter(figures.values()))
         target_path = output_file.with_suffix(suffix)
-        single_fig.savefig(
-            target_path,
-            dpi=dpi,
-            bbox_inches="tight",
-            pad_inches=pad_inches,
-        )
+        _ = save_sci_figure(single_fig, target_path, dpi=dpi, pad_inches=pad_inches)
         saved_paths.append(target_path)
     else:
         base_stem = output_file.stem
         for key, fig in figures.items():
             target_path = output_file.parent / f"{base_stem}_{key}{suffix}"
-            fig.savefig(
-                target_path,
-                dpi=dpi,
-                bbox_inches="tight",
-                pad_inches=pad_inches,
-            )
+            _ = save_sci_figure(fig, target_path, dpi=dpi, pad_inches=pad_inches)
             saved_paths.append(target_path)
 
     return saved_paths
@@ -357,4 +383,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -10,6 +10,7 @@ from rl.experiment_utils import (
     DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
     DEFAULT_SCHEDULE_TIME_S,
     DEFAULT_STEP_DISTANCE,
+    DEFAULT_TRAINING_EPISODES,
     TrainingRunSpec,
     curriculum_profile_names,
     resolve_training_run_spec,
@@ -165,10 +166,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
              则根据 rollout-steps-per-update 和 num-envs 计算得出。",
     )
     _ = parser.add_argument(
-        "--total-timesteps",
+        "--training-episodes",
         type=int,
-        default=200_000,
-        help="PPO 总训练步数。",
+        default=DEFAULT_TRAINING_EPISODES,
+        help="全局完成训练回合数；多环境时自动向上取整并推导 PPO 环境步上限。",
     )
     _ = parser.add_argument(
         "--tensorboard-log-dir",
@@ -260,7 +261,9 @@ def print_training_run_spec(spec: TrainingRunSpec) -> None:
     print(f"- n_steps_per_env={spec.n_steps_per_env}")
     print(f"- rollout_steps_per_update={spec.rollout_steps_per_update}")
     print(f"- output_dir={spec.output_dir}")
-    print(f"- total_timesteps={spec.total_timesteps}")
+    print(f"- training_episodes={spec.training_episodes}")
+    print(f"- max_episode_steps={spec.max_episode_steps}")
+    print(f"- derived_total_timesteps={spec.total_timesteps}")
     print(f"- tensorboard_log_dir={spec.tensorboard_log_dir}")
     print(f"- run_metadata_path={run_metadata_path}")
     if spec.enable_tb:

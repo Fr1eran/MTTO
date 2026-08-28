@@ -22,7 +22,7 @@ from utils.data_loader import (
     load_stations_goal_positions,
     resolve_project_path,
 )
-from utils.plot_utils import set_chinese_font
+from utils.plot_utils import apply_sci_figure_layout, set_chinese_font
 from utils.scenario import build_safeguard_utility
 
 ALIGNED_CURVE_REQUIRED_KEYS = ("position_m", "speed_mps", "acc_mps2", "time_s")
@@ -123,7 +123,7 @@ def main() -> None:
     plt.rcParams["axes.unicode_minus"] = False
     safeguardutility = build_safeguard_utility()
 
-    fig1, ax1 = plt.subplots(figsize=(10, 6))
+    fig1, ax1 = plt.subplots()
     _ = ax1.plot(
         distance_m,
         speed_kmh,
@@ -137,7 +137,7 @@ def main() -> None:
     ax1.grid(True, alpha=0.3)
     _ = ax1.legend()
 
-    fig2, ax2 = plt.subplots(figsize=(10, 6))
+    fig2, ax2 = plt.subplots()
     _ = ax2.plot(
         distance_m,
         acceleration,
@@ -181,7 +181,7 @@ def main() -> None:
         leviation_energy_consumption=leviation_energy_consumption,
     )
 
-    fig3, ax3 = plt.subplots(figsize=(10, 6))
+    fig3, ax3 = plt.subplots()
     _ = ax3.plot(
         distance_m,
         propulsion_energy_consumption,
@@ -201,7 +201,7 @@ def main() -> None:
     _ = ax3.set_title("龙阳路到浦东国际机场重标定后实际能耗-里程曲线")
 
     for fig in (fig1, fig2, fig3):
-        fig.tight_layout()
+        apply_sci_figure_layout(fig, columns=2, height_in=3.4)
 
     plt.show()
 

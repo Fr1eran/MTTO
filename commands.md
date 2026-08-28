@@ -6,9 +6,10 @@
 cd /home/lopethos/gitprojects/MTTO
 ```
 
-命令统一通过 `uv run` 使用项目虚拟环境。涉及 DSPDL 的命令假定对应的
+命令统一通过 `uv run` 使用项目虚拟环境。常规 DSPDL 命令假定对应的
 DP 参考轨迹位于 `output/optimal/dp/465p0_0p1_uni30p0/`；如果实际目录不同，
-只需替换 `--reference-curve-dir` 后的路径。
+只需替换 `--reference-curve-dir` 后的路径。步长消融脚本例外，默认使用 10 m
+参考曲线 `output/optimal/dp/465p0_0p1_uni10p0/`。
 
 ## 环境准备
 
@@ -74,7 +75,7 @@ uv run python -m scripts.train_rl \
   --schedule-time-s 465.0 \
   --step-distance 30.0 \
   --run-mode tune \
-  --total-timesteps 1000000 \
+  --training-episodes 7000 \
   --num-envs 8 \
   --rollout-steps-per-update 8192 \
   --evaluation-interval-rollouts 12 \
@@ -90,7 +91,7 @@ uv run python -m scripts.train_rl \
   --schedule-time-s 465.0 \
   --step-distance 30.0 \
   --run-mode monitor_best \
-  --total-timesteps 1000000 \
+  --training-episodes 7000 \
   --num-envs 8 \
   --rollout-steps-per-update 8192 \
   --evaluation-interval-rollouts 12 \
@@ -106,7 +107,7 @@ uv run python -m scripts.train_rl \
   --schedule-time-s 465.0 \
   --step-distance 30.0 \
   --run-mode reproduce \
-  --total-timesteps 1000000 \
+  --training-episodes 7000 \
   --num-envs 8 \
   --rollout-steps-per-update 8192 \
   --device cpu
@@ -123,7 +124,7 @@ uv run python -m scripts.train_rl \
   --curriculum-profile dspdl \
   --reference-curve-dir output/optimal/dp/465p0_0p1_uni30p0/ \
   --run-mode monitor_best \
-  --total-timesteps 1000000 \
+  --training-episodes 7000 \
   --num-envs 8 \
   --rollout-steps-per-update 8192 \
   --evaluation-interval-rollouts 12 \
@@ -202,11 +203,18 @@ uv run python -m scripts.show_rl_result \
 
 ## 消融实验
 
+所有 PPO 训练入口使用 SB3 内置 `StopTrainingOnMaxEpisodes`，并通过
+`--training-episodes` 指定总训练回合数，默认 `7000`。多环境训练按
+`ceil(training_episodes / num_envs) * num_envs` 向上取整；默认 `7000` 回合和
+`8` 个环境的有效目标仍为 `7000`。项目按理论最大单回合长度推导并对齐 PPO rollout 的
+内部环境步上限，命令行不再接受手工时间步预算。完成后在
+`run_metadata.json.training_budget` 中核对有效回合数、推导步数、实际回合数和停止原因。
+该预算接口已更新，旧版本 manifest 不能用于 `--resume`；请为新实验使用新的输出根目录。
+
 预览步长消融运行矩阵：
 
 ```bash
 uv run python -m scripts.run_step_distance_ablation train \
-  --reference-curve-dir output/optimal/dp/465p0_0p1_uni30p0/ \
   --num-envs 8 \
   --evaluation-interval-rollouts 12 \
   --dry-run
@@ -216,7 +224,6 @@ uv run python -m scripts.run_step_distance_ablation train \
 
 ```bash
 uv run python -m scripts.run_step_distance_ablation train \
-  --reference-curve-dir output/optimal/dp/465p0_0p1_uni30p0/ \
   --num-envs 8 \
   --evaluation-interval-rollouts 12
 
@@ -285,7 +292,8 @@ uv run python -m scripts.run_method_ablation train \
   --evaluation-interval-rollouts 12
 
 uv run python -m scripts.run_method_ablation show \
-  --output-root output/optimal/rl/method_ablation
+  --output-root output/optimal/rl/method_ablation \
+  --safety-output-file output/optimal/rl/method_ablation/safety_learning_process.png
 ```
 
 ## 训练分析与性能诊断

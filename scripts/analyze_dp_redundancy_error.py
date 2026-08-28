@@ -21,7 +21,12 @@ from dp.experiment_utils import (
     resolve_dp_curve_artifact,
 )
 from model.common import min_operation_time
-from utils.plot_utils import set_global_plot_style
+from utils.plot_utils import (
+    SCI_EXPORT_PAD_INCHES,
+    apply_sci_figure_layout,
+    save_sci_figure,
+    set_global_plot_style,
+)
 from utils.scenario import build_scenario
 
 DEFAULT_REDUNDANT_ARRAY_KEYS: tuple[str, ...] = (
@@ -336,7 +341,6 @@ def plot_redundancy_error_series(
     fig, (ax_redundant, ax_error) = plt.subplots(
         2,
         1,
-        figsize=(10, 7.0),
         sharex=True,
         gridspec_kw={"height_ratios": [2.0, 1.0]},
     )
@@ -363,7 +367,6 @@ def plot_redundancy_error_series(
         alpha=0.7,
         label="No redundancy",
     )
-    ax_redundant.set_title("DP redundant operation time over position")
     ax_redundant.set_ylabel("Redundant time (s)")
     ax_redundant.grid(True, alpha=0.3)
     ax_redundant.legend(loc="best")
@@ -383,13 +386,40 @@ def plot_redundancy_error_series(
         alpha=0.7,
         label="Zero error",
     )
-    ax_error.set_title("Redundant time error")
     ax_error.set_xlabel("Position (m)")
     ax_error.set_ylabel("Error (s)")
     ax_error.grid(True, alpha=0.3)
     ax_error.legend(loc="best")
+    _ = ax_redundant.text(
+        0.02,
+        0.98,
+        "(a)",
+        transform=ax_redundant.transAxes,
+        ha="left",
+        va="top",
+        fontsize=10,
+        fontweight="bold",
+    )
+    _ = ax_error.text(
+        0.02,
+        0.98,
+        "(b)",
+        transform=ax_error.transAxes,
+        ha="left",
+        va="top",
+        fontsize=10,
+        fontweight="bold",
+    )
 
-    fig.tight_layout()
+    apply_sci_figure_layout(
+        fig,
+        columns=1,
+        height_in=4.2,
+        left=0.20,
+        bottom=0.13,
+        top=0.96,
+        hspace=0.22,
+    )
     return fig
 
 
@@ -402,13 +432,7 @@ def save_compact_figure(
     if output_file.suffix == "":
         output_file = output_file.with_suffix(".png")
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(
-        output_file,
-        dpi=dpi,
-        bbox_inches="tight",
-        pad_inches=pad_inches,
-    )
-    return output_file
+    return save_sci_figure(fig, output_file, dpi=dpi, pad_inches=pad_inches)
 
 
 def write_point_csv(
@@ -588,7 +612,7 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     _ = parser.add_argument(
         "--pad-inches",
         type=float,
-        default=0.03,
+        default=SCI_EXPORT_PAD_INCHES,
         help="Padding around the tight saved figure.",
     )
     _ = parser.add_argument(

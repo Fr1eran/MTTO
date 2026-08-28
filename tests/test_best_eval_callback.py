@@ -131,6 +131,7 @@ def test_scheduled_evaluation_shares_one_result_between_handlers(
         eval_env=DummyEvalEnv(),
         handlers=[best, history],
         evaluation_interval_rollouts=12,
+        get_completed_training_episodes=lambda: 17,
     )
     _init(callback, DummyTrainingEnv())
     calls = 0
@@ -141,7 +142,7 @@ def test_scheduled_evaluation_shares_one_result_between_handlers(
         return _build_result(success=True, total_reward=5.0, safety_positions=(20.0,))
 
     monkeypatch.setattr("rl.callbacks.evaluate_policy_once", evaluate)
-    assert "_on_step" not in ScheduledPolicyEvaluationCallback.__dict__
+    assert callback._on_step() is True
     for rollout_index in range(1, 12):
         callback.num_timesteps = rollout_index * 10
         callback._on_rollout_end()
@@ -159,6 +160,7 @@ def test_scheduled_evaluation_shares_one_result_between_handlers(
     with np.load(history_path) as data:
         np.testing.assert_array_equal(data["training_steps"], [120])
         np.testing.assert_array_equal(data["rollout_indices"], [12])
+        np.testing.assert_array_equal(data["completed_training_episodes"], [17])
         np.testing.assert_allclose(data["safety_violation_positions_m"], [20.0])
 
 
@@ -218,7 +220,7 @@ def test_safety_histogram_has_no_step_hook_and_saves_rollout_data(
         output_path=str(output), position_bin_size_m=500.0
     )
     _init(callback, env)
-    assert "_on_step" not in SafetyTruncationPositionHistogramCallback.__dict__
+    assert callback._on_step() is True
     callback._on_rollout_end()
     callback._on_training_end()
     with np.load(output) as data:
@@ -242,6 +244,7 @@ def _reward_batch(*, count: int, complete: bool) -> dict[str, object]:
         "episode_terminated": np.asarray([complete]),
         "episode_truncated": np.asarray([False]),
         "episode_complete": np.asarray([complete]),
+        "episode_violation_code": np.asarray([0], dtype=np.int8),
         "episode_reward_sums": sums.reshape(1, -1),
     }
 
@@ -256,7 +259,7 @@ def test_reward_artifact_callback_drains_on_rollout_and_training_end(
             empty[key] = value[:0]
     env = DummyTrainingEnv(
         method_name="drain_reward_diagnostics",
-        batches=[[_reward_batch(count=4, complete=True)], [empty]],
+        batches=[[empty], [_reward_batch(count=4, complete=True)]],
     )
     output = tmp_path / "reward_diagnostics.npz"
     callback = RewardDiagnosticsArtifactCallback(output_path=str(output))
@@ -264,6 +267,7 @@ def test_reward_artifact_callback_drains_on_rollout_and_training_end(
     callback.num_timesteps = 4
     callback._on_rollout_end()
     callback._on_training_end()
+    assert callback.completed_episode_count == 1
     with np.load(output, allow_pickle=False) as data:
         assert tuple(data["reward_names"].tolist()) == REWARD_NAMES
         np.testing.assert_array_equal(data["rollout_transition_count"], [4])

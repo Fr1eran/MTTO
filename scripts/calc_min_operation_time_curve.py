@@ -21,7 +21,7 @@ from utils.data_loader import (
     load_speed_limits,
     load_stations_goal_positions,
 )
-from utils.plot_utils import set_chinese_font
+from utils.plot_utils import sci_figure_size, set_chinese_font
 
 slopes, slope_intervals = load_slopes()
 speed_limits, speed_limit_intervals = load_speed_limits(to_mps=True)
@@ -97,7 +97,7 @@ distance = 100.0
 set_chinese_font()
 
 # 创建初始图形（只创建一次）
-fig, ax = plt.subplots(figsize=(12, 7))
+fig, ax = plt.subplots(figsize=sci_figure_size(columns=2, height_in=4.0))
 
 # 绘制静态元素（区间限速、危险速度域和终点等）
 safeguard_utility.render(ax=ax, layers=SafeGuardUtility.DANGER_VIEW_LAYERS)

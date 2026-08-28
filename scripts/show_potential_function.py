@@ -11,7 +11,7 @@ from matplotlib.lines import Line2D
 from numpy.typing import NDArray
 
 from utils.data_loader import load_safeguard_curves, load_speed_limits
-from utils.plot_utils import set_global_plot_style
+from utils.plot_utils import sci_figure_size, save_sci_figure, set_global_plot_style
 
 
 @dataclass(frozen=True)
@@ -293,16 +293,16 @@ def plot_guidance_potentials_wide(*, minimal: bool = False) -> Figure:
     safety_potential, stopping_potential = _calculate_guidance_potentials(field)
 
     if minimal:
-        fig = plt.figure(figsize=(12.8, 5.8))
+        fig = plt.figure(figsize=sci_figure_size(columns=2, height_in=3.3))
         grid = fig.add_gridspec(1, 2, wspace=0.12)
         ax_safety = fig.add_subplot(grid[0, 0])
         ax_stopping = fig.add_subplot(grid[0, 1], sharex=ax_safety, sharey=ax_safety)
     else:
-        fig = plt.figure(figsize=(12.8, 5.9))
+        fig = plt.figure(figsize=sci_figure_size(columns=2, height_in=3.3))
         grid = fig.add_gridspec(1, 2, wspace=0.12)
         ax_safety = fig.add_subplot(grid[0, 0])
         ax_stopping = fig.add_subplot(grid[0, 1], sharex=ax_safety, sharey=ax_safety)
-        fig.subplots_adjust(top=0.85, bottom=0.17, left=0.07, right=0.98)
+    fig.subplots_adjust(top=0.84, bottom=0.18, left=0.08, right=0.98)
 
     safety_mesh = ax_safety.pcolormesh(
         field.position_grid,
@@ -361,15 +361,17 @@ def plot_guidance_potentials_wide(*, minimal: bool = False) -> Figure:
             pad=0.02,
             fraction=0.046,
         )
-        for panel_label, ax in (("(a)", ax_safety), ("(b)", ax_stopping)):
-            bounds = ax.get_position()
-            _ = fig.text(
-                (bounds.x0 + bounds.x1) / 2.0,
-                bounds.y0 - 0.11,
-                panel_label,
-                ha="center",
-                va="top",
-            )
+    for panel_label, ax in (("(a)", ax_safety), ("(b)", ax_stopping)):
+        _ = ax.text(
+            0.02,
+            0.98,
+            panel_label,
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=10,
+            fontweight="bold",
+        )
 
     _apply_transparent_background(fig)
     return fig
@@ -403,7 +405,7 @@ def plot_safety_potential_heatmap_speed(*, minimal: bool = False) -> Figure:
     """以第 7 个辅助停车区绘制与联合图一致的安全势函数。"""
     field = _build_seventh_auxiliary_stop_field()
     safety_potential, _ = _calculate_guidance_potentials(field)
-    fig, ax = plt.subplots(figsize=(6.4, 5.9))
+    fig, ax = plt.subplots(figsize=sci_figure_size(columns=2, height_in=3.4))
     safety_mesh = ax.pcolormesh(
         field.position_grid,
         field.speed_grid_mps * 3.6,
@@ -487,7 +489,7 @@ def plot_safety_potential_heatmap_position(*, minimal: bool = False) -> Figure:
     in_pos_band = (POS >= POS_LOWER) & (POS <= POS_UPPER)
     POTENTIAL_MASKED = np.where(in_pos_band, POTENTIAL, np.nan)
 
-    fig, ax = plt.subplots(figsize=(12, 6))
+    fig, ax = plt.subplots(figsize=sci_figure_size(columns=2, height_in=3.5))
 
     cmap = plt.get_cmap("Spectral")
 
@@ -550,7 +552,7 @@ def plot_safety_potential_heatmap_position(*, minimal: bool = False) -> Figure:
         ax.grid(True, alpha=0.3, linestyle=":")
 
     _apply_transparent_background(fig)
-    plt.tight_layout()
+    fig.subplots_adjust(left=0.10, right=0.92, bottom=0.16, top=0.96)
     return fig
 
 
@@ -568,7 +570,7 @@ def plot_stopping_potential_heatmap(
     _, stopping_potential = _calculate_guidance_potentials(field)
 
     if mode == "3d":
-        fig = plt.figure(figsize=(8.0, 5.9))
+        fig = plt.figure(figsize=sci_figure_size(columns=2, height_in=3.6))
         ax = fig.add_subplot(111, projection="3d")
         surface_step = 4
         _ = ax.plot_surface(
@@ -608,7 +610,7 @@ def plot_stopping_potential_heatmap(
         _apply_transparent_background(fig)
         return fig
 
-    fig, ax = plt.subplots(figsize=(6.4, 5.9))
+    fig, ax = plt.subplots(figsize=sci_figure_size(columns=2, height_in=3.4))
     stopping_mesh = ax.pcolormesh(
         field.position_grid,
         field.speed_grid_mps * 3.6,
@@ -688,7 +690,7 @@ def plot_stopping_potential_slices(*, minimal: bool = False) -> Figure:
         max_speed_mps=max_speed_mps,
     )
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    fig, axes = plt.subplots(1, 2, figsize=sci_figure_size(columns=2, height_in=3.0))
 
     axes[0].plot(distance_error_array, potential_vs_distance, color="tab:orange")
 
@@ -704,7 +706,6 @@ def plot_stopping_potential_slices(*, minimal: bool = False) -> Figure:
         axes[0].axvline(-position_plateau_m, color="gray", linestyle=":", linewidth=1.2)
         axes[0].set_xlabel("stopping error (m)")
         axes[0].set_ylabel(r"$\Phi_D$")
-        axes[0].set_title("v = 0")
         axes[0].grid(True, alpha=0.3, linestyle=":")
 
         axes[1].axvline(0.0, color="black", linestyle="--", linewidth=1.2)
@@ -717,12 +718,20 @@ def plot_stopping_potential_slices(*, minimal: bool = False) -> Figure:
         )
         axes[1].set_xlabel("speed (km/h)")
         axes[1].set_ylabel(r"$\Phi_D$")
-        axes[1].set_title(rf"d = 0, $v_{{\max}}={max_speed_mps * 3.6:.1f}$ km/h")
         axes[1].grid(True, alpha=0.3, linestyle=":")
-
-        _ = fig.suptitle(r"Clipped Laplace stopping-potential slices", fontsize=13)
+    for panel_label, axis in (("(a)", axes[0]), ("(b)", axes[1])):
+        _ = axis.text(
+            0.02,
+            0.98,
+            panel_label,
+            transform=axis.transAxes,
+            ha="left",
+            va="top",
+            fontsize=10,
+            fontweight="bold",
+        )
     _apply_transparent_background(fig)
-    plt.tight_layout()
+    fig.subplots_adjust(left=0.10, right=0.98, bottom=0.18, top=0.96, wspace=0.30)
     return fig
 
 
@@ -788,11 +797,11 @@ def _apply_plot_style() -> None:
     _ = set_global_plot_style(
         font_preset="sci",
         preferred_font="Times New Roman",
-        title_font_size=12.0,
-        axis_label_font_size=12.0,
-        tick_font_size=12.0,
-        legend_font_size=12.0,
-        figure_dpi=100.0,
+        title_font_size=8.0,
+        axis_label_font_size=8.0,
+        tick_font_size=8.0,
+        legend_font_size=8.0,
+        figure_dpi=150.0,
         savefig_dpi=300.0,
     )
 
@@ -801,15 +810,7 @@ def _save_compact_figure(figure: Figure, output_file: Path) -> Path:
     if output_file.suffix == "":
         output_file = output_file.with_suffix(".png")
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(
-        output_file,
-        transparent=True,
-        facecolor="none",
-        edgecolor="none",
-        bbox_inches="tight",
-        pad_inches=0.02,
-    )
-    return output_file
+    return save_sci_figure(figure, output_file, transparent=True)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

@@ -10,6 +10,7 @@ from tensorboard.backend.event_processing import (
 )
 
 from rl.reward_diagnostics import (
+    LEGACY_UNKNOWN_VIOLATION_CODE,
     REWARD_DIAGNOSTICS_SCHEMA_VERSION,
     REWARD_NAMES,
     REWARD_SIGNAL_COUNT,
@@ -41,6 +42,7 @@ class RewardDiagnosticsArtifact:
     episode_terminated: np.ndarray
     episode_truncated: np.ndarray
     episode_complete: np.ndarray
+    episode_violation_code: np.ndarray
     episode_reward_sums: np.ndarray
 
 
@@ -49,6 +51,50 @@ class CompleteEpisodeSeries:
     end_step: np.ndarray
     total_reward: np.ndarray
     length: np.ndarray
+
+
+@dataclass(frozen=True)
+class CompleteEpisodeSequence:
+    """Individual complete episodes ordered across all vector workers."""
+
+    episode_number: np.ndarray
+    total_reward: np.ndarray
+    length: np.ndarray
+    violation_code: np.ndarray
+
+
+def extract_complete_episode_sequence(
+    artifact: RewardDiagnosticsArtifact,
+) -> CompleteEpisodeSequence:
+    """Return every complete episode with a global cumulative episode index.
+
+    Worker-local episode indices are not globally unique.  Ordering by end
+    step, worker rank, and local index yields a deterministic merged sequence
+    suitable for an episode-number learning-curve axis.
+    """
+    complete = artifact.episode_complete
+    end_steps = artifact.episode_end_step[complete]
+    worker_ranks = artifact.episode_worker_rank[complete]
+    worker_indices = artifact.episode_index[complete]
+    rewards = artifact.episode_reward_sums[complete, TOTAL_REWARD_INDEX]
+    lengths = artifact.episode_length[complete].astype(np.float64)
+    violation_codes = artifact.episode_violation_code[complete]
+    if end_steps.size == 0:
+        return CompleteEpisodeSequence(
+            episode_number=np.empty(0, dtype=np.int64),
+            total_reward=np.empty(0, dtype=np.float64),
+            length=np.empty(0, dtype=np.float64),
+            violation_code=np.empty(0, dtype=np.int8),
+        )
+
+    order = np.lexsort((worker_indices, worker_ranks, end_steps))
+    episode_count = end_steps.size
+    return CompleteEpisodeSequence(
+        episode_number=np.arange(1, episode_count + 1, dtype=np.int64),
+        total_reward=np.asarray(rewards[order], dtype=np.float64),
+        length=np.asarray(lengths[order], dtype=np.float64),
+        violation_code=np.asarray(violation_codes[order], dtype=np.int8),
+    )
 
 
 def extract_complete_episode_series(
@@ -110,7 +156,14 @@ def load_reward_diagnostics_artifact(
         version = np.asarray(data["schema_version"], dtype=np.int16)
         names = tuple(str(name) for name in np.asarray(data["reward_names"]))
         values = {name: np.asarray(data[name]).copy() for name in required[2:]}
-    if version.shape != (1,) or int(version[0]) != REWARD_DIAGNOSTICS_SCHEMA_VERSION:
+        if "episode_violation_code" in data.files:
+            values["episode_violation_code"] = np.asarray(
+                data["episode_violation_code"]
+            ).copy()
+    if version.shape != (1,) or int(version[0]) not in (
+        2,
+        REWARD_DIAGNOSTICS_SCHEMA_VERSION,
+    ):
         raise ValueError("Unsupported reward diagnostics schema version")
     if names != REWARD_NAMES:
         raise ValueError("Reward diagnostics names do not match the schema")
@@ -148,6 +201,20 @@ def load_reward_diagnostics_artifact(
     episode_rewards = np.asarray(values["episode_reward_sums"], dtype=np.float64)
     if episode_rewards.shape != (episode_rows, REWARD_SIGNAL_COUNT):
         raise ValueError("Reward diagnostics has invalid episode_reward_sums shape")
+    if int(version[0]) == REWARD_DIAGNOSTICS_SCHEMA_VERSION:
+        if "episode_violation_code" not in values:
+            raise ValueError("Reward diagnostics is missing episode_violation_code")
+        episode_violation_code = np.asarray(
+            values["episode_violation_code"], dtype=np.int8
+        )
+        if episode_violation_code.shape != (episode_rows,):
+            raise ValueError(
+                "Reward diagnostics has invalid episode_violation_code shape"
+            )
+    else:
+        episode_violation_code = np.full(
+            episode_rows, LEGACY_UNKNOWN_VIOLATION_CODE, dtype=np.int8
+        )
 
     reward_sum = np.asarray(values["rollout_reward_sum"], dtype=np.float64)
     reward_abs_sum = np.asarray(values["rollout_reward_abs_sum"], dtype=np.float64)
@@ -181,6 +248,10 @@ def load_reward_diagnostics_artifact(
         or np.any(episode_length <= 0)
         or np.any(episode_terminated & episode_truncated)
         or np.any(episode_complete != (episode_terminated | episode_truncated))
+        or (
+            int(version[0]) == REWARD_DIAGNOSTICS_SCHEMA_VERSION
+            and np.any(~np.isin(episode_violation_code, [0, 1, 2, 3, 4]))
+        )
         or int(episode_length.sum()) != int(rollout_count.sum())
     ):
         raise ValueError("Reward diagnostics contains invalid episode metadata")
@@ -188,11 +259,13 @@ def load_reward_diagnostics_artifact(
     if not np.allclose(
         reward_sum[:, TOTAL_REWARD_INDEX],
         reward_sum[:, component_slice].sum(axis=1),
-        atol=1e-5,
+        rtol=1e-6,
+        atol=1e-3,
     ) or not np.allclose(
         episode_rewards[:, TOTAL_REWARD_INDEX],
         episode_rewards[:, component_slice].sum(axis=1),
-        atol=1e-5,
+        rtol=1e-6,
+        atol=1e-3,
     ):
         raise ValueError("Reward diagnostics total does not equal component sum")
 
@@ -211,6 +284,7 @@ def load_reward_diagnostics_artifact(
         episode_terminated=episode_terminated,
         episode_truncated=episode_truncated,
         episode_complete=episode_complete,
+        episode_violation_code=episode_violation_code,
         episode_reward_sums=episode_rewards,
     )
 

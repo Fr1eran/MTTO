@@ -7,7 +7,12 @@ from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from numpy.typing import NDArray
 
-from utils.plot_utils import set_global_plot_style
+from utils.plot_utils import (
+    SCI_EXPORT_PAD_INCHES,
+    apply_sci_figure_layout,
+    save_sci_figure,
+    set_global_plot_style,
+)
 
 MAX_STOP_ERROR_M = 0.3
 MAX_TIME_ERROR_S = 10.0
@@ -38,7 +43,7 @@ def visualize_stopping_score_function():
     x_values = np.linspace(0, STOPPING_ERROR_MAX_M, 1000)
     rewards = current_stopping_score(x_values)
 
-    fig, ax_score = plt.subplots(figsize=(10, 6))
+    fig, ax_score = plt.subplots()
 
     _ = ax_score.plot(
         x_values,
@@ -63,7 +68,7 @@ def visualize_stopping_score_function():
     _ = ax_score.set_xlabel(r"$|\Delta x|$ / m", fontsize=12)
     _ = ax_score.set_xlim(0, STOPPING_ERROR_MAX_M)
 
-    fig.tight_layout()
+    apply_sci_figure_layout(fig, columns=1, height_in=2.6)
     return fig
 
 
@@ -71,7 +76,7 @@ def visualize_punctuality_score_function():
     x_values = np.linspace(0, PUNCTUALITY_ERROR_MAX_S, 1000)
     rewards = current_punctuality_score(x_values)
 
-    fig, ax_score = plt.subplots(figsize=(10, 6))
+    fig, ax_score = plt.subplots()
 
     _ = ax_score.plot(
         x_values,
@@ -89,25 +94,25 @@ def visualize_punctuality_score_function():
 
     _ = ax_score.set_xlabel(r"$|\Delta t|$ / s", fontsize=12)
 
-    fig.tight_layout()
+    apply_sci_figure_layout(fig, columns=1, height_in=2.6)
     return fig
 
 
 def visualize_combined_score_functions():
     """在同一画幅中展示当前训练环境使用的停站和准点评分函数。"""
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
+    fig, (ax1, ax2) = plt.subplots(1, 2)
 
     def add_panel_label(ax: Axes, label: str) -> None:
         _ = ax.text(
-            0.5,
-            -0.18,
+            0.02,
+            0.98,
             label,
             transform=ax.transAxes,
-            ha="center",
+            ha="left",
             va="top",
-            fontweight="normal",
-            clip_on=False,
+            fontsize=10,
+            fontweight="bold",
         )
 
     # ---- 左子图：停站分数 ----
@@ -158,7 +163,15 @@ def visualize_combined_score_functions():
     ax2.legend()
     add_panel_label(ax2, "(b)")
 
-    fig.subplots_adjust(top=0.88, bottom=0.28, wspace=0.28)
+    apply_sci_figure_layout(
+        fig,
+        columns=2,
+        height_in=3.0,
+        left=0.10,
+        bottom=0.18,
+        top=0.95,
+        wspace=0.30,
+    )
     return fig
 
 
@@ -189,7 +202,7 @@ def parse_args():
     _ = parser.add_argument(
         "--pad-inches",
         type=float,
-        default=0.03,
+        default=SCI_EXPORT_PAD_INCHES,
         help="Padding around the tight saved figure.",
     )
     _ = parser.add_argument(
@@ -209,13 +222,7 @@ def save_compact_figure(
     if output_file.suffix == "":
         output_file = output_file.with_suffix(".png")
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(
-        output_file,
-        dpi=dpi,
-        bbox_inches="tight",
-        pad_inches=pad_inches,
-    )
-    return output_file
+    return save_sci_figure(fig, output_file, dpi=dpi, pad_inches=pad_inches)
 
 
 if __name__ == "__main__":
@@ -223,10 +230,10 @@ if __name__ == "__main__":
     _ = set_global_plot_style(
         font_preset="sci",
         preferred_font="Times New Roman",
-        title_font_size=12.0,
-        axis_label_font_size=12.0,
-        tick_font_size=10.0,
-        legend_font_size=12.0,
+        title_font_size=8.0,
+        axis_label_font_size=8.0,
+        tick_font_size=8.0,
+        legend_font_size=8.0,
         figure_dpi=150.0,
         savefig_dpi=300.0,
     )

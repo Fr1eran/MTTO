@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, override
 
 import numpy as np
 from numpy.typing import NDArray
-from stable_baselines3.common.callbacks import EventCallback
+from stable_baselines3.common.callbacks import BaseCallback, ProgressBarCallback
 
 from rl.evaluation import (
     PolicyEvaluationResult,
@@ -30,6 +30,7 @@ class PolicyEvaluationEvent:
     result: PolicyEvaluationResult
     training_step: int
     rollout_index: int
+    completed_training_episodes: int = 0
 
 
 class EvaluationResultHandler(Protocol):
@@ -44,14 +45,7 @@ class EvaluationResultHandler(Protocol):
     def finalize(self, host: ScheduledPolicyEvaluationCallback) -> None: ...
 
 
-class RolloutAggregationCallback(EventCallback):
-    """Base for callbacks whose business work runs only at rollout boundaries."""
-
-    def __init__(self, *, verbose: int = 0) -> None:
-        super().__init__(callback=None, verbose=verbose)
-
-
-class RewardDiagnosticsArtifactCallback(RolloutAggregationCallback):
+class RewardDiagnosticsArtifactCallback(BaseCallback):
     """Drain worker reward moments per rollout and persist one final artifact."""
 
     def __init__(self, *, output_path: str, verbose: int = 0) -> None:
@@ -63,6 +57,7 @@ class RewardDiagnosticsArtifactCallback(RolloutAggregationCallback):
         self._rollout_abs_sums: list[NDArray[np.float64]] = []
         self._rollout_nonzero_counts: list[NDArray[np.int64]] = []
         self._rollout_cross_products: list[NDArray[np.float64]] = []
+        self._completed_episode_count = 0
         self._episode_chunks: dict[str, list[np.ndarray]] = {
             "end_step": [],
             "worker_rank": [],
@@ -71,14 +66,24 @@ class RewardDiagnosticsArtifactCallback(RolloutAggregationCallback):
             "terminated": [],
             "truncated": [],
             "complete": [],
+            "violation_code": [],
             "reward_sums": [],
         }
+
+    @property
+    def completed_episode_count(self) -> int:
+        """Return the number of completed episodes drained from all workers."""
+        return self._completed_episode_count
 
     @override
     def _init_callback(self) -> None:
         output_dir = os.path.dirname(self.output_path)
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
+
+    @override
+    def _on_step(self) -> bool:
+        return True
 
     @staticmethod
     def _array(
@@ -189,6 +194,12 @@ class RewardDiagnosticsArtifactCallback(RolloutAggregationCallback):
                     dtype=np.bool_,
                     shape=(episode_count,),
                 ),
+                "violation_code": self._array(
+                    payload,
+                    "episode_violation_code",
+                    dtype=np.int8,
+                    shape=(episode_count,),
+                ),
                 "reward_sums": self._array(
                     payload,
                     "episode_reward_sums",
@@ -197,6 +208,9 @@ class RewardDiagnosticsArtifactCallback(RolloutAggregationCallback):
                 ),
             }
             if episode_count:
+                self._completed_episode_count += int(
+                    np.count_nonzero(episode_arrays["complete"])
+                )
                 for key, value in episode_arrays.items():
                     self._episode_chunks[key].append(value)
 
@@ -296,6 +310,11 @@ class RewardDiagnosticsArtifactCallback(RolloutAggregationCallback):
                 shape=(0,),
                 dtype=np.dtype(np.bool_),
             ),
+            "episode_violation_code": self._concat_or_empty(
+                self._episode_chunks["violation_code"],
+                shape=(0,),
+                dtype=np.dtype(np.int8),
+            ),
             "episode_reward_sums": self._concat_or_empty(
                 self._episode_chunks["reward_sums"],
                 shape=(0, REWARD_SIGNAL_COUNT),
@@ -319,6 +338,7 @@ class RewardDiagnosticsArtifactCallback(RolloutAggregationCallback):
             "episode_terminated",
             "episode_truncated",
             "episode_complete",
+            "episode_violation_code",
             "episode_reward_sums",
         ):
             fields[key] = fields[key][episode_order]
@@ -327,7 +347,7 @@ class RewardDiagnosticsArtifactCallback(RolloutAggregationCallback):
         os.replace(temporary_path, self.output_path)
 
 
-class SafetyTruncationPositionHistogramCallback(RolloutAggregationCallback):
+class SafetyTruncationPositionHistogramCallback(BaseCallback):
     """Collect worker-buffered safety truncations and persist position bins."""
 
     def __init__(
@@ -350,6 +370,10 @@ class SafetyTruncationPositionHistogramCallback(RolloutAggregationCallback):
         output_dir = os.path.dirname(self.output_path)
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
+
+    @override
+    def _on_step(self) -> bool:
+        return True
 
     def _drain_worker_batches(self) -> None:
         payloads = self.training_env.env_method("drain_safety_truncations")
@@ -552,12 +576,16 @@ class EvaluationHistoryArtifactHandler:
             comfort_tav=np.asarray(
                 [event.result.comfort_tav for event in self._events], dtype=np.float64
             ),
+            completed_training_episodes=np.asarray(
+                [event.completed_training_episodes for event in self._events],
+                dtype=np.int64,
+            ),
             safety_violation_positions_m=flattened,
             safety_violation_position_offsets=offsets,
         )
 
 
-class ScheduledPolicyEvaluationCallback(RolloutAggregationCallback):
+class ScheduledPolicyEvaluationCallback(BaseCallback):
     def __init__(
         self,
         *,
@@ -565,6 +593,7 @@ class ScheduledPolicyEvaluationCallback(RolloutAggregationCallback):
         handlers: Sequence[EvaluationResultHandler],
         evaluation_interval_rollouts: int = DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
         deterministic: bool = True,
+        get_completed_training_episodes: Callable[[], int] | None = None,
         verbose: int = 0,
     ) -> None:
         super().__init__(verbose=verbose)
@@ -574,12 +603,17 @@ class ScheduledPolicyEvaluationCallback(RolloutAggregationCallback):
         self.handlers = list(handlers)
         self.evaluation_interval_rollouts = int(evaluation_interval_rollouts)
         self.deterministic = bool(deterministic)
+        self.get_completed_training_episodes = get_completed_training_episodes
         self._rollouts_completed = 0
 
     @override
     def _init_callback(self) -> None:
         for handler in self.handlers:
             handler.initialize(self)
+
+    @override
+    def _on_step(self) -> bool:
+        return True
 
     def run_evaluation(self) -> PolicyEvaluationResult:
         return evaluate_policy_once(
@@ -596,6 +630,11 @@ class ScheduledPolicyEvaluationCallback(RolloutAggregationCallback):
             result=result,
             training_step=int(self.num_timesteps),
             rollout_index=self._rollouts_completed,
+            completed_training_episodes=(
+                int(self.get_completed_training_episodes())
+                if self.get_completed_training_episodes is not None
+                else 0
+            ),
         )
         for handler in self.handlers:
             handler.handle_evaluation(self, event)
@@ -607,3 +646,27 @@ class ScheduledPolicyEvaluationCallback(RolloutAggregationCallback):
         close = getattr(self.eval_env, "close", None)
         if callable(close):
             close()
+
+
+class EpisodeProgressBarCallback(ProgressBarCallback):
+    """
+    Display a progress bar based on training episodes instead of timesteps.
+    """
+
+    def __init__(self, total_episodes: int) -> None:
+        super().__init__()
+        self.total_episodes = total_episodes
+
+    def _on_training_start(self) -> None:
+        try:
+            from tqdm.auto import tqdm
+        except ImportError:
+            from tqdm import tqdm
+        self.pbar = tqdm(total=self.total_episodes, desc="Training Episodes")
+
+    def _on_step(self) -> bool:
+        if "dones" in self.locals:
+            new_episodes = int(np.sum(self.locals["dones"]))
+            if new_episodes > 0:
+                self.pbar.update(new_episodes)
+        return True

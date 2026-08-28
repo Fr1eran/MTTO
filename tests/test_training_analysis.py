@@ -122,6 +122,7 @@ def _reward_artifact() -> RewardDiagnosticsArtifact:
         episode_terminated=np.asarray([True, False]),
         episode_truncated=np.asarray([False, True]),
         episode_complete=np.asarray([True, True]),
+        episode_violation_code=np.asarray([0, 3], dtype=np.int8),
         episode_reward_sums=episode_rewards,
     )
 
@@ -130,15 +131,29 @@ def _write_reward_artifact(
     path: Path,
     *,
     schema_version: int = REWARD_DIAGNOSTICS_SCHEMA_VERSION,
+    rollout_total_offset: float = 0.0,
+    episode_total_offset: float = 0.0,
 ) -> None:
     artifact = _reward_artifact()
+    rollout_rewards = artifact.rollout_reward_sum.copy()
+    episode_rewards = artifact.episode_reward_sums.copy()
+    rollout_rewards[:, -1] += rollout_total_offset
+    episode_rewards[:, -1] += episode_total_offset
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(
         path,
         schema_version=np.asarray([schema_version], dtype=np.int16),
         reward_names=np.asarray(artifact.reward_names),
         **{
-            field: getattr(artifact, field)
+            field: (
+                rollout_rewards
+                if field == "rollout_reward_sum"
+                else (
+                    episode_rewards
+                    if field == "episode_reward_sums"
+                    else getattr(artifact, field)
+                )
+            )
             for field in artifact.__dataclass_fields__
             if field != "reward_names"
         },
@@ -150,6 +165,33 @@ def test_reward_diagnostics_rejects_removed_schema(tmp_path: Path) -> None:
     _write_reward_artifact(artifact_path, schema_version=1)
 
     with pytest.raises(ValueError, match="Unsupported reward diagnostics schema"):
+        _ = load_reward_diagnostics_artifact(artifact_path)
+
+
+def test_reward_diagnostics_accepts_small_reward_total_rounding_error(
+    tmp_path: Path,
+) -> None:
+    artifact_path = tmp_path / "reward_diagnostics.npz"
+    _write_reward_artifact(
+        artifact_path,
+        rollout_total_offset=5e-4,
+        episode_total_offset=5e-4,
+    )
+
+    _ = load_reward_diagnostics_artifact(artifact_path)
+
+
+def test_reward_diagnostics_rejects_material_reward_total_error(
+    tmp_path: Path,
+) -> None:
+    artifact_path = tmp_path / "reward_diagnostics.npz"
+    _write_reward_artifact(
+        artifact_path,
+        rollout_total_offset=1e-2,
+        episode_total_offset=1e-2,
+    )
+
+    with pytest.raises(ValueError, match="total does not equal component sum"):
         _ = load_reward_diagnostics_artifact(artifact_path)
 
 
@@ -965,6 +1007,38 @@ def test_resolve_training_run_spec_plans_paths_and_switches() -> None:
     assert spec.rollout_steps_per_update == DEFAULT_ROLLOUT_STEPS_PER_UPDATE
     assert "subproc_start_method" not in spec.run_metadata
     assert spec.dry_run is True
+
+
+def test_training_episode_budget_rounds_up_to_a_whole_vector_batch() -> None:
+    parser = build_train_rl_arg_parser()
+    args = parser.parse_args(
+        [
+            "--training-episodes",
+            "7001",
+            "--num-envs",
+            "8",
+            "--dry-run",
+        ]
+    )
+
+    spec = resolve_training_run_spec(args)
+
+    budget = spec.run_metadata["training_budget"]
+    assert spec.training_episodes == 7001
+    assert budget["training_episodes"] == 7001
+    assert budget["effective_training_episodes"] == 7008
+    assert budget["max_episode_steps"] == spec.max_episode_steps
+    assert budget["derived_total_timesteps"] == spec.total_timesteps
+    assert spec.total_timesteps % spec.rollout_steps_per_update == 0
+
+
+def test_training_defaults_to_a_completed_episode_budget() -> None:
+    spec = resolve_training_run_spec(
+        build_train_rl_arg_parser().parse_args(["--dry-run"])
+    )
+
+    assert spec.training_episodes == 7000
+    assert spec.run_metadata["training_budget"]["effective_training_episodes"] == 7000
 
 
 def test_tune_mode_enables_safety_truncation_histogram() -> None:

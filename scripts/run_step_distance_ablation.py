@@ -18,7 +18,9 @@ from rl.experiment_utils import (
     DEFAULT_REWARD_DISCOUNT,
     DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
     DEFAULT_SCHEDULE_TIME_S,
+    DEFAULT_TRAINING_EPISODES,
     TrainingRunSpec,
+    add_panel_label,
     apply_rl_curve_plot_style,
     build_default_training_args,
     evaluate_final_training_run,
@@ -27,18 +29,23 @@ from rl.experiment_utils import (
     train_single_experiment,
 )
 from rl.training_analysis.collect import (
-    extract_complete_episode_series,
+    extract_complete_episode_sequence,
     load_reward_diagnostics_artifact,
 )
+from rl.training_analysis.process import trailing_moving_average
 from utils.io_utils import format_float_token
+from utils.plot_utils import (
+    SCI_EXPORT_PAD_INCHES,
+    apply_sci_figure_layout,
+    save_sci_figure,
+)
 
 DEFAULT_STEP_DISTANCES: tuple[float, ...] = (
     10.0,
     30.0,
     50.0,
     100.0,
-    300.0,
-)  # 精度上限、黄金平衡点、退化边界、极限压力
+)  # 精度上限、黄金平衡点、退化边界
 DEFAULT_SEEDS: tuple[int, ...] = (
     11,
     131,
@@ -47,9 +54,12 @@ DEFAULT_SEEDS: tuple[int, ...] = (
     443,
 )  # 5个随机数种子
 DEFAULT_OUTPUT_ROOT = "output/optimal/rl/step_distance_ablation"
+DEFAULT_REFERENCE_CURVE_DIR = "output/optimal/dp/465p0_0p1_uni10p0"
+DEFAULT_EPISODE_SMOOTHING_WINDOW = 100
 STEP_DISTANCE_MANIFEST_FILENAME = "step_distance_ablation_manifest.json"
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 4
 FIXED_REWARD_PRESET = "basic_safety"
+FIXED_CURRICULUM_PROFILE = "dspdl_completion"
 FINAL_TRAJECTORY_METRICS_FILENAME = "final_trajectory_metrics.json"
 BEST_TRAJECTORY_METRICS_FILENAME = "best_trajectory_metrics.json"
 TRAJECTORY_METRIC_KEYS: tuple[str, ...] = (
@@ -78,7 +88,7 @@ class RewardDiagnosticsRunArtifact:
     repeat_index: int
     seed: int
     reward_diagnostics_path: str
-    index: np.ndarray
+    episode_number: np.ndarray
     episode_reward: np.ndarray
     episode_length: np.ndarray
 
@@ -86,11 +96,12 @@ class RewardDiagnosticsRunArtifact:
 @dataclass(frozen=True)
 class StepDistanceCurveAggregate:
     step_distance: float
-    reference_steps: np.ndarray
+    episode_numbers: np.ndarray
     mean_reward: np.ndarray
     std_reward: np.ndarray
     mean_length: np.ndarray
     std_length: np.ndarray
+    valid_seed_counts: np.ndarray
     valid_run_count: int
     reward_diagnostics_paths: tuple[str, ...]
 
@@ -119,7 +130,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     _ = train_parser.add_argument(
         "--reference-curve-dir",
-        required=True,
+        default=DEFAULT_REFERENCE_CURVE_DIR,
         help=(
             "Directory containing the matching DP reference trajectory required "
             "by DSPDL."
@@ -135,10 +146,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     _ = train_parser.add_argument(
-        "--total-timesteps",
+        "--training-episodes",
         type=int,
-        default=1_000_000,
-        help="Maximum simulation training timesteps.",
+        default=DEFAULT_TRAINING_EPISODES,
+        help="Global completed training episodes for every ablation run.",
     )
     _ = train_parser.add_argument(
         "--schedule-time-s", type=float, default=DEFAULT_SCHEDULE_TIME_S
@@ -157,6 +168,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Completed-rollout interval for best trajectory evaluation.",
     )
     _ = train_parser.add_argument("--device", default=DEFAULT_DEVICE)
+    _ = train_parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Resume a compatible manifest and skip runs with complete final artifacts."
+        ),
+    )
     _ = train_parser.add_argument(
         "--dry-run",
         action=argparse.BooleanOptionalAction,
@@ -184,6 +202,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     _ = show_parser.add_argument(
+        "--episode-smoothing-window",
+        type=int,
+        default=DEFAULT_EPISODE_SMOOTHING_WINDOW,
+        help=(
+            "Trailing moving-average window in completed training episodes "
+            f"(default: {DEFAULT_EPISODE_SMOOTHING_WINDOW})."
+        ),
+    )
+    _ = show_parser.add_argument(
         "--dpi",
         type=float,
         default=300.0,
@@ -192,7 +219,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     _ = show_parser.add_argument(
         "--pad-inches",
         type=float,
-        default=0.03,
+        default=SCI_EXPORT_PAD_INCHES,
         help="Padding around the tight saved figure.",
     )
     _ = show_parser.add_argument(
@@ -230,7 +257,7 @@ def _build_train_args(
     train_args.schedule_time_s = args.schedule_time_s
     train_args.step_distance = step_distance
     train_args.reward_preset = FIXED_REWARD_PRESET
-    train_args.curriculum_profile = "dspdl"
+    train_args.curriculum_profile = FIXED_CURRICULUM_PROFILE
     train_args.reference_curve_dir = args.reference_curve_dir
     train_args.experiment_tag = _build_experiment_tag(
         step_distance=step_distance,
@@ -251,7 +278,7 @@ def _build_train_args(
     train_args.reward_discount = args.reward_discount
     train_args.num_envs = args.num_envs
     train_args.rollout_steps_per_update = args.rollout_steps_per_update
-    train_args.total_timesteps = args.total_timesteps
+    train_args.training_episodes = args.training_episodes
     train_args.tensorboard_log_dir = None
     train_args.tb_log_name = None
     train_args.seed = seed
@@ -301,7 +328,7 @@ def _training_signature(args: argparse.Namespace) -> dict[str, Any]:
         "num_envs": int(args.num_envs),
         "rollout_steps_per_update": int(args.rollout_steps_per_update),
         "n_steps_per_env": None,
-        "total_timesteps": int(args.total_timesteps),
+        "training_episodes": int(args.training_episodes),
         "device": str(args.device),
         "enable_monitor": True,
         "enable_auto_analysis": False,
@@ -314,6 +341,25 @@ def _training_signature(args: argparse.Namespace) -> dict[str, Any]:
         "evaluation_deterministic": (
             True if args.enable_best_evaluation_artifacts else None
         ),
+    }
+
+
+def _manifest_training_budget_summary(spec: TrainingRunSpec) -> dict[str, object]:
+    """Return resumable budget fields without duplicating the stop reason."""
+    budget = spec.run_metadata["training_budget"]
+    return {
+        key: budget[key]
+        for key in (
+            "mode",
+            "training_episodes",
+            "effective_training_episodes",
+            "max_episode_steps",
+            "derived_total_timesteps",
+            "actual_completed_episodes",
+            "actual_training_timesteps",
+            "target_reached",
+        )
+        if key in budget
     }
 
 
@@ -355,7 +401,7 @@ def build_step_distance_manifest(
         "manifest_version": MANIFEST_VERSION,
         "output_root": args.output_root,
         "reward_preset": FIXED_REWARD_PRESET,
-        "curriculum_profile": "dspdl",
+        "curriculum_profile": FIXED_CURRICULUM_PROFILE,
         "reference_curve_dir": args.reference_curve_dir,
         "step_distances": [float(value) for value in DEFAULT_STEP_DISTANCES],
         "seed_list": [int(seed) for seed in DEFAULT_SEEDS],
@@ -389,7 +435,7 @@ def _validate_manifest_compatibility(
         raise ValueError(
             "Existing step-distance manifest uses a different reward preset"
         )
-    if manifest.get("curriculum_profile") != "dspdl":
+    if manifest.get("curriculum_profile") != FIXED_CURRICULUM_PROFILE:
         raise ValueError(
             "Existing step-distance manifest uses a different curriculum profile"
         )
@@ -420,6 +466,44 @@ def _validate_existing_manifest(args: argparse.Namespace) -> None:
         _validate_manifest_compatibility(
             load_step_distance_manifest(args.output_root), args
         )
+
+
+def _completed_statuses_for_resume(
+    args: argparse.Namespace,
+    run_entries: list[StepDistanceRunEntry],
+) -> dict[tuple[float, int], dict[str, Any]]:
+    """Keep only completed runs whose canonical final artifacts still exist."""
+    manifest_path = Path(args.output_root) / STEP_DISTANCE_MANIFEST_FILENAME
+    if not args.resume or not manifest_path.is_file():
+        return {}
+
+    expected_runs = {
+        (entry.step_distance, entry.repeat_index): entry for entry in run_entries
+    }
+    statuses: dict[tuple[float, int], dict[str, Any]] = {}
+    for entry in load_step_distance_manifest(args.output_root).get("runs", []):
+        if not isinstance(entry, dict) or entry.get("status") != "completed":
+            continue
+        try:
+            key = (_entry_step_distance(entry), int(entry.get("repeat_index", -1)))
+        except (TypeError, ValueError):
+            continue
+        expected = expected_runs.get(key)
+        if expected is None:
+            continue
+        if (
+            Path(expected.training_run_spec.final_model_save_path).is_file()
+            and Path(expected.final_metrics_path).is_file()
+        ):
+            status_payload: dict[str, Any] = {
+                "status": "completed",
+                "final_metrics_path": expected.final_metrics_path,
+            }
+            training_budget = entry.get("training_budget")
+            if isinstance(training_budget, dict):
+                status_payload["training_budget"] = training_budget
+            statuses[key] = status_payload
+    return statuses
 
 
 def train_step_distance_run(
@@ -467,16 +551,16 @@ def _load_reward_diagnostics_run(
     step_distance = _entry_step_distance(run_entry)
     repeat_index = int(run_entry.get("repeat_index", 0))
     artifact = load_reward_diagnostics_artifact(reward_diagnostics_path)
-    episodes = extract_complete_episode_series(artifact)
-    index = episodes.end_step.astype(np.float64)
+    episodes = extract_complete_episode_sequence(artifact)
+    episode_number = episodes.episode_number.astype(np.float64)
     rewards = episodes.total_reward
     lengths = episodes.length
 
-    if index.size == 0 or rewards.size == 0 or lengths.size == 0:
+    if episode_number.size == 0 or rewards.size == 0 or lengths.size == 0:
         raise ValueError(
             f"No complete episodes in reward diagnostics: {reward_diagnostics_path}"
         )
-    if rewards.size != lengths.size or rewards.size != index.size:
+    if rewards.size != lengths.size or rewards.size != episode_number.size:
         raise ValueError(
             f"Mismatched reward diagnostics arrays: {reward_diagnostics_path}"
         )
@@ -486,7 +570,7 @@ def _load_reward_diagnostics_run(
         repeat_index=repeat_index,
         seed=int(run_entry["seed"]),
         reward_diagnostics_path=str(reward_diagnostics_path),
-        index=index,
+        episode_number=episode_number,
         episode_reward=rewards,
         episode_length=lengths,
     )
@@ -636,7 +720,8 @@ def _print_run_matrix(run_entries: list[StepDistanceRunEntry]) -> None:
             f"[{index}] step_distance={entry.step_distance:g} "
             + f"repeat={entry.repeat_index + 1} seed={entry.seed} "
             + f"output_dir={entry.training_run_spec.output_dir} "
-            + f"total_timesteps={entry.training_run_spec.total_timesteps}"
+            + f"training_episodes={entry.training_run_spec.training_episodes} "
+            + f"derived_total_timesteps={entry.training_run_spec.total_timesteps}"
         )
 
 
@@ -650,9 +735,55 @@ def _resolve_display_distances(
     return [float(value) for value in values]
 
 
+def _smooth_episode_run(
+    run: RewardDiagnosticsRunArtifact,
+    *,
+    window: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if window < 1:
+        raise ValueError("episode_smoothing_window must be >= 1")
+    rewards = trailing_moving_average(run.episode_reward, window)
+    lengths = trailing_moving_average(run.episode_length, window)
+    if rewards.size == 0 or lengths.size == 0:
+        return (
+            np.empty(0, dtype=np.float64),
+            np.empty(0, dtype=np.float64),
+            np.empty(0, dtype=np.float64),
+        )
+    return run.episode_number[window - 1 :], rewards, lengths
+
+
+def _align_episode_values(
+    reference: np.ndarray,
+    episode_numbers: np.ndarray,
+    values: np.ndarray,
+) -> np.ndarray:
+    aligned = np.full(reference.shape, np.nan, dtype=np.float64)
+    if episode_numbers.size == 0:
+        return aligned
+    indices = episode_numbers.astype(np.int64) - int(reference[0])
+    valid = (indices >= 0) & (indices < reference.size)
+    aligned[indices[valid]] = values[valid]
+    return aligned
+
+
+def _mean_and_sample_std(
+    values: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    counts = np.sum(np.isfinite(values), axis=0)
+    means = np.nanmean(values, axis=0)
+    stds = np.full(means.shape, np.nan, dtype=np.float64)
+    multiple = counts >= 2
+    if np.any(multiple):
+        stds[multiple] = np.nanstd(values[:, multiple], axis=0, ddof=1)
+    return means, stds, counts
+
+
 def build_curve_aggregates(
     manifest: dict[str, Any],
     step_distances: list[float] | None = None,
+    *,
+    episode_smoothing_window: int = DEFAULT_EPISODE_SMOOTHING_WINDOW,
 ) -> tuple[list[StepDistanceCurveAggregate], list[str]]:
     warnings: list[str] = []
     aggregates: list[StepDistanceCurveAggregate] = []
@@ -674,7 +805,9 @@ def build_curve_aggregates(
                 continue
             try:
                 metrics_runs.append(_load_reward_diagnostics_run(run_entry=run_entry))
-            except ValueError:
+            except ValueError as e:
+                print(f"Error loading {run_entry.get('output_dir')}: {e}")
+                raise
                 raise
             except (FileNotFoundError, KeyError, OSError) as exc:
                 warnings.append(str(exc))
@@ -686,41 +819,53 @@ def build_curve_aggregates(
             )
             continue
 
-        reference = np.unique(np.concatenate([run.index for run in metrics_runs]))
+        smoothed_runs: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+        for run in metrics_runs:
+            episode_numbers, rewards, lengths = _smooth_episode_run(
+                run, window=episode_smoothing_window
+            )
+            if episode_numbers.size == 0:
+                warnings.append(
+                    f"Skipped step_distance={step_distance:g}, "
+                    + f"repeat={run.repeat_index} because it has fewer than "
+                    + f"{episode_smoothing_window} complete episodes."
+                )
+                continue
+            smoothed_runs.append((episode_numbers, rewards, lengths))
+        if not smoothed_runs:
+            warnings.append(
+                f"No smoothed episode curves for step_distance={step_distance:g}."
+            )
+            continue
+
+        first_episode = int(min(run[0][0] for run in smoothed_runs))
+        last_episode = int(max(run[0][-1] for run in smoothed_runs))
+        reference = np.arange(first_episode, last_episode + 1, dtype=np.float64)
         aligned_rewards = np.vstack(
             [
-                np.interp(
-                    reference,
-                    run.index,
-                    run.episode_reward,
-                    left=np.nan,
-                    right=np.nan,
-                )
-                for run in metrics_runs
+                _align_episode_values(reference, episode_numbers, rewards)
+                for episode_numbers, rewards, _ in smoothed_runs
             ]
         )
         aligned_lengths = np.vstack(
             [
-                np.interp(
-                    reference,
-                    run.index,
-                    run.episode_length,
-                    left=np.nan,
-                    right=np.nan,
-                )
-                for run in metrics_runs
+                _align_episode_values(reference, episode_numbers, lengths)
+                for episode_numbers, _, lengths in smoothed_runs
             ]
         )
+        mean_reward, std_reward, reward_counts = _mean_and_sample_std(aligned_rewards)
+        mean_length, std_length, length_counts = _mean_and_sample_std(aligned_lengths)
 
         aggregates.append(
             StepDistanceCurveAggregate(
                 step_distance=float(step_distance),
-                reference_steps=reference,
-                mean_reward=np.nanmean(aligned_rewards, axis=0),
-                std_reward=np.nanstd(aligned_rewards, axis=0),
-                mean_length=np.nanmean(aligned_lengths, axis=0),
-                std_length=np.nanstd(aligned_lengths, axis=0),
-                valid_run_count=len(metrics_runs),
+                episode_numbers=reference,
+                mean_reward=mean_reward,
+                std_reward=std_reward,
+                mean_length=mean_length,
+                std_length=std_length,
+                valid_seed_counts=np.minimum(reward_counts, length_counts),
+                valid_run_count=len(smoothed_runs),
                 reward_diagnostics_paths=tuple(
                     run.reward_diagnostics_path for run in metrics_runs
                 ),
@@ -826,7 +971,7 @@ def plot_curve_aggregates(
         return None
 
     apply_rl_curve_plot_style()
-    fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(9.2, 3.9), squeeze=False)
+    fig, axes = plt.subplots(nrows=1, ncols=2, squeeze=False)
     ax_reward = axes[0][0]
     ax_length = axes[0][1]
     for ax in (ax_reward, ax_length):
@@ -836,68 +981,61 @@ def plot_curve_aggregates(
         color = _color_for_index(index)
         label = f"{aggregate.step_distance:g} m"
         ax_reward.plot(
-            aggregate.reference_steps,
+            aggregate.episode_numbers,
             aggregate.mean_reward,
             color=color,
             label=label,
         )
         ax_reward.fill_between(
-            aggregate.reference_steps,
+            aggregate.episode_numbers,
             aggregate.mean_reward - aggregate.std_reward,
             aggregate.mean_reward + aggregate.std_reward,
             color=color,
             alpha=0.18,
         )
         ax_length.plot(
-            aggregate.reference_steps,
+            aggregate.episode_numbers,
             aggregate.mean_length,
             color=color,
             label=label,
         )
         ax_length.fill_between(
-            aggregate.reference_steps,
+            aggregate.episode_numbers,
             aggregate.mean_length - aggregate.std_length,
             aggregate.mean_length + aggregate.std_length,
             color=color,
             alpha=0.18,
         )
 
-    ax_reward.set_xlabel("Training steps")
+    ax_reward.set_xlabel("Training episodes")
     ax_reward.set_ylabel("Mean episode reward")
     ax_reward.grid(True, alpha=0.3)
-    ax_length.set_xlabel("Training steps")
+    ax_length.set_xlabel("Training episodes")
     ax_length.set_ylabel("Mean episode length")
     ax_length.grid(True, alpha=0.3)
-    ax_reward.text(
-        0.5,
-        -0.18,
-        "(a)",
-        transform=ax_reward.transAxes,
-        ha="center",
-        va="top",
-        clip_on=False,
-    )
-    ax_length.text(
-        0.5,
-        -0.18,
-        "(b)",
-        transform=ax_length.transAxes,
-        ha="center",
-        va="top",
-        clip_on=False,
-    )
+    _ = add_panel_label(ax=ax_reward, label="(a)")
+    _ = add_panel_label(ax=ax_length, label="(b)")
     handles, labels = ax_reward.get_legend_handles_labels()
     _ = fig.legend(
         handles,
         labels,
         loc="upper center",
-        bbox_to_anchor=(0.5, 0.995),
-        ncol=min(4, len(aggregates)) + 1,
-        borderaxespad=0.15,
+        bbox_to_anchor=(0.5, 1.0),
+        ncol=min(4, len(aggregates)),
+        borderaxespad=0.0,
         handlelength=1.8,
         columnspacing=1.2,
+        frameon=False,
     )
-    plt.tight_layout(rect=(0.0, 0.04, 1.0, 0.90), w_pad=1.8)
+    apply_sci_figure_layout(
+        fig,
+        columns=2,
+        height_in=3.25,
+        left=0.10,
+        bottom=0.19,
+        top=0.84,
+        wspace=0.34,
+    )
     if show:
         plt.show()
     return fig
@@ -912,13 +1050,7 @@ def save_compact_figure(
     if output_file.suffix == "":
         output_file = output_file.with_suffix(".png")
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(
-        output_file,
-        dpi=dpi,
-        bbox_inches="tight",
-        pad_inches=pad_inches,
-    )
-    return output_file
+    return save_sci_figure(fig, output_file, dpi=dpi, pad_inches=pad_inches)
 
 
 def _print_curve_summary(aggregates: list[StepDistanceCurveAggregate]) -> None:
@@ -928,16 +1060,16 @@ def _print_curve_summary(aggregates: list[StepDistanceCurveAggregate]) -> None:
         return
     for aggregate in aggregates:
         step_end = (
-            float(aggregate.reference_steps[-1])
-            if aggregate.reference_steps.size > 0
+            float(aggregate.episode_numbers[-1])
+            if aggregate.episode_numbers.size > 0
             else 0.0
         )
         print(
             "  - "
             + f"step_distance={aggregate.step_distance:g} "
             + f"valid_runs={aggregate.valid_run_count} "
-            + f"steps_points={aggregate.reference_steps.size} "
-            + f"step_end={step_end:g}"
+            + f"episode_points={aggregate.episode_numbers.size} "
+            + f"episode_end={step_end:g}"
         )
 
 
@@ -999,28 +1131,38 @@ def _run_train_command(args: argparse.Namespace) -> int:
         print("Dry run completed: step-distance run matrix resolved.")
         return 0
 
-    statuses: dict[tuple[float, int], dict[str, Any]] = {}
+    statuses = _completed_statuses_for_resume(args, run_entries)
     manifest_path = _write_manifest(
         args.output_root,
         build_step_distance_manifest(args, run_entries, statuses=statuses),
     )
 
     for index, entry in enumerate(run_entries, start=1):
+        key = (entry.step_distance, entry.repeat_index)
+        if key in statuses:
+            print(
+                f"Skipping completed step-distance job {index}/{len(run_entries)}: "
+                + f"step_distance={entry.step_distance:g}, "
+                + f"repeat={entry.repeat_index + 1}, seed={entry.seed}"
+            )
+            continue
         print(
             f"Running step-distance job {index}/{len(run_entries)}: "
             + f"step_distance={entry.step_distance:g}, "
             + f"repeat={entry.repeat_index + 1}, seed={entry.seed}, "
-            + f"total_timesteps={entry.training_run_spec.total_timesteps}"
+            + f"training_episodes={entry.training_run_spec.training_episodes} "
+            + f"derived_total_timesteps={entry.training_run_spec.total_timesteps}"
         )
         try:
-            _ = train_step_distance_run(entry)
-            final_metrics_path = evaluate_final_step_distance_run(entry)
-            statuses[(entry.step_distance, entry.repeat_index)] = {
+            completed_spec = train_step_distance_run(entry)
+            _, final_metrics_path = evaluate_final_training_run(completed_spec)
+            statuses[key] = {
                 "status": "completed",
                 "final_metrics_path": final_metrics_path,
+                "training_budget": _manifest_training_budget_summary(completed_spec),
             }
         except Exception as exc:
-            statuses[(entry.step_distance, entry.repeat_index)] = {
+            statuses[key] = {
                 "status": "failed",
                 "error_message": str(exc),
             }
@@ -1028,7 +1170,6 @@ def _run_train_command(args: argparse.Namespace) -> int:
                 args.output_root,
                 build_step_distance_manifest(args, run_entries, statuses=statuses),
             )
-            raise
 
         _ = _write_manifest(
             args.output_root,
@@ -1044,9 +1185,12 @@ def _run_show_command(args: argparse.Namespace) -> int:
         manifest = load_step_distance_manifest(args.output_root)
     except FileNotFoundError as exc:
         raise SystemExit(str(exc)) from exc
+    if args.episode_smoothing_window < 1:
+        raise SystemExit("--episode-smoothing-window must be >= 1")
 
     curve_aggregates, curve_warnings = build_curve_aggregates(
         manifest,
+        episode_smoothing_window=args.episode_smoothing_window,
     )
     metric_source = resolve_metric_source(manifest)
     metric_aggregates, metric_warnings = build_metric_aggregates(
@@ -1055,6 +1199,10 @@ def _run_show_command(args: argparse.Namespace) -> int:
     )
     _print_warnings(curve_warnings + metric_warnings)
     _print_curve_summary(curve_aggregates)
+    print(
+        "Episode smoothing: "
+        + f"trailing window={args.episode_smoothing_window} completed episodes."
+    )
     _print_metric_table(metric_aggregates, metric_source=metric_source)
 
     if args.dry_run:

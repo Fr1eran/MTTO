@@ -60,10 +60,10 @@ class OperationalStepper:
             k_c=0.8,
         )
         self.sps: SPS = SPS(
-            sgu=safeguard_utility,
-            ASA_ap_list=track.ASA_aps,
-            ASA_dp_list=track.ASA_dps,
-            T_s=2.0,
+            safeguard_utility=safeguard_utility,
+            accessible_positions_m=track.ASA_aps,
+            danger_positions_m=track.ASA_dps,
+            step_delay_s=2.0,
         )
         profile_pos, profile_speed = min_operation_time_curve(
             vehicle=vehicle,
@@ -271,9 +271,9 @@ class OperationalStepper:
         operation_time = state.operation_time_s + duration
         sps_state = self.sps.advance(
             state.sps_state,
-            current_pos=position,
-            current_speed=next_speed,
-            current_time=operation_time,
+            position_m=position,
+            speed_mps=next_speed,
+            time_s=operation_time,
         )
         next_state = self._build_state(
             position_m=position,

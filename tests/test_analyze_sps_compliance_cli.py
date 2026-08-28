@@ -47,6 +47,13 @@ class _StubSafeGuard:
     ) -> float:
         return self.get_min_and_max_speed(current_pos, current_sp)[0]
 
+    def get_max_speed(
+        self,
+        current_pos: float,
+        current_sp: int,
+    ) -> float:
+        return self.get_min_and_max_speed(current_pos, current_sp)[1]
+
 
 def _write_dp_artifact(run_dir: Path) -> tuple[Path, Path]:
     curve_path = run_dir / "optimized_speed_curve.npz"

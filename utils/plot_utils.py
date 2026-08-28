@@ -1,8 +1,15 @@
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Literal
 
 import matplotlib.pyplot as plt
 from matplotlib.font_manager import fontManager
+
+MM_PER_INCH = 25.4
+SCI_SINGLE_COLUMN_WIDTH_IN = 85.0 / MM_PER_INCH
+SCI_DOUBLE_COLUMN_WIDTH_IN = 180.0 / MM_PER_INCH
+SCI_EXPORT_DPI = 300.0
+SCI_EXPORT_PAD_INCHES = 0.02
 
 CHINESE_FONT_CANDIDATES: tuple[str, ...] = (
     "SimHei",
@@ -46,6 +53,79 @@ COMMERCIAL_FONT_FALLBACKS: dict[str, tuple[str, ...]] = {
 
 # Backward-compatible alias: kept for callers importing this symbol directly.
 DEFAULT_FONT_CANDIDATES: tuple[str, ...] = CHINESE_FONT_CANDIDATES
+
+
+def sci_column_width_in(columns: Literal[1, 2]) -> float:
+    """Return the standard 85 mm / 180 mm SCI column width in inches."""
+    if columns == 1:
+        return SCI_SINGLE_COLUMN_WIDTH_IN
+    if columns == 2:
+        return SCI_DOUBLE_COLUMN_WIDTH_IN
+    raise ValueError(f"columns must be 1 or 2, got {columns!r}")
+
+
+def sci_figure_size(
+    *,
+    columns: Literal[1, 2],
+    height_in: float,
+) -> tuple[float, float]:
+    """Build a fixed physical figure size for manuscript-ready graphics."""
+    if height_in <= 0.0:
+        raise ValueError(f"height_in must be positive, got {height_in!r}")
+    return (sci_column_width_in(columns), float(height_in))
+
+
+def apply_sci_figure_layout(
+    fig: plt.Figure,
+    *,
+    columns: Literal[1, 2],
+    height_in: float,
+    left: float = 0.12,
+    right: float = 0.98,
+    bottom: float = 0.14,
+    top: float = 0.96,
+    wspace: float | None = None,
+    hspace: float | None = None,
+) -> None:
+    """Set fixed manuscript dimensions and explicit compact subplot margins."""
+    fig.set_size_inches(*sci_figure_size(columns=columns, height_in=height_in))
+    kwargs: dict[str, float] = {
+        "left": left,
+        "right": right,
+        "bottom": bottom,
+        "top": top,
+    }
+    if wspace is not None:
+        kwargs["wspace"] = wspace
+    if hspace is not None:
+        kwargs["hspace"] = hspace
+    fig.subplots_adjust(**kwargs)
+
+
+def save_sci_figure(
+    fig: plt.Figure,
+    output_file: str | Path,
+    *,
+    dpi: float = SCI_EXPORT_DPI,
+    pad_inches: float = SCI_EXPORT_PAD_INCHES,
+    transparent: bool = False,
+) -> Path:
+    """Save a compact high-resolution figure with a controlled outer margin."""
+    path = Path(output_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    save_kwargs: dict[str, float | str | bool] = {
+        "dpi": dpi,
+        "bbox_inches": "tight",
+        "pad_inches": pad_inches,
+    }
+    if transparent:
+        save_kwargs.update(
+            transparent=True,
+            facecolor="none",
+            edgecolor="none",
+        )
+    fig.savefig(path, **save_kwargs)
+    return path
 
 
 def _pick_first_available_font(font_candidates: Sequence[str]) -> str | None:

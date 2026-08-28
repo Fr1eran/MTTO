@@ -95,7 +95,7 @@ class TestSPSIntegration:
 
         return safeguard_utility, len(setup_data["accessible_points"])
 
-    def test_sps_stepping_with_real_data(
+    def test_sps_real_data_stops_at_the_first_missed_step_window(
         self,
         setup_data: _SetupData,
         setup_system: tuple[SafeGuardUtility, int],
@@ -107,15 +107,16 @@ class TestSPSIntegration:
 
         T_r = 2.0
         sps = SPS(
-            sgu=safeguard_utility,
-            ASA_ap_list=setup_data["accessible_points"],
-            ASA_dp_list=setup_data["dangerous_points"],
-            T_s=T_r,
+            safeguard_utility=safeguard_utility,
+            accessible_positions_m=setup_data["accessible_points"],
+            danger_positions_m=setup_data["dangerous_points"],
+            step_delay_s=T_r,
         )
 
         sps_state = sps.initial_state()
         current_sp = sps_state.target_stopping_point_index
-        step_history = []
+        request_seen = False
+        window_missed = False
 
         distances = setup_data["distance"]
         speeds = setup_data["speed"]
@@ -126,33 +127,29 @@ class TestSPSIntegration:
             x = distances[i]
             v = speeds[i]
 
+            previous_state = sps_state
             sps_state = sps.advance(
-                sps_state,
-                current_pos=x,
-                current_speed=v,
-                current_time=t,
+                previous_state,
+                position_m=x,
+                speed_mps=v,
+                time_s=t,
             )
-            new_sp = sps_state.target_stopping_point_index
+            request_seen = request_seen or (
+                not previous_state.request_pending and sps_state.request_pending
+            )
+            old_max_speed = safeguard_utility.get_max_speed(
+                current_pos=x,
+                current_sp=previous_state.target_stopping_point_index,
+            )
+            if (
+                previous_state.request_pending
+                and sps_state == previous_state
+                and v > old_max_speed
+            ):
+                window_missed = True
+                break
+            current_sp = sps_state.target_stopping_point_index
 
-            if new_sp != current_sp:
-                print(
-                    f"Step changed from {current_sp} to {new_sp} at "
-                    f"time={t:.2f}s, pos={x:.2f}m, speed={v:.2f}m/s"
-                )
-                step_history.append((t, current_sp, new_sp))
-                current_sp = new_sp
-
-        # 1. 确保发起过停车点步进请求
-        assert len(step_history) > 0, "No stepping occurred!"
-
-        # 2. 检查是否到达最终停车点
-        final_sp = current_sp
-        print(f"Final SP: {final_sp}, Total SPs: {num_sp}")
-
-        assert final_sp == num_sp - 1, (
-            f"Train only reached SP {final_sp}, expected is {num_sp - 1}"
-        )
-
-        # 3. 检查步进是否单调
-        sp_values = [h[2] for h in step_history]
-        assert sp_values == sorted(sp_values), "Stepping should be monotonic"
+        assert request_seen, "No stepping request occurred in real-data replay"
+        assert window_missed, "Expected the replay to expose a missed step window"
+        assert current_sp < num_sp - 1

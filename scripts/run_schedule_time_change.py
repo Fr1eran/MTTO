@@ -10,6 +10,7 @@ from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.lines import Line2D
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 
@@ -38,13 +39,14 @@ from utils.io_utils import (
     load_optimized_curve_and_metrics,
     save_curve_and_metrics,
 )
+from utils.plot_utils import apply_sci_figure_layout, save_sci_figure
 from utils.scenario import build_safeguard_utility, build_scenario
 
 DEFAULT_EVALUATE_LOAD_DIR = "output/optimal/rl/final/"
 DEFAULT_OUTPUT_DIR = "output/optimal/rl/schedule_time_change_eval/"
 SUMMARY_FILENAME = "schedule_time_change_summary.json"
 DEFAULT_FIGURE_FILENAME = "schedule_time_change_comparison.png"
-DEFAULT_DELTA_TIMES_S = (0.0, -10.0, 10.0, -20.0, 20.0)
+DEFAULT_DELTA_TIMES_S = (0.0, 30.0, -30.0)
 
 
 @dataclass(frozen=True)
@@ -244,7 +246,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--delta-times-s",
         type=parse_delta_times,
         default=DEFAULT_DELTA_TIMES_S,
-        help="Comma-separated schedule-time deltas, e.g. 0,-10,10,-20,20.",
+        help="Comma-separated schedule-time deltas, e.g. 0,30,-30.",
     )
     _ = evaluate_parser.add_argument(
         "--dry-run",
@@ -717,37 +719,48 @@ def _case_sort_key(item: tuple[dict[str, Any], np.ndarray, np.ndarray, dict[str,
     case_payload, _, _, _ = item
     case = case_payload.get("case")
     delta = case.get("delta_time_s", 0.0) if isinstance(case, dict) else 0.0
-    order = {0.0: 0, 10.0: 1, 20.0: 2, -10.0: 3, -20.0: 4}
-    return (order.get(float(delta), 100), float(delta))
+    delta_value = float(delta)
+    if delta_value == 0.0:
+        return (0, 0.0)
+    if delta_value > 0.0:
+        return (1, abs(delta_value))
+    return (2, abs(delta_value))
 
 
 def _style_for_delta(delta_time_s: float) -> dict[str, Any]:
     if delta_time_s == 0.0:
-        return {"color": "black", "linestyle": "-", "linewidth": 1.7}
-    if delta_time_s == 10.0:
-        return {"color": "#9a3f3f", "linestyle": "-", "linewidth": 1.5}
-    if delta_time_s == 20.0:
-        return {"color": "blue", "linestyle": "--", "linewidth": 1.5}
-    if delta_time_s == -10.0:
-        return {"color": "green", "linestyle": "-", "linewidth": 1.5}
-    if delta_time_s == -20.0:
-        return {"color": "orange", "linestyle": "--", "linewidth": 1.5}
-    return {"linestyle": "-", "linewidth": 1.5}
+        return {"color": "#333333", "linestyle": "-", "linewidth": 1.7}
+    if delta_time_s > 0.0:
+        return {"color": "#E69F00", "linestyle": "-", "linewidth": 1.5}
+    return {"color": "#7B61A8", "linestyle": "--", "linewidth": 1.5}
 
 
-def _deduplicate_legend(ax: Any, *, loc: str = "best") -> None:
-    handles, labels = ax.get_legend_handles_labels()
-    filtered_handles: list[Any] = []
-    filtered_labels: list[str] = []
-    seen: set[str] = set()
-    for handle, label in zip(handles, labels, strict=False):
-        if not label or label.startswith("_") or label in seen:
-            continue
-        seen.add(label)
-        filtered_handles.append(handle)
-        filtered_labels.append(label)
-    if filtered_handles:
-        ax.legend(filtered_handles, filtered_labels, loc=loc)
+def _add_schedule_change_legend(
+    fig: plt.Figure,
+    *,
+    case_handles: list[Any],
+    case_labels: list[str],
+    trigger_handle: Any | None,
+) -> None:
+    """Add the shared legend without exposing safeguard-rendering layers."""
+    handles = list(case_handles)
+    labels = list(case_labels)
+    if trigger_handle is not None:
+        handles.append(trigger_handle)
+        labels.append("Schedule change")
+    if not handles:
+        return
+
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.995),
+        ncol=len(handles),
+        frameon=False,
+        handlelength=2.4,
+        columnspacing=1.2,
+    )
 
 
 def plot_schedule_change_result(
@@ -766,12 +779,14 @@ def plot_schedule_change_result(
     safeguard = build_safeguard_utility(factor=factor)
 
     apply_rl_curve_plot_style()
-    fig, ax = plt.subplots(figsize=(7.2, 4.0))
+    fig, ax = plt.subplots()
     safeguard.render(ax=ax, layers=SafeGuardUtility.DANGER_VIEW_LAYERS)
 
     all_pos: list[np.ndarray] = []
     all_speed_kmh: list[np.ndarray] = []
     original_curve: tuple[np.ndarray, np.ndarray] | None = None
+    case_handles: list[Any] = []
+    case_labels: list[str] = []
 
     for case_payload, pos_arr, speed_arr, _metrics in loaded_cases:
         case = case_payload.get("case")
@@ -779,7 +794,9 @@ def plot_schedule_change_result(
         label = str(case.get("label", f"{delta:g}s")) if isinstance(case, dict) else ""
         speed_kmh = np.asarray(speed_arr, dtype=np.float64) * 3.6
         style = _style_for_delta(delta)
-        _ = ax.plot(pos_arr, speed_kmh, label=label, **style)
+        (case_handle,) = ax.plot(pos_arr, speed_kmh, **style)
+        case_handles.append(case_handle)
+        case_labels.append(label)
         all_pos.append(np.asarray(pos_arr, dtype=np.float64))
         all_speed_kmh.append(speed_kmh)
         if delta == 0.0:
@@ -790,6 +807,7 @@ def plot_schedule_change_result(
         for case_payload, _, _, _ in loaded_cases
         if case_payload.get("schedule_change_position_m") is not None
     ]
+    trigger_legend_handle: Line2D | None = None
     if trigger_positions:
         trigger_pos = trigger_positions[0]
         if original_curve is not None:
@@ -808,9 +826,16 @@ def plot_schedule_change_result(
             [trigger_speed],
             marker="*",
             s=80,
-            color="red",
-            label="schedule change",
+            color="#C44E52",
             zorder=8,
+        )
+        trigger_legend_handle = Line2D(
+            [],
+            [],
+            marker="*",
+            markersize=9,
+            color="#C44E52",
+            linestyle="None",
         )
 
     if all_pos:
@@ -824,16 +849,28 @@ def plot_schedule_change_result(
         speed_limit_ymax = float(np.nanmax(safeguard.speed_limits) * 3.6)
         _ = ax.set_ylim(0.0, max(curve_ymax, speed_limit_ymax) * 1.08)
 
-    _ = ax.set_xlabel("Distance(m)")
-    _ = ax.set_ylabel("Velocity(km/h)")
+    _ = ax.set_xlabel("Position (m)")
+    _ = ax.set_ylabel("Speed (km/h)")
     ax.grid(True, alpha=0.35)
-    _deduplicate_legend(ax, loc="lower center")
-    fig.tight_layout()
+    _add_schedule_change_legend(
+        fig,
+        case_handles=case_handles,
+        case_labels=case_labels,
+        trigger_handle=trigger_legend_handle,
+    )
+    apply_sci_figure_layout(
+        fig,
+        columns=1,
+        height_in=2.65,
+        left=0.16,
+        bottom=0.20,
+        top=0.82,
+    )
 
     saved_path: str | None = None
     if save_figure:
         figure_path = experiment_dir / figure_name
-        fig.savefig(figure_path)
+        _ = save_sci_figure(fig, figure_path)
         saved_path = str(figure_path)
     if show:
         plt.show()

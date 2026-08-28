@@ -9,7 +9,10 @@ from numpy.typing import NDArray
 
 from rl.reward_calculator import RewardBreakdown
 
-REWARD_DIAGNOSTICS_SCHEMA_VERSION: Final[int] = 2
+REWARD_DIAGNOSTICS_SCHEMA_VERSION: Final[int] = 3
+LEGACY_UNKNOWN_VIOLATION_CODE: Final[int] = -1
+_SUPPORTED_SCHEMA_VERSIONS: Final[frozenset[int]] = frozenset({2, 3})
+_VALID_VIOLATION_CODES: Final[frozenset[int]] = frozenset({0, 1, 2, 3, 4})
 REWARD_NAMES: Final[tuple[str, ...]] = (
     "safety",
     "energy",
@@ -39,6 +42,7 @@ class RewardDiagnosticsBatch(TypedDict):
     episode_terminated: NDArray[np.bool_]
     episode_truncated: NDArray[np.bool_]
     episode_complete: NDArray[np.bool_]
+    episode_violation_code: NDArray[np.int8]
     episode_reward_sums: NDArray[np.float64]
 
 
@@ -61,7 +65,7 @@ class RewardDiagnosticsAccumulator:
         self._episode_length = 0
         self._episode_reward_sum = np.zeros(REWARD_SIGNAL_COUNT, dtype=np.float64)
         self._episodes: list[
-            tuple[int, int, int, int, bool, bool, bool, NDArray[np.float64]]
+            tuple[int, int, int, int, bool, bool, bool, int, NDArray[np.float64]]
         ] = []
 
     def _ensure_capacity(self) -> None:
@@ -80,7 +84,11 @@ class RewardDiagnosticsAccumulator:
         *,
         terminated: bool,
         truncated: bool,
+        violation_code: int = 0,
     ) -> None:
+        code = int(violation_code)
+        if code not in _VALID_VIOLATION_CODES:
+            raise ValueError("violation_code must be a valid operational code")
         self._ensure_capacity()
         vector = self._transition_rewards[self._transition_count]
         vector[0] = reward.safety
@@ -100,10 +108,16 @@ class RewardDiagnosticsAccumulator:
                 terminated=bool(terminated),
                 truncated=bool(truncated),
                 complete=True,
+                violation_code=code,
             )
 
     def _finish_episode(
-        self, *, terminated: bool, truncated: bool, complete: bool
+        self,
+        *,
+        terminated: bool,
+        truncated: bool,
+        complete: bool,
+        violation_code: int,
     ) -> None:
         if self._episode_length <= 0:
             return
@@ -116,6 +130,7 @@ class RewardDiagnosticsAccumulator:
                 terminated,
                 truncated,
                 complete,
+                int(violation_code),
                 self._episode_reward_sum.copy(),
             )
         )
@@ -129,6 +144,7 @@ class RewardDiagnosticsAccumulator:
                 terminated=False,
                 truncated=False,
                 complete=False,
+                violation_code=0,
             )
 
         count = self._transition_count
@@ -177,13 +193,17 @@ class RewardDiagnosticsAccumulator:
             complete_values = np.asarray(
                 [item[6] for item in self._episodes], dtype=np.bool_
             )
-            episode_rewards = np.stack([item[7] for item in self._episodes]).astype(
+            violation_codes = np.asarray(
+                [item[7] for item in self._episodes], dtype=np.int8
+            )
+            episode_rewards = np.stack([item[8] for item in self._episodes]).astype(
                 np.float64, copy=False
             )
         else:
             terminated_values = np.empty(0, dtype=np.bool_)
             truncated_values = np.empty(0, dtype=np.bool_)
             complete_values = np.empty(0, dtype=np.bool_)
+            violation_codes = np.empty(0, dtype=np.int8)
             episode_rewards = np.empty((0, REWARD_SIGNAL_COUNT), dtype=np.float64)
         self._episodes.clear()
 
@@ -200,5 +220,6 @@ class RewardDiagnosticsAccumulator:
             "episode_terminated": terminated_values,
             "episode_truncated": truncated_values,
             "episode_complete": complete_values,
+            "episode_violation_code": violation_codes,
             "episode_reward_sums": episode_rewards,
         }

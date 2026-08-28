@@ -201,6 +201,7 @@ def test_main_saves_figure_and_creates_parent_dir(
         "transparent": True,
         "facecolor": "none",
         "edgecolor": "none",
+        "dpi": 300.0,
         "bbox_inches": "tight",
         "pad_inches": 0.02,
     }
@@ -242,6 +243,8 @@ def test_plot_stopping_potential_slices_minimal_keeps_axis_and_hides_annotations
     assert ax_right.axison is True
     assert len(ax_left.lines) == 1
     assert len(ax_right.lines) == 1
+    assert [text.get_text() for text in ax_left.texts] == ["(a)"]
+    assert [text.get_text() for text in ax_right.texts] == ["(b)"]
     show_potential_function.plt.close(fig)
 
 
@@ -249,11 +252,13 @@ def test_plot_stopping_potential_slices_default_keeps_annotations() -> None:
     fig = show_potential_function.plot_stopping_potential_slices(minimal=False)
     ax_left, ax_right = fig.axes
 
-    assert getattr(fig, "_suptitle", None) is not None
+    assert getattr(fig, "_suptitle", None) is None
     assert ax_left.axison is True
     assert ax_right.axison is True
     assert len(ax_left.lines) == 4
     assert len(ax_right.lines) == 3
+    assert ax_left.get_title() == ""
+    assert ax_right.get_title() == ""
     show_potential_function.plt.close(fig)
 
 
@@ -370,7 +375,9 @@ def test_plot_guidance_potentials_wide_uses_shared_final_stop_domain(
     np.testing.assert_allclose(ax_safety.get_ylim(), ax_stopping.get_ylim())
     assert len(ax_safety.lines) == 2
     assert len(ax_stopping.lines) == 3
-    assert [text.get_text() for text in fig.texts] == ["(a)", "(b)"]
+    assert [text.get_text() for text in fig.texts] == []
+    assert [text.get_text() for text in ax_safety.texts] == ["(a)"]
+    assert [text.get_text() for text in ax_stopping.texts] == ["(b)"]
     assert len(fig.legends) == 1
     assert [text.get_text() for text in fig.legends[0].get_texts()] == [
         r"$v_{\min}(x)$",

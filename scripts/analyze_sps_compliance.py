@@ -26,6 +26,7 @@ from rl.experiment_utils import (
     resolve_rl_curve_artifact,
 )
 from utils.scenario import build_safeguard_utility, build_scenario
+from utils.plot_utils import apply_sci_figure_layout
 from utils.trajectory import OptimizedCurveArtifact, recover_time_axis_from_trajectory
 
 _OUTPUT_MODE_TEXT = "text"
@@ -338,18 +339,6 @@ def _validate_cli_args(
         parser.error("--trajectory-kind is only valid when --analysis-mode=single")
 
 
-def _compute_adaptive_delay_tolerance(time_arr: NDArray[np.float64]) -> float:
-    if time_arr.size < 2:
-        return 0.05
-
-    dt_arr = np.diff(time_arr)
-    positive_dt = dt_arr[dt_arr > 1e-9]
-    if positive_dt.size == 0:
-        return 0.05
-
-    return max(0.05, 0.5 * float(np.median(positive_dt)))
-
-
 def replay_sps_compliance(
     *,
     label: str,
@@ -386,22 +375,14 @@ def replay_sps_compliance(
     if time_axis.size != pos.size:
         raise ValueError("time_arr must have equal length with pos_arr")
 
-    delay_tolerance_s = _compute_adaptive_delay_tolerance(time_axis)
-
     sps = SPS(
-        sgu=sgu,
-        ASA_ap_list=asa_ap_list,
-        ASA_dp_list=asa_dp_list,
-        T_s=step_delay_s,
+        safeguard_utility=sgu,
+        accessible_positions_m=asa_ap_list,
+        danger_positions_m=asa_dp_list,
+        step_delay_s=step_delay_s,
     )
 
     sps_state = sps.initial_state()
-    current_sp = sps_state.target_stopping_point_index
-    request_open = False
-    request_target_sp: int | None = None
-    request_timeout_deadline = float("inf")
-    timeout_active = False
-    timeout_start_time: float | None = None
 
     request_count = 0
     complete_count = 0
@@ -413,7 +394,7 @@ def replay_sps_compliance(
     pre_timeout_max_violation_count = 0
     delay_related_min_violation_count = 0
     delay_related_max_violation_count = 0
-    delay_window_total_s = 0.0
+    window_missed = False
 
     events: list[SPSEventRecord] = []
 
@@ -422,16 +403,28 @@ def replay_sps_compliance(
         x = float(pos[idx])
         v = float(speed[idx])
 
-        if request_open and (not timeout_active) and t > request_timeout_deadline:
-            timeout_active = True
-            timeout_start_time = t
-
+        previous_state = sps_state
+        previous_sp = previous_state.target_stopping_point_index
+        was_pending = previous_state.request_pending
+        sps_state = sps.advance(
+            previous_state,
+            position_m=x,
+            speed_mps=v,
+            time_s=t,
+        )
+        current_sp = sps_state.target_stopping_point_index
         current_min_speed, current_max_speed = sgu.get_min_and_max_speed(
             current_pos=x,
             current_sp=current_sp,
         )
         is_min_violation = v < (current_min_speed - boundary_eps)
         is_max_violation = v > (current_max_speed + boundary_eps)
+        step_window_missed = (
+            was_pending
+            and sps_state.request_pending
+            and v
+            > sgu.get_max_speed(current_pos=x, current_sp=previous_sp)
+        )
 
         if is_min_violation:
             min_violation_count += 1
@@ -445,21 +438,7 @@ def replay_sps_compliance(
                     boundary="min",
                 )
             )
-            if timeout_active and request_open:
-                delay_related_min_violation_count += 1
-                events.append(
-                    SPSEventRecord(
-                        kind=_EVENT_DELAY_RELATED_VIOLATION,
-                        time_s=t,
-                        pos_m=x,
-                        speed_mps=v,
-                        current_sp=current_sp,
-                        request_target_sp=request_target_sp,
-                        boundary="min",
-                    )
-                )
-            else:
-                pre_timeout_min_violation_count += 1
+            pre_timeout_min_violation_count += 1
 
         if is_max_violation:
             max_violation_count += 1
@@ -473,7 +452,7 @@ def replay_sps_compliance(
                     boundary="max",
                 )
             )
-            if timeout_active and request_open:
+            if step_window_missed:
                 delay_related_max_violation_count += 1
                 events.append(
                     SPSEventRecord(
@@ -482,44 +461,40 @@ def replay_sps_compliance(
                         pos_m=x,
                         speed_mps=v,
                         current_sp=current_sp,
-                        request_target_sp=request_target_sp,
+                        request_target_sp=previous_sp + 1,
                         boundary="max",
                     )
                 )
             else:
                 pre_timeout_max_violation_count += 1
 
-        prev_done = not sps_state.request_pending
-        prev_sp = sps_state.target_stopping_point_index
-        sps_state = sps.advance(
-            sps_state,
-            current_pos=x,
-            current_speed=v,
-            current_time=t,
-        )
-        next_sp = sps_state.target_stopping_point_index
-        now_done = not sps_state.request_pending
+        if step_window_missed:
+            # The online environment truncates on the retained old boundary;
+            # do not let offline replay continue and later complete this request.
+            window_missed = True
+            break
 
-        if prev_done and (not now_done) and next_sp == prev_sp:
+        if (
+            not was_pending
+            and sps_state.request_pending
+            and current_sp == previous_sp
+        ):
             request_count += 1
-            request_open = True
-            request_target_sp = prev_sp + 1
-            request_timeout_deadline = (
-                float(sps_state.request_timestamp_s) + step_delay_s + delay_tolerance_s
-            )
-            timeout_active = False
-            timeout_start_time = None
             events.append(
                 SPSEventRecord(
                     kind=_EVENT_REQUEST_START,
                     time_s=t,
                     pos_m=x,
                     speed_mps=v,
-                    current_sp=prev_sp,
-                    request_target_sp=request_target_sp,
+                    current_sp=previous_sp,
+                    request_target_sp=previous_sp + 1,
                 )
             )
-        elif (not prev_done) and now_done and next_sp == prev_sp + 1:
+        elif (
+            was_pending
+            and not sps_state.request_pending
+            and current_sp == previous_sp + 1
+        ):
             complete_count += 1
             events.append(
                 SPSEventRecord(
@@ -527,22 +502,11 @@ def replay_sps_compliance(
                     time_s=t,
                     pos_m=x,
                     speed_mps=v,
-                    current_sp=next_sp,
-                    request_target_sp=next_sp,
+                    current_sp=current_sp,
+                    request_target_sp=current_sp,
                 )
             )
-            if timeout_active and timeout_start_time is not None:
-                delay_window_total_s += max(0.0, t - timeout_start_time)
-
-            request_open = False
-            request_target_sp = None
-            request_timeout_deadline = float("inf")
-            timeout_active = False
-            timeout_start_time = None
-
-        current_sp = next_sp
-
-    if request_open:
+    if sps_state.request_pending and not window_missed:
         unfinished_count += 1
         final_t = float(time_axis[-1])
         final_x = float(pos[-1])
@@ -553,18 +517,13 @@ def replay_sps_compliance(
                 time_s=final_t,
                 pos_m=final_x,
                 speed_mps=final_v,
-                current_sp=current_sp,
-                request_target_sp=request_target_sp,
+                current_sp=sps_state.target_stopping_point_index,
+                request_target_sp=sps_state.target_stopping_point_index + 1,
             )
         )
-        if timeout_active and timeout_start_time is not None:
-            delay_window_total_s += max(0.0, final_t - timeout_start_time)
 
-    delay_related_total = (
-        delay_related_min_violation_count + delay_related_max_violation_count
-    )
     triggered_pass = request_count > 0
-    delay_related_boundary_violation_pass = delay_related_total == 0
+    delay_related_boundary_violation_pass = not window_missed
 
     first_failure_reason: str | None = None
     if not triggered_pass:
@@ -585,8 +544,8 @@ def replay_sps_compliance(
         pre_timeout_max_violation_count=pre_timeout_max_violation_count,
         delay_related_min_violation_count=delay_related_min_violation_count,
         delay_related_max_violation_count=delay_related_max_violation_count,
-        delay_window_total_s=delay_window_total_s,
-        delay_tolerance_s=delay_tolerance_s,
+        delay_window_total_s=0.0,
+        delay_tolerance_s=0.0,
         first_failure_reason=first_failure_reason,
         events=events,
     )
@@ -725,7 +684,7 @@ def _plot_sps_main_figure(
     safeguard: SafeGuardUtility | None,
 ) -> None:
     apply_rl_curve_plot_style()
-    _, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots()
 
     if not no_safeguard:
         resolved_safeguard = (
@@ -775,7 +734,7 @@ def _plot_sps_main_figure(
     ax.grid(True, alpha=0.3)
     _deduplicate_legend(ax)
 
-    plt.tight_layout()
+    apply_sci_figure_layout(fig, columns=2, height_in=3.4)
     plt.show()
 
 
@@ -792,7 +751,7 @@ def _plot_sps_single_figure(
     safeguard: SafeGuardUtility | None,
 ) -> None:
     apply_rl_curve_plot_style()
-    _, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots()
 
     if not no_safeguard:
         resolved_safeguard = (
@@ -833,7 +792,7 @@ def _plot_sps_single_figure(
     ax.grid(True, alpha=0.3)
     _deduplicate_legend(ax)
 
-    plt.tight_layout()
+    apply_sci_figure_layout(fig, columns=2, height_in=3.4)
     plt.show()
 
 

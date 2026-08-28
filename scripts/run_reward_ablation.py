@@ -21,6 +21,7 @@ from rl.experiment_utils import (
     DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
     DEFAULT_SCHEDULE_TIME_S,
     DEFAULT_STEP_DISTANCE,
+    DEFAULT_TRAINING_EPISODES,
     TrainingRunSpec,
     apply_rl_curve_plot_style,
     build_default_training_args,
@@ -33,6 +34,7 @@ from rl.training_analysis.collect import (
     extract_complete_episode_series,
     load_reward_diagnostics_artifact,
 )
+from utils.plot_utils import apply_sci_figure_layout, save_sci_figure
 
 REWARD_ABLATION_MANIFEST_FILENAME = "reward_ablation_manifest.json"
 EVALUATION_HISTORY_FILENAME = "evaluation_history.npz"
@@ -41,7 +43,7 @@ DEFAULT_OUTPUT_ROOT = "output/optimal/rl/reward_ablation_safety"
 DEFAULT_SEEDS = (11, 131, 239, 359, 443)
 
 SAFETY_BIN_SIZE_M = 5_000.0
-MANIFEST_VERSION = 3
+MANIFEST_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -106,7 +108,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=reward_preset_names(),
         default=None,
     )
-    train.add_argument("--total-timesteps", type=int, default=1_000_000)
+    train.add_argument(
+        "--training-episodes",
+        type=int,
+        default=DEFAULT_TRAINING_EPISODES,
+        help="Global completed training episodes for every ablation run.",
+    )
     train.add_argument("--schedule-time-s", type=float, default=DEFAULT_SCHEDULE_TIME_S)
     train.add_argument("--step-distance", type=float, default=DEFAULT_STEP_DISTANCE)
     train.add_argument("--reward-discount", type=float, default=DEFAULT_REWARD_DISCOUNT)
@@ -189,7 +196,7 @@ def _build_train_args(
     result.enable_safety_truncation_histogram = False
     result.num_envs = args.num_envs
     result.rollout_steps_per_update = args.rollout_steps_per_update
-    result.total_timesteps = args.total_timesteps
+    result.training_episodes = args.training_episodes
     result.evaluation_interval_rollouts = args.evaluation_interval_rollouts
     result.evaluation_deterministic = True
     result.seed = seed
@@ -236,7 +243,7 @@ def resolve_run_matrix(
 
 def _training_signature(args: argparse.Namespace) -> dict[str, Any]:
     return {
-        "total_timesteps": int(args.total_timesteps),
+        "training_episodes": int(args.training_episodes),
         "schedule_time_s": float(args.schedule_time_s),
         "step_distance": float(args.step_distance),
         "reward_discount": float(args.reward_discount),
@@ -541,7 +548,7 @@ def _plot_learning_curves(aggregates: list[CurveAggregate]) -> plt.Figure | None
     if not aggregates:
         return None
     apply_rl_curve_plot_style()
-    figure, axes = plt.subplots(2, 3, figsize=(13.2, 7.3))
+    figure, axes = plt.subplots(2, 3)
     panels = (
         ("ep_reward", "Mean episode reward", "episode_steps", "(a)"),
         ("success", "Fixed-start success rate", "eval_steps", "(b)"),
@@ -575,10 +582,34 @@ def _plot_learning_curves(aggregates: list[CurveAggregate]) -> plt.Figure | None
         axis.set_xlabel("Training steps")
         axis.set_ylabel(ylabel)
         axis.grid(True, alpha=0.3)
-        axis.text(0.5, -0.23, panel, transform=axis.transAxes, ha="center")
+        axis.text(
+            0.02,
+            0.98,
+            panel,
+            transform=axis.transAxes,
+            ha="left",
+            va="top",
+            fontsize=10,
+            fontweight="bold",
+        )
     handles, labels = axes[0, 0].get_legend_handles_labels()
-    figure.legend(handles, labels, loc="upper center", ncol=len(aggregates))
-    figure.tight_layout(rect=(0, 0, 1, 0.93))
+    figure.legend(
+        handles,
+        labels,
+        loc="upper center",
+        ncol=len(aggregates),
+        frameon=False,
+    )
+    apply_sci_figure_layout(
+        figure,
+        columns=2,
+        height_in=5.4,
+        left=0.09,
+        bottom=0.11,
+        top=0.91,
+        wspace=0.42,
+        hspace=0.45,
+    )
     return figure
 
 
@@ -626,7 +657,7 @@ def _plot_safety_boxplot(
         maximum_position + 2.0 * SAFETY_BIN_SIZE_M,
         SAFETY_BIN_SIZE_M,
     )
-    figure, axis = plt.subplots(figsize=(12.5, 5.2))
+    figure, axis = plt.subplots()
     offsets = np.linspace(-0.3, 0.3, len(selected))
     legend_specs: list[RewardAblationSpec] = []
     for offset, ablation in zip(offsets, selected, strict=True):
@@ -660,7 +691,7 @@ def _plot_safety_boxplot(
         [item.label for item in legend_specs],
         loc="upper right",
     )
-    figure.tight_layout()
+    apply_sci_figure_layout(figure, columns=2, height_in=3.1)
     return figure
 
 
@@ -690,7 +721,7 @@ def _save(figure: plt.Figure | None, path: Path | None, dpi: float) -> None:
     if figure is None or path is None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(path, dpi=dpi, bbox_inches="tight")
+    _ = save_sci_figure(figure, path, dpi=dpi)
 
 
 def _load_resume_statuses(

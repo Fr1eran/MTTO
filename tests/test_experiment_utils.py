@@ -312,3 +312,73 @@ def test_resolve_survival_reward_scale_fallback_on_negative_or_invalid() -> None
     assert d["enable_potential_safety"] is False
     assert "enable_energy" not in d
     assert "enable_comfort" not in d
+
+
+def test_derive_training_budget_rules() -> None:
+    from rl.experiment_utils import _derive_training_budget, resolve_training_run_spec
+
+    # 1. 7000 回合、8 环境的有效目标仍为 7000
+    effective, max_steps, derived_timesteps = _derive_training_budget(
+        training_episodes=7000,
+        num_envs=8,
+        step_distance=30.0,
+        rollout_steps_per_update=8192,
+        schedule_time_s=465.0,
+    )
+    assert effective == 7000
+    assert derived_timesteps % 8192 == 0
+    assert derived_timesteps >= effective * max_steps
+
+    # 2. 非整除回合数向上取整
+    effective_odd, _, _ = _derive_training_budget(
+        training_episodes=7001,
+        num_envs=8,
+        step_distance=30.0,
+        rollout_steps_per_update=8192,
+        schedule_time_s=465.0,
+    )
+    assert effective_odd == 7008
+
+    # 3. 10m 与 100m 产生不同的最大单回合步数及内部 SB3 总步数
+    _, max_steps_10, timesteps_10 = _derive_training_budget(
+        training_episodes=7000,
+        num_envs=8,
+        step_distance=10.0,
+        rollout_steps_per_update=8192,
+        schedule_time_s=465.0,
+    )
+    _, max_steps_100, timesteps_100 = _derive_training_budget(
+        training_episodes=7000,
+        num_envs=8,
+        step_distance=100.0,
+        rollout_steps_per_update=8192,
+        schedule_time_s=465.0,
+    )
+    assert max_steps_10 > max_steps_100
+    assert timesteps_10 > timesteps_100
+    assert timesteps_10 % 8192 == 0
+    assert timesteps_100 % 8192 == 0
+
+    # 4. resolve_training_run_spec 快照正确传递 training_budget
+    args = build_default_training_args()
+    spec = resolve_training_run_spec(args)
+    assert spec.training_episodes == 7000
+    assert spec.max_episode_steps == max_steps
+    assert spec.total_timesteps == derived_timesteps
+    budget = spec.run_metadata["training_budget"]
+    assert budget["mode"] == "completed_episodes"
+    assert budget["training_episodes"] == 7000
+    assert budget["effective_training_episodes"] == 7000
+    assert budget["max_episode_steps"] == max_steps
+    assert budget["derived_total_timesteps"] == derived_timesteps
+
+    # 5. 异常输入校验
+    with pytest.raises(ValueError, match="training_episodes must be positive"):
+        _ = _derive_training_budget(
+            training_episodes=0,
+            num_envs=8,
+            step_distance=30.0,
+            rollout_steps_per_update=8192,
+            schedule_time_s=465.0,
+        )
+

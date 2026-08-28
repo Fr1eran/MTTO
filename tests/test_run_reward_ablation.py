@@ -39,6 +39,7 @@ def _write_reward_diagnostics(path: Path, reward_offset: float = 0.0) -> None:
         episode_terminated=np.asarray([True, True]),
         episode_truncated=np.asarray([False, False]),
         episode_complete=np.asarray([True, True]),
+        episode_violation_code=np.asarray([0, 0], dtype=np.int8),
         episode_reward_sums=episode_sums,
     )
 
@@ -108,6 +109,18 @@ def test_train_cli_rejects_removed_step_evaluation_interval(tmp_path: Path) -> N
         _ = _train_args(tmp_path, "--eval-interval-steps", "100000")
 
 
+@pytest.mark.parametrize(
+    "removed_option",
+    ("--total-timesteps", "--target-completed-episodes"),
+)
+def test_train_cli_rejects_removed_timestep_budget_options(
+    tmp_path: Path,
+    removed_option: str,
+) -> None:
+    with pytest.raises(SystemExit):
+        _ = _train_args(tmp_path, removed_option, "1")
+
+
 def test_profile_subset_preserves_order_and_removes_duplicates(tmp_path: Path) -> None:
     args = _train_args(
         tmp_path,
@@ -143,7 +156,7 @@ def test_manifest_round_trip_and_training_compatibility(tmp_path: Path) -> None:
     assert loaded == payload
     assert "vec_env_type" not in loaded["training"]
     assert not (tmp_path / "reward_ablation_manifest.json.tmp").exists()
-    changed_args = _train_args(tmp_path, "--total-timesteps", "123")
+    changed_args = _train_args(tmp_path, "--training-episodes", "123")
     try:
         reward_ablation._validate_manifest_compatibility(loaded, changed_args)
     except ValueError as exc:
@@ -288,6 +301,26 @@ def test_curve_final_and_safety_aggregates_use_completed_runs(
     safety_figure = reward_ablation._plot_safety_boxplot(manifest, selected)
     assert learning_figure is not None
     assert len(learning_figure.axes) == 6
+    assert learning_figure.legends
+    assert not learning_figure.legends[0].get_frame_on()
+    panel_labels = [
+        text
+        for axis in learning_figure.axes
+        for text in axis.texts
+        if text.get_text() in {"(a)", "(b)", "(c)", "(d)", "(e)", "(f)"}
+    ]
+    assert [text.get_text() for text in panel_labels] == [
+        "(a)",
+        "(b)",
+        "(c)",
+        "(d)",
+        "(e)",
+        "(f)",
+    ]
+    assert [text.get_position() for text in panel_labels] == pytest.approx(
+        [(0.02, 0.98)] * 6
+    )
+    assert all(axis.get_title() == "" for axis in learning_figure.axes)
     assert safety_figure is not None
     reward_ablation.plt.close(learning_figure)
     reward_ablation.plt.close(safety_figure)

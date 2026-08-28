@@ -24,6 +24,22 @@ def exponential_moving_average(values: np.ndarray, alpha: float = 0.1) -> np.nda
     return ema
 
 
+def trailing_moving_average(values: np.ndarray, window: int) -> np.ndarray:
+    """Compute SB3-style trailing arithmetic moving averages.
+
+    The returned values align with ``x[window - 1:]``, matching
+    ``stable_baselines3.common.results_plotter.window_func``.
+    """
+    array = np.asarray(values, dtype=np.float64)
+    window_size = int(window)
+    if window_size < 1:
+        raise ValueError("window must be >= 1")
+    if array.size < window_size:
+        return np.empty(0, dtype=np.float64)
+    kernel = np.full(window_size, 1.0 / window_size, dtype=np.float64)
+    return np.convolve(array, kernel, mode="valid")
+
+
 def coefficient_of_variation(values: np.ndarray, eps: float = 1e-8) -> float:
     values = np.asarray(values, dtype=np.float64)
     if values.size == 0:

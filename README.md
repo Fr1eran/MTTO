@@ -66,6 +66,7 @@ MTTO/
 | 用途 | 命令 |
 |------|------|
 | RL 训练 | `python -m scripts.train_rl` |
+| 步长消融训练 | `python -m scripts.run_step_distance_ablation train` |
 | 奖励消融训练 | `python -m scripts.run_reward_ablation train` |
 | RL 评估 | `python -m scripts.evaluate_rl` |
 | RL 中途计划时间突变实验 | `python -m scripts.run_schedule_time_change evaluate` / `python -m scripts.run_schedule_time_change show` |
@@ -145,6 +146,17 @@ DP 轨迹；同一 `DummyVecEnv` 内的环境按固定 rank 写入共享的 `DSP
 `CompletionDSPDLConfig.alpha_max` 默认取 `0.05`。可通过
 `--completion-alpha-max <value>` 在独立实验中覆盖该值，覆盖结果会写入运行元数据。
 
+空间步长消融使用 `scripts.run_step_distance_ablation train`。该脚本默认读取
+`output/optimal/dp/465p0_0p1_uni10p0` 的 10 m DP 参考曲线，以便所有消融组在同一
+细粒度、安全可重放的上下文池上训练；可通过 `--reference-curve-dir` 显式覆盖。
+所有 PPO 训练入口均以 `--training-episodes` 指定总训练回合数，默认 `7000`。训练使用
+SB3 内置 `StopTrainingOnMaxEpisodes`；多环境训练会向上取整为
+`ceil(training_episodes / num_envs) * num_envs` 个有效完成回合。项目根据当前步长的
+理论最大单回合步数自动推导并对齐 PPO rollout 的 `total_timesteps`，用户无需配置环境步数。
+`run_metadata.json` 的 `training_budget` 会记录请求/有效回合数、最大单回合步数、推导步数、
+实际回合数与停止原因。
+常规 RL/DSPDL 训练和方法消融的 30 m 参考曲线示例不受影响。
+
 
 #### 奖励配置与实验标识
 
@@ -162,7 +174,7 @@ DP 轨迹；同一 `DummyVecEnv` 内的环境按固定 rank 写入共享的 `DSP
 | `--reward-discount` | `float` | `0.995` | 回报折扣因子 γ |
 | `--rollout-steps-per-update` | `int` | `2048` | 每次更新的 rollout 总步数 |
 | `--n-steps-per-env` | `int` | 自动推导 | 每个环境的步数（优先级高于 `--rollout-steps-per-update`） |
-| `--total-timesteps` | `int` | `200000` | 训练总步数 |
+| `--training-episodes` | `int` | `7000` | 全局完成训练回合数；按环境数取整并自动推导 PPO 环境步上限 |
 | `--device` | `str` | `cpu` | 运行设备：`cpu` / `cuda` |
 
 #### 日志与分析
@@ -243,10 +255,10 @@ python -m scripts.train_rl --run-mode monitor_best --reward-preset basic_safety 
 python -m scripts.train_rl --run-mode best_only
 
 # 430s tune，每 12 个 rollouts 触发一次 best-eval
-python -m scripts.train_rl --output-root output/optimal/rl/ --schedule-time-s 430.0 --step-distance 100.0 --run-mode tune --total-timesteps 1000000 --num-envs 8 --evaluation-interval-rollouts 12 --evaluation-deterministic --device cpu
+python -m scripts.train_rl --output-root output/optimal/rl/ --schedule-time-s 430.0 --step-distance 100.0 --run-mode tune --training-episodes 7000 --num-envs 8 --evaluation-interval-rollouts 12 --evaluation-deterministic --device cpu
 
 # 430s monitor_best，每 6 个 rollouts 评估一次
-python -m scripts.train_rl --output-root output/optimal/rl/safety_speed/ --schedule-time-s 430.0 --step-distance 100.0 --run-mode monitor_best --total-timesteps 1000000 --num-envs 8 --evaluation-interval-rollouts 6 --evaluation-deterministic --device cpu
+python -m scripts.train_rl --output-root output/optimal/rl/safety_speed/ --schedule-time-s 430.0 --step-distance 100.0 --run-mode monitor_best --training-episodes 7000 --num-envs 8 --evaluation-interval-rollouts 6 --evaluation-deterministic --device cpu
 ```
 
 ---
@@ -264,7 +276,7 @@ python -m scripts.run_reward_ablation train --dry-run
 # 训练全部奖励组；中断后执行同一命令会跳过产物完整的 completed 运行
 python -m scripts.run_reward_ablation train \
     --output-root output/optimal/rl/reward_ablation_safety \
-    --total-timesteps 1000000 \
+    --training-episodes 7000 \
     --num-envs 8
 
 # 只补跑基础奖励与安全 PBRS
@@ -342,7 +354,7 @@ python -m scripts.evaluate_rl --load-dir output/optimal/rl/.../final/ --dry-run
 - `evaluate`：加载模型，按多组时间变化量执行 rollout，并保存轨迹与指标。
 - `show`：加载已保存的突变实验结果，绘制速度-距离对比图与安全防护背景。
 
-默认批量运行 `Original`、`Minus 10s`、`Plus 10s`、`Minus 20s`、`Plus 20s` 五种情形。其中 `Original` 不触发计划时间变化，其余情形会在列车首次跨过 `--change-distance-m` 指定位置时调用环境的 `change_schedule_time()`。
+实验 4 默认批量运行 `Original`、`Plus 30s`、`Minus 30s` 三种情形。其中 `Original` 不触发计划时间变化，其余情形会在列车首次跨过 `--change-distance-m` 指定位置时调用环境的 `change_schedule_time()`。
 
 #### `evaluate` 参数
 
@@ -357,7 +369,7 @@ python -m scripts.evaluate_rl --load-dir output/optimal/rl/.../final/ --dry-run
 | `--device` | `str` | `cpu` | 推理设备 |
 | `--deterministic` | `bool` | `True` | 是否使用确定性策略 |
 | `--change-distance-m` | `float` | `800.0` | 触发计划时间变化的位置 (m) |
-| `--delta-times-s` | `str` | `0,-10,10,-20,20` | 逗号分隔的计划时间变化量；新计划时间为 `schedule_time_s + delta` |
+| `--delta-times-s` | `str` | `0,30,-30` | 逗号分隔的计划时间变化量；新计划时间为 `schedule_time_s + delta` |
 | `--dry-run` | `bool` | `False` | 仅解析配置与路径，不加载模型或运行 rollout |
 
 `evaluate` 模式会在输出目录中保存：
@@ -382,7 +394,7 @@ python -m scripts.evaluate_rl --load-dir output/optimal/rl/.../final/ --dry-run
 # 仅预览将要运行的突变实验矩阵
 python -m scripts.run_schedule_time_change evaluate --dry-run
 
-# 使用训练得到的 final 模型运行默认五组突变实验
+# 使用训练得到的 final 模型运行默认三组突变实验
 python -m scripts.run_schedule_time_change evaluate \
     --load-dir output/optimal/rl/.../final/ \
     --change-distance-m 800.0

@@ -28,6 +28,7 @@ from rl.experiment_utils import (
 )
 from rl.operational_state import OperationalState
 from utils.io_utils import save_curve_and_metrics
+from utils.plot_utils import apply_sci_figure_layout
 from utils.scenario import build_scenario
 
 
@@ -78,12 +79,7 @@ def plot_operation_time_series(
         dtype=np.float32,
     )
 
-    fig, (ax_time, ax_redundant) = plt.subplots(
-        2,
-        1,
-        figsize=(10, 6.5),
-        sharex=True,
-    )
+    fig, (ax_time, ax_redundant) = plt.subplots(2, 1, sharex=True)
     ax_time.plot(
         step_axis,
         operation_time_arr,
@@ -99,7 +95,6 @@ def plot_operation_time_series(
         alpha=0.8,
         label="Schedule time",
     )
-    ax_time.set_title("Operation time over evaluation rollout")
     ax_time.set_ylabel("Operation time (s)")
     ax_time.grid(True, alpha=0.3)
     ax_time.legend()
@@ -119,14 +114,41 @@ def plot_operation_time_series(
         alpha=0.6,
         label="No redundancy",
     )
-    ax_redundant.set_title("Redundant operation time over evaluation rollout")
     ax_redundant.set_ylabel("Redundant operation time (s)")
     ax_redundant.grid(True, alpha=0.3)
     ax_redundant.legend()
 
     ax_redundant.set_xlabel("Agent step")
+    _ = ax_time.text(
+        0.02,
+        0.98,
+        "(a)",
+        transform=ax_time.transAxes,
+        ha="left",
+        va="top",
+        fontsize=10,
+        fontweight="bold",
+    )
+    _ = ax_redundant.text(
+        0.02,
+        0.98,
+        "(b)",
+        transform=ax_redundant.transAxes,
+        ha="left",
+        va="top",
+        fontsize=10,
+        fontweight="bold",
+    )
 
-    fig.tight_layout()
+    apply_sci_figure_layout(
+        fig,
+        columns=1,
+        height_in=4.0,
+        left=0.20,
+        bottom=0.14,
+        top=0.96,
+        hspace=0.24,
+    )
     plt.show()
 
 

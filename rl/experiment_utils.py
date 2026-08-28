@@ -7,12 +7,17 @@ import os
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, replace
+from functools import cache
 from pathlib import Path
 from typing import Any, Literal, cast
 
 import numpy as np
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import BaseCallback, CallbackList
+from stable_baselines3.common.callbacks import (
+    BaseCallback,
+    CallbackList,
+    StopTrainingOnMaxEpisodes,
+)
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
 
@@ -22,6 +27,7 @@ from model.vehicle import VehicleInfo
 from rl.callbacks import (
     DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
     BestEvaluationArtifactHandler,
+    EpisodeProgressBarCallback,
     EvaluationHistoryArtifactHandler,
     RewardDiagnosticsArtifactCallback,
     SafetyTruncationPositionHistogramCallback,
@@ -119,6 +125,7 @@ __all__ = [
 RL_FINAL_MODEL_FILENAME = "final_model.zip"
 RUN_METADATA_FILENAME = "run_metadata.json"
 RL_DEFAULT_SEARCH_DIR = "output/optimal/rl"
+DEFAULT_TRAINING_EPISODES = 7_000
 
 RL_TRAJECTORY_SOURCE_CHOICES: tuple[str, ...] = (
     "best",
@@ -211,6 +218,8 @@ class TrainingRunSpec:
     evaluation_history_path: str | None
     enable_safety_truncation_histogram: bool
     safety_truncation_bin_size_m: float
+    training_episodes: int
+    max_episode_steps: int
     total_timesteps: int
     device: str
     seed: int | None
@@ -476,7 +485,9 @@ def build_run_metadata(
     reward_discount: float,
     run_mode: str | None = None,
     experiment_tag: str | None = None,
-    total_timesteps: int | None = None,
+    training_episodes: int | None = None,
+    max_episode_steps: int | None = None,
+    derived_total_timesteps: int | None = None,
     enable_tb: bool | None = None,
     enable_monitor: bool | None = None,
     enable_auto_analysis: bool | None = None,
@@ -505,7 +516,9 @@ def build_run_metadata(
         reward_discount: 奖励折扣因子 γ。
         run_mode: 运行模式。
         experiment_tag: 实验标签。
-        total_timesteps: PPO 总训练步数。
+        training_episodes: 请求的全局完成训练回合数。
+        max_episode_steps: 训练任务的理论单回合最大步数。
+        derived_total_timesteps: 由回合预算推导、传入 PPO 的环境步上限。
         enable_tb: 是否启用 TensorBoard。
         enable_monitor: 是否启用 VecMonitor。
         enable_auto_analysis: 是否启用训练后自动分析。
@@ -585,8 +598,24 @@ def build_run_metadata(
         metadata["experiment_tag"] = str(experiment_tag)
     if run_mode is not None:
         metadata["run_mode"] = str(run_mode)
-    if total_timesteps is not None:
-        metadata["total_timesteps"] = int(total_timesteps)
+    effective_training_episodes = (
+        None
+        if training_episodes is None or num_envs is None
+        else int(math.ceil(training_episodes / max(1, int(num_envs))))
+        * max(1, int(num_envs))
+    )
+    if derived_total_timesteps is not None:
+        metadata["training_budget"] = {
+            "mode": "completed_episodes",
+            "training_episodes": (
+                int(training_episodes) if training_episodes is not None else None
+            ),
+            "effective_training_episodes": effective_training_episodes,
+            "max_episode_steps": (
+                int(max_episode_steps) if max_episode_steps is not None else None
+            ),
+            "derived_total_timesteps": int(derived_total_timesteps),
+        }
 
     if enable_tb is not None:
         metadata["enable_tb"] = bool(enable_tb)
@@ -716,7 +745,7 @@ def build_default_training_args() -> argparse.Namespace:
         num_envs=DEFAULT_NUM_ENVS,
         rollout_steps_per_update=DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
         n_steps_per_env=None,
-        total_timesteps=100_000,
+        training_episodes=DEFAULT_TRAINING_EPISODES,
         tensorboard_log_dir="mtto_ppo_tb_logs",
         tb_log_name=None,
         log_interval=None,
@@ -728,6 +757,45 @@ def build_default_training_args() -> argparse.Namespace:
         seed=None,
         device=DEFAULT_DEVICE,
         dry_run=False,
+    )
+
+
+@cache
+def _route_distance_m(schedule_time_s: float) -> float:
+    """Return the fixed route distance for a training schedule."""
+    _, _, _, train_service = build_scenario(schedule_time_s=float(schedule_time_s))
+    return abs(train_service.target_position - train_service.start_position)
+
+
+def _derive_training_budget(
+    *,
+    training_episodes: int,
+    num_envs: int,
+    step_distance: float,
+    rollout_steps_per_update: int,
+    schedule_time_s: float,
+) -> tuple[int, int, int]:
+    """Resolve the effective episode target and PPO-safe timestep ceiling."""
+    if training_episodes <= 0:
+        raise ValueError("training_episodes must be positive")
+    if num_envs <= 0:
+        raise ValueError("num_envs must be positive")
+    if step_distance <= 0.0 or not math.isfinite(step_distance):
+        raise ValueError("step_distance must be finite and positive")
+    if rollout_steps_per_update <= 0:
+        raise ValueError("rollout_steps_per_update must be positive")
+
+    effective_training_episodes = math.ceil(training_episodes / num_envs) * num_envs
+    max_episode_steps = math.ceil(_route_distance_m(schedule_time_s) / step_distance)
+    raw_total_timesteps = effective_training_episodes * max_episode_steps
+    derived_total_timesteps = (
+        math.ceil(raw_total_timesteps / rollout_steps_per_update)
+        * rollout_steps_per_update
+    )
+    return (
+        int(effective_training_episodes),
+        int(max_episode_steps),
+        int(derived_total_timesteps),
     )
 
 
@@ -957,6 +1025,20 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
     num_envs = max(1, int(args.num_envs))
     n_steps_per_env = _resolve_n_steps_per_env(args, num_envs)
     rollout_steps_per_update = n_steps_per_env * num_envs
+    training_episodes = int(
+        getattr(args, "training_episodes", DEFAULT_TRAINING_EPISODES)
+    )
+    (
+        effective_training_episodes,
+        max_episode_steps,
+        derived_total_timesteps,
+    ) = _derive_training_budget(
+        training_episodes=training_episodes,
+        num_envs=num_envs,
+        step_distance=ds,
+        rollout_steps_per_update=rollout_steps_per_update,
+        schedule_time_s=schedule_time_s,
+    )
 
     run_metadata = build_run_metadata(
         reward_preset=reward_preset,
@@ -968,7 +1050,9 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
         reward_discount=reward_discount,
         run_mode=run_mode,
         experiment_tag=args.experiment_tag,
-        total_timesteps=int(args.total_timesteps),
+        training_episodes=training_episodes,
+        max_episode_steps=max_episode_steps,
+        derived_total_timesteps=derived_total_timesteps,
         enable_tb=bool(enable_tb),
         enable_monitor=bool(enable_monitor),
         enable_auto_analysis=bool(enable_auto_analysis),
@@ -1025,7 +1109,9 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
         evaluation_history_path=evaluation_history_path,
         enable_safety_truncation_histogram=bool(enable_safety_truncation_histogram),
         safety_truncation_bin_size_m=safety_truncation_bin_size_m,
-        total_timesteps=int(args.total_timesteps),
+        training_episodes=training_episodes,
+        max_episode_steps=max_episode_steps,
+        total_timesteps=derived_total_timesteps,
         device=args.device,
         seed=args.seed,
         dry_run=bool(args.dry_run),
@@ -1293,14 +1379,20 @@ def train_single_experiment(
         resolved_spec = replace(resolved_spec, run_metadata=resolved_metadata)
         _ = save_run_metadata(resolved_spec.output_dir, resolved_spec.run_metadata)
 
+    effective_training_episodes = int(
+        resolved_spec.run_metadata["training_budget"]["effective_training_episodes"]
+    )
+    episode_stop_callback = StopTrainingOnMaxEpisodes(
+        max_episodes=(effective_training_episodes // resolved_spec.num_envs)
+    )
     callbacks: list[BaseCallback] = []
+    callbacks.append(episode_stop_callback)
     if curriculum_callback is not None:
         callbacks.append(curriculum_callback)
-    callbacks.append(
-        RewardDiagnosticsArtifactCallback(
-            output_path=resolved_spec.reward_diagnostics_path
-        )
+    reward_diagnostics_callback = RewardDiagnosticsArtifactCallback(
+        output_path=resolved_spec.reward_diagnostics_path
     )
+    callbacks.append(reward_diagnostics_callback)
     if resolved_spec.enable_safety_truncation_histogram:
         callbacks.append(
             SafetyTruncationPositionHistogramCallback(
@@ -1349,8 +1441,14 @@ def train_single_experiment(
                     resolved_spec.evaluation_interval_rollouts
                 ),
                 deterministic=resolved_spec.evaluation_deterministic,
+                get_completed_training_episodes=(
+                    lambda: reward_diagnostics_callback.completed_episode_count
+                ),
             )
         )
+
+    episode_pbar_callback = EpisodeProgressBarCallback(total_episodes=effective_training_episodes)
+    callbacks.append(episode_pbar_callback)
 
     callback = CallbackList(callbacks) if callbacks else None
 
@@ -1359,8 +1457,27 @@ def train_single_experiment(
         callback=callback,
         log_interval=resolved_spec.log_interval,
         tb_log_name=resolved_spec.tb_log_name,
-        progress_bar=True,
+        progress_bar=False,
     )
+    actual_completed_episodes = reward_diagnostics_callback.completed_episode_count
+    target_reached = episode_stop_callback.n_episodes >= effective_training_episodes
+    training_budget = dict(resolved_spec.run_metadata["training_budget"])
+    training_budget.update(
+        {
+            "actual_completed_episodes": actual_completed_episodes,
+            "actual_training_timesteps": int(model.num_timesteps),
+            "target_reached": target_reached,
+            "stop_reason": (
+                "completed_episode_target"
+                if target_reached
+                else "derived_timestep_ceiling"
+            ),
+        }
+    )
+    resolved_metadata = dict(resolved_spec.run_metadata)
+    resolved_metadata["training_budget"] = training_budget
+    resolved_spec = replace(resolved_spec, run_metadata=resolved_metadata)
+    _ = save_run_metadata(resolved_spec.output_dir, resolved_spec.run_metadata)
     model.save(resolved_spec.final_model_save_path)
     venv_train.close()
 

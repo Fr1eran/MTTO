@@ -11,7 +11,6 @@ from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.lines import Line2D
 
 from rl.experiment_utils import (
     DEFAULT_DEVICE,
@@ -21,25 +20,32 @@ from rl.experiment_utils import (
     DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
     DEFAULT_SCHEDULE_TIME_S,
     DEFAULT_STEP_DISTANCE,
+    DEFAULT_TRAINING_EPISODES,
     TrainingRunSpec,
+    add_panel_label,
     apply_rl_curve_plot_style,
     build_default_training_args,
     evaluate_final_training_run,
     resolve_training_run_spec,
     train_single_experiment,
 )
+from rl.operational_state import ViolationCode
 from rl.training_analysis.collect import (
-    extract_complete_episode_series,
+    extract_complete_episode_sequence,
     load_reward_diagnostics_artifact,
 )
+from rl.training_analysis.process import trailing_moving_average
+from utils.plot_utils import apply_sci_figure_layout, save_sci_figure
 
 METHOD_ABLATION_MANIFEST_FILENAME = "method_ablation_manifest.json"
 EVALUATION_HISTORY_FILENAME = "evaluation_history.npz"
 FINAL_TRAJECTORY_METRICS_FILENAME = "final_trajectory_metrics.json"
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 5
 DEFAULT_OUTPUT_ROOT = "output/optimal/rl/method_ablation"
 DEFAULT_SEEDS = (11, 131, 239, 359, 443)
 SAFETY_BIN_SIZE_M = 5_000.0
+DEFAULT_EPISODE_SMOOTHING_WINDOW = 100
+SAFETY_EPISODE_BIN_WIDTH = 500
 
 
 @dataclass(frozen=True)
@@ -54,12 +60,18 @@ class MethodSpec:
 METHODS = (
     MethodSpec("ppo", "PPO", "basic", "none", "#0072B2"),
     MethodSpec("ppo_pbrs", "PPO+PBRS", "basic_safety", "none", "#E69F00"),
-    MethodSpec("ppo_dspdl", "PPO+DSPDL", "basic", "dspdl", "#CC79A7"),
+    MethodSpec(
+        "ppo_dspdl",
+        "PPO+DSPDL",
+        "basic",
+        "dspdl_completion",
+        "#CC79A7",
+    ),
     MethodSpec(
         "ppo_pbrs_dspdl",
         "PPO+PBRS+DSPDL",
         "basic_safety",
-        "dspdl",
+        "dspdl_completion",
         "#009E73",
     ),
 )
@@ -80,9 +92,11 @@ class MethodRun:
 @dataclass(frozen=True)
 class CurveAggregate:
     method: MethodSpec
-    steps: np.ndarray
+    episode_numbers: np.ndarray
+    evaluation_steps: np.ndarray
     means: dict[str, np.ndarray]
     stds: dict[str, np.ndarray]
+    episode_valid_seed_counts: np.ndarray
     valid_run_count: int
 
 
@@ -95,6 +109,16 @@ class FinalMetricAggregate:
     stds: dict[str, float]
 
 
+@dataclass(frozen=True)
+class SafetyLearningAggregate:
+    method: MethodSpec
+    episode_bin_edges: np.ndarray
+    episode_bin_centers: np.ndarray
+    mean_violation_rate: np.ndarray
+    std_violation_rate: np.ndarray
+    valid_seed_counts: np.ndarray
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run PPO/PBRS/DSPDL method-ablation experiments."
@@ -103,7 +127,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     train = subparsers.add_parser("train", help="Train all methods and collect data.")
     train.add_argument("--output-root", default=DEFAULT_OUTPUT_ROOT)
     train.add_argument("--reference-curve-dir", required=True)
-    train.add_argument("--total-timesteps", type=int, default=1_000_000)
+    train.add_argument(
+        "--training-episodes",
+        type=int,
+        default=DEFAULT_TRAINING_EPISODES,
+        help="Global completed training episodes for every ablation run.",
+    )
     train.add_argument("--schedule-time-s", type=float, default=DEFAULT_SCHEDULE_TIME_S)
     train.add_argument("--step-distance", type=float, default=DEFAULT_STEP_DISTANCE)
     train.add_argument("--reward-discount", type=float, default=DEFAULT_REWARD_DISCOUNT)
@@ -120,6 +149,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     train.add_argument("--device", default=DEFAULT_DEVICE)
     train.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Resume a compatible manifest and skip runs with complete final artifacts."
+        ),
+    )
+    train.add_argument(
         "--dry-run", action=argparse.BooleanOptionalAction, default=False
     )
 
@@ -129,6 +165,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     show.add_argument("--output-root", default=DEFAULT_OUTPUT_ROOT)
     show.add_argument("--output-file", type=Path, default=None)
     show.add_argument("--safety-output-file", type=Path, default=None)
+    show.add_argument(
+        "--episode-smoothing-window",
+        type=int,
+        default=DEFAULT_EPISODE_SMOOTHING_WINDOW,
+        help=(
+            "Trailing moving-average window in completed training episodes "
+            f"(default: {DEFAULT_EPISODE_SMOOTHING_WINDOW})."
+        ),
+    )
     show.add_argument("--dpi", type=float, default=300.0)
     show.add_argument("--no-show", action="store_true")
     show.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=False)
@@ -150,7 +195,7 @@ def _build_train_args(
     result.reward_preset = method.reward_preset
     result.curriculum_profile = method.curriculum_profile
     result.reference_curve_dir = (
-        args.reference_curve_dir if method.curriculum_profile == "dspdl" else None
+        args.reference_curve_dir if method.curriculum_profile != "none" else None
     )
     result.experiment_tag = _tag(method, repeat_index)
     result.run_mode = "reproduce"
@@ -161,7 +206,7 @@ def _build_train_args(
     result.enable_safety_truncation_histogram = False
     result.num_envs = args.num_envs
     result.rollout_steps_per_update = args.rollout_steps_per_update
-    result.total_timesteps = args.total_timesteps
+    result.training_episodes = args.training_episodes
     result.evaluation_interval_rollouts = args.evaluation_interval_rollouts
     result.evaluation_deterministic = True
     result.seed = seed
@@ -200,7 +245,7 @@ def resolve_run_matrix(args: argparse.Namespace) -> list[MethodRun]:
 
 def _training_signature(args: argparse.Namespace) -> dict[str, Any]:
     return {
-        "total_timesteps": int(args.total_timesteps),
+        "training_episodes": int(args.training_episodes),
         "schedule_time_s": float(args.schedule_time_s),
         "step_distance": float(args.step_distance),
         "reward_discount": float(args.reward_discount),
@@ -208,6 +253,25 @@ def _training_signature(args: argparse.Namespace) -> dict[str, Any]:
         "rollout_steps_per_update": int(args.rollout_steps_per_update),
         "evaluation_interval_rollouts": int(args.evaluation_interval_rollouts),
         "device": str(args.device),
+    }
+
+
+def _manifest_training_budget_summary(spec: TrainingRunSpec) -> dict[str, object]:
+    """Return resumable budget fields without duplicating the stop reason."""
+    budget = spec.run_metadata["training_budget"]
+    return {
+        key: budget[key]
+        for key in (
+            "mode",
+            "training_episodes",
+            "effective_training_episodes",
+            "max_episode_steps",
+            "derived_total_timesteps",
+            "actual_completed_episodes",
+            "actual_training_timesteps",
+            "target_reached",
+        )
+        if key in budget
     }
 
 
@@ -289,6 +353,39 @@ def _validate_existing_manifest(args: argparse.Namespace) -> None:
         _validate_manifest_compatibility(load_manifest(args.output_root), args)
 
 
+def _completed_statuses_for_resume(
+    args: argparse.Namespace,
+    runs: list[MethodRun],
+) -> dict[tuple[str, int], dict[str, Any]]:
+    """Keep only completed runs whose canonical final artifacts still exist."""
+    manifest_path = Path(args.output_root) / METHOD_ABLATION_MANIFEST_FILENAME
+    if not args.resume or not manifest_path.is_file():
+        return {}
+
+    expected_runs = {(run.method.name, run.repeat_index): run for run in runs}
+    statuses: dict[tuple[str, int], dict[str, Any]] = {}
+    for entry in load_manifest(args.output_root).get("runs", []):
+        if not isinstance(entry, dict) or entry.get("status") != "completed":
+            continue
+        key = (str(entry.get("method")), int(entry.get("repeat_index", -1)))
+        run = expected_runs.get(key)
+        if run is None:
+            continue
+        if (
+            Path(run.spec.final_model_save_path).is_file()
+            and Path(run.final_metrics_path).is_file()
+        ):
+            status_payload: dict[str, Any] = {
+                "status": "completed",
+                "final_metrics_path": run.final_metrics_path,
+            }
+            training_budget = entry.get("training_budget")
+            if isinstance(training_budget, dict):
+                status_payload["training_budget"] = training_budget
+            statuses[key] = status_payload
+    return statuses
+
+
 def _method_by_name(name: str) -> MethodSpec:
     for method in METHODS:
         if method.name == name:
@@ -317,11 +414,64 @@ def _completed_method_runs(
 
 
 def _align(reference: np.ndarray, steps: np.ndarray, values: np.ndarray) -> np.ndarray:
-    return np.interp(reference, steps, values, left=np.nan, right=np.nan)
+    aligned = np.full(reference.shape, np.nan, dtype=np.float64)
+    indices = np.searchsorted(reference, steps)
+    valid = indices < reference.size
+    matching_indices = np.flatnonzero(valid)
+    valid[matching_indices] = (
+        reference[indices[matching_indices]] == steps[matching_indices]
+    )
+    aligned[indices[valid]] = values[valid]
+    return aligned
+
+
+def _smooth_episode_curve(
+    episode_numbers: np.ndarray,
+    values: np.ndarray,
+    *,
+    window: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    if window < 1:
+        raise ValueError("episode_smoothing_window must be >= 1")
+    smoothed = trailing_moving_average(values, window)
+    if smoothed.size == 0:
+        return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
+    return episode_numbers[window - 1 :], smoothed
+
+
+def _align_episode_values(
+    reference: np.ndarray,
+    episode_numbers: np.ndarray,
+    values: np.ndarray,
+) -> np.ndarray:
+    aligned = np.full(reference.shape, np.nan, dtype=np.float64)
+    if episode_numbers.size == 0:
+        return aligned
+    indices = episode_numbers.astype(np.int64) - int(reference[0])
+    valid = (indices >= 0) & (indices < reference.size)
+    aligned[indices[valid]] = values[valid]
+    return aligned
+
+
+def _mean_and_sample_std(
+    values: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    counts = np.sum(np.isfinite(values), axis=0)
+    means = np.full(values.shape[1], np.nan, dtype=np.float64)
+    valid = counts > 0
+    if np.any(valid):
+        means[valid] = np.nansum(values[:, valid], axis=0) / counts[valid]
+    stds = np.full(means.shape, np.nan, dtype=np.float64)
+    multiple = counts >= 2
+    if np.any(multiple):
+        stds[multiple] = np.nanstd(values[:, multiple], axis=0, ddof=1)
+    return means, stds, counts
 
 
 def build_curve_aggregates(
     manifest: dict[str, Any],
+    *,
+    episode_smoothing_window: int = DEFAULT_EPISODE_SMOOTHING_WINDOW,
 ) -> tuple[list[CurveAggregate], list[str]]:
     aggregates: list[CurveAggregate] = []
     warnings: list[str] = []
@@ -332,45 +482,120 @@ def build_curve_aggregates(
                 reward_artifact = load_reward_diagnostics_artifact(
                     str(run["reward_diagnostics_path"])
                 )
-                episodes = extract_complete_episode_series(reward_artifact)
+                episodes = extract_complete_episode_sequence(reward_artifact)
                 periodic = _load_npz(
                     str(run["evaluation_history_path"]),
-                    ("training_steps", "stop_error_m", "abs_time_error_s"),
+                    (
+                        "training_steps",
+                        "success",
+                        "stop_error_m",
+                        "abs_time_error_s",
+                    ),
                 )
+                evaluation_steps = periodic["training_steps"].astype(float)
+                evaluation_success = periodic["success"].astype(bool)
+                if evaluation_success.shape != evaluation_steps.shape:
+                    raise ValueError("success and training_steps have different shapes")
                 curves.append(
                     {
-                        "episode_steps": episodes.end_step.astype(float),
+                        "episode_numbers": episodes.episode_number.astype(float),
                         "ep_reward": episodes.total_reward,
                         "ep_len": episodes.length,
-                        "eval_steps": periodic["training_steps"].astype(float),
-                        "stop_error_m": periodic["stop_error_m"].astype(float),
-                        "abs_time_error_s": periodic["abs_time_error_s"].astype(float),
+                        "eval_steps": evaluation_steps,
+                        "stop_error_m": np.where(
+                            evaluation_success,
+                            periodic["stop_error_m"].astype(float),
+                            np.nan,
+                        ),
+                        "abs_time_error_s": np.where(
+                            evaluation_success,
+                            periodic["abs_time_error_s"].astype(float),
+                            np.nan,
+                        ),
                     }
                 )
             except (OSError, KeyError, ValueError) as exc:
                 warnings.append(f"Skipped {method.label} curve: {exc}")
         if not curves:
             continue
-        reference = np.unique(
-            np.concatenate(
-                [curve["episode_steps"] for curve in curves]
-                + [curve["eval_steps"] for curve in curves]
+        smoothed_episode_curves: list[dict[str, np.ndarray]] = []
+        for curve in curves:
+            reward_x, reward_values = _smooth_episode_curve(
+                curve["episode_numbers"],
+                curve["ep_reward"],
+                window=episode_smoothing_window,
             )
+            length_x, length_values = _smooth_episode_curve(
+                curve["episode_numbers"],
+                curve["ep_len"],
+                window=episode_smoothing_window,
+            )
+            if reward_x.size == 0 or length_x.size == 0:
+                warnings.append(
+                    f"Skipped {method.label} episode curve because it has fewer than "
+                    + f"{episode_smoothing_window} complete episodes."
+                )
+                continue
+            smoothed_episode_curves.append(
+                {
+                    "episode_numbers": reward_x,
+                    "ep_reward": reward_values,
+                    "ep_len": length_values,
+                }
+            )
+        if not smoothed_episode_curves:
+            warnings.append(f"No smoothed episode curves available for {method.label}.")
+            continue
+
+        first_episode = int(
+            min(curve["episode_numbers"][0] for curve in smoothed_episode_curves)
+        )
+        last_episode = int(
+            max(curve["episode_numbers"][-1] for curve in smoothed_episode_curves)
+        )
+        episode_reference = np.arange(
+            first_episode, last_episode + 1, dtype=np.float64
+        )
+        evaluation_reference = np.unique(
+            np.concatenate([curve["eval_steps"] for curve in curves])
         )
         means: dict[str, np.ndarray] = {}
         stds: dict[str, np.ndarray] = {}
-        for key, step_key in (
-            ("ep_reward", "episode_steps"),
-            ("ep_len", "episode_steps"),
-            ("stop_error_m", "eval_steps"),
-            ("abs_time_error_s", "eval_steps"),
-        ):
+        episode_counts: np.ndarray | None = None
+        for key in ("ep_reward", "ep_len"):
             aligned = np.vstack(
-                [_align(reference, curve[step_key], curve[key]) for curve in curves]
+                [
+                    _align_episode_values(
+                        episode_reference, curve["episode_numbers"], curve[key]
+                    )
+                    for curve in smoothed_episode_curves
+                ]
             )
-            means[key] = np.nanmean(aligned, axis=0)
-            stds[key] = np.nanstd(aligned, axis=0)
-        aggregates.append(CurveAggregate(method, reference, means, stds, len(curves)))
+            means[key], stds[key], counts = _mean_and_sample_std(aligned)
+            if episode_counts is None:
+                episode_counts = counts
+            else:
+                episode_counts = np.minimum(episode_counts, counts)
+        for key in ("stop_error_m", "abs_time_error_s"):
+            aligned = np.vstack(
+                [
+                    _align(evaluation_reference, curve["eval_steps"], curve[key])
+                    for curve in curves
+                ]
+            )
+            means[key], stds[key], _ = _mean_and_sample_std(aligned)
+        assert episode_counts is not None
+        aggregates.append(
+            CurveAggregate(
+                method,
+                episode_reference,
+                evaluation_reference,
+                means,
+                stds,
+                episode_counts,
+                len(smoothed_episode_curves),
+            )
+        )
     return aggregates, warnings
 
 
@@ -417,110 +642,190 @@ def _plot_learning_curves(aggregates: list[CurveAggregate]) -> plt.Figure | None
     if not aggregates:
         return None
     apply_rl_curve_plot_style()
-    fig, axes = plt.subplots(2, 2, figsize=(10.0, 7.2))
+    fig, axes = plt.subplots(2, 2)
     panels = (
         ("ep_reward", "Mean episode reward", "(a)"),
         ("ep_len", "Mean episode length", "(b)"),
         ("stop_error_m", "Mean absolute stop error (m)", "(c)"),
-        ("abs_time_error_s", "Mean absolute time error (s)", "(d)"),
+        (
+            "abs_time_error_s",
+            "Mean absolute time error (s)",
+            "(d)",
+        ),
     )
     for axis, (key, ylabel, panel) in zip(axes.flat, panels, strict=True):
         for aggregate in aggregates:
+            x_values = (
+                aggregate.episode_numbers
+                if key in ("ep_reward", "ep_len")
+                else aggregate.evaluation_steps
+            )
             axis.plot(
-                aggregate.steps,
+                x_values,
                 aggregate.means[key],
                 color=aggregate.method.color,
                 label=aggregate.method.label,
             )
             axis.fill_between(
-                aggregate.steps,
+                x_values,
                 aggregate.means[key] - aggregate.stds[key],
                 aggregate.means[key] + aggregate.stds[key],
                 color=aggregate.method.color,
                 alpha=0.16,
             )
-        axis.set_xlabel("Training steps")
+        axis.set_xlabel(
+            "Training episodes" if key in ("ep_reward", "ep_len") else "Training steps"
+        )
         axis.set_ylabel(ylabel)
         axis.grid(True, alpha=0.3)
-        axis.text(0.5, -0.22, panel, transform=axis.transAxes, ha="center")
+        _ = add_panel_label(ax=axis, label=panel)
     handles, labels = axes[0, 0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=4)
-    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    fig.legend(handles, labels, loc="upper center", ncol=4, frameon=False)
+    apply_sci_figure_layout(
+        fig,
+        columns=2,
+        height_in=4.8,
+        left=0.11,
+        bottom=0.12,
+        top=0.89,
+        wspace=0.42,
+        hspace=0.42,
+    )
     return fig
 
 
-def _load_violation_positions(path: str) -> tuple[np.ndarray, int]:
-    data = _load_npz(
-        path,
-        ("safety_violation_positions_m", "safety_violation_position_offsets"),
-    )
-    positions = np.asarray(data["safety_violation_positions_m"], dtype=float).reshape(
-        -1
-    )
-    evaluation_count = max(
-        1, np.asarray(data["safety_violation_position_offsets"]).size - 1
-    )
-    return positions, evaluation_count
-
-
-def _plot_safety_boxplot(manifest: dict[str, Any]) -> plt.Figure | None:
-    per_method: dict[str, list[tuple[np.ndarray, int]]] = {}
+def build_safety_learning_aggregates(
+    manifest: dict[str, Any],
+) -> tuple[list[SafetyLearningAggregate], list[str]]:
+    aggregates: list[SafetyLearningAggregate] = []
+    warnings: list[str] = []
     for method in METHODS:
-        samples: list[np.ndarray] = []
+        runs: list[np.ndarray] = []
+        legacy_run_count = 0
         for run in _completed_method_runs(manifest, method):
             try:
-                samples.append(
-                    _load_violation_positions(str(run["evaluation_history_path"]))
+                artifact = load_reward_diagnostics_artifact(
+                    str(run["reward_diagnostics_path"])
                 )
-            except OSError, ValueError:
-                continue
-        if samples:
-            per_method[method.name] = samples
-    if not per_method:
-        return None
-    max_position = max(
-        (
-            float(np.max(values))
-            for sample_list in per_method.values()
-            for values, _ in sample_list
-            if values.size
-        ),
-        default=SAFETY_BIN_SIZE_M,
-    )
-    edges = np.arange(0.0, max_position + 2 * SAFETY_BIN_SIZE_M, SAFETY_BIN_SIZE_M)
-    fig, axis = plt.subplots(figsize=(12.5, 5.2))
-    offsets = np.linspace(-0.3, 0.3, len(METHODS))
-    for offset, method in zip(offsets, METHODS, strict=True):
-        runs = per_method.get(method.name, [])
-        values = [
-            np.histogram(positions, bins=edges)[0] / evaluation_count
-            for positions, evaluation_count in runs
-        ]
-        if not values:
+                episodes = extract_complete_episode_sequence(artifact)
+                if episodes.episode_number.size == 0:
+                    raise ValueError("reward diagnostics contains no complete episodes")
+                if np.any(episodes.violation_code < 0):
+                    legacy_run_count += 1
+                    continue
+                runs.append(
+                    np.isin(
+                        episodes.violation_code,
+                        [
+                            int(ViolationCode.SPEED_LOW),
+                            int(ViolationCode.SPEED_HIGH),
+                        ],
+                    ).astype(np.float64)
+                )
+            except (OSError, KeyError, ValueError) as exc:
+                warnings.append(
+                    f"Skipped {method.label} training safety history: {exc}"
+                )
+        if legacy_run_count:
+            warnings.append(
+                f"Skipped {legacy_run_count} {method.label} training safety run(s): "
+                "reward diagnostics lack per-episode violation codes; rerun training "
+                "to create schema-v3 artifacts"
+            )
+        if not runs:
             continue
-        bin_samples = [column for column in np.asarray(values, dtype=float).T]
-        axis.boxplot(
-            bin_samples,
-            positions=np.arange(edges.size - 1) + offset,
-            widths=0.16,
-            showfliers=False,
-            patch_artist=True,
-            boxprops={"facecolor": method.color, "alpha": 0.25},
-            medianprops={"color": method.color},
+
+        max_completed_episodes = max(run.size for run in runs)
+        bin_count = (
+            (max_completed_episodes - 1) // SAFETY_EPISODE_BIN_WIDTH + 1
         )
-    axis.set_xticks(
-        np.arange(edges.size - 1), [f"{value / 1000:g}" for value in edges[:-1]]
+        bin_edges = (
+            np.arange(bin_count + 1, dtype=np.float64) * SAFETY_EPISODE_BIN_WIDTH
+        )
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+        per_seed_violation_rates = np.full(
+            (len(runs), bin_count), np.nan, dtype=np.float64
+        )
+        for run_index, violations in enumerate(runs):
+            episode_numbers = np.arange(1, violations.size + 1, dtype=np.int64)
+            bin_indices = (episode_numbers - 1) // SAFETY_EPISODE_BIN_WIDTH
+            for bin_index in np.unique(bin_indices):
+                in_bin = bin_indices == bin_index
+                per_seed_violation_rates[run_index, bin_index] = float(
+                    np.mean(violations[in_bin])
+                )
+
+        mean_rate, std_rate, valid_counts = _mean_and_sample_std(
+            per_seed_violation_rates
+        )
+        aggregates.append(
+            SafetyLearningAggregate(
+                method=method,
+                episode_bin_edges=bin_edges,
+                episode_bin_centers=bin_centers,
+                mean_violation_rate=mean_rate,
+                std_violation_rate=std_rate,
+                valid_seed_counts=valid_counts,
+            )
+        )
+    return aggregates, warnings
+
+
+def _plot_safety_learning_process(
+    aggregates: list[SafetyLearningAggregate],
+) -> plt.Figure | None:
+    if not aggregates:
+        return None
+    apply_rl_curve_plot_style()
+    fig, axis = plt.subplots()
+    markers = ("o", "s", "^", "D")
+    max_episode = max(aggregate.episode_bin_edges[-1] for aggregate in aggregates)
+    for marker, aggregate in zip(markers, aggregates, strict=False):
+        axis.plot(
+            aggregate.episode_bin_centers,
+            aggregate.mean_violation_rate,
+            color=aggregate.method.color,
+            marker=marker,
+            markersize=4.0,
+            label=aggregate.method.label,
+        )
+        std_valid = np.isfinite(aggregate.std_violation_rate)
+        axis.fill_between(
+            aggregate.episode_bin_centers,
+            np.clip(
+                aggregate.mean_violation_rate - aggregate.std_violation_rate, 0.0, 1.0
+            ),
+            np.clip(
+                aggregate.mean_violation_rate + aggregate.std_violation_rate, 0.0, 1.0
+            ),
+            where=std_valid,
+            color=aggregate.method.color,
+            alpha=0.18,
+            linewidth=0.0,
+        )
+    axis.set_xlabel("Completed training episodes")
+    axis.set_ylabel("Training safety violation rate")
+    axis.set_xlim(0.0, max_episode)
+    axis.set_ylim(-0.03, 1.03)
+    axis.grid(True, alpha=0.3)
+    handles, labels = axis.get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        ncol=min(4, len(aggregates)),
+        frameon=False,
+        bbox_to_anchor=(0.5, 1.0),
+        borderaxespad=0.0,
     )
-    axis.set_xlabel("Violation position bin (km)")
-    axis.set_ylabel("Mean violations per periodic evaluation")
-    axis.set_title("Fixed-start safety violations by position")
-    axis.grid(True, axis="y", alpha=0.3)
-    axis.legend(
-        [Line2D([0], [0], color=method.color, lw=5) for method in METHODS],
-        [method.label for method in METHODS],
-        loc="upper right",
+    apply_sci_figure_layout(
+        fig,
+        columns=2,
+        height_in=3.1,
+        left=0.11,
+        bottom=0.18,
+        top=0.84,
     )
-    fig.tight_layout()
     return fig
 
 
@@ -548,7 +853,7 @@ def _print_final_table(aggregates: list[FinalMetricAggregate]) -> None:
 def _save(fig: plt.Figure | None, path: Path | None, dpi: float) -> None:
     if fig is not None and path is not None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(path, dpi=dpi, bbox_inches="tight")
+        _ = save_sci_figure(fig, path, dpi=dpi)
 
 
 def run_train(args: argparse.Namespace) -> int:
@@ -558,18 +863,26 @@ def run_train(args: argparse.Namespace) -> int:
         for run in runs:
             print(f"{run.method.label} seed={run.seed} output={run.spec.output_dir}")
         return 0
-    statuses: dict[tuple[str, int], dict[str, Any]] = {}
+    statuses = _completed_statuses_for_resume(args, runs)
     for run in runs:
+        key = (run.method.name, run.repeat_index)
+        if key in statuses:
+            print(
+                f"Skipping completed run: {run.method.label} seed={run.seed} "
+                + f"output={run.spec.final_output_dir}"
+            )
+            continue
         _write_manifest(args.output_root, build_manifest(args, runs, statuses))
         try:
-            train_single_experiment(run.train_args, spec=run.spec)
-            _, metrics_path = evaluate_final_training_run(run.spec)
-            statuses[(run.method.name, run.repeat_index)] = {
+            completed_spec = train_single_experiment(run.train_args, spec=run.spec)
+            _, metrics_path = evaluate_final_training_run(completed_spec)
+            statuses[key] = {
                 "status": "completed",
                 "final_metrics_path": metrics_path,
+                "training_budget": _manifest_training_budget_summary(completed_spec),
             }
         except Exception as exc:
-            statuses[(run.method.name, run.repeat_index)] = {
+            statuses[key] = {
                 "status": "failed",
                 "error_message": str(exc),
             }
@@ -581,16 +894,31 @@ def run_train(args: argparse.Namespace) -> int:
 
 def run_show(args: argparse.Namespace) -> int:
     manifest = load_manifest(args.output_root)
-    curves, curve_warnings = build_curve_aggregates(manifest)
+    if args.episode_smoothing_window < 1:
+        raise SystemExit("--episode-smoothing-window must be >= 1")
+    curves, curve_warnings = build_curve_aggregates(
+        manifest,
+        episode_smoothing_window=args.episode_smoothing_window,
+    )
+    safety_aggregates, safety_warnings = build_safety_learning_aggregates(manifest)
     finals, final_warnings = build_final_aggregates(manifest)
-    print("\n".join([*curve_warnings, *final_warnings]))
+    print("\n".join([*curve_warnings, *safety_warnings, *final_warnings]))
     _print_final_table(finals)
+    print(
+        "Episode smoothing: "
+        + f"trailing window={args.episode_smoothing_window} completed episodes."
+    )
     if args.dry_run:
         return 0
     curve_figure = _plot_learning_curves(curves)
-    safety_figure = _plot_safety_boxplot(manifest)
+    safety_figure = _plot_safety_learning_process(safety_aggregates)
     _save(curve_figure, args.output_file, args.dpi)
     _save(safety_figure, args.safety_output_file, args.dpi)
+    if safety_figure is None:
+        print(
+            "No training safety violation figure was produced; "
+            "rerun method ablation with schema-v3 reward diagnostics."
+        )
     if not args.no_show:
         plt.show()
     return 0
@@ -602,4 +930,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.set_start_method("spawn", force=True)
     raise SystemExit(main())

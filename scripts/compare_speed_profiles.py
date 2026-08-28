@@ -7,6 +7,7 @@ from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.lines import Line2D
 
 from dp.experiment_utils import (
     DP_DEFAULT_SEARCH_DIR,
@@ -24,6 +25,7 @@ from rl.experiment_utils import (
     resolve_rl_curve_artifact,
 )
 from utils.scenario import build_safeguard_utility, build_scenario
+from utils.plot_utils import apply_sci_figure_layout, save_sci_figure
 from utils.trajectory import (
     OptimizedCurveArtifact,
     compute_comfort_metrics_from_trajectory,
@@ -35,6 +37,12 @@ DEFAULT_REAL_CURVE_PATH = "output/real_operation/aligned_real_operation_curve.np
 _REAL_CURVE_REQUIRED_KEYS = ("position_m", "speed_mps", "time_s", "target_position_m")
 _TARGET_TIME_TOLERANCE_S = 1e-6
 _TARGET_POSITION_TOLERANCE_M = 1e-3
+_TRAJECTORY_COLORS = ("#333333", "#E69F00", "#7B61A8")
+_TRAJECTORY_LEGEND_LABELS = (
+    "DP optimization",
+    "Proposed RL",
+    "Actual operation",
+)
 
 
 @dataclass(frozen=True)
@@ -286,6 +294,48 @@ def _deduplicate_legend(ax: Any, *, loc: str = "upper right") -> None:
         ax.legend(*zip(*filtered, strict=False), loc=loc)
 
 
+def _finalize_comparison_figure(
+    figure: plt.Figure,
+    axes: tuple[plt.Axes, plt.Axes, plt.Axes],
+) -> None:
+    """Apply the paper layout and a trajectory-only shared legend."""
+    for axis in axes:
+        axis.set_title("")
+        legend = axis.get_legend()
+        if legend is not None:
+            legend.remove()
+    handles = [
+        Line2D([0], [0], color=color, linewidth=1.8)
+        for color in _TRAJECTORY_COLORS
+    ]
+    figure.legend(
+        handles,
+        _TRAJECTORY_LEGEND_LABELS,
+        loc="upper center",
+        ncol=3,
+        frameon=False,
+        bbox_to_anchor=(0.5, 0.995),
+        borderaxespad=0.0,
+    )
+    apply_sci_figure_layout(
+        figure,
+        columns=2,
+        height_in=5.5,
+        left=0.11,
+        bottom=0.10,
+        top=0.92,
+        hspace=0.30,
+    )
+
+
+def _create_comparison_axes() -> tuple[
+    plt.Figure,
+    tuple[plt.Axes, plt.Axes, plt.Axes],
+]:
+    figure, axes = plt.subplots(3, 1, sharex=True)
+    return figure, (axes[0], axes[1], axes[2])
+
+
 def _build_cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -307,6 +357,17 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--no-safeguard", action="store_true")
     parser.add_argument("--factor", type=float, default=0.99)
+    parser.add_argument(
+        "--output-file",
+        type=Path,
+        default=None,
+        help="Optional path for saving the comparison figure.",
+    )
+    parser.add_argument(
+        "--no-show",
+        action="store_true",
+        help="Save or compute without opening an interactive figure window.",
+    )
     return parser
 
 
@@ -384,7 +445,7 @@ def main() -> None:
     print(format_comparison_table(metrics_by_label))
 
     apply_rl_curve_plot_style()
-    _, (ax_speed, ax_acc, ax_energy) = plt.subplots(3, 1, figsize=(6, 8))
+    figure, (ax_speed, ax_acc, ax_energy) = _create_comparison_axes()
     safeguard = None if args.no_safeguard else build_safeguard_utility(args.factor)
     render_dp_curve_on_axes(
         ax=ax_speed,
@@ -393,7 +454,7 @@ def main() -> None:
         metrics=dp_metadata,
         no_safeguard=args.no_safeguard,
         factor=args.factor,
-        curve_color="tab:red",
+        curve_color=_TRAJECTORY_COLORS[0],
         curve_label="DP optimized speed curve",
         safeguard=safeguard,
     )
@@ -404,22 +465,22 @@ def main() -> None:
         metrics=rl_metadata,
         no_safeguard=True,
         factor=args.factor,
-        curve_color="tab:blue",
+        curve_color=_TRAJECTORY_COLORS[1],
         curve_label=_build_rl_curve_label(args.trajectory_source),
         safeguard=safeguard,
     )
     ax_speed.plot(
         real_profile.position_m,
         real_profile.speed_mps * 3.6,
-        color="tab:green",
+        color=_TRAJECTORY_COLORS[2],
         linewidth=1.5,
         label="Actual operation speed curve",
     )
-    ax_speed.set_title("Speed-position profile comparison")
-    _deduplicate_legend(ax_speed)
+    ax_speed.set_ylabel("Speed (km/h)")
+    ax_speed.set_xlabel("")
+    ax_speed.text(0.02, 0.92, "(a)", transform=ax_speed.transAxes, fontsize=10, fontweight="bold")
 
-    colors = ("tab:red", "tab:blue", "tab:green")
-    for profile, color in zip(profiles, colors, strict=True):
+    for profile, color in zip(profiles, _TRAJECTORY_COLORS, strict=True):
         ax_acc.plot(
             _compute_segment_midpoints(profile.position_m),
             compute_segment_accelerations(profile.position_m, profile.speed_mps),
@@ -428,13 +489,12 @@ def main() -> None:
             label=f"{profile.label} acceleration",
         )
     ax_acc.axhline(0.0, color="black", linewidth=0.8, linestyle="--", alpha=0.5)
-    ax_acc.set_xlabel("Position (m)")
-    ax_acc.set_ylabel("Acceleration (m/s^2)")
-    ax_acc.set_title("Acceleration-position profile comparison")
+    ax_acc.set_xlabel("")
+    ax_acc.set_ylabel(r"Acceleration ($\mathrm{m/s^2}$)")
+    ax_acc.text(0.02, 0.92, "(b)", transform=ax_acc.transAxes, fontsize=10, fontweight="bold")
     ax_acc.grid(True, alpha=0.3)
-    _deduplicate_legend(ax_acc)
 
-    for profile, color in zip(profiles, colors, strict=True):
+    for profile, color in zip(profiles, _TRAJECTORY_COLORS, strict=True):
         cumulative_energy = compute_cumulative_energy_from_trajectory(
             pos_arr=profile.position_m,
             speed_arr=profile.speed_mps,
@@ -451,12 +511,20 @@ def main() -> None:
         )
     ax_energy.set_xlabel("Position (m)")
     ax_energy.set_ylabel("Cumulative energy (kJ)")
-    ax_energy.set_title("Cumulative energy-position profile comparison")
+    ax_energy.text(0.02, 0.92, "(c)", transform=ax_energy.transAxes, fontsize=10, fontweight="bold")
     ax_energy.grid(True, alpha=0.3)
-    _deduplicate_legend(ax_energy)
-
-    plt.tight_layout()
-    plt.show()
+    _finalize_comparison_figure(
+        figure,
+        (ax_speed, ax_acc, ax_energy),
+    )
+    if args.output_file is not None:
+        args.output_file.parent.mkdir(parents=True, exist_ok=True)
+        _ = save_sci_figure(figure, args.output_file)
+        print(f"Comparison figure saved to: {args.output_file}")
+    if args.no_show:
+        plt.close(figure)
+    else:
+        plt.show()
 
 
 if __name__ == "__main__":
