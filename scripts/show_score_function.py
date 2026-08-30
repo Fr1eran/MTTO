@@ -7,6 +7,7 @@ from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from numpy.typing import NDArray
 
+from model.ocs import TrainService
 from utils.plot_utils import (
     SCI_EXPORT_PAD_INCHES,
     apply_sci_figure_layout,
@@ -15,7 +16,7 @@ from utils.plot_utils import (
 )
 
 MAX_STOP_ERROR_M = 0.3
-MAX_TIME_ERROR_S = 10.0
+MAX_TIME_ERROR_S = TrainService.DEFAULT_MAX_ARR_TIME_ERROR_S
 PUNCTUALITY_DECAY_TIME_S = 30.0
 STOPPING_ERROR_MAX_M = 10.0
 PUNCTUALITY_ERROR_MAX_S = 140.0

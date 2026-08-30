@@ -243,7 +243,7 @@ def print_training_run_spec(spec: TrainingRunSpec) -> None:
     print("Training runtime switches:")
     print(f"- run_mode={spec.run_mode}")
     print(f"- reward_preset={spec.reward_preset.name}")
-    print(f"- reward_config={spec.run_metadata['reward_config']}")
+    print(f"- reward_config={spec.run_metadata.reward_config.to_mapping()}")
     print(f"- curriculum_profile={spec.curriculum_profile}")
     if spec.curriculum_profile != "none":
         print(f"- reference_curve_dir={spec.reference_curve_dir}")

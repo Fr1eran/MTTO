@@ -21,6 +21,13 @@ from stable_baselines3.common.callbacks import (
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
 
+from contracts.evaluation import EvaluationMetrics
+from contracts.training import (
+    CurriculumMetadata,
+    RewardConfigSnapshot,
+    RunMetadata,
+    TrainingBudget,
+)
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
@@ -54,7 +61,11 @@ from rl.reward_calculator import (
 )
 from rl.reward_diagnostics import REWARD_DIAGNOSTICS_SCHEMA_VERSION
 from rl.training_analysis import AnalysisConfig, run_training_analysis
-from utils.io_utils import format_float_token, load_optimized_curve_and_metrics
+from utils.io_utils import (
+    format_float_token,
+    load_evaluation_artifact,
+    load_evaluation_metrics,
+)
 from utils.plot_utils import set_global_plot_style
 from utils.scenario import build_safeguard_utility, build_scenario
 from utils.trajectory import OptimizedCurveArtifact
@@ -63,6 +74,8 @@ __all__ = [
     # 常量
     "RL_FINAL_MODEL_FILENAME",
     "RUN_METADATA_FILENAME",
+    "REWARD_DIAGNOSTICS_FILENAME",
+    "EVALUATION_HISTORY_FILENAME",
     "RL_DEFAULT_SEARCH_DIR",
     "RL_TRAJECTORY_SOURCE_CHOICES",
     "DEFAULT_SCHEDULE_TIME_S",
@@ -81,6 +94,8 @@ __all__ = [
     "DSPDLConfig",
     "CompletionDSPDLConfig",
     "RewardPreset",
+    "RunMetadata",
+    "TrainingBudget",
     "TrainingRunSpec",
     # reward preset
     "reward_preset_names",
@@ -122,8 +137,10 @@ __all__ = [
 # 文件路径常量
 # =============================================================================
 
-RL_FINAL_MODEL_FILENAME = "final_model.zip"
-RUN_METADATA_FILENAME = "run_metadata.json"
+RL_FINAL_MODEL_FILENAME = "policy_final.zip"
+RUN_METADATA_FILENAME = "metadata.json"
+REWARD_DIAGNOSTICS_FILENAME = "episodes.npz"
+EVALUATION_HISTORY_FILENAME = "evaluations.npz"
 RL_DEFAULT_SEARCH_DIR = "output/optimal/rl"
 DEFAULT_TRAINING_EPISODES = 7_000
 
@@ -201,7 +218,7 @@ class TrainingRunSpec:
     reward_diagnostics_path: str
     final_model_save_path: str
     run_metadata_path: str
-    run_metadata: dict[str, Any]
+    run_metadata: RunMetadata
     run_mode: str
     enable_tb: bool
     enable_monitor: bool
@@ -506,8 +523,8 @@ def build_run_metadata(
     best_eval_output_dir: str | None = None,
     tensorboard_log_dir: str | None = None,
     tb_log_name: str | None = None,
-) -> dict[str, Any]:
-    """构建单次训练运行的元数据字典，用于持久化记录实验参数。
+) -> RunMetadata:
+    """构建单次训练运行的类型化元数据快照。
 
     Args:
         reward_preset: 具名奖励预设。
@@ -533,9 +550,8 @@ def build_run_metadata(
         tb_log_name: TensorBoard 日志名称。
 
     Returns:
-        包含实验完整元数据的字典。
+        包含实验完整元数据的 ``RunMetadata``。
     """
-    metadata = reward_preset.to_metadata()
     resolved_curriculum = resolve_curriculum_profile_name(curriculum_profile)
     curriculum_enabled = resolved_curriculum != "none"
     resolved_dspdl_config = (
@@ -559,122 +575,108 @@ def build_run_metadata(
         resolved_dspdl_config, DSPDLConfig
     ):
         raise TypeError("legacy DSPDL metadata requires DSPDLConfig")
-    metadata["curriculum"] = {
-        "profile_name": resolved_curriculum,
-        "enabled": curriculum_enabled,
-        "value_source": (
-            "task_completion"
-            if resolved_curriculum == "dspdl_completion"
-            else ("ppo_critic_return" if curriculum_enabled else None)
-        ),
-        "dspdl_config": (
-            asdict(resolved_dspdl_config) if resolved_dspdl_config is not None else None
-        ),
-        "reference_curve_dir": reference_curve_dir,
-        "reference_curve_artifact_path": reference_curve_artifact_path,
-        "reference_curve_metrics_path": reference_curve_metrics_path,
-        "rl_step_distance_m": (float(step_distance) if curriculum_enabled else None),
-        "context_count": None,
-        "initial_curriculum_version": (0 if curriculum_enabled else None),
-        "completion_critic": None,
-    }
-
-    metadata.update(
-        {
-            "schedule_time_s": float(schedule_time_s),
-            "step_distance": float(step_distance),
-            "reward_discount": float(reward_discount),
-        }
-    )
-
-    metadata["experiment_token"] = _build_experiment_token(
+    experiment_token = _build_experiment_token(
         schedule_time_s=schedule_time_s,
         step_distance=step_distance,
         reward_preset_name=reward_preset.name,
         curriculum_profile_name=resolved_curriculum,
         experiment_tag=experiment_tag,
     )
-    if experiment_tag is not None:
-        metadata["experiment_tag"] = str(experiment_tag)
-    if run_mode is not None:
-        metadata["run_mode"] = str(run_mode)
     effective_training_episodes = (
         None
         if training_episodes is None or num_envs is None
         else int(math.ceil(training_episodes / max(1, int(num_envs))))
         * max(1, int(num_envs))
     )
-    if derived_total_timesteps is not None:
-        metadata["training_budget"] = {
-            "mode": "completed_episodes",
-            "training_episodes": (
+    training_budget = (
+        TrainingBudget(
+            mode="completed_episodes",
+            training_episodes=(
                 int(training_episodes) if training_episodes is not None else None
             ),
-            "effective_training_episodes": effective_training_episodes,
-            "max_episode_steps": (
+            effective_training_episodes=effective_training_episodes,
+            max_episode_steps=(
                 int(max_episode_steps) if max_episode_steps is not None else None
             ),
-            "derived_total_timesteps": int(derived_total_timesteps),
-        }
-
-    if enable_tb is not None:
-        metadata["enable_tb"] = bool(enable_tb)
-    if enable_monitor is not None:
-        metadata["enable_monitor"] = bool(enable_monitor)
-    if enable_auto_analysis is not None:
-        metadata["enable_auto_analysis"] = bool(enable_auto_analysis)
-    if enable_best_evaluation_artifacts is not None:
-        metadata["enable_best_evaluation_artifacts"] = bool(
-            enable_best_evaluation_artifacts
+            derived_total_timesteps=int(derived_total_timesteps),
         )
-    if enable_safety_truncation_histogram is not None:
-        metadata["enable_safety_truncation_histogram"] = bool(
-            enable_safety_truncation_histogram
-        )
-    if safety_truncation_bin_size_m is not None:
-        metadata["safety_truncation_bin_size_m"] = float(safety_truncation_bin_size_m)
-    if evaluation_interval_rollouts is not None:
-        metadata["evaluation_interval_rollouts"] = int(evaluation_interval_rollouts)
-    if evaluation_deterministic is not None:
-        metadata["evaluation_deterministic"] = bool(evaluation_deterministic)
-    if evaluation_history_path is not None:
-        metadata["evaluation_history_path"] = str(evaluation_history_path)
-
-    if num_envs is not None:
-        metadata["num_envs"] = int(num_envs)
-    if n_steps_per_env is not None:
-        metadata["n_steps_per_env"] = int(n_steps_per_env)
-    if rollout_steps_per_update is not None:
-        metadata["rollout_steps_per_update"] = int(rollout_steps_per_update)
-
-    if output_dir is not None:
-        metadata["output_dir"] = str(output_dir)
-    if final_output_dir is not None:
-        metadata["final_output_dir"] = str(final_output_dir)
-    if reward_diagnostics_path is not None:
-        metadata["reward_diagnostics_path"] = str(reward_diagnostics_path)
-        metadata["reward_diagnostics_schema_version"] = (
+        if derived_total_timesteps is not None
+        else None
+    )
+    curriculum_metadata = CurriculumMetadata(
+        profile_name=resolved_curriculum,
+        enabled=curriculum_enabled,
+        value_source=(
+            "task_completion"
+            if resolved_curriculum == "dspdl_completion"
+            else ("ppo_critic_return" if curriculum_enabled else None)
+        ),
+        dspdl_config=(
+            asdict(resolved_dspdl_config) if resolved_dspdl_config is not None else None
+        ),
+        reference_curve_dir=reference_curve_dir,
+        reference_curve_artifact_path=reference_curve_artifact_path,
+        reference_curve_metrics_path=reference_curve_metrics_path,
+        rl_step_distance_m=(float(step_distance) if curriculum_enabled else None),
+        context_count=None,
+        initial_curriculum_version=(0 if curriculum_enabled else None),
+        completion_critic=None,
+    )
+    reward_config = RewardConfigSnapshot(
+        energy_reward_scale=float(reward_preset.config.energy_reward_scale),
+        comfort_reward_scale=float(reward_preset.config.comfort_reward_scale),
+        enable_potential_safety=bool(reward_preset.config.enable_potential_safety),
+        survival_reward_scale=float(reward_preset.config.survival_reward_scale),
+    )
+    return RunMetadata(
+        reward_preset_name=reward_preset.name,
+        reward_preset_label=reward_preset.label,
+        reward_preset_description=reward_preset.description,
+        potential_shaping_components=reward_preset.enabled_shaping_components(),
+        reward_config=reward_config,
+        curriculum=curriculum_metadata,
+        schedule_time_s=float(schedule_time_s),
+        step_distance=float(step_distance),
+        reward_discount=float(reward_discount),
+        experiment_token=experiment_token,
+        training_budget=training_budget,
+        experiment_tag=experiment_tag,
+        run_mode=run_mode,
+        enable_tb=enable_tb,
+        enable_monitor=enable_monitor,
+        enable_auto_analysis=enable_auto_analysis,
+        enable_best_evaluation_artifacts=enable_best_evaluation_artifacts,
+        enable_safety_truncation_histogram=enable_safety_truncation_histogram,
+        safety_truncation_bin_size_m=safety_truncation_bin_size_m,
+        evaluation_interval_rollouts=evaluation_interval_rollouts,
+        evaluation_deterministic=evaluation_deterministic,
+        evaluation_history_path=evaluation_history_path,
+        num_envs=num_envs,
+        n_steps_per_env=n_steps_per_env,
+        rollout_steps_per_update=rollout_steps_per_update,
+        output_dir=output_dir,
+        final_output_dir=final_output_dir,
+        reward_diagnostics_path=reward_diagnostics_path,
+        best_eval_output_dir=best_eval_output_dir,
+        tensorboard_log_dir=tensorboard_log_dir,
+        tb_log_name=tb_log_name,
+        reward_diagnostics_schema_version=(
             REWARD_DIAGNOSTICS_SCHEMA_VERSION
-        )
-    if best_eval_output_dir is not None:
-        metadata["best_eval_output_dir"] = str(best_eval_output_dir)
-    if tensorboard_log_dir is not None:
-        metadata["tensorboard_log_dir"] = str(tensorboard_log_dir)
-    if tb_log_name is not None:
-        metadata["tb_log_name"] = str(tb_log_name)
-
-    return metadata
+            if reward_diagnostics_path is not None
+            else None
+        ),
+    )
 
 
 def save_run_metadata(
     output_dir: str | os.PathLike[str],
-    metadata: dict[str, Any],
+    metadata: RunMetadata,
 ) -> str:
-    """将实验元数据保存为 JSON 文件。
+    """将类型化实验元数据保存为版本化 JSON 文件。
 
     Args:
         output_dir: 输出目录路径。
-        metadata: 元数据字典。
+        metadata: 元数据对象。
 
     Returns:
         写入的 JSON 文件路径。
@@ -684,18 +686,20 @@ def save_run_metadata(
 
     metadata_path = output_path / RUN_METADATA_FILENAME
     with metadata_path.open("w", encoding="utf-8") as file_obj:
-        json.dump(metadata, file_obj, ensure_ascii=False, indent=2)
+        json.dump(metadata.to_mapping(), file_obj, ensure_ascii=False, indent=2)
+        file_obj.write("\n")
     return str(metadata_path)
 
 
-def load_run_metadata(search_dir: str | os.PathLike[str]) -> dict[str, Any]:
+def load_run_metadata(search_dir: str | os.PathLike[str]) -> RunMetadata:
     """从指定目录（或其父目录）加载实验元数据。
 
     Args:
         search_dir: 搜索目录路径。
 
-    Returns:
-        元数据字典，未找到时返回空字典。
+    Raises:
+        FileNotFoundError: 未找到元数据文件。
+        ValueError: 元数据不符合 canonical schema。
     """
     base_path = Path(search_dir)
     candidate_paths = [
@@ -704,12 +708,13 @@ def load_run_metadata(search_dir: str | os.PathLike[str]) -> dict[str, Any]:
     ]
 
     for candidate_path in candidate_paths:
-        if not candidate_path.exists() or not candidate_path.is_file():
-            continue
-        with candidate_path.open("r", encoding="utf-8") as file_obj:
-            return json.load(file_obj)
+        if candidate_path.is_file():
+            with candidate_path.open("r", encoding="utf-8") as file_obj:
+                return RunMetadata.from_mapping(json.load(file_obj))
 
-    return {}
+    raise FileNotFoundError(
+        f"Could not find {RUN_METADATA_FILENAME!r} in '{base_path}' or its parent"
+    )
 
 
 # =============================================================================
@@ -889,12 +894,6 @@ def resolve_log_interval(
     return int(defaults_by_mode.get(run_mode, 1))
 
 
-def _normalize_optional_positive_int(value: int | None) -> int | None:
-    if value is None:
-        return None
-    return None if int(value) <= 0 else int(value)
-
-
 def _resolve_n_steps_per_env(args: argparse.Namespace, num_envs: int) -> int:
     if args.n_steps_per_env is not None:
         return max(1, int(args.n_steps_per_env))
@@ -982,7 +981,9 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
     )
     final_output_dir = os.path.join(output_dir, "final")
     final_model_save_path = os.path.join(final_output_dir, RL_FINAL_MODEL_FILENAME)
-    reward_diagnostics_path = os.path.join(final_output_dir, "reward_diagnostics.npz")
+    reward_diagnostics_path = os.path.join(
+        final_output_dir, REWARD_DIAGNOSTICS_FILENAME
+    )
     best_eval_output_dir = os.path.join(output_dir, "best_rollouts")
     evaluation_history_path_raw = getattr(args, "evaluation_history_path", None)
     evaluation_history_path = (
@@ -1287,18 +1288,17 @@ def train_single_experiment(
                 statistics_hub=dspdl_statistics_hub,
             )
             curriculum_distribution_state = curriculum_callback.distribution_state
-        curriculum_metadata = dict(resolved_spec.run_metadata["curriculum"])
-        curriculum_metadata.update(
-            {
-                "reference_curve_artifact_path": artifact.npz_path,
-                "reference_curve_metrics_path": artifact.metrics_path,
-                "rl_step_distance_m": resolved_spec.step_distance,
-                "context_count": context_pool.context_count,
-                "initial_curriculum_version": 0,
-            }
+        curriculum_metadata = replace(
+            resolved_spec.run_metadata.curriculum,
+            reference_curve_artifact_path=artifact.npz_path,
+            reference_curve_metrics_path=artifact.metrics_path,
+            rl_step_distance_m=resolved_spec.step_distance,
+            context_count=context_pool.context_count,
+            initial_curriculum_version=0,
         )
-        resolved_metadata = dict(resolved_spec.run_metadata)
-        resolved_metadata["curriculum"] = curriculum_metadata
+        resolved_metadata = resolved_spec.run_metadata.with_updates(
+            curriculum=curriculum_metadata
+        )
         resolved_spec = replace(
             resolved_spec,
             reference_curve_artifact_path=artifact.npz_path,
@@ -1372,15 +1372,22 @@ def train_single_experiment(
     )
 
     if resolved_spec.curriculum_profile == "dspdl_completion":
-        curriculum_metadata = dict(resolved_spec.run_metadata["curriculum"])
-        curriculum_metadata["completion_critic"] = completion_critic_metadata(model)
-        resolved_metadata = dict(resolved_spec.run_metadata)
-        resolved_metadata["curriculum"] = curriculum_metadata
+        curriculum_metadata = replace(
+            resolved_spec.run_metadata.curriculum,
+            completion_critic=completion_critic_metadata(model),
+        )
+        resolved_metadata = resolved_spec.run_metadata.with_updates(
+            curriculum=curriculum_metadata
+        )
         resolved_spec = replace(resolved_spec, run_metadata=resolved_metadata)
         _ = save_run_metadata(resolved_spec.output_dir, resolved_spec.run_metadata)
 
+    if resolved_spec.run_metadata.training_budget is None:
+        raise RuntimeError("training metadata is missing its training budget")
+    if resolved_spec.run_metadata.training_budget.effective_training_episodes is None:
+        raise RuntimeError("training metadata is missing effective training episodes")
     effective_training_episodes = int(
-        resolved_spec.run_metadata["training_budget"]["effective_training_episodes"]
+        resolved_spec.run_metadata.training_budget.effective_training_episodes
     )
     episode_stop_callback = StopTrainingOnMaxEpisodes(
         max_episodes=(effective_training_episodes // resolved_spec.num_envs)
@@ -1419,7 +1426,7 @@ def train_single_experiment(
             evaluation_handlers.append(
                 BestEvaluationArtifactHandler(
                     output_dir=resolved_spec.best_eval_output_dir,
-                    artifact_metadata=resolved_spec.run_metadata,
+                    artifact_metadata=resolved_spec.run_metadata.to_mapping(),
                 )
             )
         callbacks.append(
@@ -1447,7 +1454,9 @@ def train_single_experiment(
             )
         )
 
-    episode_pbar_callback = EpisodeProgressBarCallback(total_episodes=effective_training_episodes)
+    episode_pbar_callback = EpisodeProgressBarCallback(
+        total_episodes=effective_training_episodes
+    )
     callbacks.append(episode_pbar_callback)
 
     callback = CallbackList(callbacks) if callbacks else None
@@ -1461,21 +1470,20 @@ def train_single_experiment(
     )
     actual_completed_episodes = reward_diagnostics_callback.completed_episode_count
     target_reached = episode_stop_callback.n_episodes >= effective_training_episodes
-    training_budget = dict(resolved_spec.run_metadata["training_budget"])
-    training_budget.update(
-        {
-            "actual_completed_episodes": actual_completed_episodes,
-            "actual_training_timesteps": int(model.num_timesteps),
-            "target_reached": target_reached,
-            "stop_reason": (
-                "completed_episode_target"
-                if target_reached
-                else "derived_timestep_ceiling"
-            ),
-        }
+    if resolved_spec.run_metadata.training_budget is None:
+        raise RuntimeError("training metadata is missing its training budget")
+    training_budget = replace(
+        resolved_spec.run_metadata.training_budget,
+        actual_completed_episodes=actual_completed_episodes,
+        actual_training_timesteps=int(model.num_timesteps),
+        target_reached=target_reached,
+        stop_reason=(
+            "completed_episode_target" if target_reached else "derived_timestep_ceiling"
+        ),
     )
-    resolved_metadata = dict(resolved_spec.run_metadata)
-    resolved_metadata["training_budget"] = training_budget
+    resolved_metadata = resolved_spec.run_metadata.with_updates(
+        training_budget=training_budget
+    )
     resolved_spec = replace(resolved_spec, run_metadata=resolved_metadata)
     _ = save_run_metadata(resolved_spec.output_dir, resolved_spec.run_metadata)
     model.save(resolved_spec.final_model_save_path)
@@ -1548,8 +1556,9 @@ def evaluate_final_training_run(
             model,
             env,
             output_path=os.path.join(spec.final_output_dir, "final_trajectory.npz"),
-            metadata=spec.run_metadata,
+            metadata=spec.run_metadata.to_mapping(),
             deterministic=True,
+            metrics_path=os.path.join(spec.final_output_dir, "metrics_final.json"),
         )
         return npz_path, metrics_path
     finally:
@@ -1598,9 +1607,14 @@ def _find_latest_matching_file(
 
 
 def _resolve_rl_metrics_path(curve_path: Path) -> Path:
-    metrics_path = curve_path.with_name(
-        f"{curve_path.stem}{_RL_TRAJECTORY_METRICS_SUFFIX}"
-    )
+    if curve_path.name == _RL_FINAL_TRAJECTORY_FILENAME:
+        metrics_path = curve_path.with_name("metrics_final.json")
+    elif curve_path.name == _RL_BEST_TRAJECTORY_FILENAME:
+        metrics_path = curve_path.with_name("metrics_best.json")
+    else:
+        metrics_path = curve_path.with_name(
+            f"{curve_path.stem}{_RL_TRAJECTORY_METRICS_SUFFIX}"
+        )
     if not metrics_path.is_file():
         raise FileNotFoundError(
             f"Could not find '{metrics_path.name}' in directory: {curve_path.parent}"
@@ -1674,44 +1688,44 @@ def resolve_rl_curve_artifact(
 
 def load_rl_curve_artifact(
     artifact: OptimizedCurveArtifact,
-) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
-    """加载轨迹产物中的位置数组、速度数组和指标字典。
+) -> tuple[np.ndarray, np.ndarray, EvaluationMetrics]:
+    """加载 canonical RL 轨迹产物和类型化指标。
 
     Args:
         artifact: 由 resolve_rl_curve_artifact 返回的产物定位信息。
 
     Returns:
-        (pos_arr, speed_arr, metrics) 三元组。
+        (位置数组, 速度数组, ``EvaluationMetrics``) 三元组。
     """
-    pos_arr, speed_arr, metrics = load_optimized_curve_and_metrics(
+    loaded = load_evaluation_artifact(
         npz_path=artifact.npz_path,
         metrics_path=artifact.metrics_path,
         dtype=np.float32,
         use_metrics_cache=True,
     )
+    return (
+        loaded.trajectory.position_m,
+        loaded.trajectory.speed_mps,
+        loaded.metrics,
+    )
 
-    return pos_arr, speed_arr, metrics
 
-
-def load_rl_curve_metrics(artifact: OptimizedCurveArtifact) -> dict[str, object]:
-    """仅加载轨迹产物的指标字典（不加载位置/速度数组）。
+def load_rl_curve_metrics(artifact: OptimizedCurveArtifact) -> EvaluationMetrics:
+    """仅加载 canonical 轨迹产物的类型化指标。
 
     Args:
         artifact: 由 resolve_rl_curve_artifact 返回的产物定位信息。
 
     Returns:
-        指标字典。
+        ``EvaluationMetrics``。
 
     Raises:
         FileNotFoundError: 指标文件不存在。
     """
-    metrics_path = Path(artifact.metrics_path)
-    if not metrics_path.is_file():
-        raise FileNotFoundError(f"Metrics file does not exist: {artifact.metrics_path}")
-    with metrics_path.open("r", encoding="utf-8") as file_obj:
-        metrics = json.load(file_obj)
-
-    return metrics
+    return load_evaluation_metrics(
+        artifact.metrics_path,
+        use_metrics_cache=True,
+    )
 
 
 # =============================================================================
@@ -1726,7 +1740,7 @@ def _metric_as_float(value: object) -> float | None:
 
 
 def build_rl_trajectory_comparison_key(
-    metrics: Mapping[str, object],
+    metrics: EvaluationMetrics | Mapping[str, object],
 ) -> tuple[float, ...]:
     """构建用于多轨迹排序对比的键。
 
@@ -1739,6 +1753,9 @@ def build_rl_trajectory_comparison_key(
     Returns:
         可直接用于 max() 的比较键。
     """
+    if isinstance(metrics, EvaluationMetrics):
+        return metrics.selection_comparison_key
+
     raw_key = metrics.get("selection_comparison_key")
     if isinstance(raw_key, (list, tuple)) and len(raw_key) > 0:
         converted: list[float] = []
@@ -1831,7 +1848,17 @@ def apply_rl_curve_plot_style() -> None:
     )
 
 
-def get_rl_trajectory_status_text(metrics: dict[str, object]) -> str | None:
+def _metrics_display_mapping(
+    metrics: EvaluationMetrics | Mapping[str, object],
+) -> Mapping[str, object]:
+    if isinstance(metrics, EvaluationMetrics):
+        return metrics.to_display_mapping()
+    return metrics
+
+
+def get_rl_trajectory_status_text(
+    metrics: EvaluationMetrics | Mapping[str, object],
+) -> str | None:
     """根据轨迹指标返回中文状态描述文本。
 
     Args:
@@ -1840,8 +1867,9 @@ def get_rl_trajectory_status_text(metrics: dict[str, object]) -> str | None:
     Returns:
         如 "RL 最优轨迹（完成任务）" 或 None（success 不是 bool 时）。
     """
-    success_value = metrics.get("success")
-    trajectory_source = metrics.get("trajectory_source")
+    display_metrics = _metrics_display_mapping(metrics)
+    success_value = display_metrics.get("success")
+    trajectory_source = display_metrics.get("trajectory_source")
     if not isinstance(success_value, bool):
         return None
     prefix = "RL 最终轨迹" if trajectory_source == "final" else "RL 最优轨迹"
@@ -1881,7 +1909,7 @@ def add_panel_label(
 
 
 def format_rl_trajectory_terminal_summary(
-    metrics: dict[str, object],
+    metrics: EvaluationMetrics | Mapping[str, object],
     *,
     panel_label: str | None = None,
     reward_preset_name: str | None = None,
@@ -1902,8 +1930,9 @@ def format_rl_trajectory_terminal_summary(
     Returns:
         " | " 分隔的摘要字符串。
     """
+    display_metrics = _metrics_display_mapping(metrics)
     effective_preset = reward_preset_name or str(
-        metrics.get("reward_preset_name", "unknown")
+        display_metrics.get("reward_preset_name", "unknown")
     )
     fields = [f"preset={effective_preset}"]
     if panel_label:
@@ -1921,16 +1950,18 @@ def format_rl_trajectory_terminal_summary(
         "time_error_s",
         "stop_error_m",
     ):
-        if key in metrics:
-            fields.append(f"{key}={metrics[key]}")
+        if key in display_metrics:
+            fields.append(f"{key}={display_metrics[key]}")
 
     if artifact_path:
         fields.append(f"artifact={artifact_path}")
     return " | ".join(fields)
 
 
-def _get_rl_trajectory_display_name(metrics: dict[str, object]) -> str:
-    trajectory_source = metrics.get("trajectory_source")
+def _get_rl_trajectory_display_name(
+    metrics: EvaluationMetrics | Mapping[str, object],
+) -> str:
+    trajectory_source = _metrics_display_mapping(metrics).get("trajectory_source")
     if trajectory_source == "final":
         return "RL final trajectory"
     return "RL best trajectory"
@@ -1941,7 +1972,7 @@ def render_rl_curve_on_axes(
     ax: Any,
     pos_arr: np.ndarray,
     speed_arr: np.ndarray,
-    metrics: dict[str, object],
+    metrics: EvaluationMetrics | Mapping[str, object],
     no_safeguard: bool,
     factor: float,
     curve_color: str = "blue",
@@ -1976,8 +2007,9 @@ def render_rl_curve_on_axes(
         label=curve_label or _get_rl_trajectory_display_name(metrics),
     )
 
-    start_position = _metric_as_float(metrics.get("start_position_m"))
-    target_position = _metric_as_float(metrics.get("target_position_m"))
+    display_metrics = _metrics_display_mapping(metrics)
+    start_position = _metric_as_float(display_metrics.get("start_position_m"))
+    target_position = _metric_as_float(display_metrics.get("target_position_m"))
 
     if start_position is not None:
         ax.scatter(

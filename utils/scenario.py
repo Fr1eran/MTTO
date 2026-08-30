@@ -65,11 +65,9 @@ def build_scenario(
     vehicle = VehicleInfo(mass=317.5, numoftrainsets=5, length=128.5)
     train_service = TrainService(
         start_position=longyang_start_position,
-        start_speed=0.0,
         target_position=putong_end_position,
         schedule_time=schedule_time_s,
         max_acc_change=0.75,
-        max_arr_time_error_ratio=0.01,
         max_stop_error=0.3,
     )
 

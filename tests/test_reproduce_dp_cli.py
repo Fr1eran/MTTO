@@ -245,8 +245,16 @@ def test_run_optimization_metrics_include_start_and_target_speed(
         def __init__(self, **kwargs: object):
             del kwargs
 
-        def optimize(self, *, max_speed: float, delta_speed: float, max_iters: int):
-            del max_speed, delta_speed, max_iters
+        def optimize(
+            self,
+            *,
+            start_pos: float,
+            start_speed: float,
+            target_pos: float,
+            target_speed: float,
+            schedule_time: float,
+        ):
+            del start_pos, start_speed, target_pos, target_speed, schedule_time
             return {
                 "pos": [0.0, 20.0],
                 "speed": [1.5, 0.0],
@@ -258,7 +266,6 @@ def test_run_optimization_metrics_include_start_and_target_speed(
     train_service = SimpleNamespace(
         schedule_time=10.0,
         start_position=0.0,
-        start_speed=1.5,
         target_position=20.0,
         max_acc_change=0.75,
     )
@@ -315,7 +322,7 @@ def test_run_optimization_metrics_include_start_and_target_speed(
 
     metrics_path = tmp_path / "optimized_speed_curve_metrics.json"
     metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
-    assert metrics["start_speed_mps"] == pytest.approx(1.5)
+    assert metrics["start_speed_mps"] == pytest.approx(0.0)
     assert metrics["target_speed_mps"] == pytest.approx(0.0)
     assert metrics["max_step_distance_m"] is None
     assert metrics["stage_division"] == "variable"

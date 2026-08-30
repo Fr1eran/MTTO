@@ -5,6 +5,7 @@ import os
 from collections.abc import Sequence
 
 from dp.core import (
+    DP_UPPER_SPEED_ENVELOPE_VERSION,
     ParallelPrecomputeExitedError,
     VariableSpacingDPOptimizer,
 )
@@ -162,6 +163,8 @@ def _run_optimization(*, cli_args: argparse.Namespace, output_dir: str) -> int:
         track=track,
         safeguard_utility=safeguard_utility,
         train_service=train_service,
+        delta_speed=cli_args.delta_speed_mps,
+        max_outer_iterations=cli_args.max_outer_iterations,
         show_precompute_progress=not cli_args.hide_precompute_progress,
         precompute_progress_desc="状态转移图预计算",
         precompute_mode=cli_args.precompute_mode,
@@ -176,9 +179,11 @@ def _run_optimization(*, cli_args: argparse.Namespace, output_dir: str) -> int:
 
     try:
         result = VSDP.optimize(
-            max_speed=vehicle.max_speed,
-            delta_speed=cli_args.delta_speed_mps,
-            max_iters=cli_args.max_outer_iterations,
+            start_pos=float(train_service.start_position),
+            start_speed=0.0,
+            target_pos=float(train_service.target_position),
+            target_speed=0.0,
+            schedule_time=float(train_service.schedule_time),
         )
     except KeyboardInterrupt:
         print("\n检测到 Ctrl+C，已停止预计算/优化流程。")
@@ -208,7 +213,7 @@ def _run_optimization(*, cli_args: argparse.Namespace, output_dir: str) -> int:
                 ),
                 "total_energy_kj": float(result["total_energy"]),
                 "start_position_m": float(train_service.start_position),
-                "start_speed_mps": float(train_service.start_speed),
+                "start_speed_mps": 0.0,
                 "target_position_m": float(train_service.target_position),
                 "target_speed_mps": 0.0,
                 "max_step_distance_m": (
@@ -217,6 +222,9 @@ def _run_optimization(*, cli_args: argparse.Namespace, output_dir: str) -> int:
                     else None
                 ),
                 "stage_division": cli_args.stage_division,
+                "dp_upper_speed_envelope_version": (
+                    DP_UPPER_SPEED_ENVELOPE_VERSION
+                ),
                 **comfort_metrics,
             },
         )

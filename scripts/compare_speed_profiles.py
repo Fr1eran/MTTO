@@ -24,8 +24,8 @@ from rl.experiment_utils import (
     render_rl_curve_on_axes,
     resolve_rl_curve_artifact,
 )
-from utils.scenario import build_safeguard_utility, build_scenario
 from utils.plot_utils import apply_sci_figure_layout, save_sci_figure
+from utils.scenario import build_safeguard_utility, build_scenario
 from utils.trajectory import (
     OptimizedCurveArtifact,
     compute_comfort_metrics_from_trajectory,
@@ -478,7 +478,14 @@ def main() -> None:
     )
     ax_speed.set_ylabel("Speed (km/h)")
     ax_speed.set_xlabel("")
-    ax_speed.text(0.02, 0.92, "(a)", transform=ax_speed.transAxes, fontsize=10, fontweight="bold")
+    ax_speed.text(
+        0.02,
+        0.92,
+        "(a)",
+        transform=ax_speed.transAxes,
+        fontsize=10,
+        fontweight="bold",
+    )
 
     for profile, color in zip(profiles, _TRAJECTORY_COLORS, strict=True):
         ax_acc.plot(
@@ -491,7 +498,14 @@ def main() -> None:
     ax_acc.axhline(0.0, color="black", linewidth=0.8, linestyle="--", alpha=0.5)
     ax_acc.set_xlabel("")
     ax_acc.set_ylabel(r"Acceleration ($\mathrm{m/s^2}$)")
-    ax_acc.text(0.02, 0.92, "(b)", transform=ax_acc.transAxes, fontsize=10, fontweight="bold")
+    ax_acc.text(
+        0.02,
+        0.92,
+        "(b)",
+        transform=ax_acc.transAxes,
+        fontsize=10,
+        fontweight="bold",
+    )
     ax_acc.grid(True, alpha=0.3)
 
     for profile, color in zip(profiles, _TRAJECTORY_COLORS, strict=True):
@@ -511,7 +525,14 @@ def main() -> None:
         )
     ax_energy.set_xlabel("Position (m)")
     ax_energy.set_ylabel("Cumulative energy (kJ)")
-    ax_energy.text(0.02, 0.92, "(c)", transform=ax_energy.transAxes, fontsize=10, fontweight="bold")
+    ax_energy.text(
+        0.02,
+        0.92,
+        "(c)",
+        transform=ax_energy.transAxes,
+        fontsize=10,
+        fontweight="bold",
+    )
     ax_energy.grid(True, alpha=0.3)
     _finalize_comparison_figure(
         figure,

@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 import numpy as np
 
-from dp.core import VariableSpacingDPOptimizer
+from dp.core import DP_UPPER_SPEED_ENVELOPE_VERSION, VariableSpacingDPOptimizer
 from model.ocs import SafeGuardUtility
 from model.ocs.train_service import TrainService
 from model.track import TrackInfo
@@ -126,7 +126,6 @@ def compute_dp_reference_curve(
     target_position: float,
     schedule_time_s: float,
     target_speed: float = 0.0,
-    max_speed: float | None = None,
     delta_speed_mps: float = 0.1,
     max_outer_iterations: int = 100,
     precompute_mode: Literal["serial", "parallel"] = "parallel",
@@ -140,13 +139,9 @@ def compute_dp_reference_curve(
     show_precompute_progress: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, object]]:
     """Compute, save, and return a DP trajectory usable as a min-time reference."""
-    if abs(float(target_speed)) > 1e-9:
-        raise ValueError("VariableSpacingDPOptimizer currently requires target_speed=0")
-
     task_train_service = replace(
         train_service,
         start_position=float(start_position),
-        start_speed=float(start_speed),
         target_position=float(target_position),
         schedule_time=float(schedule_time_s),
     )
@@ -155,6 +150,8 @@ def compute_dp_reference_curve(
         track=track,
         safeguard_utility=safeguard_utility,
         train_service=task_train_service,
+        delta_speed=float(delta_speed_mps),
+        max_outer_iterations=int(max_outer_iterations),
         show_precompute_progress=show_precompute_progress,
         precompute_mode=precompute_mode,
         precompute_workers=precompute_workers,
@@ -166,9 +163,11 @@ def compute_dp_reference_curve(
         skip_disk_cache=skip_disk_cache,
     )
     result = optimizer.optimize(
-        max_speed=float(vehicle.max_speed if max_speed is None else max_speed),
-        delta_speed=float(delta_speed_mps),
-        max_iters=int(max_outer_iterations),
+        start_pos=float(start_position),
+        start_speed=float(start_speed),
+        target_pos=float(target_position),
+        target_speed=float(target_speed),
+        schedule_time=float(schedule_time_s),
     )
     if result is None:
         raise RuntimeError("DP optimization did not find a feasible trajectory")
@@ -184,13 +183,14 @@ def compute_dp_reference_curve(
         "time_error_s": float(task_train_service.schedule_time - result["total_time"]),
         "total_energy_kj": float(result["total_energy"]),
         "start_position_m": float(task_train_service.start_position),
-        "start_speed_mps": float(task_train_service.start_speed),
+        "start_speed_mps": float(start_speed),
         "target_position_m": float(task_train_service.target_position),
         "target_speed_mps": float(target_speed),
         "max_step_distance_m": (
             float(uniform_step_size) if stage_division == "uniform" else None
         ),
         "stage_division": stage_division,
+        "dp_upper_speed_envelope_version": DP_UPPER_SPEED_ENVELOPE_VERSION,
         **comfort_metrics,
     }
 

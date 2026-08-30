@@ -118,16 +118,8 @@ def _score_snapshot_severity(
     *,
     kl_threshold: float,
 ) -> str:
-    metrics = snapshot.get("metrics", {})
-    if not isinstance(metrics, dict):
-        return "normal"
-
-    approx_kl_stats = metrics.get("train/approx_kl", {})
-    if isinstance(approx_kl_stats, dict):
-        if float(approx_kl_stats.get("p95", 0.0)) > kl_threshold:
-            return "warn"
-
-    return "normal"
+    p95 = snapshot.get("metrics", {}).get("train/approx_kl", {}).get("p95", 0.0)
+    return "warn" if float(p95) > kl_threshold else "normal"
 
 
 def _annotate_snapshot_severity(
@@ -135,15 +127,11 @@ def _annotate_snapshot_severity(
     *,
     kl_threshold: float,
 ) -> list[dict[str, Any]]:
-    enriched: list[dict[str, Any]] = []
-    for snapshot in snapshots:
-        snapshot_copy = dict(snapshot)
-        snapshot_copy["severity"] = _score_snapshot_severity(
-            snapshot,
-            kl_threshold=kl_threshold,
-        )
-        enriched.append(snapshot_copy)
-    return enriched
+    return [
+        {**s, "severity": _score_snapshot_severity(s, kl_threshold=kl_threshold)}
+        for s in snapshots
+    ]
+
 
 
 def run_training_analysis(
@@ -203,7 +191,7 @@ def run_training_analysis(
     reward_artifact = None
     reward_artifact_path: Path | None = None
     if cfg.final_output_dir is not None:
-        reward_artifact_path = Path(cfg.final_output_dir) / "reward_diagnostics.npz"
+        reward_artifact_path = Path(cfg.final_output_dir) / "episodes.npz"
         if reward_artifact_path.is_file():
             reward_artifact = load_reward_diagnostics_artifact(reward_artifact_path)
     reward_component_analysis = compute_reward_component_analysis(reward_artifact)

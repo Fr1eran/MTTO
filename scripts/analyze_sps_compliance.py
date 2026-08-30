@@ -25,8 +25,8 @@ from rl.experiment_utils import (
     load_rl_curve_artifact,
     resolve_rl_curve_artifact,
 )
-from utils.scenario import build_safeguard_utility, build_scenario
 from utils.plot_utils import apply_sci_figure_layout
+from utils.scenario import build_safeguard_utility, build_scenario
 from utils.trajectory import OptimizedCurveArtifact, recover_time_axis_from_trajectory
 
 _OUTPUT_MODE_TEXT = "text"

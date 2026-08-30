@@ -19,6 +19,7 @@ from rl.evaluation import (
     PolicyEvaluationResult,
     classify_arrival_status,
     describe_best_update_reason,
+    get_strict_time_error_limit_s,
 )
 from rl.reward_diagnostics import REWARD_NAMES, REWARD_SIGNAL_COUNT
 
@@ -75,7 +76,13 @@ def _build_result(
     stop_error = 0.0 if success else 12.0
     time_error = 0.0 if success else 20.0
     final_speed = 0.0 if success else 3.0
-    service = TrainService(0.0, 0.0, 100.0, 440.0, 0.75, 0.05, 0.3)
+    service = TrainService(
+        start_position=0.0,
+        target_position=100.0,
+        schedule_time=440.0,
+        max_acc_change=0.75,
+        max_stop_error=0.3,
+    )
     success, precise, punctual = classify_arrival_status(
         stop_error_m=stop_error,
         time_error_s=time_error,
@@ -121,11 +128,72 @@ def _init(callback: object, training_env: object) -> None:
     )
 
 
+def test_punctual_arrival_uses_train_service_absolute_limit() -> None:
+    service = TrainService(
+        start_position=0.0,
+        target_position=100.0,
+        schedule_time=440.0,
+        max_acc_change=0.75,
+        max_stop_error=0.3,
+    )
+
+    assert service.max_arr_time_error_s == pytest.approx(10.0)
+    assert get_strict_time_error_limit_s(service) == pytest.approx(10.0)
+    assert classify_arrival_status(
+        stop_error_m=0.0,
+        time_error_s=9.999,
+        final_speed_mps=0.0,
+        train_service=service,
+        terminated=True,
+        truncated=False,
+    ) == (True, True, True)
+    assert classify_arrival_status(
+        stop_error_m=0.0,
+        time_error_s=10.0,
+        final_speed_mps=0.0,
+        train_service=service,
+        terminated=True,
+        truncated=False,
+    ) == (True, True, False)
+
+    custom_service = TrainService(
+        start_position=0.0,
+        target_position=100.0,
+        schedule_time=440.0,
+        max_acc_change=0.75,
+        max_stop_error=0.3,
+        max_arr_time_error_s=5.0,
+    )
+    assert classify_arrival_status(
+        stop_error_m=0.0,
+        time_error_s=5.0,
+        final_speed_mps=0.0,
+        train_service=custom_service,
+        terminated=True,
+        truncated=False,
+    ) == (True, True, False)
+
+
+@pytest.mark.parametrize("invalid_limit", [0.0, -1.0, float("nan"), float("inf")])
+def test_train_service_rejects_invalid_arrival_time_limit(
+    invalid_limit: float,
+) -> None:
+    with pytest.raises(ValueError, match="max_arr_time_error_s"):
+        TrainService(
+            start_position=0.0,
+            target_position=100.0,
+            schedule_time=440.0,
+            max_acc_change=0.75,
+            max_stop_error=0.3,
+            max_arr_time_error_s=invalid_limit,
+        )
+
+
 def test_scheduled_evaluation_shares_one_result_between_handlers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     best = BestEvaluationArtifactHandler(output_dir=str(tmp_path / "best"))
-    history_path = tmp_path / "evaluation_history.npz"
+    history_path = tmp_path / "evaluations.npz"
     history = EvaluationHistoryArtifactHandler(output_path=str(history_path))
     callback = ScheduledPolicyEvaluationCallback(
         eval_env=DummyEvalEnv(),
@@ -153,9 +221,7 @@ def test_scheduled_evaluation_shares_one_result_between_handlers(
 
     assert calls == 1
     assert best.best_result is not None
-    metrics = json.loads(
-        (tmp_path / "best" / "best_trajectory_metrics.json").read_text()
-    )
+    metrics = json.loads((tmp_path / "best" / "metrics_best.json").read_text())
     assert metrics["evaluation_rollout_index"] == 12
     with np.load(history_path) as data:
         np.testing.assert_array_equal(data["training_steps"], [120])

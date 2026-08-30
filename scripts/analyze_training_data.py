@@ -33,7 +33,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Final training artifact directory containing "
-            "reward_diagnostics.npz and optional safety histogram data."
+            "episodes.npz and optional safety histogram data."
         ),
     )
     _ = parser.add_argument(

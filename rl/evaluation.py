@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -5,6 +6,8 @@ import gymnasium as gym
 import numpy as np
 from numpy.typing import NDArray
 
+from contracts.common import JSONValue, as_json_value
+from contracts.evaluation import EvaluationArtifact, EvaluationMetrics, TrajectoryData
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
@@ -13,9 +16,7 @@ from rl.mtto_env import MTTOEnv
 from rl.observation_builder import ObservationBuilder
 from rl.operational_stepper import OperationalStepper
 from rl.reward_calculator import RewardCalculator, RewardConfig
-from utils.io_utils import save_curve_and_metrics
-
-PUNCTUAL_ARRIVAL_TIME_ERROR_LIMIT_S = 10.0
+from utils.io_utils import save_evaluation_artifact
 
 BEST_TRAJECTORY_SELECTION_RULE = "arrival_precise_punctual_energy_else_reward"
 BEST_TRAJECTORY_SELECTION_RULE_DESCRIPTION = (
@@ -26,12 +27,12 @@ BEST_TRAJECTORY_SELECTION_RULE_DESCRIPTION = (
     "precise arrival wins first; if neither trajectory is precise, lower "
     "stop_error_m wins. Punctual arrival wins next; if neither trajectory is "
     "punctual, lower abs(time_error_s) wins. Punctual arrival requires "
-    "abs(time_error_s) < 10.0. Lower total_energy_j wins only after those "
-    "task-completion levels."
+    "abs(time_error_s) < TrainService.max_arr_time_error_s. Lower total_energy_j "
+    "wins only after those task-completion levels."
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class PolicyEvaluationResult:
     success: bool
     precise_arrival: bool
@@ -40,7 +41,6 @@ class PolicyEvaluationResult:
     total_time_s: float
     target_time_s: float
     total_energy_j: float
-    total_energy_kj: float
     start_position_m: float
     target_position_m: float
     final_position_m: float
@@ -63,46 +63,154 @@ class PolicyEvaluationResult:
         default_factory=lambda: np.empty(0, dtype=np.float32)
     )
 
+    def __init__(
+        self,
+        *,
+        success: bool,
+        precise_arrival: bool,
+        punctual_arrival: bool,
+        total_reward: float,
+        total_time_s: float,
+        target_time_s: float,
+        total_energy_j: float,
+        start_position_m: float,
+        target_position_m: float,
+        final_position_m: float,
+        final_speed_mps: float,
+        stop_error_m: float,
+        time_error_s: float,
+        strict_stop_error_limit_m: float,
+        strict_time_error_limit_s: float,
+        comfort_tav: float,
+        comfort_er_pct: float,
+        comfort_rms: float,
+        terminated: bool,
+        truncated: bool,
+        episode_steps: int,
+        trajectory_pos_m: NDArray[np.float32],
+        trajectory_speed_mps: NDArray[np.float32],
+        min_safety_margin_mps: float = 0.0,
+        mean_safety_margin_mps: float = 0.0,
+        safety_violation_positions_m: NDArray[np.float32] | None = None,
+        # Accepted only as an in-memory migration alias.  It is not a
+        # dataclass field and is never serialized; Joules remain canonical.
+        total_energy_kj: float | None = None,
+    ) -> None:
+        if total_energy_kj is not None and not np.isclose(
+            float(total_energy_kj), float(total_energy_j) / 1000.0
+        ):
+            raise ValueError("total_energy_kj does not match total_energy_j")
+        values = {
+            "success": bool(success),
+            "precise_arrival": bool(precise_arrival),
+            "punctual_arrival": bool(punctual_arrival),
+            "total_reward": float(total_reward),
+            "total_time_s": float(total_time_s),
+            "target_time_s": float(target_time_s),
+            "total_energy_j": float(total_energy_j),
+            "start_position_m": float(start_position_m),
+            "target_position_m": float(target_position_m),
+            "final_position_m": float(final_position_m),
+            "final_speed_mps": float(final_speed_mps),
+            "stop_error_m": float(stop_error_m),
+            "time_error_s": float(time_error_s),
+            "strict_stop_error_limit_m": float(strict_stop_error_limit_m),
+            "strict_time_error_limit_s": float(strict_time_error_limit_s),
+            "comfort_tav": float(comfort_tav),
+            "comfort_er_pct": float(comfort_er_pct),
+            "comfort_rms": float(comfort_rms),
+            "terminated": bool(terminated),
+            "truncated": bool(truncated),
+            "episode_steps": int(episode_steps),
+            "trajectory_pos_m": np.asarray(trajectory_pos_m, dtype=np.float32),
+            "trajectory_speed_mps": np.asarray(trajectory_speed_mps, dtype=np.float32),
+            "min_safety_margin_mps": float(min_safety_margin_mps),
+            "mean_safety_margin_mps": float(mean_safety_margin_mps),
+            "safety_violation_positions_m": np.asarray(
+                np.empty(0, dtype=np.float32)
+                if safety_violation_positions_m is None
+                else safety_violation_positions_m,
+                dtype=np.float32,
+            ),
+        }
+        for name, value in values.items():
+            object.__setattr__(self, name, value)
+
     def to_metrics(
         self,
         *,
         num_timesteps: int | None = None,
         evaluation_rollout_index: int | None = None,
     ) -> dict[str, object]:
-        metrics: dict[str, object] = {
-            "total_reward": self.total_reward,
-            "target_time_s": self.target_time_s,
-            "total_time_s": self.total_time_s,
-            "time_error_s": self.time_error_s,
-            "start_position_m": self.start_position_m,
-            "target_position_m": self.target_position_m,
-            "final_position_m": self.final_position_m,
-            "stop_error_m": self.stop_error_m,
-            "total_energy_kj": self.total_energy_kj,
-            "total_energy_j": self.total_energy_j,
-            "final_speed_mps": self.final_speed_mps,
-            "comfort_tav": self.comfort_tav,
-            "comfort_er_pct": self.comfort_er_pct,
-            "comfort_rms": self.comfort_rms,
-            "episode_steps": self.episode_steps,
-            "success": self.success,
-            "precise_arrival": self.precise_arrival,
-            "punctual_arrival": self.punctual_arrival,
-            "min_safety_margin_mps": self.min_safety_margin_mps,
-            "mean_safety_margin_mps": self.mean_safety_margin_mps,
-            "strict_stop_error_limit_m": self.strict_stop_error_limit_m,
-            "strict_time_error_limit_s": self.strict_time_error_limit_s,
-            "selection_comparison_key": list(
-                build_policy_evaluation_comparison_key(self)
-            ),
-        }
-        metrics["selection_rule"] = BEST_TRAJECTORY_SELECTION_RULE
-        if num_timesteps is not None:
-            metrics["num_timesteps"] = int(num_timesteps)
-        if evaluation_rollout_index is not None:
-            metrics["evaluation_rollout_index"] = int(evaluation_rollout_index)
+        """Serialize metrics using the canonical versioned contract."""
+        return self.to_evaluation_metrics(
+            num_timesteps=num_timesteps,
+            evaluation_rollout_index=evaluation_rollout_index,
+        ).to_mapping()
 
-        return metrics
+    @property
+    def total_energy_kj(self) -> float:
+        """Presentation conversion; Joules remain the canonical field."""
+        return self.total_energy_j / 1000.0
+
+    def to_evaluation_metrics(
+        self,
+        *,
+        extensions: Mapping[str, object] | None = None,
+        num_timesteps: int | None = None,
+        evaluation_rollout_index: int | None = None,
+    ) -> EvaluationMetrics:
+        extension_values: dict[str, JSONValue] = {}
+        if extensions:
+            for key, value in extensions.items():
+                extension_values[str(key)] = as_json_value(
+                    value,
+                    field=f"evaluation_metrics.extensions.{key}",
+                )
+        return EvaluationMetrics(
+            success=bool(self.success),
+            precise_arrival=bool(self.precise_arrival),
+            punctual_arrival=bool(self.punctual_arrival),
+            total_reward=float(self.total_reward),
+            total_time_s=float(self.total_time_s),
+            target_time_s=float(self.target_time_s),
+            time_error_s=float(self.time_error_s),
+            start_position_m=float(self.start_position_m),
+            target_position_m=float(self.target_position_m),
+            final_position_m=float(self.final_position_m),
+            final_speed_mps=float(self.final_speed_mps),
+            stop_error_m=float(self.stop_error_m),
+            total_energy_j=float(self.total_energy_j),
+            comfort_tav=float(self.comfort_tav),
+            comfort_er_pct=float(self.comfort_er_pct),
+            comfort_rms=float(self.comfort_rms),
+            terminated=bool(self.terminated),
+            truncated=bool(self.truncated),
+            episode_steps=int(self.episode_steps),
+            min_safety_margin_mps=float(self.min_safety_margin_mps),
+            mean_safety_margin_mps=float(self.mean_safety_margin_mps),
+            strict_stop_error_limit_m=float(self.strict_stop_error_limit_m),
+            strict_time_error_limit_s=float(self.strict_time_error_limit_s),
+            selection_comparison_key=build_policy_evaluation_comparison_key(self),
+            selection_rule=BEST_TRAJECTORY_SELECTION_RULE,
+            num_timesteps=(None if num_timesteps is None else int(num_timesteps)),
+            evaluation_rollout_index=(
+                None
+                if evaluation_rollout_index is None
+                else int(evaluation_rollout_index)
+            ),
+            extensions=extension_values,
+        )
+
+    def to_artifact(self) -> EvaluationArtifact:
+        return EvaluationArtifact(
+            metrics=self.to_evaluation_metrics(),
+            trajectory=TrajectoryData(
+                position_m=self.trajectory_pos_m,
+                speed_mps=self.trajectory_speed_mps,
+                safety_violation_positions_m=self.safety_violation_positions_m,
+            ),
+        )
 
 
 def build_single_eval_env(
@@ -161,10 +269,9 @@ def is_punctual_arrival(
     time_error_s: float,
     train_service: TrainService,
 ) -> bool:
-    del train_service
     return bool(
         precise_arrival
-        and abs(float(time_error_s)) < PUNCTUAL_ARRIVAL_TIME_ERROR_LIMIT_S
+        and abs(float(time_error_s)) < float(train_service.max_arr_time_error_s)
     )
 
 
@@ -200,8 +307,7 @@ def get_strict_stop_error_limit_m(train_service: TrainService) -> float:
 
 
 def get_strict_time_error_limit_s(train_service: TrainService) -> float:
-    del train_service
-    return PUNCTUAL_ARRIVAL_TIME_ERROR_LIMIT_S
+    return float(train_service.max_arr_time_error_s)
 
 
 def evaluate_policy_once(
@@ -236,7 +342,9 @@ def evaluate_policy_once(
         if safety_margin < 0.0:
             safety_violation_positions_m.append(float(mtto_env.state.position_m))
 
-    basic_info = mtto_env.basic_info
+    episode_info = mtto_env.episode_info
+    if episode_info is None:
+        raise RuntimeError("evaluation environment did not produce episode info")
     if safety_margins:
         safety_margin_arr = np.asarray(safety_margins, dtype=np.float64)
         min_safety_margin_mps = float(np.min(safety_margin_arr))
@@ -254,17 +362,13 @@ def evaluate_policy_once(
         dtype=np.float32,
     )
 
-    final_position = float(basic_info.get("position", mtto_env.state.position_m))
+    final_position = float(episode_info.position_m)
     target_time_s = float(mtto_env.train_service.schedule_time)
-    total_time_s = float(
-        basic_info.get("operation_time", mtto_env.state.operation_time_s)
-    )
-    total_energy_kj = float(
-        basic_info.get("energy_consumption", mtto_env.state.energy_consumption_kj)
-    )
+    total_time_s = float(episode_info.operation_time_s)
+    total_energy_j = float(episode_info.energy_consumption_j)
     stop_error_m = abs(float(mtto_env.train_service.target_position) - final_position)
     time_error_s = total_time_s - target_time_s
-    final_speed_mps = float(basic_info.get("speed", mtto_env.state.speed_mps))
+    final_speed_mps = float(episode_info.speed_mps)
     success, precise_arrival, punctual_arrival = classify_arrival_status(
         stop_error_m=stop_error_m,
         time_error_s=time_error_s,
@@ -281,8 +385,7 @@ def evaluate_policy_once(
         total_reward=float(total_reward),
         total_time_s=total_time_s,
         target_time_s=target_time_s,
-        total_energy_j=total_energy_kj * 1000.0,
-        total_energy_kj=total_energy_kj,
+        total_energy_j=total_energy_j,
         start_position_m=float(mtto_env.train_service.start_position),
         target_position_m=float(mtto_env.train_service.target_position),
         final_position_m=final_position,
@@ -291,9 +394,9 @@ def evaluate_policy_once(
         time_error_s=time_error_s,
         strict_stop_error_limit_m=get_strict_stop_error_limit_m(mtto_env.train_service),
         strict_time_error_limit_s=get_strict_time_error_limit_s(mtto_env.train_service),
-        comfort_tav=float(basic_info.get("comfort_tav", 0.0)),
-        comfort_er_pct=float(basic_info.get("comfort_er_pct", 0.0)),
-        comfort_rms=float(basic_info.get("comfort_rms", 0.0)),
+        comfort_tav=float(episode_info.comfort_tav),
+        comfort_er_pct=float(episode_info.comfort_er_pct),
+        comfort_rms=float(episode_info.comfort_rms),
         terminated=bool(terminated),
         truncated=bool(truncated),
         episode_steps=episode_steps,
@@ -330,9 +433,7 @@ def evaluate_operational_policy_once(
     speeds = [abs(state.speed_mps)]
     safety_margins: list[float] = []
     safety_violation_positions_m: list[float] = []
-    observation_buffer = np.empty(
-        ObservationBuilder.OBSERVATION_DIM, dtype=np.float32
-    )
+    observation_buffer = np.empty(ObservationBuilder.OBSERVATION_DIM, dtype=np.float32)
     terminated = truncated = False
 
     while not (terminated or truncated):
@@ -384,7 +485,6 @@ def evaluate_operational_policy_once(
         total_time_s=state.operation_time_s,
         target_time_s=stepper.train_service.schedule_time,
         total_energy_j=state.energy_consumption_kj * 1000.0,
-        total_energy_kj=state.energy_consumption_kj,
         start_position_m=stepper.train_service.start_position,
         target_position_m=stepper.train_service.target_position,
         final_position_m=state.position_m,
@@ -415,17 +515,77 @@ def save_policy_evaluation_curve(
     result: PolicyEvaluationResult,
     output_path: str,
     *,
-    extra_metrics: dict[str, object] | None = None,
+    extra_metrics: Mapping[str, object] | None = None,
+    metrics_path: str | None = None,
 ) -> tuple[str, str]:
-    metrics = result.to_metrics()
+    canonical_fields = {
+        "artifact_type",
+        "schema_version",
+        "created_at",
+        "success",
+        "precise_arrival",
+        "punctual_arrival",
+        "total_reward",
+        "total_time_s",
+        "target_time_s",
+        "time_error_s",
+        "start_position_m",
+        "target_position_m",
+        "final_position_m",
+        "final_speed_mps",
+        "stop_error_m",
+        "total_energy_j",
+        "comfort_tav",
+        "comfort_er_pct",
+        "comfort_rms",
+        "terminated",
+        "truncated",
+        "episode_steps",
+        "min_safety_margin_mps",
+        "mean_safety_margin_mps",
+        "strict_stop_error_limit_m",
+        "strict_time_error_limit_s",
+        "selection_comparison_key",
+        "selection_rule",
+        "extensions",
+    }
+    num_timesteps = None
+    evaluation_rollout_index = None
+    extensions: dict[str, object] = {}
     if extra_metrics:
-        metrics.update(extra_metrics)
-
-    return save_curve_and_metrics(
-        pos_arr=result.trajectory_pos_m,
-        speed_arr=result.trajectory_speed_mps,
-        output_path=output_path,
-        metrics=metrics,
+        raw_num_timesteps = extra_metrics.get("num_timesteps")
+        if raw_num_timesteps is not None:
+            num_timesteps = int(raw_num_timesteps)
+        raw_evaluation_rollout_index = extra_metrics.get("evaluation_rollout_index")
+        if raw_evaluation_rollout_index is not None:
+            evaluation_rollout_index = int(raw_evaluation_rollout_index)
+        raw_extensions = extra_metrics.get("extensions")
+        if isinstance(raw_extensions, Mapping):
+            extensions.update(raw_extensions)
+        extensions.update(
+            {
+                key: value
+                for key, value in extra_metrics.items()
+                if key not in canonical_fields
+                and key not in {"num_timesteps", "evaluation_rollout_index"}
+            }
+        )
+    metrics = result.to_evaluation_metrics(
+        extensions=extensions,
+        num_timesteps=num_timesteps,
+        evaluation_rollout_index=evaluation_rollout_index,
+    )
+    return save_evaluation_artifact(
+        EvaluationArtifact(
+            metrics=metrics,
+            trajectory=TrajectoryData(
+                position_m=result.trajectory_pos_m,
+                speed_mps=result.trajectory_speed_mps,
+                safety_violation_positions_m=result.safety_violation_positions_m,
+            ),
+        ),
+        output_path,
+        metrics_path=metrics_path,
     )
 
 
@@ -434,14 +594,15 @@ def evaluate_and_save_final_policy(
     env: gym.Env[np.ndarray, np.ndarray],
     *,
     output_path: str,
-    metadata: dict[str, object] | None = None,
+    metadata: Mapping[str, object] | None = None,
     deterministic: bool = True,
+    metrics_path: str | None = None,
 ) -> tuple[PolicyEvaluationResult, str, str]:
     """Evaluate a final policy once and persist its canonical final artifacts.
 
     The caller owns the environment lifecycle.  ``output_path`` should normally
     be ``<final_output_dir>/final_trajectory.npz``; metrics are emitted next to
-    it as ``final_trajectory_metrics.json``.
+    it as ``metrics_final.json``.
     """
     result = evaluate_policy_once(model, env, deterministic=deterministic)
     extra_metrics = dict(metadata or {})
@@ -455,6 +616,7 @@ def evaluate_and_save_final_policy(
         result,
         output_path,
         extra_metrics=extra_metrics,
+        metrics_path=metrics_path,
     )
     return result, npz_path, metrics_path
 

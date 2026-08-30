@@ -208,8 +208,13 @@ uv run python -m scripts.show_rl_result \
 `ceil(training_episodes / num_envs) * num_envs` 向上取整；默认 `7000` 回合和
 `8` 个环境的有效目标仍为 `7000`。项目按理论最大单回合长度推导并对齐 PPO rollout 的
 内部环境步上限，命令行不再接受手工时间步预算。完成后在
-`run_metadata.json.training_budget` 中核对有效回合数、推导步数、实际回合数和停止原因。
+`metadata.json` 的 `training_budget` 中核对有效回合数、推导步数、实际回合数和停止原因。
 该预算接口已更新，旧版本 manifest 不能用于 `--resume`；请为新实验使用新的输出根目录。
+三类消融脚本均将矩阵状态写入各自输出根目录的 `manifest.json`。需要断点恢复时显式追加
+`--resume`；runner 会按稳定 `run_id` 跳过 canonical 产物完整的运行，并在首个失败运行处停止，
+其余运行保留为 `pending`。如果输出目录已有 manifest 但未指定 `--resume`，新训练会拒绝覆盖；
+确认要重新开始时使用 `--force-new`，旧 manifest 会先备份为带 UTC 时间戳的文件。resume 只检查
+canonical 产物，不会在检查阶段自动复制旧版产物。
 
 预览步长消融运行矩阵：
 
@@ -249,28 +254,6 @@ uv run python -m scripts.run_reward_ablation train \
 
 uv run python -m scripts.run_reward_ablation show \
   --output-root output/optimal/rl/reward_ablation_safety
-```
-
-预览生存奖励尺度消融运行矩阵：
-
-```bash
-uv run python -m scripts.run_survival_reward_ablation train \
-  --survival-weights 0.0 20.0 50.0 100.0 200.0 \
-  --num-envs 8 \
-  --evaluation-interval-rollouts 12 \
-  --dry-run
-```
-
-执行生存奖励尺度消融并展示结果：
-
-```bash
-uv run python -m scripts.run_survival_reward_ablation train \
-  --survival-weights 0.0 20.0 50.0 100.0 200.0 \
-  --num-envs 8 \
-  --evaluation-interval-rollouts 12
-
-uv run python -m scripts.run_survival_reward_ablation show \
-  --output-root output/optimal/rl/survival_reward_ablation
 ```
 
 预览方法消融运行矩阵：

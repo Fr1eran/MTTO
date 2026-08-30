@@ -9,6 +9,7 @@ import numpy as np
 from numpy.typing import NDArray
 from stable_baselines3.common.callbacks import BaseCallback, ProgressBarCallback
 
+from contracts.evaluation import EvaluationHistory
 from rl.evaluation import (
     PolicyEvaluationResult,
     describe_best_update_reason,
@@ -21,6 +22,7 @@ from rl.reward_diagnostics import (
     REWARD_NAMES,
     REWARD_SIGNAL_COUNT,
 )
+from utils.io_utils import save_evaluation_history
 
 DEFAULT_EVALUATION_INTERVAL_ROLLOUTS = 12
 
@@ -490,7 +492,7 @@ class BestEvaluationArtifactHandler:
         if reason is None:
             return
         tracked = event.result
-        host.model.save(os.path.join(self.output_dir, "best_model"))
+        host.model.save(os.path.join(self.output_dir, "policy_best"))
         metrics = tracked.to_metrics(
             num_timesteps=event.training_step,
             evaluation_rollout_index=event.rollout_index,
@@ -502,6 +504,7 @@ class BestEvaluationArtifactHandler:
             tracked,
             os.path.join(self.output_dir, "best_trajectory.npz"),
             extra_metrics=metrics,
+            metrics_path=os.path.join(self.output_dir, "metrics_best.json"),
         )
         self.best_result = tracked
         self._log_result(host, tracked, prefix="best")
@@ -545,8 +548,7 @@ class EvaluationHistoryArtifactHandler:
             if offsets[-1] > 0
             else np.empty(0, dtype=np.float64)
         )
-        np.savez(
-            self.output_path,
+        history = EvaluationHistory(
             training_steps=np.asarray(
                 [event.training_step for event in self._events], dtype=np.int64
             ),
@@ -565,12 +567,11 @@ class EvaluationHistoryArtifactHandler:
             stop_error_m=np.asarray(
                 [event.result.stop_error_m for event in self._events], dtype=np.float64
             ),
-            abs_time_error_s=np.asarray(
-                [abs(event.result.time_error_s) for event in self._events],
-                dtype=np.float64,
+            time_error_s=np.asarray(
+                [event.result.time_error_s for event in self._events], dtype=np.float64
             ),
-            total_energy_kj=np.asarray(
-                [event.result.total_energy_kj for event in self._events],
+            total_energy_j=np.asarray(
+                [event.result.total_energy_j for event in self._events],
                 dtype=np.float64,
             ),
             comfort_tav=np.asarray(
@@ -583,6 +584,7 @@ class EvaluationHistoryArtifactHandler:
             safety_violation_positions_m=flattened,
             safety_violation_position_offsets=offsets,
         )
+        _ = save_evaluation_history(history, self.output_path)
 
 
 class ScheduledPolicyEvaluationCallback(BaseCallback):

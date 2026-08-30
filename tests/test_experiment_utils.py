@@ -15,6 +15,7 @@ from rl.experiment_utils import (
     build_default_training_args,
     build_reward_config,
     build_rl_trajectory_comparison_key,
+    build_run_metadata,
     curriculum_profile_names,
     load_run_metadata,
     resolve_curriculum_profile_name,
@@ -151,10 +152,14 @@ def test_load_run_metadata_falls_back_to_parent_directory(tmp_path: Path) -> Non
     final_dir = run_dir / "final"
     final_dir.mkdir(parents=True)
 
-    expected_metadata = {
-        "reward_preset_name": "basic",
-        "tb_log_name": "trainning_log__monitor_best__430p0_100p0__basic",
-    }
+    expected_metadata = build_run_metadata(
+        reward_preset=resolve_reward_preset("basic"),
+        schedule_time_s=430.0,
+        step_distance=100.0,
+        reward_discount=0.998,
+        run_mode="monitor_best",
+        tb_log_name="train_log__monitor_best__430p0_100p0__basic",
+    )
     metadata_path = save_run_metadata(run_dir, expected_metadata)
 
     assert Path(metadata_path).name == RUN_METADATA_FILENAME
@@ -381,4 +386,3 @@ def test_derive_training_budget_rules() -> None:
             rollout_steps_per_update=8192,
             schedule_time_s=465.0,
         )
-

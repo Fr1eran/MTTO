@@ -39,7 +39,13 @@ def _state(
 
 @pytest.fixture
 def calculator() -> RewardCalculator:
-    service = TrainService(0.0, 0.0, 100.0, 20.0, 1.0, 1.0, 2.0)
+    service = TrainService(
+        start_position=0.0,
+        target_position=100.0,
+        schedule_time=20.0,
+        max_acc_change=1.0,
+        max_stop_error=2.0,
+    )
     return RewardCalculator(
         service,
         max_episode_steps=10,
@@ -196,7 +202,13 @@ def test_terminal_stopping_is_rewarded_only_on_termination(
 
 
 def test_safety_potential_can_be_disabled() -> None:
-    service = TrainService(0.0, 0.0, 100.0, 20.0, 1.0, 1.0, 2.0)
+    service = TrainService(
+        start_position=0.0,
+        target_position=100.0,
+        schedule_time=20.0,
+        max_acc_change=1.0,
+        max_stop_error=2.0,
+    )
     calculator = RewardCalculator(
         service,
         max_episode_steps=10,
@@ -222,7 +234,13 @@ def test_safety_potential_can_be_disabled() -> None:
 
 
 def test_survival_reward_scale_is_configurable() -> None:
-    service = TrainService(0.0, 0.0, 100.0, 20.0, 1.0, 1.0, 2.0)
+    service = TrainService(
+        start_position=0.0,
+        target_position=100.0,
+        schedule_time=20.0,
+        max_acc_change=1.0,
+        max_stop_error=2.0,
+    )
     calculator = RewardCalculator(
         service,
         max_episode_steps=10,
@@ -248,7 +266,13 @@ def test_survival_reward_scale_is_configurable() -> None:
 
 
 def test_dense_reward_scales_are_configurable() -> None:
-    service = TrainService(0.0, 0.0, 100.0, 20.0, 1.0, 1.0, 2.0)
+    service = TrainService(
+        start_position=0.0,
+        target_position=100.0,
+        schedule_time=20.0,
+        max_acc_change=1.0,
+        max_stop_error=2.0,
+    )
     calculator = RewardCalculator(
         service,
         max_episode_steps=10,
@@ -282,7 +306,13 @@ def test_dense_reward_scales_are_configurable() -> None:
 
 def test_zero_dense_reward_scales_disable_components() -> None:
     config = RewardConfig(energy_reward_scale=0.0, comfort_reward_scale=0.0)
-    service = TrainService(0.0, 0.0, 100.0, 20.0, 1.0, 1.0, 2.0)
+    service = TrainService(
+        start_position=0.0,
+        target_position=100.0,
+        schedule_time=20.0,
+        max_acc_change=1.0,
+        max_stop_error=2.0,
+    )
     calculator = RewardCalculator(
         service,
         max_episode_steps=10,
@@ -328,7 +358,13 @@ def test_reward_config_invalid_scales_fall_back_to_defaults(
 
 
 def test_survival_reward_zero_disables_survival() -> None:
-    service = TrainService(0.0, 0.0, 100.0, 20.0, 1.0, 1.0, 2.0)
+    service = TrainService(
+        start_position=0.0,
+        target_position=100.0,
+        schedule_time=20.0,
+        max_acc_change=1.0,
+        max_stop_error=2.0,
+    )
     calculator = RewardCalculator(
         service,
         max_episode_steps=10,

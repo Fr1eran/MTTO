@@ -70,7 +70,7 @@ class OperationalStepper:
             track=track,
             factor=safeguard_utility.gamma,
             begin_pos=train_service.start_position,
-            begin_speed=train_service.start_speed,
+            begin_speed=0.0,
             end_pos=train_service.target_position + train_service.max_stop_error * 20,
             end_speed=0.0,
         )
@@ -89,7 +89,7 @@ class OperationalStepper:
             factor=safeguard_utility.gamma,
             energy_con_calc=self.ecc,
             begin_pos=train_service.start_position,
-            begin_speed=train_service.start_speed,
+            begin_speed=0.0,
             end_pos=train_service.target_position,
             end_speed=0.0,
             distance=train_service.target_position - train_service.start_position,
@@ -207,7 +207,7 @@ class OperationalStepper:
     def reset(self) -> OperationalState:
         return self._build_state(
             position_m=self.train_service.start_position,
-            speed_mps=self.train_service.start_speed,
+            speed_mps=0.0,
             acceleration_mps2=0.0,
             operation_time_s=0.0,
             energy_consumption_kj=0.0,

@@ -1,0 +1,81 @@
+"""Shared lifecycle and statistics primitives for ablation experiments."""
+
+from .artifacts import (
+    artifact_paths,
+    canonical_artifacts_complete,
+    load_npz_arrays,
+    materialize_canonical_artifacts,
+)
+from .manifest import (
+    ManifestSchemaError,
+    ManifestStore,
+    build_manifest_payload,
+    manifest_matrix_config,
+    manifest_runs,
+    status_map,
+)
+from .models import (
+    ArtifactLayout,
+    CurveAggregate,
+    FinalMetricAggregate,
+    MetricStats,
+)
+from .runner import (
+    AblationDriver,
+    AblationRun,
+    AblationSpec,
+    ArgRef,
+    ArgumentSpec,
+    CLIConfig,
+    CurveAggregationSpec,
+    CurveMetricSpec,
+    FinalAggregationSpec,
+    FinalMetricSpec,
+    SeedValues,
+    VariantPayloads,
+    VariantSpec,
+    VariantValues,
+    execute_matrix,
+)
+from .statistics import (
+    aggregate_indexed_series,
+    aggregate_matrix,
+    align_exact,
+    smooth_episode_curve,
+)
+
+__all__ = [
+    "AblationRun",
+    "AblationDriver",
+    "AblationSpec",
+    "ArgRef",
+    "ArgumentSpec",
+    "artifact_paths",
+    "ArtifactLayout",
+    "CurveAggregate",
+    "CLIConfig",
+    "CurveAggregationSpec",
+    "CurveMetricSpec",
+    "FinalAggregationSpec",
+    "FinalMetricAggregate",
+    "FinalMetricSpec",
+    "ManifestSchemaError",
+    "ManifestStore",
+    "MetricStats",
+    "aggregate_indexed_series",
+    "aggregate_matrix",
+    "align_exact",
+    "build_manifest_payload",
+    "manifest_matrix_config",
+    "manifest_runs",
+    "canonical_artifacts_complete",
+    "execute_matrix",
+    "load_npz_arrays",
+    "materialize_canonical_artifacts",
+    "smooth_episode_curve",
+    "SeedValues",
+    "status_map",
+    "VariantPayloads",
+    "VariantSpec",
+    "VariantValues",
+]

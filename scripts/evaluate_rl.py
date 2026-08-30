@@ -1,59 +1,109 @@
 import argparse
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 
+import gymnasium as gym
 import numpy as np
+from gymnasium.wrappers import RecordVideo
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv, VecEnv, VecVideoRecorder
+from stable_baselines3.common.vec_env import VecEnv
 
-from rl.env_factory import make_env
+from contracts.training import RunMetadata
 from rl.evaluation import (
     PolicyEvaluationResult,
-    classify_arrival_status,
-    get_strict_stop_error_limit_m,
-    get_strict_time_error_limit_s,
+    build_single_eval_env,
+    evaluate_and_save_final_policy,
+    evaluate_policy_once,
 )
 from rl.experiment_utils import (
     DEFAULT_DEVICE,
-    DEFAULT_REWARD_DISCOUNT,
-    DEFAULT_REWARD_PRESET_NAME,
-    DEFAULT_SCHEDULE_TIME_S,
-    DEFAULT_STEP_DISTANCE,
     RL_FINAL_MODEL_FILENAME,
-    build_run_metadata,
+    RewardPreset,
     load_run_metadata,
     resolve_reward_preset,
     reward_preset_names,
 )
 from rl.operational_state import OperationalState
-from utils.io_utils import save_curve_and_metrics
 from utils.plot_utils import apply_sci_figure_layout
 from utils.scenario import build_scenario
 
 
-def _get_initial_state(venv: VecEnv) -> OperationalState:
-    values = venv.get_attr("state")
-    if not values:
+def _get_initial_state(env: VecEnv | gym.Env) -> OperationalState:
+    get_attr = getattr(env, "get_attr", None)
+    if callable(get_attr):
+        values = get_attr("state")
+        if not values:
+            raise RuntimeError("Could not read environment state")
+        return values[0]
+
+    state = getattr(getattr(env, "unwrapped", env), "state", None)
+    if state is None:
         raise RuntimeError("Could not read environment state")
-    return values[0]
+    return state
 
 
 def build_initial_rollout_series(
-    venv: VecEnv,
+    env: VecEnv | gym.Env,
 ) -> tuple[
     list[float],
     list[float],
     list[float],
     list[float],
 ]:
-    state = _get_initial_state(venv)
+    state = _get_initial_state(env)
     return (
         [float(state.position_m)],
         [float(state.speed_mps)],
         [float(state.operation_time_s)],
         [float(state.redundant_operation_time_s)],
     )
+
+
+class OperationTimeTrace(gym.Wrapper):
+    """Collect operation-time diagnostics without owning evaluation semantics."""
+
+    def __init__(self, env: gym.Env) -> None:
+        super().__init__(env)
+        self.position_seq: list[float] = []
+        self.speed_seq: list[float] = []
+        self.operation_time_seq: list[float] = []
+        self.redundant_operation_time_seq: list[float] = []
+
+    def _reset_trace(self) -> None:
+        (
+            self.position_seq,
+            self.speed_seq,
+            self.operation_time_seq,
+            self.redundant_operation_time_seq,
+        ) = build_initial_rollout_series(self.env)
+
+    def _append_current_state(self) -> None:
+        state = _get_initial_state(self.env)
+        self.position_seq.append(float(state.position_m))
+        self.speed_seq.append(float(state.speed_mps))
+        self.operation_time_seq.append(float(state.operation_time_s))
+        self.redundant_operation_time_seq.append(
+            float(state.redundant_operation_time_s)
+        )
+
+    def reset(
+        self,
+        *,
+        seed: int | None = None,
+        options: dict[str, object] | None = None,
+    ) -> tuple[np.ndarray, dict[str, object]]:
+        observation, info = self.env.reset(seed=seed, options=options)
+        self._reset_trace()
+        return observation, info
+
+    def step(
+        self,
+        action: np.ndarray,
+    ) -> tuple[np.ndarray, float, bool, bool, dict[str, object]]:
+        observation, reward, terminated, truncated, info = self.env.step(action)
+        self._append_current_state()
+        return observation, reward, terminated, truncated, info
 
 
 def plot_operation_time_series(
@@ -252,6 +302,121 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _run_evaluation(
+    args: argparse.Namespace,
+    *,
+    load_dir: str,
+    run_metadata: RunMetadata | Mapping[str, object],
+    schedule_time_s: float,
+    reward_discount: float,
+    step_distance: float,
+    reward_preset: RewardPreset,
+    output_dir: str,
+) -> tuple[PolicyEvaluationResult, str, str, OperationTimeTrace | None]:
+    model_zip_path = os.path.join(load_dir, RL_FINAL_MODEL_FILENAME)
+    if not os.path.exists(model_zip_path):
+        raise FileNotFoundError(f"Model file not found: {model_zip_path}")
+
+    vehicle, track, safeguard_utility, train_service = build_scenario(
+        schedule_time_s=schedule_time_s
+    )
+    evaluation_env = build_single_eval_env(
+        vehicle=vehicle,
+        track=track,
+        safeguard_utility=safeguard_utility,
+        train_service=train_service,
+        gamma=reward_discount,
+        step_distance=step_distance,
+        enable_trajectory_tracking=args.save_trajectory or args.record_video,
+        render_mode="rgb_array" if args.record_video else None,
+        reward_config=reward_preset.config,
+    )
+    if args.plot_operation_time_series:
+        time_trace = OperationTimeTrace(evaluation_env)
+    else:
+        time_trace = None
+    if time_trace is not None:
+        evaluation_env = time_trace
+
+    if args.record_video:
+        eval_name_prefix = f"eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        evaluation_env = RecordVideo(
+            evaluation_env,
+            video_folder=args.video_folder,
+            step_trigger=lambda step: step == args.video_trigger_step,
+            video_length=args.video_length,
+            name_prefix=eval_name_prefix,
+        )
+
+    saved_npz_path = ""
+    saved_json_path = ""
+    try:
+        model = PPO.load(model_zip_path, device=args.device)
+        evaluation_metadata = (
+            run_metadata.to_mapping()
+            if isinstance(run_metadata, RunMetadata)
+            else dict(run_metadata)
+        )
+        evaluation_metadata["evaluation_load_dir"] = load_dir
+        if args.save_trajectory:
+            (
+                evaluation_result,
+                saved_npz_path,
+                saved_json_path,
+            ) = evaluate_and_save_final_policy(
+                model,
+                evaluation_env,
+                output_path=os.path.join(output_dir, "final_trajectory.npz"),
+                metadata=evaluation_metadata,
+                deterministic=args.deterministic,
+                metrics_path=os.path.join(output_dir, "metrics_final.json"),
+            )
+        else:
+            evaluation_result = evaluate_policy_once(
+                model,
+                evaluation_env,
+                deterministic=args.deterministic,
+            )
+    finally:
+        evaluation_env.close()
+
+    return evaluation_result, saved_npz_path, saved_json_path, time_trace
+
+
+def _print_evaluation_results(
+    result: PolicyEvaluationResult,
+    *,
+    reward_preset_name: str,
+    saved_npz_path: str,
+    saved_json_path: str,
+) -> None:
+    print("========== Evaluation Results ==========")
+    print(f"  total_reward:       {result.total_reward:.6f}")
+    print(f"  success:            {result.success}")
+    print(f"  precise_arrival:    {result.precise_arrival}")
+    print(f"  punctual_arrival:   {result.punctual_arrival}")
+    print(f"  reward_preset:     {reward_preset_name}")
+    print(f"  target_time_s:      {result.target_time_s:.2f}")
+    print(f"  total_time_s:       {result.total_time_s:.2f}")
+    print(f"  time_error_s:       {result.time_error_s:.2f}")
+    print(f"  start_position_m:   {result.start_position_m:.2f}")
+    print(f"  target_position_m:  {result.target_position_m:.2f}")
+    print(f"  final_position_m:   {result.final_position_m:.2f}")
+    print(f"  stop_error_m:       {result.stop_error_m:.4f}")
+    print(f"  final_speed_mps:    {result.final_speed_mps:.4f}")
+    print(f"  total_energy_kj:    {result.total_energy_kj:.4f}")
+    print(f"  total_energy_j:     {result.total_energy_j:.4f}")
+    print(f"  comfort_tav:        {result.comfort_tav:.4f} m/s²")
+    print(f"  comfort_er_pct:     {result.comfort_er_pct:.2f} %")
+    print(f"  comfort_rms:        {result.comfort_rms:.4f} m/s²")
+    print(f"  episode_steps:      {result.episode_steps}")
+    if saved_npz_path:
+        print(f"  trajectory_npz:     {saved_npz_path}")
+    if saved_json_path:
+        print(f"  trajectory_json:    {saved_json_path}")
+    print("=========================================")
+
+
 def main() -> None:
     args = build_arg_parser().parse_args()
 
@@ -261,37 +426,32 @@ def main() -> None:
     schedule_time_s = float(
         args.schedule_time_s
         if args.schedule_time_s is not None
-        else run_metadata.get("schedule_time_s", DEFAULT_SCHEDULE_TIME_S)
+        else run_metadata.schedule_time_s
     )
     reward_discount = float(
         args.reward_discount
         if args.reward_discount is not None
-        else run_metadata.get("reward_discount", DEFAULT_REWARD_DISCOUNT)
+        else run_metadata.reward_discount
     )
-    ds = float(
+    step_distance = float(
         args.step_distance
         if args.step_distance is not None
-        else run_metadata.get(
-            "step_distance",
-            run_metadata.get("max_step_distance", DEFAULT_STEP_DISTANCE),
-        )
+        else run_metadata.step_distance
     )
     reward_preset = resolve_reward_preset(
-        args.reward_preset
-        or str(run_metadata.get("reward_preset_name", DEFAULT_REWARD_PRESET_NAME))
+        args.reward_preset or run_metadata.reward_preset_name
     )
-    reward_config = reward_preset.config
     output_dir = args.output_dir if args.output_dir is not None else load_dir
-
     model_zip_path = os.path.join(load_dir, RL_FINAL_MODEL_FILENAME)
+
     if args.dry_run:
         print("========== Evaluation Dry Run ==========")
         print(f"  load_dir:            {load_dir}")
         print(f"  output_dir:          {output_dir}")
         print(f"  reward_preset:      {reward_preset.name}")
-        print(f"  reward_config:       {reward_config}")
+        print(f"  reward_config:       {reward_preset.config}")
         print(f"  schedule_time_s:     {schedule_time_s:.2f}")
-        print(f"  step_distance:       {ds:.2f}")
+        print(f"  step_distance:       {step_distance:.2f}")
         print(f"  reward_discount:     {reward_discount:.4f}")
         print(f"  deterministic:       {args.deterministic}")
         print(f"  record_video:        {args.record_video}")
@@ -302,200 +462,35 @@ def main() -> None:
         print("========================================")
         return
 
-    if not os.path.exists(model_zip_path):
-        raise FileNotFoundError(f"Model file not found: {model_zip_path}")
-
-    vehicle, track, safeguard_utility, train_service = build_scenario(
-        schedule_time_s=schedule_time_s
-    )
-
-    venv_eval = DummyVecEnv(
-        [
-            lambda: make_env(
-                vehicle=vehicle,
-                track=track,
-                safeguard_utility=safeguard_utility,
-                train_service=train_service,
-                gamma=reward_discount,
-                step_distance=ds,
-                enable_trajectory_tracking=args.record_video,
-                render_mode="rgb_array" if args.record_video else None,
-                reward_config=reward_config,
-            )
-        ]
-    )
-
-    if args.record_video:
-        eval_name_prefix = f"eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        venv_eval = VecVideoRecorder(
-            venv_eval,
-            video_folder=args.video_folder,
-            record_video_trigger=lambda step: step == args.video_trigger_step,
-            video_length=args.video_length,
-            name_prefix=eval_name_prefix,
-        )
-
-    model = PPO.load(model_zip_path, device=args.device)
-
-    total_reward = 0.0
-    episode_steps = 0
-
-    obs = venv_eval.reset()
     (
-        trajectory_position_seq,
-        trajectory_speed_seq,
-        operation_time_seq,
-        redundant_operation_time_seq,
-    ) = build_initial_rollout_series(venv_eval)
-    episode_over = False
-    last_info: dict[str, object] = {}
-
-    while not episode_over:
-        if not isinstance(obs, np.ndarray):
-            raise TypeError("VecEnv observation must be a numpy.ndarray for MlpPolicy.")
-        action, _ = model.predict(obs, deterministic=args.deterministic)
-        obs, rewards, dones, infos = venv_eval.step(action)
-        total_reward += float(rewards[0])
-        episode_steps += 1
-        episode_over = bool(dones[0])
-        last_info = infos[0]
-        basic = last_info.get("basic")
-        if isinstance(basic, dict):
-            trajectory_position_seq.append(float(basic.get("position", 0.0)))
-            trajectory_speed_seq.append(float(basic.get("speed", 0.0)))
-            operation_time_seq.append(float(basic.get("operation_time", 0.0)))
-            redundant_operation_time_seq.append(
-                float(basic.get("redundant_operation_time", 0.0))
-            )
-
-    target_time_s = float(train_service.schedule_time)
-    start_position_m = float(train_service.start_position)
-    target_position_m = float(train_service.target_position)
-    # VecEnv 在 done 后会自动 reset；终态指标优先从最后一步 info 快照读取。
-    basic_info = last_info.get("basic")
-    basic_snapshot = basic_info if isinstance(basic_info, dict) else {}
-
-    # 提取性能指标
-    final_position_m = float(basic_snapshot.get("position", 0.0))
-    final_speed_mps = float(basic_snapshot.get("speed", 0.0))
-    total_time_s = float(basic_snapshot.get("operation_time", 0.0))
-    total_energy_kj = float(basic_snapshot.get("energy_consumption", 0.0))
-    total_energy_j = total_energy_kj * 1000.0
-    stop_error_m = abs(target_position_m - final_position_m)
-    time_error_s = total_time_s - target_time_s
-
-    comfort_tav = float(basic_snapshot.get("comfort_tav", 0.0))
-    comfort_er_pct = float(basic_snapshot.get("comfort_er_pct", 0.0))
-    comfort_rms = float(basic_snapshot.get("comfort_rms", 0.0))
-    outcome_info = last_info.get("outcome")
-    outcome_snapshot = outcome_info if isinstance(outcome_info, dict) else {}
-    truncated = bool(
-        outcome_snapshot.get(
-            "truncated",
-            last_info.get("TimeLimit.truncated", False),
-        )
+        evaluation_result,
+        saved_npz_path,
+        saved_json_path,
+        time_trace,
+    ) = _run_evaluation(
+        args,
+        load_dir=load_dir,
+        run_metadata=run_metadata,
+        schedule_time_s=schedule_time_s,
+        reward_discount=reward_discount,
+        step_distance=step_distance,
+        reward_preset=reward_preset,
+        output_dir=output_dir,
     )
-    terminated = bool(
-        outcome_snapshot.get("terminated", episode_over and not truncated)
+    _print_evaluation_results(
+        evaluation_result,
+        reward_preset_name=reward_preset.name,
+        saved_npz_path=saved_npz_path,
+        saved_json_path=saved_json_path,
     )
-
-    success, precise_arrival, punctual_arrival = classify_arrival_status(
-        stop_error_m=stop_error_m,
-        time_error_s=time_error_s,
-        final_speed_mps=final_speed_mps,
-        train_service=train_service,
-        terminated=terminated,
-        truncated=truncated,
-    )
-
-    saved_npz_path = ""
-    saved_json_path = ""
-    if args.save_trajectory:
-        npz_path = os.path.join(output_dir, "final_trajectory.npz")
-        trajectory_metadata = build_run_metadata(
-            reward_preset=reward_preset,
-            schedule_time_s=schedule_time_s,
-            step_distance=ds,
-            reward_discount=reward_discount,
-            run_mode=str(run_metadata.get("run_mode")),
-            experiment_tag=str(run_metadata.get("experiment_tag")),
-            tensorboard_log_dir=str(run_metadata.get("tensorboard_log_dir")),
-            tb_log_name=str(run_metadata.get("tb_log_name")),
-            output_dir=str(run_metadata.get("output_dir")),
-            final_output_dir=str(run_metadata.get("final_output_dir")),
-            best_eval_output_dir=str(run_metadata.get("best_eval_output_dir")),
-        )
-        trajectory_metadata["trajectory_source"] = "final"
-        trajectory_metadata["evaluation_load_dir"] = load_dir
-        trajectory_metadata["deterministic"] = bool(args.deterministic)
-        evaluation_result = PolicyEvaluationResult(
-            success=success,
-            precise_arrival=precise_arrival,
-            punctual_arrival=punctual_arrival,
-            total_reward=float(total_reward),
-            total_time_s=total_time_s,
-            target_time_s=target_time_s,
-            total_energy_j=total_energy_j,
-            total_energy_kj=total_energy_kj,
-            start_position_m=start_position_m,
-            target_position_m=target_position_m,
-            final_position_m=final_position_m,
-            final_speed_mps=final_speed_mps,
-            stop_error_m=stop_error_m,
-            time_error_s=time_error_s,
-            strict_stop_error_limit_m=get_strict_stop_error_limit_m(train_service),
-            strict_time_error_limit_s=get_strict_time_error_limit_s(train_service),
-            comfort_tav=comfort_tav,
-            comfort_er_pct=comfort_er_pct,
-            comfort_rms=comfort_rms,
-            terminated=terminated,
-            truncated=truncated,
-            episode_steps=episode_steps,
-            trajectory_pos_m=np.asarray(trajectory_position_seq, dtype=np.float32),
-            trajectory_speed_mps=np.asarray(trajectory_speed_seq, dtype=np.float32),
-        )
-        trajectory_metrics = evaluation_result.to_metrics()
-        trajectory_metrics.update(trajectory_metadata)
-        saved_npz_path, saved_json_path = save_curve_and_metrics(
-            pos_arr=trajectory_position_seq,
-            speed_arr=trajectory_speed_seq,
-            output_path=npz_path,
-            metrics=trajectory_metrics,
-        )
-
-    venv_eval.close()
-
-    print("========== Evaluation Results ==========")
-    print(f"  total_reward:       {total_reward:.6f}")
-    print(f"  success:            {success}")
-    print(f"  precise_arrival:    {precise_arrival}")
-    print(f"  punctual_arrival:   {punctual_arrival}")
-    print(f"  reward_preset:     {reward_preset.name}")
-    print(f"  target_time_s:      {target_time_s:.2f}")
-    print(f"  total_time_s:       {total_time_s:.2f}")
-    print(f"  time_error_s:       {time_error_s:.2f}")
-    print(f"  start_position_m:   {start_position_m:.2f}")
-    print(f"  target_position_m:  {target_position_m:.2f}")
-    print(f"  final_position_m:   {final_position_m:.2f}")
-    print(f"  stop_error_m:       {stop_error_m:.4f}")
-    print(f"  final_speed_mps:    {final_speed_mps:.4f}")
-    print(f"  total_energy_kj:    {total_energy_kj:.4f}")
-    print(f"  total_energy_j:     {total_energy_j:.4f}")
-    print(f"  comfort_tav:        {comfort_tav:.4f} m/s²")
-    print(f"  comfort_er_pct:     {comfort_er_pct:.2f} %")
-    print(f"  comfort_rms:        {comfort_rms:.4f} m/s²")
-    print(f"  episode_steps:      {episode_steps}")
-    if saved_npz_path:
-        print(f"  trajectory_npz:     {saved_npz_path}")
-    if saved_json_path:
-        print(f"  trajectory_json:    {saved_json_path}")
-    print("=========================================")
 
     if args.plot_operation_time_series:
+        if time_trace is None:
+            raise RuntimeError("Operation-time trace was not initialized")
         plot_operation_time_series(
-            operation_time_seq,
-            redundant_operation_time_seq,
-            target_time_s=target_time_s,
+            time_trace.operation_time_seq,
+            time_trace.redundant_operation_time_seq,
+            target_time_s=evaluation_result.target_time_s,
         )
 
 

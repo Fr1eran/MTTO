@@ -82,12 +82,11 @@ def mtto_env():
     vehicle = VehicleInfo(mass=317.5, numoftrainsets=5, length=128.5)
     train_service = TrainService(
         start_position=longyang_start_position,
-        start_speed=0.0,
         target_position=putong_end_position,
         schedule_time=440.0,
         max_acc_change=0.75,
-        max_arr_time_error_ratio=60.0,
         max_stop_error=2.0,
+        max_arr_time_error_s=60.0,
     )
 
     maglevttoenv = MTTOEnv(
@@ -105,12 +104,11 @@ def mtto_env():
 def _clone_train_service(train_service: TrainService) -> TrainService:
     return TrainService(
         start_position=train_service.start_position,
-        start_speed=train_service.start_speed,
         target_position=train_service.target_position,
         schedule_time=train_service.schedule_time,
         max_acc_change=train_service.max_acc_change,
-        max_arr_time_error_ratio=train_service.max_arr_time_error_ratio,
         max_stop_error=train_service.max_stop_error,
+        max_arr_time_error_s=train_service.max_arr_time_error_s,
     )
 
 
@@ -572,7 +570,14 @@ def test_reverse_direction_lookahead_cache_uses_step_index_grid() -> None:
         speed_limits=np.asarray([20.0]),
         speed_limit_intervals=np.asarray([0.0, 100.0]),
     )
-    service = TrainService(100.0, 0.0, 0.0, 10.0, 0.75, 0.05, 1.0)
+    service = TrainService(
+        start_position=100.0,
+        target_position=0.0,
+        schedule_time=10.0,
+        max_acc_change=0.75,
+        max_stop_error=1.0,
+        max_arr_time_error_s=10.0,
+    )
     upper_speed_query_count = 0
 
     def get_upper_speed(position_m: float) -> float:
@@ -640,7 +645,7 @@ def test_step_info_excludes_reward_diagnostics(mtto_env: MTTOEnv):
     action = mtto_env.action_space.sample()
     _, _, terminated, truncated, info = mtto_env.step(action)
 
-    assert "basic" in info
+    assert "episode" in info
     assert "outcome" in info
     assert info["outcome"] == {
         "terminated": terminated,
@@ -1036,8 +1041,8 @@ def test_gym_evaluation_uses_terminal_flags_without_persisting_violation_code(
     assert result.truncated is True
     assert result.success is False
     assert "violation_code" not in result.to_metrics()
-    assert "terminated" not in result.to_metrics()
-    assert "truncated" not in result.to_metrics()
+    assert result.to_metrics()["terminated"] is False
+    assert result.to_metrics()["truncated"] is True
 
 
 def test_observation_builder_supports_out_buffer(mtto_env: MTTOEnv) -> None:

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
+from dp.core import DP_UPPER_SPEED_ENVELOPE_VERSION
 from dp.experiment_utils import DP_CURVE_FILENAME, load_dp_curve_artifact
 from model.ocs import TrainService
 from rl.context_pool import ReferenceTrajectory
@@ -32,9 +33,9 @@ class DPTrajectoryReader:
     _METRIC_EXPECTATIONS: tuple[tuple[str, str], ...] = (
         ("target_time_s", "schedule_time"),
         ("start_position_m", "start_position"),
-        ("start_speed_mps", "start_speed"),
         ("target_position_m", "target_position"),
     )
+    _ENVELOPE_VERSION_METRIC = "dp_upper_speed_envelope_version"
 
     @classmethod
     def from_curve_dir(
@@ -77,17 +78,23 @@ class DPTrajectoryReader:
             )
 
         candidates: list[OptimizedCurveArtifact] = []
+        incompatible_envelope_version_found = False
         for curve_path in search_root.rglob(DP_CURVE_FILENAME):
             if not curve_path.is_file():
                 continue
             metrics_path = curve_path.with_name(f"{curve_path.stem}_metrics.json")
             metrics = cls._read_metrics(metrics_path)
-            if metrics is not None and cls._metrics_match_task(
+            if metrics is None:
+                continue
+            task_matches = cls._metrics_match_task_values(
                 metrics,
                 train_service=train_service,
                 target_speed=target_speed,
                 match_tolerance=match_tolerance,
-            ):
+            )
+            if task_matches and not cls._metrics_have_current_envelope_version(metrics):
+                incompatible_envelope_version_found = True
+            if task_matches and cls._metrics_have_current_envelope_version(metrics):
                 candidates.append(
                     OptimizedCurveArtifact(
                         npz_path=str(curve_path),
@@ -96,6 +103,12 @@ class DPTrajectoryReader:
                 )
 
         if not candidates:
+            if incompatible_envelope_version_found:
+                raise FileNotFoundError(
+                    "Found a task-matching DP trajectory with an incompatible "
+                    + "upper-speed-envelope version; regenerate the DP reference "
+                    + f"with version {DP_UPPER_SPEED_ENVELOPE_VERSION}."
+                )
             raise FileNotFoundError(
                 "Could not find a DP trajectory artifact matching the requested task."
             )
@@ -117,13 +130,18 @@ class DPTrajectoryReader:
         """Load one DP artifact without imposing an RL discretization match."""
         cls._validate_match_tolerance(match_tolerance)
         position, speed, cumulative_time, metrics = load_dp_curve_artifact(artifact)
-        if not cls._metrics_match_task(
+        if not cls._metrics_match_task_values(
             metrics,
             train_service=train_service,
             target_speed=target_speed,
             match_tolerance=match_tolerance,
         ):
             raise ValueError("DP trajectory artifact metadata does not match the task.")
+        if not cls._metrics_have_current_envelope_version(metrics):
+            raise ValueError(
+                "DP trajectory artifact has an incompatible upper-speed-envelope "
+                + "version; regenerate the reference trajectory."
+            )
         return ReferenceTrajectory(
             position_m=np.asarray(position, dtype=np.float64),
             speed_mps=np.asarray(speed, dtype=np.float64),
@@ -156,13 +174,37 @@ class DPTrajectoryReader:
         target_speed: float,
         match_tolerance: float,
     ) -> bool:
+        return cls._metrics_match_task_values(
+            metrics,
+            train_service=train_service,
+            target_speed=target_speed,
+            match_tolerance=match_tolerance,
+        ) and cls._metrics_have_current_envelope_version(metrics)
+
+    @classmethod
+    def _metrics_match_task_values(
+        cls,
+        metrics: dict[str, object],
+        *,
+        train_service: TrainService,
+        target_speed: float,
+        match_tolerance: float,
+    ) -> bool:
         expected_values = {
             metric_key: float(getattr(train_service, service_attr))
             for metric_key, service_attr in cls._METRIC_EXPECTATIONS
         }
+        expected_values["start_speed_mps"] = 0.0
         expected_values["target_speed_mps"] = float(target_speed)
         return all(
             (actual := _metric_as_float(metrics.get(key))) is not None
             and abs(actual - expected) <= match_tolerance
             for key, expected in expected_values.items()
         )
+
+    @classmethod
+    def _metrics_have_current_envelope_version(
+        cls, metrics: dict[str, object]
+    ) -> bool:
+        envelope_version = _metric_as_float(metrics.get(cls._ENVELOPE_VERSION_METRIC))
+        return envelope_version == float(DP_UPPER_SPEED_ENVELOPE_VERSION)

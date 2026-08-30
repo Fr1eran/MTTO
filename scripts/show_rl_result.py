@@ -1,9 +1,11 @@
 import argparse
+from collections.abc import Mapping
 
 import matplotlib.pyplot as plt
 import numpy as np
 from numpy.typing import NDArray
 
+from contracts.evaluation import EvaluationMetrics
 from rl.experiment_utils import (
     RL_DEFAULT_SEARCH_DIR as _RL_DEFAULT_SEARCH_DIR,
     RL_TRAJECTORY_SOURCE_CHOICES as _RL_TRAJECTORY_SOURCE_CHOICES,
@@ -16,11 +18,12 @@ from rl.experiment_utils import (
 from utils.plot_utils import apply_sci_figure_layout
 
 
-def _print_metrics(metrics: dict[str, object]) -> None:
-    if not metrics:
-        print("No metrics file found.")
-        return
-
+def _print_metrics(metrics: EvaluationMetrics | Mapping[str, object]) -> None:
+    display_metrics = (
+        metrics.to_display_mapping()
+        if isinstance(metrics, EvaluationMetrics)
+        else metrics
+    )
     print("Loaded metrics:")
     for key in [
         "trajectory_source",
@@ -52,8 +55,8 @@ def _print_metrics(metrics: dict[str, object]) -> None:
         "evaluation_rollout_index",
         "created_at",
     ]:
-        if key in metrics:
-            print(f"  {key}: {metrics[key]}")
+        if key in display_metrics:
+            print(f"  {key}: {display_metrics[key]}")
 
 
 def _build_cli_parser() -> argparse.ArgumentParser:
@@ -94,7 +97,7 @@ def plot_rl_curve(
     *,
     pos_arr: NDArray[np.float64],
     speed_arr: NDArray[np.float64],
-    metrics: dict[str, object],
+    metrics: EvaluationMetrics | Mapping[str, object],
     no_safeguard: bool,
     factor: float,
 ) -> None:

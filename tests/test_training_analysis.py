@@ -211,7 +211,7 @@ def test_training_analysis_supports_reward_artifact_without_tensorboard(
     tmp_path: Path,
 ) -> None:
     final_dir = tmp_path / "run_a" / "final"
-    _write_reward_artifact(final_dir / "reward_diagnostics.npz")
+    _write_reward_artifact(final_dir / "episodes.npz")
 
     result = run_training_analysis(
         log_root=None,
@@ -996,10 +996,10 @@ def test_resolve_training_run_spec_plans_paths_and_switches() -> None:
     assert spec.run_mode == "monitor_best"
     assert spec.enable_tb is True
     assert spec.enable_best_evaluation_artifacts is True
-    assert Path(spec.reward_diagnostics_path).name == "reward_diagnostics.npz"
+    assert Path(spec.reward_diagnostics_path).name == "episodes.npz"
     assert spec.reward_preset.name == "basic_safety"
     assert Path(spec.output_dir).name == "465p0_30p0__basic_safety__batch_a"
-    assert Path(spec.run_metadata_path).name == "run_metadata.json"
+    assert Path(spec.run_metadata_path).name == "metadata.json"
     assert spec.run_metadata["reward_preset_name"] == "basic_safety"
     assert spec.num_envs == DEFAULT_NUM_ENVS
     assert "vec_env_type" not in spec.run_metadata

@@ -14,6 +14,8 @@ from matplotlib.lines import Line2D
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 
+from contracts.environment import EpisodeInfo, EpisodeOutcome
+from contracts.evaluation import EvaluationArtifact
 from model.ocs import SafeGuardUtility
 from rl.env_factory import make_env
 from rl.evaluation import (
@@ -21,13 +23,10 @@ from rl.evaluation import (
     classify_arrival_status,
     get_strict_stop_error_limit_m,
     get_strict_time_error_limit_s,
+    save_policy_evaluation_curve,
 )
 from rl.experiment_utils import (
     DEFAULT_DEVICE,
-    DEFAULT_REWARD_DISCOUNT,
-    DEFAULT_REWARD_PRESET_NAME,
-    DEFAULT_SCHEDULE_TIME_S,
-    DEFAULT_STEP_DISTANCE,
     RL_FINAL_MODEL_FILENAME,
     apply_rl_curve_plot_style,
     load_run_metadata,
@@ -36,8 +35,7 @@ from rl.experiment_utils import (
 )
 from utils.io_utils import (
     format_float_token,
-    load_optimized_curve_and_metrics,
-    save_curve_and_metrics,
+    load_evaluation_artifact,
 )
 from utils.plot_utils import apply_sci_figure_layout, save_sci_figure
 from utils.scenario import build_safeguard_utility, build_scenario
@@ -352,14 +350,14 @@ def _run_one_case(
     start_position_m = float(train_service.start_position)
     target_position_m = float(train_service.target_position)
     trajectory_position_seq: list[float] = [start_position_m]
-    trajectory_speed_seq: list[float] = [float(train_service.start_speed)]
+    trajectory_speed_seq: list[float] = [0.0]
 
     obs = venv_eval.reset()
     episode_over = False
     last_info: dict[str, object] = {}
     previous_position_m = start_position_m
     current_position_m = start_position_m
-    current_speed_mps = float(train_service.start_speed)
+    current_speed_mps = 0.0
     change_triggered = False
     change_step: int | None = None
     change_position_m: float | None = None
@@ -399,12 +397,16 @@ def _run_one_case(
             last_info = infos[0]
 
             previous_position_m = current_position_m
-            basic = last_info.get("basic")
-            if isinstance(basic, dict):
-                current_position_m = float(basic.get("position", current_position_m))
-                current_speed_mps = float(basic.get("speed", current_speed_mps))
-                trajectory_position_seq.append(current_position_m)
-                trajectory_speed_seq.append(current_speed_mps)
+            episode_payload = last_info.get("episode")
+            if not isinstance(episode_payload, dict):
+                raise ValueError(
+                    "Environment info is missing canonical episode payload"
+                )
+            episode_info = EpisodeInfo.from_mapping(episode_payload)
+            current_position_m = episode_info.position_m
+            current_speed_mps = episode_info.speed_mps
+            trajectory_position_seq.append(current_position_m)
+            trajectory_speed_seq.append(current_speed_mps)
 
             if (not episode_over) and should_trigger_schedule_change(
                 previous_position_m=previous_position_m,
@@ -429,27 +431,23 @@ def _run_one_case(
         venv_eval.close()
 
     target_time_s = float(train_service.schedule_time)
-    basic_info = last_info.get("basic")
-    basic_snapshot = basic_info if isinstance(basic_info, dict) else {}
-
-    final_position_m = float(basic_snapshot.get("position", current_position_m))
-    final_speed_mps = float(basic_snapshot.get("speed", current_speed_mps))
-    total_time_s = float(basic_snapshot.get("operation_time", 0.0))
-    total_energy_kj = float(basic_snapshot.get("energy_consumption", 0.0))
-    total_energy_j = total_energy_kj * 1000.0
+    episode_payload = last_info.get("episode")
+    if not isinstance(episode_payload, dict):
+        raise ValueError("Environment info is missing canonical episode payload")
+    episode_info = EpisodeInfo.from_mapping(episode_payload)
+    final_position_m = float(episode_info.position_m)
+    final_speed_mps = float(episode_info.speed_mps)
+    total_time_s = float(episode_info.operation_time_s)
+    total_energy_j = float(episode_info.energy_consumption_j)
+    total_energy_kj = total_energy_j / 1000.0
     stop_error_m = abs(target_position_m - final_position_m)
     time_error_s = total_time_s - target_time_s
-    outcome_info = last_info.get("outcome")
-    outcome_snapshot = outcome_info if isinstance(outcome_info, dict) else {}
-    truncated = bool(
-        outcome_snapshot.get(
-            "truncated",
-            last_info.get("TimeLimit.truncated", False),
-        )
-    )
-    terminated = bool(
-        outcome_snapshot.get("terminated", episode_over and not truncated)
-    )
+    outcome_payload = last_info.get("outcome")
+    if not isinstance(outcome_payload, dict):
+        raise ValueError("Environment info is missing canonical outcome payload")
+    outcome = EpisodeOutcome.from_mapping(outcome_payload)
+    terminated = outcome.terminated
+    truncated = outcome.truncated
     success, precise_arrival, punctual_arrival = classify_arrival_status(
         stop_error_m=stop_error_m,
         time_error_s=time_error_s,
@@ -459,9 +457,9 @@ def _run_one_case(
         truncated=truncated,
     )
 
-    comfort_tav = float(basic_snapshot.get("comfort_tav", 0.0))
-    comfort_er_pct = float(basic_snapshot.get("comfort_er_pct", 0.0))
-    comfort_rms = float(basic_snapshot.get("comfort_rms", 0.0))
+    comfort_tav = float(episode_info.comfort_tav)
+    comfort_er_pct = float(episode_info.comfort_er_pct)
+    comfort_rms = float(episode_info.comfort_rms)
 
     evaluation_result = PolicyEvaluationResult(
         success=success,
@@ -471,7 +469,6 @@ def _run_one_case(
         total_time_s=total_time_s,
         target_time_s=target_time_s,
         total_energy_j=total_energy_j,
-        total_energy_kj=total_energy_kj,
         start_position_m=start_position_m,
         target_position_m=target_position_m,
         final_position_m=final_position_m,
@@ -489,9 +486,11 @@ def _run_one_case(
         trajectory_pos_m=np.asarray(trajectory_position_seq, dtype=np.float32),
         trajectory_speed_mps=np.asarray(trajectory_speed_seq, dtype=np.float32),
     )
-    metrics = evaluation_result.to_metrics()
-    metrics.update(
-        {
+    npz_path = experiment_dir / f"trajectory_{case.token}.npz"
+    saved_npz_path, saved_json_path = save_policy_evaluation_curve(
+        evaluation_result,
+        str(npz_path),
+        extra_metrics={
             "trajectory_source": "schedule_time_change",
             "evaluation_load_dir": load_dir,
             "reward_preset_name": reward_preset_name,
@@ -508,15 +507,7 @@ def _run_one_case(
             "step_distance": float(step_distance),
             "reward_discount": float(reward_discount),
             "deterministic": bool(deterministic),
-        }
-    )
-
-    npz_path = experiment_dir / f"trajectory_{case.token}.npz"
-    saved_npz_path, saved_json_path = save_curve_and_metrics(
-        pos_arr=trajectory_position_seq,
-        speed_arr=trajectory_speed_seq,
-        output_path=str(npz_path),
-        metrics=metrics,
+        },
     )
 
     return ScheduleChangeRunResult(
@@ -582,24 +573,20 @@ def run_evaluate(args: argparse.Namespace) -> None:
     schedule_time_s = float(
         args.schedule_time_s
         if args.schedule_time_s is not None
-        else run_metadata.get("schedule_time_s", DEFAULT_SCHEDULE_TIME_S)
+        else run_metadata.schedule_time_s
     )
     reward_discount = float(
         args.reward_discount
         if args.reward_discount is not None
-        else run_metadata.get("reward_discount", DEFAULT_REWARD_DISCOUNT)
+        else run_metadata.reward_discount
     )
     step_distance = float(
         args.step_distance
         if args.step_distance is not None
-        else run_metadata.get(
-            "step_distance",
-            run_metadata.get("max_step_distance", DEFAULT_STEP_DISTANCE),
-        )
+        else run_metadata.step_distance
     )
     reward_preset = resolve_reward_preset(
-        args.reward_preset
-        or str(run_metadata.get("reward_preset_name", DEFAULT_REWARD_PRESET_NAME))
+        args.reward_preset or run_metadata.reward_preset_name
     )
     reward_config = reward_preset.config
 
@@ -682,7 +669,7 @@ def run_evaluate(args: argparse.Namespace) -> None:
 def _load_case_curves(
     experiment_dir: Path,
     summary: dict[str, Any],
-) -> list[tuple[dict[str, Any], np.ndarray, np.ndarray, dict[str, Any]]]:
+) -> list[tuple[dict[str, Any], EvaluationArtifact]]:
     cases_raw = summary.get("cases")
     if not isinstance(cases_raw, list) or not cases_raw:
         raise ValueError("Summary must contain a non-empty 'cases' list")
@@ -704,19 +691,19 @@ def _load_case_curves(
             raise FileNotFoundError(
                 f"Trajectory metrics file not found: {metrics_path}"
             )
-        pos_arr, speed_arr, metrics = load_optimized_curve_and_metrics(
+        artifact = load_evaluation_artifact(
             npz_path=str(npz_path),
             metrics_path=str(metrics_path),
             dtype=np.float32,
             use_metrics_cache=False,
         )
-        loaded_cases.append((case_payload, pos_arr, speed_arr, metrics))
+        loaded_cases.append((case_payload, artifact))
 
     return loaded_cases
 
 
-def _case_sort_key(item: tuple[dict[str, Any], np.ndarray, np.ndarray, dict[str, Any]]):
-    case_payload, _, _, _ = item
+def _case_sort_key(item: tuple[dict[str, Any], EvaluationArtifact]):
+    case_payload, _ = item
     case = case_payload.get("case")
     delta = case.get("delta_time_s", 0.0) if isinstance(case, dict) else 0.0
     delta_value = float(delta)
@@ -788,10 +775,12 @@ def plot_schedule_change_result(
     case_handles: list[Any] = []
     case_labels: list[str] = []
 
-    for case_payload, pos_arr, speed_arr, _metrics in loaded_cases:
+    for case_payload, artifact in loaded_cases:
         case = case_payload.get("case")
         delta = float(case.get("delta_time_s", 0.0)) if isinstance(case, dict) else 0.0
         label = str(case.get("label", f"{delta:g}s")) if isinstance(case, dict) else ""
+        pos_arr = artifact.trajectory.position_m
+        speed_arr = artifact.trajectory.speed_mps
         speed_kmh = np.asarray(speed_arr, dtype=np.float64) * 3.6
         style = _style_for_delta(delta)
         (case_handle,) = ax.plot(pos_arr, speed_kmh, **style)
@@ -804,7 +793,7 @@ def plot_schedule_change_result(
 
     trigger_positions = [
         float(case_payload["schedule_change_position_m"])
-        for case_payload, _, _, _ in loaded_cases
+        for case_payload, _ in loaded_cases
         if case_payload.get("schedule_change_position_m") is not None
     ]
     trigger_legend_handle: Line2D | None = None
@@ -817,7 +806,7 @@ def plot_schedule_change_result(
         else:
             trigger_speeds = [
                 float(case_payload["schedule_change_speed_mps"]) * 3.6
-                for case_payload, _, _, _ in loaded_cases
+                for case_payload, _ in loaded_cases
                 if case_payload.get("schedule_change_speed_mps") is not None
             ]
             trigger_speed = trigger_speeds[0] if trigger_speeds else 0.0

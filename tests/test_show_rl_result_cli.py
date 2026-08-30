@@ -9,7 +9,11 @@ from scripts.show_rl_result import (
 
 def _write_artifact(run_dir: Path, file_name: str) -> tuple[Path, Path]:
     curve_path = run_dir / file_name
-    metrics_path = run_dir / f"{curve_path.stem}_metrics.json"
+    metrics_name = {
+        "best_trajectory.npz": "metrics_best.json",
+        "final_trajectory.npz": "metrics_final.json",
+    }.get(file_name, f"{curve_path.stem}_metrics.json")
+    metrics_path = run_dir / metrics_name
     _ = curve_path.write_bytes(b"curve")
     _ = metrics_path.write_text("{}", encoding="utf-8")
     return curve_path, metrics_path

@@ -1,5 +1,5 @@
 import math
-from typing import Any, TypedDict, cast, final, override
+from typing import Any, cast, final, override
 
 import gymnasium as gym
 import matplotlib.pyplot as plt
@@ -10,6 +10,7 @@ from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from numpy.typing import NDArray
 
+from contracts.environment import EpisodeInfo, EpisodeOutcome
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
@@ -23,23 +24,6 @@ from rl.reward_calculator import RewardCalculator, RewardConfig
 from rl.reward_diagnostics import RewardDiagnosticsAccumulator, RewardDiagnosticsBatch
 from rl.safety_statistics import SafetyTruncationBatch, SafetyTruncationBuffer
 from utils.plot_utils import sci_figure_size, set_chinese_font
-
-
-class BasicInfo(TypedDict, total=False):
-    position: float
-    speed: float
-    stopping_point_index: int
-    operation_time: float
-    redundant_operation_time: float
-    energy_consumption: float
-    comfort_tav: float
-    comfort_er_pct: float
-    comfort_rms: float
-
-
-class OutcomeInfo(TypedDict):
-    terminated: bool
-    truncated: bool
 
 
 @final
@@ -147,8 +131,11 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
             self.observation_space.shape, dtype=np.float32
         )
         self.compact_training_info: bool = bool(compact_training_info)
-        self.basic_info: BasicInfo = {}
-        self.outcome_info: OutcomeInfo = {"terminated": False, "truncated": False}
+        self.episode_info: EpisodeInfo | None = None
+        self.outcome: EpisodeOutcome = EpisodeOutcome(
+            terminated=False,
+            truncated=False,
+        )
         self._comfort_tav: float = 0.0
         self._comfort_sum_sq_delta_acc: float = 0.0
         self._comfort_exceedance_count: int = 0
@@ -253,8 +240,8 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
                     context_index=context.context_index,
                     distribution_version=sampler.version,
                 )
-        self.basic_info = {}
-        self.outcome_info = {"terminated": False, "truncated": False}
+        self.episode_info = None
+        self.outcome = EpisodeOutcome(terminated=False, truncated=False)
         self._comfort_tav = self._comfort_sum_sq_delta_acc = 0.0
         self._comfort_exceedance_count = 0
         self._reset_trajectory()
@@ -280,10 +267,10 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         next_observation = self.observation_builder.build(
             self.state, out=self._observation_buffer
         )
-        self.outcome_info = {
-            "terminated": bool(transition.terminated),
-            "truncated": bool(transition.truncated),
-        }
+        self.outcome = EpisodeOutcome(
+            terminated=bool(transition.terminated),
+            truncated=bool(transition.truncated),
+        )
         if self.dspdl_statistics_hub is not None:
             assert self.curriculum_env_rank is not None
             self.dspdl_statistics_hub.record_transition(
@@ -340,9 +327,12 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         if self.compact_training_info:
             info = {}
         else:
-            self._record_basic_info()
-            info = self._get_basic_info()
-            info.update(outcome=dict(self.outcome_info))
+            self._record_episode_info()
+            assert self.episode_info is not None
+            info = {
+                "episode": self.episode_info.to_mapping(),
+                "outcome": self.outcome.to_mapping(),
+            }
         return (
             # See reset(): VecEnv may retain a terminal observation after this
             # method returns, so it must not alias the reusable scratch buffer.
@@ -353,22 +343,19 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
             info,
         )
 
-    def _record_basic_info(self) -> None:
+    def _record_episode_info(self) -> None:
         steps = max(self.state.step_count, 1)
-        self.basic_info = {
-            "energy_consumption": self.state.energy_consumption_kj,
-            "operation_time": self.state.operation_time_s,
-            "redundant_operation_time": self.state.redundant_operation_time_s,
-            "position": self.state.position_m,
-            "speed": self.state.speed_mps,
-            "stopping_point_index": self.state.stopping_point_index,
-            "comfort_tav": self._comfort_tav,
-            "comfort_er_pct": self._comfort_exceedance_count / steps * 100.0,
-            "comfort_rms": math.sqrt(self._comfort_sum_sq_delta_acc / steps),
-        }
-
-    def _get_basic_info(self) -> dict[str, object]:
-        return {"basic": dict(self.basic_info)} if self.basic_info else {}
+        self.episode_info = EpisodeInfo(
+            energy_consumption_j=self.state.energy_consumption_kj * 1000.0,
+            operation_time_s=self.state.operation_time_s,
+            redundant_operation_time_s=self.state.redundant_operation_time_s,
+            position_m=self.state.position_m,
+            speed_mps=self.state.speed_mps,
+            stopping_point_index=self.state.stopping_point_index,
+            comfort_tav=self._comfort_tav,
+            comfort_er_pct=self._comfort_exceedance_count / steps * 100.0,
+            comfort_rms=math.sqrt(self._comfort_sum_sq_delta_acc / steps),
+        )
 
     @override
     def render(self):

@@ -11,7 +11,7 @@ from matplotlib.lines import Line2D
 from numpy.typing import NDArray
 
 from utils.data_loader import load_safeguard_curves, load_speed_limits
-from utils.plot_utils import sci_figure_size, save_sci_figure, set_global_plot_style
+from utils.plot_utils import save_sci_figure, sci_figure_size, set_global_plot_style
 
 
 @dataclass(frozen=True)

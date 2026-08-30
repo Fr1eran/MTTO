@@ -213,7 +213,7 @@ class ContextPoolBuilder:
             raise ValueError("reference trajectory direction does not match task")
         if not np.isclose(
             speed[0],
-            service.start_speed,
+            0.0,
             atol=_SPEED_ATOL_MPS,
             rtol=0.0,
         ):

@@ -7,6 +7,7 @@ from typing import cast
 import numpy as np
 import pytest
 
+from dp.core import DP_UPPER_SPEED_ENVELOPE_VERSION
 from model.common import calc_transition_from_acc_scalar_numba
 from model.ocs import TrainService
 from model.ocs.stopping_points_stepping import SPSState
@@ -22,12 +23,11 @@ from utils.trajectory import OptimizedCurveArtifact
 def train_service() -> TrainService:
     return TrainService(
         start_position=0.0,
-        start_speed=0.0,
         target_position=20.0,
         schedule_time=10.0,
         max_acc_change=0.75,
-        max_arr_time_error_ratio=0.1,
         max_stop_error=1.0,
+        max_arr_time_error_s=10.0,
     )
 
 
@@ -44,6 +44,7 @@ def _write_artifact(
         "start_speed_mps": 0.0,
         "target_position_m": 20.0,
         "target_speed_mps": 0.0,
+        "dp_upper_speed_envelope_version": DP_UPPER_SPEED_ENVELOPE_VERSION,
     }
     if metrics_updates is not None:
         metrics.update(metrics_updates)
@@ -95,18 +96,33 @@ def test_dp_adapter_selects_newest_matching_artifact(
     np.testing.assert_allclose(trajectory.position_m, [0.0, 10.0, 20.0])
 
 
+def test_dp_adapter_rejects_legacy_upper_envelope_artifact(
+    tmp_path: Path,
+    train_service: TrainService,
+) -> None:
+    artifact = _write_artifact(
+        tmp_path / "legacy",
+        metrics_updates={"dp_upper_speed_envelope_version": 0},
+    )
+
+    with pytest.raises(ValueError, match="incompatible upper-speed-envelope"):
+        _ = DPTrajectoryReader.from_artifact(
+            artifact=artifact,
+            train_service=train_service,
+        )
+
+
 class _FakeStepper:
     def __init__(
         self, *, step_distance_m: float = 5.0, truncate_step: int | None = None
     ):
         self.train_service: TrainService = TrainService(
             start_position=0.0,
-            start_speed=0.0,
             target_position=9.0,
             schedule_time=8.0,
             max_acc_change=0.75,
-            max_arr_time_error_ratio=0.1,
             max_stop_error=1.0,
+            max_arr_time_error_s=10.0,
         )
         self.direction: int = 1
         self.whole_distance_m: float = 9.0

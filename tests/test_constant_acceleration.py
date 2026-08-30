@@ -84,7 +84,7 @@ def test_dp_transition_uses_shared_end_speed_transition() -> None:
             return 2.0, 3.0
 
     ecc = FakeECC()
-    is_valid, energy, duration = _calculate_transition_with_context(
+    transition = _calculate_transition_with_context(
         pos_k=0.0,
         speed_k=10.0,
         displacement=30.0,
@@ -95,10 +95,46 @@ def test_dp_transition_uses_shared_end_speed_transition() -> None:
         safeguard_utility=cast(SafeGuardUtility, cast(object, FakeSafeguardUtility())),
         ecc=cast(ECC, cast(object, ecc)),
         track=cast(TrackInfo, object()),
+        upper_curve_pos=np.asarray([0.0, 30.0], dtype=np.float64),
+        upper_curve_speed=np.asarray([100.0, 100.0], dtype=np.float64),
     )
 
-    assert is_valid is True
+    assert transition is not None
+    energy, duration = transition
     assert energy == pytest.approx(5.0)
     assert duration == pytest.approx(30.0 / 11.0)
     assert ecc.kwargs["acc"] == pytest.approx(44.0 / 60.0)
     assert ecc.kwargs["operation_time"] == pytest.approx(30.0 / 11.0)
+
+
+def test_dp_transition_rejects_sample_above_minimum_time_upper_curve() -> None:
+    class FakeSafeguardUtility:
+        @staticmethod
+        def detect_any_danger(
+            *, pos: NDArray[np.floating], speed: NDArray[np.floating]
+        ) -> bool:
+            del pos, speed
+            return False
+
+    class FakeECC:
+        @staticmethod
+        def calc_energy(**kwargs: object) -> tuple[float, float]:
+            del kwargs
+            raise AssertionError("energy must not be evaluated for an invalid edge")
+
+    transition = _calculate_transition_with_context(
+        pos_k=0.0,
+        speed_k=10.0,
+        displacement=30.0,
+        speed_k_1=12.0,
+        vehicle=cast(
+            VehicleInfo, cast(object, SimpleNamespace(max_acc=1.0, max_dec=-1.0))
+        ),
+        safeguard_utility=cast(SafeGuardUtility, cast(object, FakeSafeguardUtility())),
+        ecc=cast(ECC, cast(object, FakeECC())),
+        track=cast(TrackInfo, object()),
+        upper_curve_pos=np.asarray([0.0, 10.0, 20.0, 30.0], dtype=np.float64),
+        upper_curve_speed=np.asarray([100.0, 10.0, 10.0, 100.0], dtype=np.float64),
+    )
+
+    assert transition is None

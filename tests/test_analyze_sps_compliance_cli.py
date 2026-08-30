@@ -69,7 +69,11 @@ def _write_dp_artifact(run_dir: Path) -> tuple[Path, Path]:
 
 def _write_rl_artifact(run_dir: Path, *, file_name: str) -> tuple[Path, Path]:
     curve_path = run_dir / file_name
-    metrics_path = run_dir / f"{curve_path.stem}_metrics.json"
+    metrics_name = {
+        "best_trajectory.npz": "metrics_best.json",
+        "final_trajectory.npz": "metrics_final.json",
+    }.get(file_name, f"{curve_path.stem}_metrics.json")
+    metrics_path = run_dir / metrics_name
     np.savez_compressed(
         curve_path,
         pos_m=np.asarray([0.0, 1.0], dtype=np.float32),
