@@ -734,10 +734,27 @@ python -m scripts.show_env_data --view overview --output-file output/figures/env
 
 ### 计算并保存防护曲线 · `calc_and_save_safeguard_curves`
 
-离线计算并序列化保存完整的安全防护曲线数据至 `output/safeguardcurves/`，供后续训练与评估加载。
+离线计算并序列化保存完整的安全防护曲线数据至
+`output/safeguardcurves/`，供后续训练与评估加载。默认拒绝覆盖已有产物；
+确认重新生成时需要指定 `--force`。
 
 ```bash
-python -m scripts.calc_and_save_safeguard_curves
+python -m scripts.calc_and_save_safeguard_curves --dry-run
+python -m scripts.calc_and_save_safeguard_curves --force
+```
+
+可以调整距离步长、车辆参数、安全误差与执行延时，并将结果保存到自定义目录：
+
+```bash
+python -m scripts.calc_and_save_safeguard_curves \
+  --output-dir output/safeguardcurves_0p5m \
+  --distance-step-m 0.5
+```
+
+查看完整参数：
+
+```bash
+python -m scripts.calc_and_save_safeguard_curves --help
 ```
 
 ---

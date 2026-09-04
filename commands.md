@@ -342,6 +342,34 @@ uv run python -m scripts.analyze_sps_compliance \
   --json-output-path output/analysis/sps_compliance.json
 ```
 
+## 防护曲线计算
+
+预览有效参数、危险点数量和计划输出文件，不执行计算：
+
+```bash
+uv run python -m scripts.calc_and_save_safeguard_curves --dry-run
+```
+
+使用默认参数重新生成防护曲线。默认目录已有产物，因此需要显式允许覆盖：
+
+```bash
+uv run python -m scripts.calc_and_save_safeguard_curves --force
+```
+
+使用更细的距离步长并写入独立目录：
+
+```bash
+uv run python -m scripts.calc_and_save_safeguard_curves \
+  --output-dir output/safeguardcurves_0p5m \
+  --distance-step-m 0.5
+```
+
+查看车辆、安全误差和延时等完整参数：
+
+```bash
+uv run python -m scripts.calc_and_save_safeguard_curves --help
+```
+
 ## 线路环境与防护曲线可视化
 
 展示综合环境视图（防护曲线 + 轨道坡度）：

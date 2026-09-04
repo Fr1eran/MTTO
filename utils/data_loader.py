@@ -71,14 +71,21 @@ def load_acceleration_zones() -> dict[str, Any]:
     return load_json("data/rail/raw/acceleration_zones.json")
 
 
-def load_safeguard_curve(curve_name: str) -> list[NDArray[np.float64]]:
-    return load_pickle(f"output/safeguardcurves/{curve_name}.pkl")
+def load_safeguard_curve(
+    curve_name: str,
+    *,
+    curve_dir: str | Path = "output/safeguardcurves",
+) -> list[NDArray[np.float64]]:
+    return load_pickle(Path(curve_dir) / f"{curve_name}.pkl")
 
 
 def load_safeguard_curves(
     *curve_names: str,
+    curve_dir: str | Path = "output/safeguardcurves",
 ) -> tuple[list[NDArray[np.float64]], ...]:
-    return tuple(load_safeguard_curve(name) for name in curve_names)
+    return tuple(
+        load_safeguard_curve(name, curve_dir=curve_dir) for name in curve_names
+    )
 
 
 def load_stations_goal_positions() -> tuple[float, float]:
