@@ -1,11 +1,13 @@
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pytest
 from matplotlib import pyplot as plt
 
+from rl.experiment_utils import build_default_training_args, resolve_training_run_spec
 from scripts.run_schedule_time_change import (
     DEFAULT_DELTA_TIMES_S,
     DEFAULT_EVALUATE_LOAD_DIR,
@@ -13,11 +15,13 @@ from scripts.run_schedule_time_change import (
     SUMMARY_FILENAME,
     _add_schedule_change_legend,
     _as_batch_observation,
+    _reward_config_from_metadata,
     build_arg_parser,
     build_schedule_change_case,
     resolve_schedule_change_experiment_dir,
     should_trigger_schedule_change,
 )
+from utils.policy_selection import load_selected_policy_dir
 
 
 def test_as_batch_observation_preserves_environment_normalized_values() -> None:
@@ -50,6 +54,48 @@ def test_cli_parses_custom_delta_times() -> None:
     args = parser.parse_args(["evaluate", "--delta-times-s", "0,-5, 7.5"])
 
     assert args.delta_times_s == (0.0, -5.0, 7.5)
+
+
+def test_policy_selection_loader_resolves_selected_directory(tmp_path: Path) -> None:
+    policy_dir = tmp_path / "run" / "final"
+    policy_dir.mkdir(parents=True)
+    selection = tmp_path / "selected_policy.json"
+    selection.write_text(
+        json.dumps(
+            {
+                "artifact_type": "paper_policy_selection",
+                "schema_version": 1,
+                "protocol_version": 2,
+                "selected": {"policy_dir": str(policy_dir)},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert load_selected_policy_dir(selection) == policy_dir
+
+
+def test_metadata_reward_snapshot_reconstructs_fixed_configuration() -> None:
+    args = build_default_training_args()
+    args.training_episodes = 8
+    args.reference_curve_dir = "."
+    spec = resolve_training_run_spec(args)
+    config = _reward_config_from_metadata(spec.run_metadata.reward_config)
+
+    assert config.enable_potential_punctuality
+    assert not hasattr(config, "punctuality_potential_scale")
+
+
+def test_metadata_reward_snapshot_rejects_retired_parameters() -> None:
+    args = build_default_training_args()
+    args.training_episodes = 8
+    args.reference_curve_dir = "."
+    snapshot = replace(
+        resolve_training_run_spec(args).run_metadata.reward_config,
+        punctuality_potential_scale=3.25,
+    )
+    with pytest.raises(ValueError, match="fixed DSPDL protocol"):
+        _reward_config_from_metadata(snapshot)
 
 
 def test_default_schedule_change_matrix_is_original_plus30_minus30() -> None:

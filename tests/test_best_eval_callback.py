@@ -253,6 +253,38 @@ def test_scheduled_evaluation_repeats_at_rollout_interval(
         assert calls == rollout_index // 12
 
 
+def test_optional_boundary_evaluations_include_latest_final_policy(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "boundaries.npz"
+    completed = [0]
+    callback = ScheduledPolicyEvaluationCallback(
+        eval_env=DummyEvalEnv(),
+        handlers=[EvaluationHistoryArtifactHandler(output_path=str(path))],
+        evaluation_interval_rollouts=4,
+        get_completed_training_episodes=lambda: completed[0],
+        evaluate_at_boundaries=True,
+    )
+    _init(callback, DummyTrainingEnv())
+    monkeypatch.setattr(
+        "rl.callbacks.evaluate_policy_once",
+        lambda *a, **k: _build_result(success=True, total_reward=float(completed[0])),
+    )
+    callback.num_timesteps = 0
+    callback._on_training_start()
+    for index in range(1, 5):
+        completed[0] = index
+        callback.num_timesteps = index * 10
+        callback._on_rollout_end()
+    completed[0] = 6
+    callback.num_timesteps = 60
+    callback._on_training_end()
+    with np.load(path) as data:
+        np.testing.assert_array_equal(data["completed_training_episodes"], [0, 4, 6])
+        np.testing.assert_array_equal(data["training_steps"], [0, 40, 60])
+        np.testing.assert_array_equal(data["total_reward"], [0, 4, 6])
+
+
 def test_scheduled_evaluation_rejects_nonpositive_rollout_interval() -> None:
     with pytest.raises(ValueError, match="evaluation_interval_rollouts"):
         _ = ScheduledPolicyEvaluationCallback(

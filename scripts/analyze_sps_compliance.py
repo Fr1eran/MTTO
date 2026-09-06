@@ -25,7 +25,7 @@ from rl.experiment_utils import (
     load_rl_curve_artifact,
     resolve_rl_curve_artifact,
 )
-from utils.plot_utils import apply_sci_figure_layout
+from utils.policy_selection import load_selected_policy_dir
 from utils.scenario import build_safeguard_utility, build_scenario
 from utils.trajectory import OptimizedCurveArtifact, recover_time_axis_from_trajectory
 
@@ -235,6 +235,12 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         help="Directory used to recursively search RL trajectory artifacts.",
     )
     _ = parser.add_argument(
+        "--selection-file",
+        type=Path,
+        default=None,
+        help="Use the final RL policy directory recorded by selected_policy.json.",
+    )
+    _ = parser.add_argument(
         "--trajectory-source",
         choices=RL_TRAJECTORY_SOURCE_CHOICES,
         default="best",
@@ -302,6 +308,17 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.99,
         help="Safeguard factor used for rendering and replay boundaries.",
+    )
+    _ = parser.add_argument(
+        "--output-file",
+        type=Path,
+        default=None,
+        help="Optional path to save the generated figure.",
+    )
+    _ = parser.add_argument(
+        "--no-show",
+        action="store_true",
+        help="Do not display the interactive plot window.",
     )
     return parser
 
@@ -422,8 +439,7 @@ def replay_sps_compliance(
         step_window_missed = (
             was_pending
             and sps_state.request_pending
-            and v
-            > sgu.get_max_speed(current_pos=x, current_sp=previous_sp)
+            and v > sgu.get_max_speed(current_pos=x, current_sp=previous_sp)
         )
 
         if is_min_violation:
@@ -474,11 +490,7 @@ def replay_sps_compliance(
             window_missed = True
             break
 
-        if (
-            not was_pending
-            and sps_state.request_pending
-            and current_sp == previous_sp
-        ):
+        if not was_pending and sps_state.request_pending and current_sp == previous_sp:
             request_count += 1
             events.append(
                 SPSEventRecord(
@@ -682,9 +694,11 @@ def _plot_sps_main_figure(
     annotation_mode: str,
     max_text_annotations: int,
     safeguard: SafeGuardUtility | None,
+    output_file: Path | None = None,
+    no_show: bool = False,
 ) -> None:
     apply_rl_curve_plot_style()
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=(10, 6))
 
     if not no_safeguard:
         resolved_safeguard = (
@@ -734,8 +748,15 @@ def _plot_sps_main_figure(
     ax.grid(True, alpha=0.3)
     _deduplicate_legend(ax)
 
-    apply_sci_figure_layout(fig, columns=2, height_in=3.4)
-    plt.show()
+    fig.tight_layout()
+
+    if output_file is not None:
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_file, dpi=300.0, bbox_inches="tight")
+        print(f"Saved figure to: {output_file}")
+
+    if not no_show:
+        plt.show()
 
 
 def _plot_sps_single_figure(
@@ -749,9 +770,11 @@ def _plot_sps_single_figure(
     annotation_mode: str,
     max_text_annotations: int,
     safeguard: SafeGuardUtility | None,
+    output_file: Path | None = None,
+    no_show: bool = False,
 ) -> None:
     apply_rl_curve_plot_style()
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=(10, 6))
 
     if not no_safeguard:
         resolved_safeguard = (
@@ -792,8 +815,15 @@ def _plot_sps_single_figure(
     ax.grid(True, alpha=0.3)
     _deduplicate_legend(ax)
 
-    apply_sci_figure_layout(fig, columns=2, height_in=3.4)
-    plt.show()
+    fig.tight_layout()
+
+    if output_file is not None:
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_file, dpi=300.0, bbox_inches="tight")
+        print(f"Saved figure to: {output_file}")
+
+    if not no_show:
+        plt.show()
 
 
 def _build_json_payload(
@@ -854,6 +884,11 @@ def _build_single_json_payload(
 def main() -> None:
     parser = _build_cli_parser()
     args = parser.parse_args()
+    if args.selection_file is not None:
+        try:
+            args.rl_curve_dir = str(load_selected_policy_dir(args.selection_file))
+        except (FileNotFoundError, ValueError) as exc:
+            parser.error(str(exc))
 
     if args.step_delay_s <= 0.0:
         parser.error("--step-delay-s must be positive")
@@ -956,6 +991,8 @@ def main() -> None:
                 annotation_mode=args.event_annotation,
                 max_text_annotations=args.max_text_annotations,
                 safeguard=safeguard_utility,
+                output_file=args.output_file,
+                no_show=args.no_show,
             )
         return
 
@@ -1034,6 +1071,8 @@ def main() -> None:
             annotation_mode=args.event_annotation,
             max_text_annotations=args.max_text_annotations,
             safeguard=safeguard_utility,
+            output_file=args.output_file,
+            no_show=args.no_show,
         )
 
 

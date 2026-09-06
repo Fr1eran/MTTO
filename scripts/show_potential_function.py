@@ -10,6 +10,10 @@ from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from numpy.typing import NDArray
 
+from rl.reward_calculator import (
+    PUNCTUALITY_POTENTIAL_SCALE,
+    PUNCTUALITY_POTENTIAL_SIGMA_S,
+)
 from utils.data_loader import load_safeguard_curves, load_speed_limits
 from utils.plot_utils import save_sci_figure, sci_figure_size, set_global_plot_style
 
@@ -736,6 +740,7 @@ def plot_stopping_potential_slices(*, minimal: bool = False) -> Figure:
 
 
 PLOT_TYPE_CHOICES: tuple[str, ...] = (
+    "punctuality-slack",
     "safety-speed",
     "safety-position",
     "stopping-heatmap",
@@ -779,6 +784,7 @@ def _validate_cli_args(cli_args: argparse.Namespace) -> None:
 
 def _resolve_plotter(plot_type: str, *, minimal: bool) -> Callable[[], Figure]:
     plotters: dict[str, Callable[[], Figure]] = {
+        "punctuality-slack": lambda: plot_punctuality_slack(minimal=minimal),
         "safety-speed": lambda: plot_safety_potential_heatmap_speed(minimal=minimal),
         "safety-position": lambda: plot_safety_potential_heatmap_position(
             minimal=minimal
@@ -791,6 +797,41 @@ def _resolve_plotter(plot_type: str, *, minimal: bool) -> Callable[[], Figure]:
         "guidance-wide": lambda: plot_guidance_potentials_wide(minimal=minimal),
     }
     return plotters[plot_type]
+
+
+def plot_punctuality_slack(*, minimal: bool = False) -> Figure:
+    """Illustrative global slack reference and its bounded error potential."""
+    fig, axes = plt.subplots(1, 2, figsize=(8, 3))
+    remaining_fraction = np.linspace(0, 1, 101)
+    for initial_slack in (30.0, 60.0, 90.0):
+        axes[0].plot(
+            remaining_fraction,
+            initial_slack * remaining_fraction,
+            label=f"Initial slack {initial_slack:g} s",
+        )
+    error = np.linspace(-180, 180, 361)
+    axes[1].plot(
+        error,
+        -PUNCTUALITY_POTENTIAL_SCALE
+        * ((error / np.hypot(error, PUNCTUALITY_POTENTIAL_SIGMA_S)) ** 2),
+    )
+    if minimal:
+        for ax in axes:
+            ax.set_axis_off()
+    else:
+        axes[0].set(
+            xlabel="Remaining distance / full distance", ylabel="Reference slack (s)"
+        )
+        axes[0].legend(fontsize=7)
+        axes[1].set(
+            xlabel="Actual slack - reference slack (s)",
+            ylabel=(
+                f"Potential (K={PUNCTUALITY_POTENTIAL_SCALE:g}, "
+                f"sigma={PUNCTUALITY_POTENTIAL_SIGMA_S:g} s)"
+            ),
+        )
+    fig.tight_layout()
+    return fig
 
 
 def _apply_plot_style() -> None:

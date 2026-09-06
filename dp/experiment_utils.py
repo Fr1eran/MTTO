@@ -193,6 +193,22 @@ def compute_dp_reference_curve(
         "dp_upper_speed_envelope_version": DP_UPPER_SPEED_ENVELOPE_VERSION,
         **comfort_metrics,
     }
+    final_position_m = float(result["pos"][-1])
+    stop_error_m = abs(float(task_train_service.target_position) - final_position_m)
+    abs_time_error_s = abs(
+        float(result["total_time"]) - task_train_service.schedule_time
+    )
+    metrics.update(
+        {
+            "final_position_m": final_position_m,
+            "stop_error_m": stop_error_m,
+            "success": True,
+            "precise_arrival": stop_error_m <= task_train_service.max_stop_error,
+            "punctual_arrival": abs_time_error_s < 10.0,
+            "terminated": True,
+            "truncated": False,
+        }
+    )
 
     output_path = Path(output_dir) / DP_CURVE_FILENAME
     _ = save_curve_and_metrics(

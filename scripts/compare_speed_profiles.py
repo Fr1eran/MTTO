@@ -25,6 +25,7 @@ from rl.experiment_utils import (
     resolve_rl_curve_artifact,
 )
 from utils.plot_utils import apply_sci_figure_layout, save_sci_figure
+from utils.policy_selection import load_selected_policy_dir
 from utils.scenario import build_safeguard_utility, build_scenario
 from utils.trajectory import (
     OptimizedCurveArtifact,
@@ -280,20 +281,6 @@ def format_comparison_table(
     return "\n".join(rendered_rows)
 
 
-def _deduplicate_legend(ax: Any, *, loc: str = "upper right") -> None:
-    handles, labels = ax.get_legend_handles_labels()
-    seen: set[str] = set()
-    filtered = [
-        (handle, label)
-        for handle, label in zip(handles, labels, strict=False)
-        if label
-        and not label.startswith("_")
-        and not (label in seen or seen.add(label))
-    ]
-    if filtered:
-        ax.legend(*zip(*filtered, strict=False), loc=loc)
-
-
 def _finalize_comparison_figure(
     figure: plt.Figure,
     axes: tuple[plt.Axes, plt.Axes, plt.Axes],
@@ -305,8 +292,7 @@ def _finalize_comparison_figure(
         if legend is not None:
             legend.remove()
     handles = [
-        Line2D([0], [0], color=color, linewidth=1.8)
-        for color in _TRAJECTORY_COLORS
+        Line2D([0], [0], color=color, linewidth=1.8) for color in _TRAJECTORY_COLORS
     ]
     figure.legend(
         handles,
@@ -346,6 +332,12 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dp-curve-dir", default=DP_DEFAULT_SEARCH_DIR)
     parser.add_argument("--rl-curve-dir", default=RL_DEFAULT_SEARCH_DIR)
     parser.add_argument(
+        "--selection-file",
+        type=Path,
+        default=None,
+        help="Use the final RL policy directory recorded by selected_policy.json.",
+    )
+    parser.add_argument(
         "--real-curve",
         default=DEFAULT_REAL_CURVE_PATH,
         help="Aligned actual curve NPZ path.",
@@ -361,12 +353,12 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         "--output-file",
         type=Path,
         default=None,
-        help="Optional path for saving the comparison figure.",
+        help="Optional path to save the generated comparison figure.",
     )
     parser.add_argument(
         "--no-show",
         action="store_true",
-        help="Save or compute without opening an interactive figure window.",
+        help="Do not display the interactive plot window.",
     )
     return parser
 
@@ -381,9 +373,14 @@ def main() -> None:
     parser = _build_cli_parser()
     args = parser.parse_args()
     try:
+        rl_curve_dir = (
+            str(load_selected_policy_dir(args.selection_file))
+            if args.selection_file is not None
+            else args.rl_curve_dir
+        )
         dp_artifact, rl_artifact = _resolve_curve_artifacts(
             dp_curve_dir=args.dp_curve_dir,
-            rl_curve_dir=args.rl_curve_dir,
+            rl_curve_dir=rl_curve_dir,
             trajectory_source=args.trajectory_source,
         )
         dp_pos, dp_speed, dp_time, dp_metadata = load_dp_curve_artifact(dp_artifact)
@@ -445,7 +442,7 @@ def main() -> None:
     print(format_comparison_table(metrics_by_label))
 
     apply_rl_curve_plot_style()
-    figure, (ax_speed, ax_acc, ax_energy) = _create_comparison_axes()
+    fig, (ax_speed, ax_acc, ax_energy) = _create_comparison_axes()
     safeguard = None if args.no_safeguard else build_safeguard_utility(args.factor)
     render_dp_curve_on_axes(
         ax=ax_speed,
@@ -534,18 +531,16 @@ def main() -> None:
         fontweight="bold",
     )
     ax_energy.grid(True, alpha=0.3)
-    _finalize_comparison_figure(
-        figure,
-        (ax_speed, ax_acc, ax_energy),
-    )
+    _finalize_comparison_figure(fig, (ax_speed, ax_acc, ax_energy))
+
     if args.output_file is not None:
-        args.output_file.parent.mkdir(parents=True, exist_ok=True)
-        _ = save_sci_figure(figure, args.output_file)
-        print(f"Comparison figure saved to: {args.output_file}")
-    if args.no_show:
-        plt.close(figure)
-    else:
+        save_sci_figure(fig, args.output_file)
+        print(f"Saved comparison figure to: {args.output_file}")
+
+    if not args.no_show:
         plt.show()
+    else:
+        plt.close(fig)
 
 
 if __name__ == "__main__":

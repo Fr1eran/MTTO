@@ -30,14 +30,21 @@ from rl.experiment_utils import (
     RL_FINAL_MODEL_FILENAME,
     apply_rl_curve_plot_style,
     load_run_metadata,
+    reward_config_parameters,
     resolve_reward_preset,
     reward_preset_names,
+)
+from rl.reward_calculator import (
+    PUNCTUALITY_POTENTIAL_SCALE,
+    PUNCTUALITY_POTENTIAL_SIGMA_S,
+    RewardConfig,
 )
 from utils.io_utils import (
     format_float_token,
     load_evaluation_artifact,
 )
 from utils.plot_utils import apply_sci_figure_layout, save_sci_figure
+from utils.policy_selection import load_selected_policy_dir
 from utils.scenario import build_safeguard_utility, build_scenario
 
 DEFAULT_EVALUATE_LOAD_DIR = "output/optimal/rl/final/"
@@ -45,6 +52,18 @@ DEFAULT_OUTPUT_DIR = "output/optimal/rl/schedule_time_change_eval/"
 SUMMARY_FILENAME = "schedule_time_change_summary.json"
 DEFAULT_FIGURE_FILENAME = "schedule_time_change_comparison.png"
 DEFAULT_DELTA_TIMES_S = (0.0, 30.0, -30.0)
+
+
+def _reward_config_from_metadata(snapshot: object) -> RewardConfig:
+    values = asdict(snapshot)  # type: ignore[arg-type]
+    scale = float(values.pop("punctuality_potential_scale"))
+    sigma_s = float(values.pop("punctuality_potential_sigma_s"))
+    if scale != PUNCTUALITY_POTENTIAL_SCALE or sigma_s != PUNCTUALITY_POTENTIAL_SIGMA_S:
+        raise ValueError(
+            "selected policy uses retired punctuality-potential parameters; "
+            "the fixed DSPDL protocol requires K=5 and sigma=20 s"
+        )
+    return RewardConfig(**values)
 
 
 @dataclass(frozen=True)
@@ -65,6 +84,7 @@ class ScheduleChangeRunResult:
     final_schedule_time_s: float
     total_time_s: float
     time_error_s: float
+    abs_time_error_s: float
     stop_error_m: float
     total_energy_kj: float
     total_energy_j: float
@@ -188,6 +208,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default=DEFAULT_EVALUATE_LOAD_DIR,
         help="PPO model directory.",
+    )
+    _ = evaluate_parser.add_argument(
+        "--selection-file",
+        type=Path,
+        default=None,
+        help="Use the final policy directory recorded by selected_policy.json.",
     )
     _ = evaluate_parser.add_argument(
         "--output-dir",
@@ -520,6 +546,7 @@ def _run_one_case(
         final_schedule_time_s=target_time_s,
         total_time_s=total_time_s,
         time_error_s=time_error_s,
+        abs_time_error_s=abs(time_error_s),
         stop_error_m=stop_error_m,
         total_energy_kj=total_energy_kj,
         total_energy_j=total_energy_j,
@@ -547,6 +574,8 @@ def _write_summary(
     deterministic: bool,
     change_distance_m: float,
     results: list[ScheduleChangeRunResult],
+    reward_config: RewardConfig,
+    selection_file: str | None,
 ) -> Path:
     summary = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -555,10 +584,12 @@ def _write_summary(
         "output_root": output_root,
         "initial_schedule_time_s": float(schedule_time_s),
         "reward_preset_name": reward_preset_name,
+        "reward_config": reward_config_parameters(reward_config),
         "reward_discount": float(reward_discount),
         "step_distance": float(step_distance),
         "deterministic": bool(deterministic),
         "change_distance_m": float(change_distance_m),
+        "selection_file": selection_file,
         "cases": [result.to_summary_case() for result in results],
     }
     summary_path = experiment_dir / SUMMARY_FILENAME
@@ -568,7 +599,11 @@ def _write_summary(
 
 
 def run_evaluate(args: argparse.Namespace) -> None:
-    load_dir = args.load_dir
+    load_dir = (
+        str(load_selected_policy_dir(args.selection_file))
+        if args.selection_file is not None
+        else args.load_dir
+    )
     run_metadata = load_run_metadata(load_dir)
     schedule_time_s = float(
         args.schedule_time_s
@@ -585,10 +620,13 @@ def run_evaluate(args: argparse.Namespace) -> None:
         if args.step_distance is not None
         else run_metadata.step_distance
     )
-    reward_preset = resolve_reward_preset(
-        args.reward_preset or run_metadata.reward_preset_name
-    )
-    reward_config = reward_preset.config
+    if args.reward_preset is None:
+        reward_preset_name = run_metadata.reward_preset_name
+        reward_config = _reward_config_from_metadata(run_metadata.reward_config)
+    else:
+        reward_preset = resolve_reward_preset(args.reward_preset)
+        reward_preset_name = reward_preset.name
+        reward_config = reward_preset.config
 
     model_zip_path = os.path.join(load_dir, RL_FINAL_MODEL_FILENAME)
     cases = [build_schedule_change_case(delta) for delta in args.delta_times_s]
@@ -598,7 +636,8 @@ def run_evaluate(args: argparse.Namespace) -> None:
         print("  mode:                evaluate")
         print(f"  load_dir:            {load_dir}")
         print(f"  output_dir:          {args.output_dir}")
-        print(f"  reward_preset:      {reward_preset.name}")
+        print(f"  reward_preset:      {reward_preset_name}")
+        print(f"  reward_config:      {asdict(reward_config)}")
         print(f"  schedule_time_s:     {schedule_time_s:.2f}")
         print(f"  reward_discount:     {reward_discount:.4f}")
         print(f"  step_distance:       {step_distance:.2f}")
@@ -629,7 +668,7 @@ def run_evaluate(args: argparse.Namespace) -> None:
             schedule_time_s=schedule_time_s,
             reward_discount=reward_discount,
             step_distance=step_distance,
-            reward_preset_name=reward_preset.name,
+            reward_preset_name=reward_preset_name,
             reward_config=reward_config,
             deterministic=bool(args.deterministic),
             change_distance_m=float(args.change_distance_m),
@@ -641,12 +680,16 @@ def run_evaluate(args: argparse.Namespace) -> None:
         load_dir=load_dir,
         output_root=args.output_dir,
         schedule_time_s=schedule_time_s,
-        reward_preset_name=reward_preset.name,
+        reward_preset_name=reward_preset_name,
         reward_discount=reward_discount,
         step_distance=step_distance,
         deterministic=bool(args.deterministic),
         change_distance_m=float(args.change_distance_m),
         results=results,
+        reward_config=reward_config,
+        selection_file=(
+            str(args.selection_file) if args.selection_file is not None else None
+        ),
     )
 
     print("========== Schedule-Time Change Evaluation ==========")
@@ -661,6 +704,7 @@ def run_evaluate(args: argparse.Namespace) -> None:
             + f"target={result.final_schedule_time_s:.2f}s "
             + f"actual={result.total_time_s:.2f}s "
             + f"error={result.time_error_s:.2f}s "
+            + f"abs_error={result.abs_time_error_s:.2f}s "
             + f"energy={result.total_energy_kj:.2f}kJ"
         )
     print("=====================================================")

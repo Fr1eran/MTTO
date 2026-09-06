@@ -402,40 +402,18 @@ def compute_trajectory_evaluation_metrics(
 def compute_curriculum_distribution_metrics(
     series_map: dict[str, ScalarSeries],
 ) -> dict[str, Any]:
-    """Analyze DSPDL only when it emitted an actual-to-target KL series."""
-    steps, values = _series_values(series_map, "dspdl/empirical_to_target_kl")
-    if values.size == 0:
-        return {
-            "available": False,
-            "reason": "no DSPDL empirical sampling-distribution KL was logged",
-        }
-    current_steps, current_values = _series_values(
-        series_map, "dspdl/current_to_target_kl"
-    )
-    result: dict[str, Any] = {
-        "available": True,
-        "empirical_to_target_kl": {
-            "final": float(values[-1]),
-            "mean": float(np.mean(values)),
-            "min": float(np.min(values)),
-            "trend_slope_per_step": float(linear_slope(steps, values)),
-        },
-    }
-    if current_values.size:
-        result["current_to_target_kl"] = {
-            "final": float(current_values[-1]),
-            "mean": float(np.mean(current_values)),
-            "min": float(np.min(current_values)),
-            "trend_slope_per_step": float(linear_slope(current_steps, current_values)),
-        }
+    """Analyze DSPDL distribution and value-estimation diagnostics."""
     diagnostic_tags = {
         "converged": "dspdl/converged",
         "alpha": "dspdl/alpha",
+        "current_to_target_kl": "dspdl/current_to_target_kl",
+        "empirical_to_target_kl": "dspdl/empirical_to_target_kl",
         "update_kl": "dspdl/update_kl",
-        "critic_values_duration_s": "dspdl/critic_values_duration_s",
-        "distribution_solve_duration_s": "dspdl/distribution_solve_duration_s",
-        "critic_return_mae": "dspdl/critic_return_mae",
-        "critic_return_pearson": "dspdl/critic_return_pearson",
+        "value_return_mae": "dspdl/value_return_mae",
+        "value_return_pearson": "dspdl/value_return_pearson",
+        "importance_weight_ess": "dspdl/importance_weight_ess",
+        "importance_weight_ess_ratio": "dspdl/importance_weight_ess_ratio",
+        "importance_weight_max_to_mean": "dspdl/importance_weight_max_to_mean",
     }
     diagnostics: dict[str, dict[str, float]] = {}
     for name, tag in diagnostic_tags.items():
@@ -448,7 +426,15 @@ def compute_curriculum_distribution_metrics(
             "max": float(np.max(diag_values)),
             "trend_slope_per_step": float(linear_slope(diag_steps, diag_values)),
         }
-    result["diagnostics"] = diagnostics
+    if not diagnostics:
+        return {
+            "available": False,
+            "reason": "no DSPDL distribution diagnostics were logged",
+        }
+    result: dict[str, Any] = {
+        "available": True,
+        "diagnostics": diagnostics,
+    }
     return result
 
 

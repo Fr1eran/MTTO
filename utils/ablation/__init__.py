@@ -3,8 +3,11 @@
 from .artifacts import (
     artifact_paths,
     canonical_artifacts_complete,
+    canonical_training_run_complete,
     load_npz_arrays,
+    manifest_run_complete,
     materialize_canonical_artifacts,
+    training_budget_complete,
 )
 from .manifest import (
     ManifestSchemaError,
@@ -69,9 +72,12 @@ __all__ = [
     "manifest_matrix_config",
     "manifest_runs",
     "canonical_artifacts_complete",
+    "canonical_training_run_complete",
     "execute_matrix",
     "load_npz_arrays",
+    "manifest_run_complete",
     "materialize_canonical_artifacts",
+    "training_budget_complete",
     "smooth_episode_curve",
     "SeedValues",
     "status_map",

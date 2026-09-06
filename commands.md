@@ -11,6 +11,11 @@ DP 参考轨迹位于 `output/optimal/dp/465p0_0p1_uni30p0/`；如果实际目�
 只需替换 `--reference-curve-dir` 后的路径。步长消融脚本例外，默认使用 10 m
 参考曲线 `output/optimal/dp/465p0_0p1_uni10p0/`。
 
+主训练入口和通用训练参数默认使用 `dspdl`（DSPDL）。课程 profile 启用时
+仍必须显式提供与任务匹配的 DP 参考目录；消融或基线实验可显式指定
+`--curriculum-profile none`。旧任务完成度课程的输出目录和 manifest 只作为历史材料保存，
+不会被当前实验脚本自动迁移或续跑。
+
 ## 环境准备
 
 安装或同步依赖：
@@ -64,7 +69,10 @@ uv run python -m scripts.show_dp_result \
 先预览默认训练配置，不创建环境、不启动训练：
 
 ```bash
-uv run python -m scripts.train_rl --dry-run
+uv run python -m scripts.train_rl \
+  --curriculum-profile dspdl \
+  --reference-curve-dir output/optimal/dp/465p0_0p1_uni30p0/ \
+  --dry-run
 ```
 
 全量调优训练，每 12 个 rollouts 执行一次 best-eval：
@@ -74,6 +82,8 @@ uv run python -m scripts.train_rl \
   --output-root output/optimal/rl/tune/ \
   --schedule-time-s 465.0 \
   --step-distance 30.0 \
+  --curriculum-profile dspdl \
+  --reference-curve-dir output/optimal/dp/465p0_0p1_uni30p0/ \
   --run-mode tune \
   --training-episodes 7000 \
   --num-envs 8 \
@@ -90,6 +100,8 @@ uv run python -m scripts.train_rl \
   --output-root output/optimal/rl/monitor_best/ \
   --schedule-time-s 465.0 \
   --step-distance 30.0 \
+  --curriculum-profile dspdl \
+  --reference-curve-dir output/optimal/dp/465p0_0p1_uni30p0/ \
   --run-mode monitor_best \
   --training-episodes 7000 \
   --num-envs 8 \
@@ -106,6 +118,8 @@ uv run python -m scripts.train_rl \
   --output-root output/optimal/rl/reproduce/ \
   --schedule-time-s 465.0 \
   --step-distance 30.0 \
+  --curriculum-profile dspdl \
+  --reference-curve-dir output/optimal/dp/465p0_0p1_uni30p0/ \
   --run-mode reproduce \
   --training-episodes 7000 \
   --num-envs 8 \
@@ -113,30 +127,11 @@ uv run python -m scripts.train_rl \
   --device cpu
 ```
 
-启用 DSPDL 课程训练：
+论文主方法使用 DSPDL。`train_rl` 的默认课程配置已经是
+`dspdl`，也可以在正式命令中显式写出：
 
 ```bash
-uv run python -m scripts.train_rl \
-  --output-root output/optimal/rl/dspdl/ \
-  --schedule-time-s 465.0 \
-  --step-distance 30.0 \
-  --reward-preset basic_safety \
-  --curriculum-profile dspdl \
-  --reference-curve-dir output/optimal/dp/465p0_0p1_uni30p0/ \
-  --run-mode monitor_best \
-  --training-episodes 7000 \
-  --num-envs 8 \
-  --rollout-steps-per-update 8192 \
-  --evaluation-interval-rollouts 12 \
-  --seed 11 \
-  --device cpu
-```
-
-将上述命令中的课程配置改为以下值，可启用基于任务完成度的 DSPDL，同时保留旧
-`dspdl` 配置用于对照：
-
-```bash
-  --curriculum-profile dspdl_completion
+  --curriculum-profile dspdl
 ```
 
 使用 CUDA 训练时，将上述命令末尾的 `--device cpu` 改为 `--device cuda`。
@@ -210,8 +205,8 @@ uv run python -m scripts.show_rl_result \
 内部环境步上限，命令行不再接受手工时间步预算。完成后在
 `metadata.json` 的 `training_budget` 中核对有效回合数、推导步数、实际回合数和停止原因。
 该预算接口已更新，旧版本 manifest 不能用于 `--resume`；请为新实验使用新的输出根目录。
-三类消融脚本均将矩阵状态写入各自输出根目录的 `manifest.json`。需要断点恢复时显式追加
-`--resume`；runner 会按稳定 `run_id` 跳过 canonical 产物完整的运行，并在首个失败运行处停止，
+两类消融脚本均将矩阵状态写入各自输出根目录的 `manifest.json`。需要断点恢复时显式追加
+`--resume`；runner 只会跳过 canonical 产物完整且完成回合预算已达标的运行，并在首个失败运行处停止，
 其余运行保留为 `pending`。如果输出目录已有 manifest 但未指定 `--resume`，新训练会拒绝覆盖；
 确认要重新开始时使用 `--force-new`，旧 manifest 会先备份为带 UTC 时间戳的文件。resume 只检查
 canonical 产物，不会在检查阶段自动复制旧版产物。
@@ -233,27 +228,7 @@ uv run python -m scripts.run_step_distance_ablation train \
   --evaluation-interval-rollouts 12
 
 uv run python -m scripts.run_step_distance_ablation show \
-  --output-root output/optimal/rl/step_distance_ablation
-```
-
-预览奖励消融运行矩阵：
-
-```bash
-uv run python -m scripts.run_reward_ablation train \
-  --num-envs 8 \
-  --evaluation-interval-rollouts 12 \
-  --dry-run
-```
-
-执行奖励消融并展示结果：
-
-```bash
-uv run python -m scripts.run_reward_ablation train \
-  --num-envs 8 \
-  --evaluation-interval-rollouts 12
-
-uv run python -m scripts.run_reward_ablation show \
-  --output-root output/optimal/rl/reward_ablation_safety
+  --output-root output/paper_experiment/01_step_distance_dspdl_v3
 ```
 
 预览方法消融运行矩阵：
@@ -275,8 +250,9 @@ uv run python -m scripts.run_method_ablation train \
   --evaluation-interval-rollouts 12
 
 uv run python -m scripts.run_method_ablation show \
-  --output-root output/optimal/rl/method_ablation \
-  --safety-output-file output/optimal/rl/method_ablation/safety_learning_process.png
+  --output-root output/paper_experiment/02_method_ablation_pbrs_x_dspdl_v3 \
+  --safety-output-file output/paper_experiment/02_method_ablation_pbrs_x_dspdl_v3/safety_learning_process.png \
+  --selection-output-file output/paper_experiment/02_method_ablation_pbrs_x_dspdl_v3/selected_policy.json
 ```
 
 ## 训练分析与性能诊断
@@ -298,14 +274,6 @@ uv run python -m scripts.analyze_training_data \
 uv run python -m scripts.analyze_training_data \
   --final-output-dir output/optimal/rl/tune/465p0_30p0/final/ \
   --dry-run
-```
-
-运行环境吞吐基准：
-
-```bash
-uv run python -m scripts.benchmark_tune \
-  --steps 8192 \
-  --rollout-capacity 2048
 ```
 
 ## 对比与合规分析

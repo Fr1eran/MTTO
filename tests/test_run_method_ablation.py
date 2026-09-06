@@ -1,11 +1,14 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 import scripts.run_method_ablation as method_ablation
 from contracts.evaluation import EvaluationHistory, EvaluationMetrics
 from rl.reward_diagnostics import REWARD_DIAGNOSTICS_SCHEMA_VERSION, REWARD_NAMES
+from utils.io_utils import load_evaluation_metrics
 
 
 def _write_episodes(path: Path, violation_codes: list[int] | None = None) -> None:
@@ -140,10 +143,60 @@ def test_matrix_maps_methods_to_expected_training_modes() -> None:
     assert len(runs) == len(method_ablation.METHODS) * len(
         method_ablation.DEFAULT_SEEDS
     )
-    assert runs[0].run_id == "method__ppo__seed0011__r01"
-    assert runs[0].train_args.curriculum_profile == "none"
-    assert runs[-1].train_args.curriculum_profile == "dspdl_completion"
-    assert runs[-1].artifacts.evaluations.name == "evaluations.npz"
+    assert args.evaluation_interval_rollouts == 12
+    assert args.num_envs == 8
+    assert not hasattr(args, "vec_env_type")
+    assert args.rollout_steps_per_update == 8192
+    assert args.device == "cpu"
+    assert all(run.spec.evaluation_interval_rollouts == 12 for run in runs)
+    first_by_method = {run.method.name: run for run in runs if run.repeat_index == 0}
+    assert first_by_method["ppo"].train_args.reward_preset == "basic"
+    assert first_by_method["ppo"].train_args.curriculum_profile == "none"
+    assert (
+        first_by_method["ppo_pbrs"].train_args.reward_preset
+        == "basic_safety_punctuality"
+    )
+    assert (
+        first_by_method["ppo_dspdl"].train_args.curriculum_profile
+        == "dspdl"
+    )
+    assert first_by_method["ppo_dspdl"].train_args.reference_curve_dir == "."
+    assert (
+        first_by_method["ppo_pbrs_dspdl"].train_args.reward_preset
+        == "basic_safety_punctuality"
+    )
+    assert (
+        first_by_method["ppo_pbrs_dspdl"].train_args.curriculum_profile
+        == "dspdl"
+    )
+
+
+@pytest.mark.parametrize("vec_env_type", ("dummy", "subproc"))
+def test_train_cli_rejects_vec_env_type(vec_env_type: str) -> None:
+    parser = method_ablation.build_arg_parser()
+    with pytest.raises(SystemExit):
+        _ = parser.parse_args(
+            [
+                "train",
+                "--reference-curve-dir",
+                ".",
+                "--vec-env-type",
+                vec_env_type,
+            ]
+        )
+
+
+def test_train_cli_rejects_removed_step_evaluation_interval() -> None:
+    with pytest.raises(SystemExit):
+        _ = method_ablation.build_arg_parser().parse_args(
+            [
+                "train",
+                "--reference-curve-dir",
+                ".",
+                "--eval-interval-steps",
+                "100000",
+            ]
+        )
 
 
 def test_manifest_round_trip_and_compatibility(tmp_path: Path) -> None:
@@ -164,6 +217,13 @@ def test_manifest_round_trip_and_compatibility(tmp_path: Path) -> None:
     assert loaded == payload
     assert loaded["schema_version"] == 1
     assert loaded["matrix_id"] == "method"
+    assert loaded["matrix_config"]["protocol_version"] == 3
+    assert (
+        loaded["training_signature"]["dspdl_protocol"][
+            "context_value_estimator"
+        ]
+        == "importance_weighted_samples"
+    )
     assert loaded["runs"][0]["status"] == "completed"  # type: ignore[index]
 
 
@@ -184,7 +244,44 @@ def test_curve_and_final_aggregates_use_canonical_artifacts(tmp_path: Path) -> N
         method.name for method in method_ablation.METHODS
     ]
     assert finals[0].means["stop_error_m"] == 1.0
-    assert finals[0].means["time_error_s"] == -2.0
+    assert finals[0].means["abs_time_error_s"] == 2.0
+    np.testing.assert_allclose(curves[0].axis_for("stop_error_m"), [1.0, 2.0])
+    np.testing.assert_allclose(curves[0].means["abs_time_error_s"], [12.0, 2.0])
+
+
+def test_policy_selection_prefers_lowest_energy_strictly_feasible_policy(
+    tmp_path: Path,
+) -> None:
+    metrics_path = tmp_path / "metrics.json"
+    _write_metrics(metrics_path)
+    base = load_evaluation_metrics(metrics_path)
+    high_energy = replace(
+        base,
+        stop_error_m=0.1,
+        time_error_s=-2.0,
+        total_energy_j=10_000.0,
+        min_safety_margin_mps=0.1,
+    )
+    low_energy = replace(high_energy, total_energy_j=9_000.0)
+
+    low_rank = method_ablation._selection_rank(low_energy)
+    high_rank = method_ablation._selection_rank(high_energy)
+    assert low_rank > high_rank
+
+
+def test_analysis_rejects_old_method_protocol(tmp_path: Path) -> None:
+    args = method_ablation.build_arg_parser().parse_args(
+        ["train", "--reference-curve-dir", ".", "--output-root", str(tmp_path)]
+    )
+    manifest = method_ablation.build_manifest(
+        args, method_ablation.resolve_run_matrix(args)
+    )
+    legacy = replace(
+        manifest,
+        matrix_config={**manifest.matrix_config, "protocol_version": 1},
+    )
+    with pytest.raises(ValueError, match="obsolete protocol"):
+        method_ablation._validate_analysis_manifest(legacy)
 
 
 def test_safety_learning_process_bins_per_episode_violation_codes(

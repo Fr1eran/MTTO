@@ -92,7 +92,7 @@ def _reward_artifact() -> RewardDiagnosticsArtifact:
         ],
         dtype=np.float64,
     )
-    transitions = np.column_stack((transitions, transitions.sum(axis=1)))
+    transitions = np.column_stack((transitions, np.zeros(4), transitions.sum(axis=1)))
     episode_rewards = np.vstack(
         (transitions[:2].sum(axis=0), transitions[2:].sum(axis=0))
     )
@@ -166,6 +166,39 @@ def test_reward_diagnostics_rejects_removed_schema(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="Unsupported reward diagnostics schema"):
         _ = load_reward_diagnostics_artifact(artifact_path)
+
+
+@pytest.mark.parametrize("version", [2, 3])
+def test_legacy_reward_diagnostics_insert_zero_punctuality(tmp_path, version):
+    path = tmp_path / "legacy.npz"
+    artifact = _reward_artifact()
+    legacy_indices = [
+        i for i, name in enumerate(REWARD_NAMES) if name != "punctuality_shaping"
+    ]
+    payload = {}
+    for field in artifact.__dataclass_fields__:
+        value = getattr(artifact, field)
+        if field == "reward_names":
+            value = np.asarray([REWARD_NAMES[i] for i in legacy_indices])
+        elif field == "rollout_reward_cross_product":
+            value = value[:, legacy_indices][:, :, legacy_indices]
+        elif "reward" in field:
+            value = value[:, legacy_indices]
+        elif field == "episode_violation_code" and version == 2:
+            continue
+        payload[field] = value
+    np.savez(path, schema_version=np.asarray([version]), **payload)
+    restored = load_reward_diagnostics_artifact(path)
+    np.testing.assert_allclose(restored.rollout_reward_sum, artifact.rollout_reward_sum)
+    np.testing.assert_allclose(
+        restored.rollout_reward_cross_product, artifact.rollout_reward_cross_product
+    )
+    np.testing.assert_allclose(
+        restored.episode_reward_sums, artifact.episode_reward_sums
+    )
+    np.testing.assert_array_equal(
+        restored.episode_violation_code, [0, 3] if version == 3 else [-1, -1]
+    )
 
 
 def test_reward_diagnostics_accepts_small_reward_total_rounding_error(
@@ -297,32 +330,57 @@ def test_trajectory_evaluation_metrics_records_required_trends():
     assert metrics["metrics"]["comfort_rms"]["final"] == 1.0
 
 
-def test_curriculum_distribution_metrics_requires_empirical_dspdl_kl():
+def test_curriculum_distribution_metrics_accepts_critic_signals():
     unavailable = compute_curriculum_distribution_metrics({})
     assert unavailable["available"] is False
 
     series_map = {
-        "dspdl/empirical_to_target_kl": _make_series(
-            "dspdl/empirical_to_target_kl", [1.0, 0.4, 0.2]
-        ),
-        "dspdl/current_to_target_kl": _make_series(
-            "dspdl/current_to_target_kl", [0.8, 0.3, 0.1]
-        ),
-        "dspdl/alpha": _make_series("dspdl/alpha", [5.0, 5.0, 3.0]),
+        "dspdl/alpha": _make_series("dspdl/alpha", [0.05, 0.04, 0.03]),
         "dspdl/converged": _make_series("dspdl/converged", [0.0, 0.0, 1.0]),
-        "dspdl/update_kl": _make_series("dspdl/update_kl", [0.05, 0.05, 0.05]),
-        "dspdl/critic_return_pearson": _make_series(
-            "dspdl/critic_return_pearson", [0.1, 0.3, 0.5]
+        "dspdl/current_to_target_kl": _make_series(
+            "dspdl/current_to_target_kl", [2.0, 1.0, 0.1]
         ),
     }
     metrics = compute_curriculum_distribution_metrics(series_map)
     assert metrics["available"] is True
     assert metrics["diagnostics"]["converged"]["final"] == 1.0
-    assert metrics["empirical_to_target_kl"]["final"] == 0.2
-    assert metrics["current_to_target_kl"]["trend_slope_per_step"] < 0.0
-    assert metrics["diagnostics"]["alpha"]["final"] == 3.0
-    assert metrics["diagnostics"]["update_kl"]["final"] == 0.05
-    assert metrics["diagnostics"]["critic_return_pearson"]["final"] == 0.5
+    assert metrics["diagnostics"]["alpha"]["final"] == pytest.approx(0.03)
+    assert metrics["diagnostics"]["current_to_target_kl"]["final"] == pytest.approx(0.1)
+
+
+def test_markdown_report_renders_empirical_kl_with_numeric_values(
+    tmp_path: Path,
+) -> None:
+    series_map = {
+        "dspdl/current_to_target_kl": _make_series(
+            "dspdl/current_to_target_kl", [2.0, 1.0, 0.5]
+        ),
+        "dspdl/empirical_to_target_kl": _make_series(
+            "dspdl/empirical_to_target_kl", [1.8, 0.9, 0.4]
+        ),
+        "dspdl/update_kl": _make_series("dspdl/update_kl", [0.05, 0.02, 0.01]),
+    }
+    curriculum = compute_curriculum_distribution_metrics(series_map)
+    payload = build_analysis_payload(
+        run_name="empirical_kl_test",
+        run_directory="dummy",
+        available_tags=list(series_map.keys()),
+        regular_metrics={},
+        curriculum_distribution_metrics=curriculum,
+        config={"export_csv": False, "include_snapshots": False},
+    )
+    output_paths = write_analysis_outputs(
+        payload, output_root=tmp_path, run_name="empirical_kl_test"
+    )
+    report = Path(output_paths["markdown_report"]).read_text(encoding="utf-8")
+
+    assert "- empirical_to_target_kl: final=0.4, trend_slope_per_step=-0.7" in report
+    assert "empirical_to_target_kl: final=N/A" not in report
+    assert report.count("- empirical_to_target_kl:") == 1
+    idx_current = report.index("- current_to_target_kl:")
+    idx_empirical = report.index("- empirical_to_target_kl:")
+    idx_update = report.index("- update_kl:")
+    assert idx_current < idx_empirical < idx_update
 
 
 def test_safety_position_metrics_identifies_highest_truncation_count_bin(
@@ -857,90 +915,6 @@ def test_train_rl_cli_rejects_removed_fixed_reverse_profile() -> None:
         _ = parser.parse_args(["--curriculum-profile", "fixed_reverse"])
 
 
-def test_train_rl_cli_resolves_dspdl_profile(tmp_path: Path) -> None:
-    parser = build_train_rl_arg_parser()
-    args = parser.parse_args(
-        [
-            "--curriculum-profile",
-            "dspdl",
-            "--reference-curve-dir",
-            str(tmp_path),
-            "--dry-run",
-        ]
-    )
-
-    spec = resolve_training_run_spec(args)
-    assert spec.curriculum_profile == "dspdl"
-    assert spec.dspdl_config is not None
-    curriculum = spec.run_metadata["curriculum"]
-    assert curriculum["profile_name"] == "dspdl"
-    assert curriculum["enabled"] is True
-    assert curriculum["dspdl_config"]["relative_entropy_bound"] == 0.02
-    assert curriculum["dspdl_config"]["target_uniform_mass"] == 0.05
-    assert curriculum["dspdl_config"]["target_kl_stop"] == 0.1
-    assert curriculum["dspdl_config"]["alpha_warmup_updates"] == 5
-    assert curriculum["dspdl_config"]["update_interval_rollouts"] == 2
-    assert curriculum["dspdl_config"]["zeta"] == 0.01
-    assert "dspdl" in Path(spec.output_dir).name
-
-
-def test_train_rl_cli_resolves_completion_dspdl_profile(tmp_path: Path) -> None:
-    parser = build_train_rl_arg_parser()
-    args = parser.parse_args(
-        [
-            "--curriculum-profile",
-            "dspdl_completion",
-            "--reference-curve-dir",
-            str(tmp_path),
-            "--dry-run",
-        ]
-    )
-
-    spec = resolve_training_run_spec(args)
-    assert spec.curriculum_profile == "dspdl_completion"
-    assert spec.dspdl_config is not None
-    curriculum = spec.run_metadata["curriculum"]
-    config = curriculum["dspdl_config"]
-    assert curriculum["profile_name"] == "dspdl_completion"
-    assert curriculum["enabled"] is True
-    assert curriculum["value_source"] == "task_completion"
-    assert config["zeta"] == pytest.approx(1.0)
-    assert config["completion_floor"] == pytest.approx(0.1)
-    assert config["completion_ema_alpha"] == pytest.approx(0.1)
-    assert config["alpha_min"] == pytest.approx(0.01)
-    assert config["alpha_max"] == pytest.approx(0.05)
-    assert "dspdl_completion" in Path(spec.output_dir).name
-
-
-def test_train_rl_cli_overrides_completion_alpha_max(tmp_path: Path) -> None:
-    parser = build_train_rl_arg_parser()
-    args = parser.parse_args(
-        [
-            "--curriculum-profile",
-            "dspdl_completion",
-            "--completion-alpha-max",
-            "0.05",
-            "--reference-curve-dir",
-            str(tmp_path),
-            "--dry-run",
-        ]
-    )
-
-    spec = resolve_training_run_spec(args)
-    assert spec.dspdl_config is not None
-    assert spec.run_metadata["curriculum"]["dspdl_config"]["alpha_max"] == (
-        pytest.approx(0.05)
-    )
-
-
-def test_completion_alpha_max_rejects_noncompletion_profile() -> None:
-    parser = build_train_rl_arg_parser()
-    args = parser.parse_args(["--completion-alpha-max", "0.05", "--dry-run"])
-
-    with pytest.raises(ValueError, match="only valid with dspdl_completion"):
-        _ = resolve_training_run_spec(args)
-
-
 def test_train_rl_curriculum_requires_existing_reference_directory() -> None:
     parser = build_train_rl_arg_parser()
     args = parser.parse_args(["--curriculum-profile", "dspdl"])
@@ -985,6 +959,8 @@ def test_resolve_training_run_spec_plans_paths_and_switches() -> None:
             "monitor_best",
             "--reward-preset",
             "basic_safety",
+            "--curriculum-profile",
+            "none",
             "--experiment-tag",
             "batch_a",
             "--dry-run",
@@ -1017,6 +993,8 @@ def test_training_episode_budget_rounds_up_to_a_whole_vector_batch() -> None:
             "7001",
             "--num-envs",
             "8",
+            "--curriculum-profile",
+            "none",
             "--dry-run",
         ]
     )
@@ -1034,7 +1012,9 @@ def test_training_episode_budget_rounds_up_to_a_whole_vector_batch() -> None:
 
 def test_training_defaults_to_a_completed_episode_budget() -> None:
     spec = resolve_training_run_spec(
-        build_train_rl_arg_parser().parse_args(["--dry-run"])
+        build_train_rl_arg_parser().parse_args(
+            ["--curriculum-profile", "none", "--dry-run"]
+        )
     )
 
     assert spec.training_episodes == 7000
@@ -1043,7 +1023,9 @@ def test_training_defaults_to_a_completed_episode_budget() -> None:
 
 def test_tune_mode_enables_safety_truncation_histogram() -> None:
     parser = build_train_rl_arg_parser()
-    args = parser.parse_args(["--run-mode", "tune", "--dry-run"])
+    args = parser.parse_args(
+        ["--run-mode", "tune", "--curriculum-profile", "none", "--dry-run"]
+    )
 
     spec = resolve_training_run_spec(args)
 
@@ -1052,7 +1034,9 @@ def test_tune_mode_enables_safety_truncation_histogram() -> None:
 
 def test_multi_environment_training_omits_backend_metadata() -> None:
     parser = build_train_rl_arg_parser()
-    args = parser.parse_args(["--num-envs", "2", "--dry-run"])
+    args = parser.parse_args(
+        ["--num-envs", "2", "--curriculum-profile", "none", "--dry-run"]
+    )
 
     spec = resolve_training_run_spec(args)
 

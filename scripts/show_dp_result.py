@@ -14,7 +14,7 @@ from dp.experiment_utils import (
     render_dp_curve_on_axes,
 )
 from model.common import min_operation_time
-from utils.plot_utils import apply_sci_figure_layout, set_global_plot_style
+from utils.plot_utils import set_global_plot_style
 from utils.scenario import build_scenario
 from utils.trajectory import OptimizedCurveArtifact
 
@@ -133,9 +133,9 @@ def _build_dp_redundant_operation_time_arr(
     )
     min_remaining_time_fn = functools.partial(
         min_operation_time,
-        vehicle=vehicle,
-        track=track,
-        gamma=safeguard_utility.gamma,
+        vehicle,
+        track,
+        safeguard_utility.gamma,
     )
 
     target_position = _metric_as_float(metrics, "target_position_m")
@@ -202,6 +202,17 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.99,
         help="Safeguard factor used for rendering when safeguard is enabled.",
+    )
+    _ = parser.add_argument(
+        "--output-file",
+        type=Path,
+        default=None,
+        help="Optional path to save the generated figure.",
+    )
+    _ = parser.add_argument(
+        "--no-show",
+        action="store_true",
+        help="Do not display the interactive plot window.",
     )
     return parser
 
@@ -291,16 +302,15 @@ def main() -> None:
         fontweight="bold",
     )
 
-    apply_sci_figure_layout(
-        fig,
-        columns=2,
-        height_in=4.4,
-        left=0.10,
-        bottom=0.12,
-        top=0.96,
-        hspace=0.22,
-    )
-    plt.show()
+    fig.tight_layout()
+
+    if args.output_file is not None:
+        args.output_file.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(args.output_file, dpi=300.0, bbox_inches="tight")
+        print(f"Saved figure to: {args.output_file}")
+
+    if not args.no_show:
+        plt.show()
 
 
 if __name__ == "__main__":

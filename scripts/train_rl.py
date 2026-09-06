@@ -51,6 +51,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help=(
             "奖励配置预设。basic 固定包含 energy/comfort；"
             "basic_safety 额外启用安全 PBRS。"
+            "basic_safety_punctuality 再加入线性剩余裕度准点 PBRS。"
         ),
     )
     _ = parser.add_argument(
@@ -59,8 +60,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
         choices=tuple(curriculum_profile_names()),
         default=DEFAULT_CURRICULUM_PROFILE_NAME,
         help=(
-            "初态课程预设。none 保持真实起点训练；dspdl 使用 PPO Critic；"
-            "dspdl_completion 使用任务完成度 Critic。"
+            "初态课程预设。none 保持真实起点训练；"
+            "dspdl 使用离散自步学习机制（默认）。"
         ),
     )
     _ = parser.add_argument(
@@ -68,15 +69,6 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="启用课程时必填：包含任务匹配 DP 参考轨迹的目录。",
-    )
-    _ = parser.add_argument(
-        "--completion-alpha-max",
-        type=float,
-        default=None,
-        help=(
-            "仅用于 dspdl_completion：覆盖目标分布迁移强度 alpha 的上限；"
-            "未指定时使用 CompletionDSPDLConfig 默认值。"
-        ),
     )
     _ = parser.add_argument(
         "--experiment-tag",

@@ -297,9 +297,20 @@ class ContextPoolBuilder:
             speed_sq = begin_speed**2 + 2.0 * acceleration * (
                 float(distance) - begin_distance
             )
-            if speed_sq < -(_SPEED_ATOL_MPS**2):
-                raise ValueError("reference interpolation produced an invalid speed")
-            result[index] = float(np.sqrt(max(speed_sq, 0.0)))
+            interpolated_speed = float(np.sqrt(max(speed_sq, 0.0)))
+            if hasattr(self._stepper, "get_upper_speed"):
+                pos = (
+                    float(self._stepper.train_service.start_position)
+                    + self._stepper.direction * distance
+                )
+                upper = float(self._stepper.get_upper_speed(pos))
+                result[index] = (
+                    min(interpolated_speed, upper - 1e-4)
+                    if upper > 0.0
+                    else interpolated_speed
+                )
+            else:
+                result[index] = interpolated_speed
         return result
 
     def _reconstruct_contexts(

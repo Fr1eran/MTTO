@@ -1,11 +1,11 @@
-from __future__ import annotations
-
+import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
 from matplotlib import pyplot as plt
 
+import scripts.compare_speed_profiles as compare_module
 from scripts.compare_speed_profiles import (
     DEFAULT_REAL_CURVE_PATH,
     ProfileMetrics,
@@ -18,6 +18,7 @@ from scripts.compare_speed_profiles import (
     format_comparison_table,
     load_real_operation_profile,
 )
+from utils.trajectory import OptimizedCurveArtifact
 
 
 def test_compare_speed_profiles_cli_defaults() -> None:
@@ -26,6 +27,7 @@ def test_compare_speed_profiles_cli_defaults() -> None:
     assert args.real_curve == DEFAULT_REAL_CURVE_PATH
     assert args.trajectory_source == "best"
     assert args.no_safeguard is False
+    assert args.selection_file is None
 
 
 def test_comparison_figure_uses_one_trajectory_only_shared_legend() -> None:
@@ -150,3 +152,110 @@ def test_format_comparison_table_contains_only_requested_metrics() -> None:
     assert "comfort_tav (m/s^2)" in table
     assert "123.456" in table
     assert "0.123456" in table
+
+
+def test_deduplicate_legend_is_removed() -> None:
+    assert not hasattr(compare_module, "_deduplicate_legend")
+
+
+def test_main_uses_comparison_axes_and_scientific_export(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pos = np.linspace(0.0, 6000.0, 20)
+    speed = np.linspace(0.0, 20.0, 20)
+    time = np.linspace(0.0, 465.0, 20)
+
+    monkeypatch.setattr(
+        compare_module,
+        "_resolve_curve_artifacts",
+        lambda **kw: (
+            OptimizedCurveArtifact(
+                npz_path="dummy_dp.npz", metrics_path="dummy_dp.json"
+            ),
+            OptimizedCurveArtifact(
+                npz_path="dummy_rl.npz", metrics_path="dummy_rl.json"
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        compare_module,
+        "load_dp_curve_artifact",
+        lambda *a, **kw: (
+            pos,
+            speed,
+            time,
+            {
+                "target_time_s": 465.0,
+                "target_position_m": 6000.0,
+                "total_energy_kj": 100.0,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        compare_module,
+        "load_rl_curve_artifact",
+        lambda *a, **kw: (
+            pos,
+            speed,
+            {
+                "target_time_s": 465.0,
+                "target_position_m": 6000.0,
+                "total_time_s": 465.0,
+                "total_energy_kj": 105.0,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        compare_module,
+        "load_real_operation_profile",
+        lambda *a, **kw: SpeedProfile(
+            label="Actual operation",
+            position_m=pos,
+            speed_mps=speed,
+            time_s=time,
+            target_position_m=6000.0,
+        ),
+    )
+
+    called_helpers: list[str] = []
+    orig_create_axes = compare_module._create_comparison_axes
+    orig_finalize = compare_module._finalize_comparison_figure
+    orig_save_sci = compare_module.save_sci_figure
+
+    def spy_create_axes():
+        called_helpers.append("_create_comparison_axes")
+        return orig_create_axes()
+
+    def spy_finalize(figure, axes):
+        called_helpers.append("_finalize_comparison_figure")
+        return orig_finalize(figure, axes)
+
+    def spy_save_sci(fig, output_file, **kwargs):
+        called_helpers.append("save_sci_figure")
+        return orig_save_sci(fig, output_file, **kwargs)
+
+    monkeypatch.setattr(compare_module, "_create_comparison_axes", spy_create_axes)
+    monkeypatch.setattr(compare_module, "_finalize_comparison_figure", spy_finalize)
+    monkeypatch.setattr(compare_module, "save_sci_figure", spy_save_sci)
+
+    output_png = tmp_path / "comparison_figure.png"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "compare_speed_profiles",
+            "--output-file",
+            str(output_png),
+            "--no-show",
+        ],
+    )
+
+    compare_module.main()
+
+    assert called_helpers == [
+        "_create_comparison_axes",
+        "_finalize_comparison_figure",
+        "save_sci_figure",
+    ]
+    assert output_png.is_file()
+    assert output_png.stat().st_size > 0

@@ -7,7 +7,10 @@ from typing import ClassVar, Literal
 
 from .common import JSONMapping, MappingView, from_dict, to_dict
 
-CurriculumProfileName = Literal["none", "dspdl", "dspdl_completion"]
+CurriculumProfileName = Literal[
+    "none",
+    "dspdl",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,6 +19,9 @@ class RewardConfigSnapshot(MappingView):
     comfort_reward_scale: float
     enable_potential_safety: bool
     survival_reward_scale: float
+    enable_potential_punctuality: bool = False
+    punctuality_potential_scale: float = 5.0
+    punctuality_potential_sigma_s: float = 20.0
 
     def to_mapping(self) -> JSONMapping:
         return to_dict(self)
@@ -26,14 +32,16 @@ class CurriculumMetadata(MappingView):
     profile_name: CurriculumProfileName
     enabled: bool
     value_source: str | None
-    dspdl_config: JSONMapping | None
+    dspdl_protocol: JSONMapping | None
     reference_curve_dir: str | None
     reference_curve_artifact_path: str | None
     reference_curve_metrics_path: str | None
     rl_step_distance_m: float | None
     context_count: int | None = field(metadata={"minimum": 0})
     initial_curriculum_version: int | None = field(metadata={"minimum": 0})
-    completion_critic: JSONMapping | None
+    algorithm_id: str | None = None
+    alpha_update_protocol: JSONMapping | None = None
+    context_value_estimation_protocol: JSONMapping | None = None
 
     def to_mapping(self) -> JSONMapping:
         return to_dict(self)
@@ -97,10 +105,11 @@ class RunMetadata(MappingView):
     tensorboard_log_dir: str | None = None
     tb_log_name: str | None = None
     reward_diagnostics_schema_version: int | None = None
+    seed: int | None = None
     extensions: JSONMapping = field(default_factory=dict)
 
     ARTIFACT_TYPE: ClassVar[str] = "rl_training_metadata"
-    SCHEMA_VERSION: ClassVar[int] = 1
+    SCHEMA_VERSION: ClassVar[int] = 2
 
     def to_mapping(self) -> JSONMapping:
         return to_dict(

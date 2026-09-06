@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from contracts.training import TrainingBudget
 from utils.ablation import (
     ArtifactLayout,
     ManifestSchemaError,
@@ -17,6 +18,7 @@ from utils.ablation import (
     execute_matrix,
     materialize_canonical_artifacts,
     smooth_episode_curve,
+    training_budget_complete,
 )
 
 
@@ -51,6 +53,27 @@ def test_statistics_keep_nan_missing_values_and_sample_std() -> None:
     np.testing.assert_array_equal(count, [2, 1, 0])
     assert np.isnan(mean[2])
     assert np.isnan(std[2])
+
+
+def test_completed_episode_budget_requires_target_and_actual_count() -> None:
+    base = dict(
+        mode="completed_episodes",
+        training_episodes=7,
+        effective_training_episodes=8,
+        max_episode_steps=10,
+        derived_total_timesteps=80,
+        actual_training_timesteps=64,
+        stop_reason="completed_episode_target",
+    )
+    assert training_budget_complete(
+        TrainingBudget(**base, actual_completed_episodes=8, target_reached=True)
+    )
+    assert not training_budget_complete(
+        TrainingBudget(**base, actual_completed_episodes=7, target_reached=True)
+    )
+    assert not training_budget_complete(
+        TrainingBudget(**base, actual_completed_episodes=8, target_reached=False)
+    )
 
 
 def test_exact_alignment_and_trailing_smoothing_preserve_axes() -> None:

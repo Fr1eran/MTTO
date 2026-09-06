@@ -11,7 +11,9 @@ import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
 from contracts.ablation import AblationManifest
+from rl.experiment_statistics import assess_constraints
 from rl.experiment_utils import (
+    DSPDL_ALGORITHM_ID,
     DEFAULT_DEVICE,
     DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
     DEFAULT_NUM_ENVS,
@@ -22,6 +24,9 @@ from rl.experiment_utils import (
     add_panel_label,
     apply_rl_curve_plot_style,
     evaluate_final_training_run,
+    dspdl_protocol_parameters,
+    reward_config_parameters,
+    resolve_reward_preset,
     train_single_experiment,
 )
 from utils.ablation import (
@@ -40,23 +45,25 @@ from utils.ablation import (
     SeedValues,
     VariantSpec,
     VariantValues,
+    manifest_run_complete,
 )
 from utils.ablation.plotting import save_ablation_figure
-from utils.io_utils import format_float_token
+from utils.io_utils import format_float_token, load_evaluation_metrics
 from utils.plot_utils import SCI_EXPORT_PAD_INCHES, apply_sci_figure_layout
 
 DEFAULT_STEP_DISTANCES = (10.0, 30.0, 50.0, 100.0)
 DEFAULT_SEEDS = (11, 131, 239, 359, 443)
-DEFAULT_OUTPUT_ROOT = "output/optimal/rl/step_distance_ablation"
+DEFAULT_OUTPUT_ROOT = "output/paper_experiment/01_step_distance_dspdl_v3"
 DEFAULT_REFERENCE_CURVE_DIR = "output/optimal/dp/465p0_0p1_uni10p0"
 DEFAULT_EPISODE_SMOOTHING_WINDOW = 100
 STEP_DISTANCE_MANIFEST_FILENAME = "manifest.json"
 MANIFEST_VERSION = 1
-FIXED_REWARD_PRESET = "basic_safety"
-FIXED_CURRICULUM_PROFILE = "dspdl_completion"
+PROTOCOL_VERSION = 3
+FIXED_REWARD_PRESET = "basic_safety_punctuality"
+FIXED_CURRICULUM_PROFILE = "dspdl"
 TRAJECTORY_METRIC_KEYS = (
     "stop_error_m",
-    "time_error_s",
+    "abs_time_error_s",
     "total_energy_kj",
     "comfort_tav",
 )
@@ -84,7 +91,10 @@ SPEC = AblationSpec(
     variants=_step_variants(),
     seeds=DEFAULT_SEEDS,
     cli=CLIConfig(
-        description="Run fixed spatial control-step ablation with PBRS + DSPDL.",
+        description=(
+            "Run fixed spatial control-step ablation with PBRS + "
+            "DSPDL."
+        ),
         train_help="Run the ablation matrix.",
         show_help="Plot episode-metrics learning curves.",
         train_arguments=(
@@ -249,13 +259,20 @@ SPEC = AblationSpec(
     ),
     experiment_tag_template="ds{variant_id}__r{repeat_number:02d}",
     matrix_config={
+        "protocol_version": PROTOCOL_VERSION,
         "step_distances": VariantValues("step_distance"),
         "seeds": SeedValues(),
         "reward_preset": FIXED_REWARD_PRESET,
         "curriculum_profile": FIXED_CURRICULUM_PROFILE,
         "reference_curve_dir": ArgRef("reference_curve_dir"),
+        "reward_config": reward_config_parameters(
+            resolve_reward_preset(FIXED_REWARD_PRESET).config
+        ),
+        "dspdl_protocol": dspdl_protocol_parameters(),
     },
     training_signature={
+        "protocol_version": PROTOCOL_VERSION,
+        "curriculum_algorithm_id": DSPDL_ALGORITHM_ID,
         "schedule_time_s": ArgRef("schedule_time_s", float),
         "reward_discount": ArgRef("reward_discount", float),
         "num_envs": ArgRef("num_envs", int),
@@ -304,11 +321,13 @@ SPEC = AblationSpec(
     final=FinalAggregationSpec(
         metrics=(
             FinalMetricSpec("stop_error_m", "stop_error_m"),
-            FinalMetricSpec("time_error_s", "time_error_s"),
-            FinalMetricSpec("total_energy_kj", "total_energy_kj"),
+            FinalMetricSpec("abs_time_error_s", "time_error_s", transform="abs"),
+            FinalMetricSpec(
+                "total_energy_kj", "total_energy_kj", feasible_only=True
+            ),
             FinalMetricSpec("comfort_tav", "comfort_tav"),
         ),
-        source="auto",
+        source="final",
         warn_non_completed=True,
     ),
     run_label_template=(
@@ -399,8 +418,12 @@ def plot_curve_aggregates(
             axis.fill_between(
                 aggregate.x, mean - std, mean + std, color=color, alpha=0.18
             )
-    reward_axis.set(xlabel="Training episodes", ylabel="Mean episode reward")
-    length_axis.set(xlabel="Training episodes", ylabel="Mean episode length")
+    reward_axis.set(
+        xlabel="Completed training episodes", ylabel="Mean episode reward"
+    )
+    length_axis.set(
+        xlabel="Completed training episodes", ylabel="Mean episode length"
+    )
     for axis, panel in ((reward_axis, "(a)"), (length_axis, "(b)")):
         axis.grid(True, alpha=0.3)
         add_panel_label(ax=axis, label=panel)
@@ -500,11 +523,86 @@ def _print_metric_table(
         print(formatted(row))
 
 
+def _print_constraint_table(manifest: AblationManifest) -> None:
+    print("Final-policy constraint rates:")
+    print("step_distance | success | precise | punctual | safe | feasible | n")
+    for variant in _step_variants():
+        assessments = []
+        for run in manifest.runs:
+            if run.variant_id == variant.id:
+                metrics = load_evaluation_metrics(
+                    Path(run.artifacts.path_for("metrics_final"))
+                )
+                assessments.append(assess_constraints(metrics.to_display_mapping()))
+        n = len(assessments)
+        fields = (
+            "success",
+            "precise_arrival",
+            "punctual_arrival",
+            "safe",
+            "feasible",
+        )
+        rates = [
+            sum(bool(getattr(item, field)) for item in assessments) / n
+            for field in fields
+        ]
+        print(
+            f"{variant.label} | "
+            + " | ".join(f"{value:.3f}" for value in rates)
+            + f" | {n}"
+        )
+
+
 def _print_warnings(warnings: list[str]) -> None:
     if warnings:
         print("Warnings:")
         for warning in warnings:
             print(f"  - {warning}")
+
+
+def _validate_analysis_manifest(manifest: AblationManifest) -> None:
+    if manifest.matrix_config.get("protocol_version") != PROTOCOL_VERSION:
+        raise ValueError(
+            "step-distance manifest uses an obsolete protocol; rerun in the "
+            "DSPDL v3 output directory"
+        )
+    expected_config = {
+        "step_distances": list(DEFAULT_STEP_DISTANCES),
+        "seeds": list(DEFAULT_SEEDS),
+        "reward_preset": FIXED_REWARD_PRESET,
+        "curriculum_profile": FIXED_CURRICULUM_PROFILE,
+        "reward_config": reward_config_parameters(
+            resolve_reward_preset(FIXED_REWARD_PRESET).config
+        ),
+        "dspdl_protocol": dspdl_protocol_parameters(),
+    }
+    for key, value in expected_config.items():
+        if manifest.matrix_config.get(key) != value:
+            raise ValueError(f"step-distance manifest {key} is incompatible")
+    if (
+        manifest.training_signature.get("curriculum_algorithm_id")
+        != DSPDL_ALGORITHM_ID
+    ):
+        raise ValueError("step-distance DSPDL protocol is incompatible")
+    expected = {
+        "step_distance__"
+        f"ds{format_float_token(distance)}__seed{seed:04d}__r{index + 1:02d}"
+        for distance in DEFAULT_STEP_DISTANCES
+        for index, seed in enumerate(DEFAULT_SEEDS)
+    }
+    actual = {run.run_id for run in manifest.runs}
+    if actual != expected:
+        missing = sorted(expected - actual)
+        extra = sorted(actual - expected)
+        raise ValueError(
+            f"step-distance run matrix mismatch: missing={missing}, extra={extra}"
+        )
+    incomplete = [run.run_id for run in manifest.runs if not manifest_run_complete(run)]
+    if incomplete:
+        raise ValueError(
+            "step-distance analysis requires completed budgets and canonical "
+            f"artifacts for every run; invalid={incomplete}"
+        )
 
 
 def _run_train_command(args: argparse.Namespace) -> int:
@@ -521,6 +619,10 @@ def _run_show_command(args: argparse.Namespace) -> int:
         manifest = DRIVER.load_manifest(args.output_root)
     except FileNotFoundError as exc:
         raise SystemExit(str(exc)) from exc
+    try:
+        _validate_analysis_manifest(manifest)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     if args.episode_smoothing_window < 1:
         raise SystemExit("--episode-smoothing-window must be >= 1")
     curves, curve_warnings = DRIVER.build_curve_aggregates(
@@ -530,13 +632,26 @@ def _run_show_command(args: argparse.Namespace) -> int:
     metrics, metric_warnings = DRIVER.build_final_aggregates(
         manifest, metric_source=metric_source
     )
-    _print_warnings(curve_warnings + metric_warnings)
+    warnings = curve_warnings + metric_warnings
+    if warnings:
+        raise SystemExit(
+            "Step-distance analysis inputs are invalid:\n" + "\n".join(warnings)
+        )
+    expected_count = len(DEFAULT_STEP_DISTANCES)
+    if (
+        len(curves) != expected_count
+        or len(metrics) != expected_count
+        or any(item.valid_run_count != len(DEFAULT_SEEDS) for item in curves)
+        or any(item.valid_run_count != len(DEFAULT_SEEDS) for item in metrics)
+    ):
+        raise SystemExit("Step-distance analysis refused a partial aggregation")
     _print_curve_summary(curves)
     print(
         f"Episode smoothing: trailing window={args.episode_smoothing_window} "
         "completed episodes."
     )
     _print_metric_table(metrics, metric_source=metric_source)
+    _print_constraint_table(manifest)
     if args.dry_run:
         print(
             "Dry run completed: episode-metrics and "

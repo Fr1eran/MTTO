@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 from model.ocs import SPSState, TrainService
@@ -6,6 +8,8 @@ from rl.reward_calculator import (
     DEFAULT_COMFORT_REWARD_SCALE,
     DEFAULT_ENERGY_REWARD_SCALE,
     DEFAULT_SURVIVAL_REWARD_SCALE,
+    PUNCTUALITY_POTENTIAL_SCALE,
+    PUNCTUALITY_POTENTIAL_SIGMA_S,
     RewardCalculator,
     RewardConfig,
 )
@@ -55,28 +59,101 @@ def calculator() -> RewardCalculator:
     )
 
 
-def test_task_completion_is_bounded_and_zero_for_unsuccessful_episodes(
-    calculator: RewardCalculator,
-) -> None:
-    assert calculator.task_completion(
-        terminated=False,
-        truncated=True,
-        stop_error_m=0.0,
-        operation_time_s=calculator.train_service.schedule_time,
-    ) == pytest.approx(0.0)
-    assert calculator.task_completion(
-        terminated=True,
-        truncated=False,
-        stop_error_m=0.0,
-        operation_time_s=calculator.train_service.schedule_time,
-    ) == pytest.approx(1.0)
-    completion = calculator.task_completion(
-        terminated=True,
-        truncated=False,
-        stop_error_m=calculator.train_service.max_stop_error + 100.0,
-        operation_time_s=calculator.train_service.schedule_time + 1000.0,
+@pytest.fixture
+def punctuality_calculator(calculator: RewardCalculator) -> RewardCalculator:
+    return RewardCalculator(
+        calculator.train_service,
+        max_episode_steps=10,
+        whole_distance_m=100,
+        max_energy_consumption_kj=100,
+        gamma=0.9,
+        reward_config=RewardConfig(enable_potential_punctuality=True),
+        initial_min_operation_time_s=10,
     )
-    assert 0.6 <= completion <= 1.0
+
+
+def test_global_linear_slack_reference(punctuality_calculator):
+    calc = punctuality_calculator
+    assert [calc.reference_punctuality_slack(x) for x in (-5, 0, 50, 100, 105)] == [
+        10,
+        10,
+        5,
+        0,
+        0,
+    ]
+    state = replace(_state(position=50), redundant_operation_time_s=5)
+    assert calc.potential_punctuality(state) == 0
+    calc.train_service.start_position = 100
+    calc.train_service.target_position = 0
+    assert [calc.reference_punctuality_slack(x) for x in (100, 50, 0, -5)] == [
+        10,
+        5,
+        0,
+        0,
+    ]
+    calc.train_service.schedule_time = 5
+    assert calc.reference_punctuality_slack(50) == -2.5
+
+
+@pytest.mark.parametrize("code", list(ViolationCode))
+@pytest.mark.parametrize("length", [1, 3, 7])
+def test_punctuality_pbrs_telescopes_on_every_task_end(
+    punctuality_calculator, code, length
+):
+    calc = punctuality_calculator
+    state = replace(_state(position=30), redundant_operation_time_s=60)
+    initial_phi = calc.potential_punctuality(state)
+    total = 0.0
+    for index in range(length):
+        next_state = replace(
+            state,
+            position_m=state.position_m + 5,
+            redundant_operation_time_s=state.redundant_operation_time_s - 3,
+        )
+        last = index == length - 1
+        transition = OperationalTransition(
+            state,
+            next_state,
+            0,
+            5,
+            1,
+            0,
+            last and code == ViolationCode.ONGOING,
+            last and code != ViolationCode.ONGOING,
+            code if last else ViolationCode.ONGOING,
+        )
+        breakdown = calc.calculate(transition)
+        total += calc.gamma**index * breakdown.punctuality_shaping
+        if transition.truncated:
+            assert breakdown.total == pytest.approx(
+                breakdown.truncation + breakdown.punctuality_shaping
+            )
+        state = next_state
+    assert total == pytest.approx(-initial_phi)
+
+
+def test_external_sampling_cut_keeps_next_potential(punctuality_calculator):
+    calc = punctuality_calculator
+    previous = _state(position=40)
+    current = _state(position=50)
+    transition = OperationalTransition(
+        previous, current, 0, 10, 1, 0, False, True, ViolationCode.ONGOING
+    )
+    assert calc.reward_punctuality_potential(transition) == pytest.approx(
+        calc.gamma * calc.potential_punctuality(current)
+        - calc.potential_punctuality(previous)
+    )
+
+
+def test_punctuality_potential_is_bounded_and_can_be_disabled(punctuality_calculator):
+    calc = punctuality_calculator
+    state = replace(_state(position=100), redundant_operation_time_s=1e200)
+    assert calc.potential_punctuality(state) == pytest.approx(
+        -PUNCTUALITY_POTENTIAL_SCALE
+    )
+    assert PUNCTUALITY_POTENTIAL_SIGMA_S == 20.0
+    calc.reward_config = replace(calc.reward_config, enable_potential_punctuality=False)
+    assert calc.potential_punctuality(state) == 0
 
 
 def test_dense_reward_includes_energy_comfort_and_survival(

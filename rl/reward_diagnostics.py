@@ -9,9 +9,9 @@ from numpy.typing import NDArray
 
 from rl.reward_calculator import RewardBreakdown
 
-REWARD_DIAGNOSTICS_SCHEMA_VERSION: Final[int] = 3
+REWARD_DIAGNOSTICS_SCHEMA_VERSION: Final[int] = 4
 LEGACY_UNKNOWN_VIOLATION_CODE: Final[int] = -1
-_SUPPORTED_SCHEMA_VERSIONS: Final[frozenset[int]] = frozenset({2, 3})
+_SUPPORTED_SCHEMA_VERSIONS: Final[frozenset[int]] = frozenset({2, 3, 4})
 _VALID_VIOLATION_CODES: Final[frozenset[int]] = frozenset({0, 1, 2, 3, 4})
 REWARD_NAMES: Final[tuple[str, ...]] = (
     "safety",
@@ -21,6 +21,7 @@ REWARD_NAMES: Final[tuple[str, ...]] = (
     "terminal_punctuality",
     "survival",
     "truncation",
+    "punctuality_shaping",
     "total",
 )
 REWARD_SIGNAL_COUNT: Final[int] = len(REWARD_NAMES)
@@ -91,14 +92,8 @@ class RewardDiagnosticsAccumulator:
             raise ValueError("violation_code must be a valid operational code")
         self._ensure_capacity()
         vector = self._transition_rewards[self._transition_count]
-        vector[0] = reward.safety
-        vector[1] = reward.energy
-        vector[2] = reward.comfort
-        vector[3] = reward.terminal_stopping
-        vector[4] = reward.terminal_punctuality
-        vector[5] = reward.survival
-        vector[6] = reward.truncation
-        vector[7] = reward.total
+        for index, name in enumerate(REWARD_NAMES):
+            vector[index] = getattr(reward, name)
         self._transition_count += 1
         self._worker_transition_step += 1
         self._episode_length += 1

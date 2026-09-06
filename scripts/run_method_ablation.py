@@ -1,16 +1,20 @@
-"""Train and display the PPO/PBRS/DSPDL method-ablation matrix."""
+"""Train and display the PPO/PBRS/DSPDL ablation matrix."""
 
 from __future__ import annotations
 
 import argparse
+import json
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 
 from contracts.ablation import AblationManifest
+from rl.experiment_statistics import assess_constraints
 from rl.experiment_utils import (
+    DSPDL_ALGORITHM_ID,
     DEFAULT_DEVICE,
     DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
     DEFAULT_NUM_ENVS,
@@ -22,6 +26,9 @@ from rl.experiment_utils import (
     add_panel_label,
     apply_rl_curve_plot_style,
     evaluate_final_training_run,
+    dspdl_protocol_parameters,
+    reward_config_parameters,
+    resolve_reward_preset,
     train_single_experiment,
 )
 from rl.operational_state import ViolationCode
@@ -46,14 +53,18 @@ from utils.ablation import (
     VariantPayloads,
     VariantSpec,
     aggregate_matrix,
+    manifest_run_complete,
     manifest_runs,
 )
 from utils.ablation.plotting import save_ablation_figure
+from utils.io_utils import load_evaluation_metrics
 from utils.plot_utils import apply_sci_figure_layout
 
 METHOD_ABLATION_MANIFEST_FILENAME = "manifest.json"
 MANIFEST_VERSION = 1
-DEFAULT_OUTPUT_ROOT = "output/optimal/rl/method_ablation"
+PROTOCOL_VERSION = 3
+DEFAULT_OUTPUT_ROOT = "output/paper_experiment/02_method_ablation_pbrs_x_dspdl_v3"
+DEFAULT_SELECTION_FILENAME = "selected_policy.json"
 DEFAULT_SEEDS = (11, 131, 239, 359, 443)
 DEFAULT_EPISODE_SMOOTHING_WINDOW = 100
 SAFETY_EPISODE_BIN_WIDTH = 500
@@ -76,6 +87,11 @@ def _method(
             "reward_preset": reward_preset,
             "curriculum_profile": curriculum_profile,
             "color": color,
+            "pbrs_enabled": reward_preset == "basic_safety_punctuality",
+            "curriculum_enabled": curriculum_profile == "dspdl",
+            "reward_config": reward_config_parameters(
+                resolve_reward_preset(reward_preset).config
+            ),
         },
         training={
             "reward_preset": reward_preset,
@@ -89,13 +105,25 @@ def _method(
 
 METHODS = (
     _method("ppo", "PPO", "basic", "none", "#0072B2"),
-    _method("ppo_pbrs", "PPO+PBRS", "basic_safety", "none", "#E69F00"),
-    _method("ppo_dspdl", "PPO+DSPDL", "basic", "dspdl_completion", "#CC79A7"),
+    _method(
+        "ppo_pbrs",
+        "PPO+PBRS",
+        "basic_safety_punctuality",
+        "none",
+        "#E69F00",
+    ),
+    _method(
+        "ppo_dspdl",
+        "PPO+DSPDL",
+        "basic",
+        "dspdl",
+        "#CC79A7",
+    ),
     _method(
         "ppo_pbrs_dspdl",
         "PPO+PBRS+DSPDL",
-        "basic_safety",
-        "dspdl_completion",
+        "basic_safety_punctuality",
+        "dspdl",
         "#009E73",
     ),
 )
@@ -108,7 +136,7 @@ SPEC = AblationSpec(
     variants=METHODS,
     seeds=DEFAULT_SEEDS,
     cli=CLIConfig(
-        description="Run PPO/PBRS/DSPDL method-ablation experiments.",
+        description="Run PPO/PBRS/DSPDL ablation experiments.",
         train_help="Train all methods and collect data.",
         show_help="Aggregate and plot method-ablation data.",
         train_arguments=(
@@ -176,6 +204,17 @@ SPEC = AblationSpec(
             ArgumentSpec(("--output-file",), {"type": Path, "default": None}),
             ArgumentSpec(("--safety-output-file",), {"type": Path, "default": None}),
             ArgumentSpec(
+                ("--selection-output-file",),
+                {
+                    "type": Path,
+                    "default": None,
+                    "help": (
+                        "Best-policy JSON path; defaults to selected_policy.json "
+                        "under the output root."
+                    ),
+                },
+            ),
+            ArgumentSpec(
                 ("--episode-smoothing-window",),
                 {
                     "type": int,
@@ -197,11 +236,15 @@ SPEC = AblationSpec(
     run_id_template="method__{variant_id}__seed{seed:04d}__r{repeat_number:02d}",
     experiment_tag_template="{variant_id}__r{repeat_number:02d}",
     matrix_config={
+        "protocol_version": PROTOCOL_VERSION,
         "variants": VariantPayloads(),
         "seeds": SeedValues(),
         "reference_curve_dir": ArgRef("reference_curve_dir"),
     },
     training_signature={
+        "protocol_version": PROTOCOL_VERSION,
+        "curriculum_algorithm_id": DSPDL_ALGORITHM_ID,
+        "dspdl_protocol": dspdl_protocol_parameters(),
         "training_episodes": ArgRef("training_episodes", int),
         "schedule_time_s": ArgRef("schedule_time_s", float),
         "step_distance": ArgRef("step_distance", float),
@@ -231,15 +274,16 @@ SPEC = AblationSpec(
                 "stop_error_m",
                 "evaluation",
                 "stop_error_m",
-                "training_steps",
-                success_only=True,
+                "completed_training_episodes",
+                alignment="indexed",
             ),
             CurveMetricSpec(
                 "abs_time_error_s",
                 "evaluation",
-                "abs_time_error_s",
-                "training_steps",
-                success_only=True,
+                "time_error_s",
+                "completed_training_episodes",
+                transform="abs",
+                alignment="indexed",
             ),
         ),
         primary_metric="ep_reward",
@@ -249,8 +293,10 @@ SPEC = AblationSpec(
     final=FinalAggregationSpec(
         metrics=(
             FinalMetricSpec("stop_error_m", "stop_error_m"),
-            FinalMetricSpec("time_error_s", "time_error_s"),
-            FinalMetricSpec("total_energy_kj", "total_energy_kj"),
+            FinalMetricSpec("abs_time_error_s", "time_error_s", transform="abs"),
+            FinalMetricSpec(
+                "total_energy_kj", "total_energy_kj", feasible_only=True
+            ),
             FinalMetricSpec("comfort_tav", "comfort_tav"),
         )
     ),
@@ -309,7 +355,7 @@ def _plot_learning_curves(aggregates: list[CurveAggregate]) -> plt.Figure | None
                 alpha=0.16,
             )
         axis.set_xlabel(
-            "Training episodes" if key in ("ep_reward", "ep_len") else "Training steps"
+            "Completed training episodes"
         )
         axis.set_ylabel(ylabel)
         axis.grid(True, alpha=0.3)
@@ -437,7 +483,7 @@ def _print_final_table(aggregates: list[FinalMetricAggregate]) -> None:
     columns = (
         "method",
         "stop_error_m",
-        "time_error_s",
+        "abs_time_error_s",
         "total_energy_kj",
         "comfort_tav",
     )
@@ -456,6 +502,162 @@ def _print_final_table(aggregates: list[FinalMetricAggregate]) -> None:
         )
 
 
+def _print_constraint_table(manifest: AblationManifest) -> None:
+    print("Final-policy constraint rates:")
+    print("method | success | precise | punctual | safe | feasible | n")
+    for method in METHODS:
+        assessments = []
+        for run in manifest.runs:
+            if run.variant_id == method.id:
+                metrics = load_evaluation_metrics(
+                    Path(run.artifacts.path_for("metrics_final"))
+                )
+                assessments.append(assess_constraints(metrics.to_display_mapping()))
+        n = len(assessments)
+        fields = (
+            "success",
+            "precise_arrival",
+            "punctual_arrival",
+            "safe",
+            "feasible",
+        )
+        rates = [
+            sum(bool(getattr(item, field)) for item in assessments) / n
+            for field in fields
+        ]
+        print(
+            f"{method.label} | "
+            + " | ".join(f"{value:.3f}" for value in rates)
+            + f" | {n}"
+        )
+
+
+def _validate_analysis_manifest(manifest: AblationManifest) -> None:
+    if manifest.matrix_config.get("protocol_version") != PROTOCOL_VERSION:
+        raise ValueError(
+            "method-ablation manifest uses an obsolete protocol; rerun in the "
+            "DSPDL v3 output directory"
+        )
+    expected_variants = [dict(method.manifest) for method in METHODS]
+    if manifest.matrix_config.get("variants") != expected_variants:
+        raise ValueError(
+            "method-ablation manifest variant/reward matrix is incompatible"
+        )
+    if manifest.matrix_config.get("seeds") != list(DEFAULT_SEEDS):
+        raise ValueError("method-ablation manifest seed matrix is incompatible")
+    if (
+        manifest.training_signature.get("curriculum_algorithm_id")
+        != DSPDL_ALGORITHM_ID
+        or manifest.training_signature.get("dspdl_protocol")
+        != dspdl_protocol_parameters()
+    ):
+        raise ValueError("method-ablation DSPDL protocol is incompatible")
+    expected = {
+        f"method__{method.id}__seed{seed:04d}__r{index + 1:02d}"
+        for method in METHODS
+        for index, seed in enumerate(DEFAULT_SEEDS)
+    }
+    actual = {run.run_id for run in manifest.runs}
+    if actual != expected:
+        missing = sorted(expected - actual)
+        extra = sorted(actual - expected)
+        raise ValueError(
+            f"method-ablation run matrix mismatch: missing={missing}, extra={extra}"
+        )
+    incomplete = [run.run_id for run in manifest.runs if not manifest_run_complete(run)]
+    if incomplete:
+        raise ValueError(
+            "method-ablation analysis requires completed budgets and canonical "
+            f"artifacts for every run; invalid={incomplete}"
+        )
+
+
+def _selection_rank(metrics: object) -> tuple[float, ...]:
+    metric_map = metrics.to_display_mapping()  # type: ignore[attr-defined]
+    assessment = assess_constraints(metric_map)
+    energy = float(metric_map["total_energy_kj"])
+    if assessment.feasible:
+        return (1.0, -energy, 0.0, 0.0, 0.0, 0.0, 0.0)
+    return (
+        0.0,
+        float(assessment.safe and assessment.success),
+        float(assessment.precise_arrival),
+        -abs(float(metric_map["stop_error_m"])),
+        float(assessment.punctual_arrival),
+        -abs(float(metric_map["time_error_s"])),
+        -energy,
+    )
+
+
+def build_policy_selection(manifest: AblationManifest) -> dict[str, object]:
+    candidates: list[dict[str, object]] = []
+    for run in manifest.runs:
+        if run.variant_id != "ppo_pbrs_dspdl":
+            continue
+        metrics = load_evaluation_metrics(Path(run.artifacts.path_for("metrics_final")))
+        metric_map = metrics.to_display_mapping()
+        assessment = assess_constraints(metric_map)
+        candidates.append(
+            {
+                "run_id": run.run_id,
+                "variant_id": run.variant_id,
+                "seed": run.seed,
+                "repeat_index": run.repeat_index,
+                "rank_key": list(_selection_rank(metrics)),
+                "assessment": assessment.to_dict(),
+                "metrics": {
+                    "stop_error_m": abs(float(metrics.stop_error_m)),
+                    "abs_time_error_s": abs(float(metrics.time_error_s)),
+                    "total_energy_kj": float(metrics.total_energy_kj),
+                    "comfort_tav": float(metrics.comfort_tav),
+                },
+                "policy_dir": str(Path(run.artifacts.path_for("metrics_final")).parent),
+                "artifacts": {
+                    "policy_final": run.artifacts.path_for("policy_final"),
+                    "metrics_final": run.artifacts.path_for("metrics_final"),
+                    "metadata": run.artifacts.path_for("metadata"),
+                },
+            }
+        )
+    if len(candidates) != len(DEFAULT_SEEDS):
+        raise ValueError(
+            "policy selection requires all five final policies from "
+            "ppo_pbrs_dspdl"
+        )
+    best_key = max(tuple(item["rank_key"]) for item in candidates)  # type: ignore[arg-type]
+    selected = min(
+        (item for item in candidates if tuple(item["rank_key"]) == best_key),  # type: ignore[arg-type]
+        key=lambda item: str(item["run_id"]),
+    )
+    return {
+        "artifact_type": "paper_policy_selection",
+        "schema_version": 1,
+        "protocol_version": PROTOCOL_VERSION,
+        "source_manifest": (
+            str(Path(manifest.output_root) / METHOD_ABLATION_MANIFEST_FILENAME)
+            if manifest.output_root is not None
+            else None
+        ),
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "selection_rule": (
+            "strict feasibility first; minimum energy among feasible policies; "
+            "otherwise safe success, precision, stop error, punctuality, absolute "
+            "time error, and energy; run_id breaks exact ties"
+        ),
+        "candidate_variant_id": "ppo_pbrs_dspdl",
+        "selected": selected,
+        "candidates": sorted(candidates, key=lambda item: str(item["run_id"])),
+    }
+
+
+def save_policy_selection(payload: dict[str, object], output_path: Path) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return output_path
+
+
 def run_train(args: argparse.Namespace) -> int:
     DRIVER.train_experiment = train_single_experiment
     DRIVER.evaluate_experiment = evaluate_final_training_run
@@ -464,6 +666,10 @@ def run_train(args: argparse.Namespace) -> int:
 
 def run_show(args: argparse.Namespace) -> int:
     manifest = DRIVER.load_manifest(args.output_root)
+    try:
+        _validate_analysis_manifest(manifest)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     if args.episode_smoothing_window < 1:
         raise SystemExit("--episode-smoothing-window must be >= 1")
     curves, curve_warnings = DRIVER.build_curve_aggregates(
@@ -471,23 +677,45 @@ def run_show(args: argparse.Namespace) -> int:
     )
     safety, safety_warnings = build_safety_learning_aggregates(manifest)
     finals, final_warnings = DRIVER.build_final_aggregates(manifest)
-    print("\n".join([*curve_warnings, *safety_warnings, *final_warnings]))
+    warnings = [*curve_warnings, *safety_warnings, *final_warnings]
+    if warnings:
+        raise SystemExit(
+            "Method-ablation analysis inputs are invalid:\n" + "\n".join(warnings)
+        )
+    expected_count = len(METHODS)
+    if (
+        len(curves) != expected_count
+        or len(safety) != expected_count
+        or len(finals) != expected_count
+        or any(item.valid_run_count != len(DEFAULT_SEEDS) for item in curves)
+        or any(item.valid_run_count != len(DEFAULT_SEEDS) for item in finals)
+    ):
+        raise SystemExit("Method-ablation analysis refused a partial aggregation")
     _print_final_table(finals)
+    _print_constraint_table(manifest)
+    selection = build_policy_selection(manifest)
+    selected = selection["selected"]
+    assert isinstance(selected, dict)
+    print(
+        "Selected final policy: "
+        f"run_id={selected['run_id']} seed={selected['seed']} "
+        f"directory={selected['policy_dir']}"
+    )
     print(
         f"Episode smoothing: trailing window={args.episode_smoothing_window} "
         "completed episodes."
     )
     if args.dry_run:
         return 0
+    selection_path = args.selection_output_file or (
+        Path(args.output_root) / DEFAULT_SELECTION_FILENAME
+    )
+    save_policy_selection(selection, selection_path)
+    print(f"Saved policy selection to: {selection_path}")
     curve_figure = _plot_learning_curves(curves)
     safety_figure = _plot_safety_learning_process(safety)
     save_ablation_figure(curve_figure, args.output_file, dpi=args.dpi)
     save_ablation_figure(safety_figure, args.safety_output_file, dpi=args.dpi)
-    if safety_figure is None:
-        print(
-            "No training safety violation figure was produced; "
-            "rerun method ablation with schema-v3 reward diagnostics."
-        )
     if not args.no_show:
         plt.show()
     return 0

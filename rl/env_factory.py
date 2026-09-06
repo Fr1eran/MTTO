@@ -4,7 +4,6 @@ from numpy.typing import NDArray
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
-from rl.completion_critic import CompletionDSPDLConfig, CompletionTrajectoryAccumulator
 from rl.context_pool import ContextPool
 from rl.context_sampler import ContextSampler, CurriculumDistributionState
 from rl.dspdl import DSPDLStatisticsHub
@@ -33,19 +32,14 @@ def make_env(
     context_sampling_seed: int | None = None,
     dspdl_statistics_hub: DSPDLStatisticsHub | None = None,
     curriculum_env_rank: int | None = None,
-    enable_completion_accumulator: bool = False,
-    completion_config: CompletionDSPDLConfig | None = None,
     enable_safety_truncation_tracking: bool = False,
     reward_diagnostics_worker_rank: int | None = None,
     reward_diagnostics_rollout_capacity: int | None = None,
 ):
     if (dspdl_statistics_hub is None) != (curriculum_env_rank is None):
         raise ValueError(
-            "DSPDL statistics hub and curriculum environment rank must be set together"
-        )
-    if dspdl_statistics_hub is not None and enable_completion_accumulator:
-        raise ValueError(
-            "traditional and completion DSPDL statistics are mutually exclusive"
+            "DSPDL statistics hub and curriculum environment rank "
+            "must be set together"
         )
     if (reward_diagnostics_worker_rank is None) != (
         reward_diagnostics_rollout_capacity is None
@@ -62,19 +56,19 @@ def make_env(
                 "exactly one curriculum distribution source is required "
                 "with context_pool"
             )
-        if (
-            dspdl_statistics_hub is not None
-            and dspdl_statistics_hub.context_count != context_pool.context_count
-        ):
-            raise ValueError(
-                "statistics hub context count must match the context pool"
-            )
         context_sampler = ContextSampler(
             context_pool=context_pool,
             initial_distribution=initial_context_distribution,
             distribution_state=curriculum_distribution_state,
             seed=context_sampling_seed,
         )
+        if (
+            dspdl_statistics_hub is not None
+            and dspdl_statistics_hub.context_count != context_pool.context_count
+        ):
+            raise ValueError(
+                "critic statistics hub context count must match the context pool"
+            )
     elif (
         initial_context_distribution is not None
         or curriculum_distribution_state is not None
@@ -109,13 +103,4 @@ def make_env(
             else None
         ),
     )
-    if context_pool is not None:
-        if enable_completion_accumulator:
-            config = completion_config or CompletionDSPDLConfig()
-            env.completion_accumulator = CompletionTrajectoryAccumulator(
-                observation_shape=env.observation_space.shape,
-                success_base=config.success_base,
-                stopping_weight=config.stopping_weight,
-                punctuality_weight=config.punctuality_weight,
-            )
     return env

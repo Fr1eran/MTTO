@@ -127,8 +127,30 @@ def test_run_matrix_expands_default_distances_and_seeds() -> None:
     )
     runs = step_distance_ablation.resolve_step_distance_run_matrix(args)
 
-    assert len(runs) == len(step_distance_ablation.DEFAULT_STEP_DISTANCES) * len(
-        step_distance_ablation.DEFAULT_SEEDS
+    run_entries = step_distance_ablation.resolve_step_distance_run_matrix(args)
+    first = run_entries[0]
+    other_distance = run_entries[len(step_distance_ablation.DEFAULT_SEEDS)]
+
+    assert (
+        first.training_run_spec.reward_preset.name
+        == step_distance_ablation.FIXED_REWARD_PRESET
+    )
+    assert first.training_run_spec.enable_monitor is True
+    assert first.training_run_spec.enable_auto_analysis is False
+    assert first.training_run_spec.curriculum_profile == "dspdl"
+    assert first.training_run_spec.reference_curve_dir == "."
+    assert first.training_run_spec.enable_best_evaluation_artifacts is False
+    assert first.training_run_spec.evaluation_interval_rollouts == 12
+    assert first.training_run_spec.run_metadata["evaluation_interval_rollouts"] == 12
+    assert first.training_run_spec.evaluation_deterministic is True
+
+    assert (
+        first.training_run_spec.reward_discount
+        == other_distance.training_run_spec.reward_discount
+    )
+    assert (
+        first.training_run_spec.schedule_time_s
+        == other_distance.training_run_spec.schedule_time_s
     )
     assert runs[0].run_id == "step_distance__ds10p0__seed0011__r01"
     assert runs[0].evaluation_history_path.endswith("evaluations.npz")
@@ -155,6 +177,15 @@ def test_manifest_round_trip_uses_one_new_schema_file(tmp_path: Path) -> None:
     step_distance_ablation._validate_manifest_compatibility(loaded, args)
     assert loaded["schema_version"] == 1
     assert loaded["matrix_id"] == "step_distance"
+    assert loaded["matrix_config"]["protocol_version"] == 3
+    assert (
+        loaded["matrix_config"]["reward_config"]["punctuality_potential_scale"]
+        == 5.0
+    )
+    assert (
+        loaded["matrix_config"]["dspdl_protocol"]["context_value_estimator"]
+        == "importance_weighted_samples"
+    )
     assert loaded["runs"][0]["artifacts"]["policy_final"].endswith(  # type: ignore[index]
         "policy_final.zip"
     )
@@ -180,7 +211,9 @@ def test_curve_aggregation_aligns_by_completed_episode_number(tmp_path: Path) ->
     np.testing.assert_array_equal(aggregate.metrics["ep_reward"].count, [2, 2, 1])
 
 
-def test_metric_aggregation_uses_sample_std_and_best_artifacts(tmp_path: Path) -> None:
+def test_metric_aggregation_uses_sample_std_and_explicit_best_artifacts(
+    tmp_path: Path,
+) -> None:
     first = _entry(tmp_path, 50.0, 0, [1.0])
     second = _entry(tmp_path, 50.0, 1, [2.0])
     best_first = tmp_path / "best_first.json"
@@ -192,7 +225,7 @@ def test_metric_aggregation_uses_sample_std_and_best_artifacts(tmp_path: Path) -
 
     manifest = _manifest([first, second])
     manifest["matrix_config"]["step_distances"] = [50.0]  # type: ignore[index]
-    assert step_distance_ablation.resolve_metric_source(manifest) == "best"
+    assert step_distance_ablation.resolve_metric_source(manifest) == "final"
     aggregates, warnings = step_distance_ablation.build_metric_aggregates(
         manifest, metric_source="best"
     )

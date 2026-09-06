@@ -162,11 +162,41 @@ def load_reward_diagnostics_artifact(
             ).copy()
     if version.shape != (1,) or int(version[0]) not in (
         2,
+        3,
         REWARD_DIAGNOSTICS_SCHEMA_VERSION,
     ):
         raise ValueError("Unsupported reward diagnostics schema version")
-    if names != REWARD_NAMES:
+    expected_names = (
+        tuple(name for name in REWARD_NAMES if name != "punctuality_shaping")
+        if int(version[0]) < 4
+        else REWARD_NAMES
+    )
+    if names != expected_names:
         raise ValueError("Reward diagnostics names do not match the schema")
+    if int(version[0]) < 4:
+        indices = [REWARD_NAMES.index(name) for name in names]
+        for key in (
+            "rollout_reward_sum",
+            "rollout_reward_abs_sum",
+            "rollout_reward_nonzero_count",
+            "episode_reward_sums",
+        ):
+            old = values[key]
+            if old.ndim != 2 or old.shape[1] != len(names):
+                raise ValueError(f"Reward diagnostics has invalid {key} shape")
+            expanded = np.zeros((old.shape[0], REWARD_SIGNAL_COUNT), dtype=old.dtype)
+            expanded[:, indices] = old
+            values[key] = expanded
+        old_cross = values["rollout_reward_cross_product"]
+        if old_cross.ndim != 3 or old_cross.shape[1:] != (len(names), len(names)):
+            raise ValueError("Reward diagnostics has invalid cross product shape")
+        expanded_cross = np.zeros(
+            (old_cross.shape[0], REWARD_SIGNAL_COUNT, REWARD_SIGNAL_COUNT),
+            dtype=old_cross.dtype,
+        )
+        expanded_cross[:, np.asarray(indices)[:, None], np.asarray(indices)] = old_cross
+        values["rollout_reward_cross_product"] = expanded_cross
+        names = REWARD_NAMES
 
     rollout_end = np.asarray(values["rollout_end_step"], dtype=np.int64)
     rollout_count = np.asarray(values["rollout_transition_count"], dtype=np.int64)
@@ -201,7 +231,7 @@ def load_reward_diagnostics_artifact(
     episode_rewards = np.asarray(values["episode_reward_sums"], dtype=np.float64)
     if episode_rewards.shape != (episode_rows, REWARD_SIGNAL_COUNT):
         raise ValueError("Reward diagnostics has invalid episode_reward_sums shape")
-    if int(version[0]) == REWARD_DIAGNOSTICS_SCHEMA_VERSION:
+    if int(version[0]) >= 3:
         if "episode_violation_code" not in values:
             raise ValueError("Reward diagnostics is missing episode_violation_code")
         episode_violation_code = np.asarray(
@@ -249,7 +279,7 @@ def load_reward_diagnostics_artifact(
         or np.any(episode_terminated & episode_truncated)
         or np.any(episode_complete != (episode_terminated | episode_truncated))
         or (
-            int(version[0]) == REWARD_DIAGNOSTICS_SCHEMA_VERSION
+            int(version[0]) >= 3
             and np.any(~np.isin(episode_violation_code, [0, 1, 2, 3, 4]))
         )
         or int(episode_length.sum()) != int(rollout_count.sum())

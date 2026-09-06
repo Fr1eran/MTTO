@@ -596,6 +596,7 @@ class ScheduledPolicyEvaluationCallback(BaseCallback):
         evaluation_interval_rollouts: int = DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
         deterministic: bool = True,
         get_completed_training_episodes: Callable[[], int] | None = None,
+        evaluate_at_boundaries: bool = False,
         verbose: int = 0,
     ) -> None:
         super().__init__(verbose=verbose)
@@ -606,6 +607,7 @@ class ScheduledPolicyEvaluationCallback(BaseCallback):
         self.evaluation_interval_rollouts = int(evaluation_interval_rollouts)
         self.deterministic = bool(deterministic)
         self.get_completed_training_episodes = get_completed_training_episodes
+        self.evaluate_at_boundaries = evaluate_at_boundaries
         self._rollouts_completed = 0
 
     @override
@@ -623,10 +625,18 @@ class ScheduledPolicyEvaluationCallback(BaseCallback):
         )
 
     @override
+    def _on_training_start(self) -> None:
+        if self.evaluate_at_boundaries:
+            self._emit_evaluation()
+
+    @override
     def _on_rollout_end(self) -> None:
         self._rollouts_completed += 1
         if self._rollouts_completed % self.evaluation_interval_rollouts != 0:
             return
+        self._emit_evaluation()
+
+    def _emit_evaluation(self) -> None:
         result = self.run_evaluation()
         event = PolicyEvaluationEvent(
             result=result,
@@ -643,6 +653,8 @@ class ScheduledPolicyEvaluationCallback(BaseCallback):
 
     @override
     def _on_training_end(self) -> None:
+        if self.evaluate_at_boundaries:
+            self._emit_evaluation()
         for handler in self.handlers:
             handler.finalize(self)
         close = getattr(self.eval_env, "close", None)

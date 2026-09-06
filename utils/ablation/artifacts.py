@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
 import numpy as np
+
+from contracts.ablation import AblationRunRecord
+from contracts.training import RunMetadata, TrainingBudget
 
 from .models import ArtifactLayout
 
@@ -62,6 +66,7 @@ def canonical_artifacts_complete(
 ) -> bool:
     required = [
         layout.policy_final,
+        layout.metadata,
         layout.episodes,
         layout.trajectory_final,
         layout.metrics_final,
@@ -69,3 +74,79 @@ def canonical_artifacts_complete(
     if require_evaluations:
         required.append(layout.evaluations)
     return all(path.is_file() for path in required)
+
+
+def training_budget_complete(
+    budget: TrainingBudget | None,
+    *,
+    expected_effective_episodes: int | None = None,
+) -> bool:
+    """Return whether a completed-episode budget reached its effective target."""
+    if budget is None or budget.mode != "completed_episodes":
+        return False
+    effective = budget.effective_training_episodes
+    actual = budget.actual_completed_episodes
+    if effective is None or actual is None or effective <= 0:
+        return False
+    if expected_effective_episodes is not None and effective != int(
+        expected_effective_episodes
+    ):
+        return False
+    return budget.target_reached is True and actual >= effective
+
+
+def _load_metadata_budget(path: Path) -> TrainingBudget | None:
+    if not path.is_file():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as file_obj:
+            metadata = RunMetadata.from_mapping(json.load(file_obj))
+    except (OSError, TypeError, ValueError):
+        return None
+    return metadata.training_budget
+
+
+def canonical_training_run_complete(
+    layout: ArtifactLayout,
+    *,
+    expected_effective_episodes: int | None = None,
+    require_evaluations: bool = True,
+) -> bool:
+    """Check canonical artifacts and the persisted completed-episode budget."""
+    return canonical_artifacts_complete(
+        layout, require_evaluations=require_evaluations
+    ) and training_budget_complete(
+        _load_metadata_budget(layout.metadata),
+        expected_effective_episodes=expected_effective_episodes,
+    )
+
+
+def manifest_run_complete(
+    run: AblationRunRecord,
+    *,
+    require_evaluations: bool = True,
+) -> bool:
+    """Validate a completed manifest record against its referenced artifacts."""
+    if run.status != "completed" or not training_budget_complete(run.training_budget):
+        return False
+    required = (
+        "policy_final",
+        "metadata",
+        "episodes",
+        "trajectory_final",
+        "metrics_final",
+    )
+    if require_evaluations:
+        required += ("evaluations",)
+    try:
+        if not all(Path(run.artifacts.path_for(name)).is_file() for name in required):
+            return False
+        metadata_budget = _load_metadata_budget(
+            Path(run.artifacts.path_for("metadata"))
+        )
+    except (KeyError, OSError):
+        return False
+    expected = run.training_budget.effective_training_episodes
+    return training_budget_complete(
+        metadata_budget, expected_effective_episodes=expected
+    )

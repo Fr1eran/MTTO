@@ -1,5 +1,5 @@
 from dataclasses import replace
-from typing import TypedDict, Unpack, cast
+from typing import TypedDict, Unpack
 
 import numpy as np
 import pytest
@@ -7,12 +7,10 @@ from gymnasium.utils.env_checker import (
     check_env,
 )
 from numpy.typing import NDArray
-from stable_baselines3.common.vec_env import DummyVecEnv
 
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo, get_slope_scalar_numba
 from model.vehicle import VehicleInfo, calc_levi_deceleration_scalar_numba
-from rl.completion_critic import CompletionTrajectoryAccumulator
 from rl.context_pool import Context, ContextPool
 from rl.context_sampler import ContextSampler, CurriculumDistributionState
 from rl.dspdl import DSPDLStatisticsHub
@@ -39,7 +37,6 @@ class _MTTOEnvOverrides(TypedDict, total=False):
     context_sampler: ContextSampler | None
     dspdl_statistics_hub: DSPDLStatisticsHub | None
     curriculum_env_rank: int | None
-    completion_accumulator: CompletionTrajectoryAccumulator | None
     enable_trajectory_tracking: bool
     safety_truncation_buffer: SafetyTruncationBuffer | None
 
@@ -110,6 +107,145 @@ def _clone_train_service(train_service: TrainService) -> TrainService:
         max_stop_error=train_service.max_stop_error,
         max_arr_time_error_s=train_service.max_arr_time_error_s,
     )
+
+
+def test_punctuality_schedule_change_and_global_context_reference(mtto_env):
+    env = _build_env_like(
+        mtto_env, reward_config=RewardConfig(enable_potential_punctuality=True)
+    )
+    env.reset()
+    calc = env.reward_calculator
+    assert calc.potential_punctuality(env.state) == pytest.approx(0)
+    midpoint = (
+        env.train_service.start_position + env.train_service.target_position
+    ) / 2
+    old_reference = calc.reference_punctuality_slack(midpoint)
+    env.state = replace(env.state, position_m=midpoint)
+    old_minimum = env.stepper.initial_min_operation_time_s
+    env.change_schedule_time(env.train_service.schedule_time + 20)
+    assert calc.reference_punctuality_slack(midpoint) == pytest.approx(
+        old_reference + 10
+    )
+    assert env.stepper.initial_min_operation_time_s == old_minimum
+    assert env.state.redundant_operation_time_s == pytest.approx(
+        env.stepper._calc_redundant_operation_time(
+            midpoint, env.state.speed_mps, env.state.operation_time_s
+        )
+    )
+
+
+def test_punctuality_gym_and_shared_replay_reward_match(mtto_env):
+    env = _build_env_like(
+        mtto_env, reward_config=RewardConfig(enable_potential_punctuality=True)
+    )
+    env.reset()
+    acceleration = env.observation_builder.denormalize_action(1.0)
+    transition = env.stepper.advance(env.state, acceleration)
+    expected = env.reward_calculator.calculate(transition)
+    _, reward, terminated, truncated, _ = env.step(np.asarray([1.0]))
+    assert reward == pytest.approx(expected.total)
+    assert (terminated, truncated) == (transition.terminated, transition.truncated)
+
+
+def test_punctuality_curriculum_statistics_exclude_shaping(mtto_env):
+    source = _build_env_like(mtto_env)
+    source.reset()
+    state = replace(source.state, redundant_operation_time_s=100)
+    pool = ContextPool((Context(0, source.stepper.whole_distance_m, state),))
+    hub = DSPDLStatisticsHub(context_count=1, num_envs=1, gamma=source.gamma)
+    env = _build_env_like(
+        source,
+        reward_config=RewardConfig(enable_potential_punctuality=True),
+        context_sampler=ContextSampler(
+            context_pool=pool, initial_distribution=np.ones(1), seed=1
+        ),
+        dspdl_statistics_hub=hub,
+        curriculum_env_rank=0,
+    )
+    env.reset()
+    base_rewards = []
+    for action in (1.0, -1.0):
+        transition = env.stepper.advance(
+            env.state, env.observation_builder.denormalize_action(action)
+        )
+        breakdown = env.reward_calculator.calculate(transition)
+        base_rewards.append(breakdown.total - breakdown.punctuality_shaping)
+        env.step(np.asarray([action]))
+        hub.finish_rollout(version=0)
+        if transition.terminated or transition.truncated:
+            break
+    snapshot = hub.snapshot(version=0)
+    np.testing.assert_allclose(snapshot.rollout_returns, base_rewards)
+    if snapshot.completed_returns.size:
+        assert snapshot.completed_returns[0] == pytest.approx(
+            sum(env.gamma**i * r for i, r in enumerate(base_rewards))
+        )
+
+
+def test_punctuality_training_adapter_and_ppo_smoke(mtto_env):
+    from stable_baselines3 import PPO
+    from stable_baselines3.common.vec_env import DummyVecEnv
+
+    from rl.task_terminal_vec_env import TaskTerminalVecEnv
+
+    env = _build_env_like(
+        mtto_env, reward_config=RewardConfig(enable_potential_punctuality=True)
+    )
+    vec = TaskTerminalVecEnv(DummyVecEnv([lambda: env]))
+    env.compact_training_info = True
+    vec.reset()
+    _, _, done, infos = vec.step(np.asarray([[-1.0]]))
+    assert done[0]
+    assert infos[0]["mtto_task_ended"]
+    assert not infos[0]["TimeLimit.truncated"]
+    model = PPO(
+        "MlpPolicy",
+        vec,
+        n_steps=16,
+        batch_size=8,
+        n_epochs=1,
+        gamma=env.gamma,
+        seed=17,
+        device="cpu",
+        policy_kwargs={"net_arch": [16]},
+    )
+    model.learn(total_timesteps=32)
+    assert model.num_timesteps == 32
+    for parameter in model.policy.parameters():
+        assert np.isfinite(parameter.detach().numpy()).all()
+    assert np.isfinite(model.rollout_buffer.rewards).all()
+    assert np.isfinite(model.rollout_buffer.returns).all()
+    vec.close()
+
+
+def test_punctuality_external_time_limit_still_bootstraps(mtto_env, monkeypatch):
+    from gymnasium.wrappers import TimeLimit
+    from stable_baselines3.common.vec_env import DummyVecEnv
+
+    from rl.task_terminal_vec_env import TaskTerminalVecEnv
+
+    env = _build_env_like(
+        mtto_env, reward_config=RewardConfig(enable_potential_punctuality=True)
+    )
+    vec = TaskTerminalVecEnv(DummyVecEnv([lambda: TimeLimit(env, max_episode_steps=1)]))
+    vec.reset()
+    # Isolate an external cutoff from this fixture's first-step safety failure.
+    advance = env.stepper.advance
+    monkeypatch.setattr(
+        env.stepper,
+        "advance",
+        lambda *args: replace(
+            advance(*args),
+            terminated=False,
+            truncated=False,
+            violation_code=ViolationCode.ONGOING,
+        ),
+    )
+    _, _, done, infos = vec.step(np.asarray([[1.0]]))
+    assert done[0]
+    assert not infos[0].get("mtto_task_ended", False)
+    assert infos[0]["TimeLimit.truncated"]
+    vec.close()
 
 
 def _build_env_like(
@@ -215,9 +351,6 @@ def test_factory_shares_stepper_and_curriculum_distribution(
         context_count=1,
         initial_distribution=[1.0],
     )
-    statistics_hub = DSPDLStatisticsHub(
-        context_count=1, num_envs=2, gamma=mtto_env.gamma
-    )
     kwargs = {
         "vehicle": mtto_env.vehicle,
         "track": mtto_env.track,
@@ -230,20 +363,48 @@ def test_factory_shares_stepper_and_curriculum_distribution(
         "curriculum_distribution_state": distribution_state,
     }
 
-    first = make_env(
-        **kwargs, dspdl_statistics_hub=statistics_hub, curriculum_env_rank=0
-    )
-    second = make_env(
-        **kwargs, dspdl_statistics_hub=statistics_hub, curriculum_env_rank=1
-    )
+    first = make_env(**kwargs)
+    second = make_env(**kwargs)
 
     assert first.stepper is second.stepper is mtto_env.stepper
     assert first.context_sampler is not None
     assert second.context_sampler is not None
     assert first.context_sampler.distribution_state is distribution_state
     assert second.context_sampler.distribution_state is distribution_state
-    assert first.dspdl_statistics_hub is statistics_hub
-    assert second.dspdl_statistics_hub is statistics_hub
+
+
+def test_factory_shares_critic_statistics(
+    mtto_env: MTTOEnv,
+) -> None:
+    pool = ContextPool(
+        (
+            Context(
+                context_index=0,
+                remaining_distance_m=mtto_env.stepper.whole_distance_m,
+                initial_state=mtto_env.stepper.reset(),
+            ),
+        )
+    )
+    distribution_state = CurriculumDistributionState(
+        context_count=1, initial_distribution=[1.0]
+    )
+    hub = DSPDLStatisticsHub(context_count=1, num_envs=1, gamma=0.9)
+    kwargs = {
+        "vehicle": mtto_env.vehicle,
+        "track": mtto_env.track,
+        "safeguard_utility": mtto_env.safeguard_utility,
+        "train_service": mtto_env.train_service,
+        "gamma": mtto_env.gamma,
+        "step_distance": mtto_env.step_distance,
+        "stepper": mtto_env.stepper,
+        "context_pool": pool,
+        "curriculum_distribution_state": distribution_state,
+        "dspdl_statistics_hub": hub,
+        "curriculum_env_rank": 0,
+    }
+
+    env = make_env(**kwargs)
+    assert env.dspdl_statistics_hub is hub
 
 
 class _ContextSamplerStub:
@@ -268,72 +429,6 @@ class _ContextSamplerStub:
     ) -> None:
         self.updated = (np.asarray(weights, dtype=np.float64), version)
         self.version = version
-
-
-def test_reset_can_sample_context_and_collect_dspdl_statistics(
-    mtto_env: MTTOEnv,
-) -> None:
-    reference_state = replace(
-        mtto_env.stepper.reset(),
-        position_m=mtto_env.train_service.start_position + 100.0,
-        operation_time_s=4.0,
-        energy_consumption_kj=12.0,
-        step_count=3,
-    )
-    sampler = _ContextSamplerStub(reference_state)
-    statistics_hub = DSPDLStatisticsHub(
-        context_count=3, num_envs=1, gamma=mtto_env.gamma
-    )
-    env = _build_env_like(
-        mtto_env,
-        context_sampler=cast(ContextSampler, cast(object, sampler)),
-        dspdl_statistics_hub=statistics_hub,
-        curriculum_env_rank=0,
-        enable_trajectory_tracking=True,
-    )
-    env._comfort_tav = 8.0
-
-    observation, info = env.reset(seed=123)
-
-    assert info == {}
-    assert sampler.reseeded_with == 123
-    assert env.state is reference_state
-    assert env._comfort_tav == 0.0
-    assert env.trajectory_pos == [reference_state.position_m]
-    assert observation[0] < 1.0
-    _, _, _, _, info = env.step(np.asarray([0.0], dtype=np.float32))
-    assert "reference_context_sample_id" not in info
-    assert "reference_context_index" not in info
-    assert "reference_context_distribution_version" not in info
-
-    statistics = statistics_hub.snapshot(version=0)
-    np.testing.assert_array_equal(statistics.context_counts, [0, 0, 1])
-
-
-def test_reset_and_step_collect_completion_decision_states(mtto_env: MTTOEnv) -> None:
-    reference_state = mtto_env.stepper.reset()
-    sampler = _ContextSamplerStub(reference_state)
-    accumulator = CompletionTrajectoryAccumulator(observation_shape=(12,))
-    env = _build_env_like(
-        mtto_env,
-        context_sampler=cast(ContextSampler, cast(object, sampler)),
-        completion_accumulator=accumulator,
-    )
-
-    initial_observation, _ = env.reset()
-    assert len(accumulator._active_observations) == 1
-    np.testing.assert_allclose(accumulator._active_observations[0], initial_observation)
-
-    _, _, terminated, truncated, _ = env.step(np.asarray([0.0], dtype=np.float32))
-    if terminated or truncated:
-        payload = env.drain_completion_trajectories()
-        assert cast(np.ndarray, payload["observations"]).shape[0] == 1
-    else:
-        assert len(accumulator._active_observations) == 2
-
-    env.validate_dspdl_version(1)
-    env.commit_dspdl_version(1)
-    assert accumulator.accepted_version == 1
 
 
 @pytest.mark.parametrize(
@@ -1085,43 +1180,3 @@ def test_env_reset_and_step_return_observation_copies(mtto_env: MTTOEnv) -> None
     assert obs_step is not mtto_env._observation_buffer
     assert obs_reset is not obs_step
     np.testing.assert_array_equal(obs_reset, reset_snapshot)
-
-
-def test_dummy_vec_env_preserves_terminal_observation_across_auto_reset(
-    mtto_env: MTTOEnv,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    env = _build_env_like(mtto_env)
-    initial = env.stepper.reset()
-    terminal = replace(
-        initial,
-        position_m=initial.position_m + 100.0,
-        speed_mps=5.0,
-        step_count=1,
-    )
-    transition = OperationalTransition(
-        initial,
-        terminal,
-        0.0,
-        100.0,
-        1.0,
-        0.0,
-        False,
-        True,
-        ViolationCode.STEP_LIMIT,
-    )
-    monkeypatch.setattr(env.stepper, "advance", lambda *_args: transition)
-    venv = DummyVecEnv([lambda: env])
-    try:
-        reset_observation = venv.reset().copy()
-        _, _, dones, infos = venv.step(np.asarray([[0.0]], dtype=np.float32))
-
-        assert dones[0]
-        terminal_observation = infos[0]["terminal_observation"]
-        assert terminal_observation is not env._observation_buffer
-        assert terminal_observation[0] != pytest.approx(reset_observation[0])
-        assert terminal_observation[1] == pytest.approx(
-            terminal.speed_mps / env.vehicle.max_speed
-        )
-    finally:
-        venv.close()

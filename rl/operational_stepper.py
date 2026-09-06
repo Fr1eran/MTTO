@@ -168,6 +168,18 @@ class OperationalStepper:
         )
         return self.train_service.schedule_time - operation_time_s - min_remaining
 
+    @property
+    def initial_min_operation_time_s(self) -> float:
+        """Cache the same minimum-time estimate used by runtime slack."""
+        if not hasattr(self, "_initial_min_operation_time_s"):
+            self._initial_min_operation_time_s = (
+                self.train_service.schedule_time
+                - self._calc_redundant_operation_time(
+                    self.train_service.start_position, 0.0, 0.0
+                )
+            )
+        return self._initial_min_operation_time_s
+
     def _build_state(
         self,
         *,

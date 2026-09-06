@@ -1,3 +1,5 @@
+# ruff: noqa: E501
+
 from __future__ import annotations
 
 import csv
@@ -26,11 +28,14 @@ STAT_NAMES = ("mean", "p05", "p95", "min", "max", "slope", "cv")
 DSPDL_DIAG_KEYS = (
     "converged",
     "alpha",
+    "current_to_target_kl",
+    "empirical_to_target_kl",
     "update_kl",
-    "critic_values_duration_s",
-    "distribution_solve_duration_s",
-    "critic_return_mae",
-    "critic_return_pearson",
+    "value_return_mae",
+    "value_return_pearson",
+    "importance_weight_ess",
+    "importance_weight_ess_ratio",
+    "importance_weight_max_to_mean",
 )
 
 
@@ -132,7 +137,7 @@ def _format_number(value: Any, default: str = "N/A") -> str:
     try:
         v = float(value)
         return default if np.isnan(v) or np.isinf(v) else f"{v:.6g}"
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return default
 
 
@@ -141,7 +146,7 @@ def _format_percent(value: Any, default: str = "N/A") -> str:
         return default
     try:
         return f"{float(value) * 100.0:.2f}%"
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return default
 
 
@@ -160,7 +165,7 @@ def _ordered_best_eval_keys(best_eval: dict[str, Any], prefix: str) -> list[str]
 def _ascii_bar(value: Any, width: int = 24) -> str:
     try:
         ratio = max(0.0, min(1.0, float(value)))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         ratio = 0.0
     w = max(8, int(width))
     filled = int(round(ratio * w))
@@ -330,11 +335,6 @@ def _render_dspdl_distribution(curriculum: dict[str, Any]) -> list[str]:
         lines.append("- unavailable: no DSPDL distribution KL logged")
         return lines
 
-    empirical = curriculum.get("empirical_to_target_kl", {})
-    lines.append(
-        f"- empirical_to_target_kl: final={_format_number(empirical.get('final'))}, "
-        f"trend_slope_per_step={_format_number(empirical.get('trend_slope_per_step'))}"
-    )
     diagnostics = curriculum.get("diagnostics", {})
     for key in DSPDL_DIAG_KEYS:
         if key in diagnostics:
@@ -425,7 +425,9 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
         ),
         _render_evaluation_trend(payload.get("trajectory_evaluation_metrics", {})),
         _render_dspdl_distribution(payload.get("curriculum_distribution_metrics", {})),
-        _render_safety_truncation(payload.get("safety_truncation_position_metrics", {})),
+        _render_safety_truncation(
+            payload.get("safety_truncation_position_metrics", {})
+        ),
         _render_artifact_summary(payload.get("snapshots", {}), config),
     ]
 
@@ -503,4 +505,3 @@ def write_analysis_outputs(
             output_paths["step_snapshots_csv"] = str(step_csv_path)
 
     return output_paths
-

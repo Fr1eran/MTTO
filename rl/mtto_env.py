@@ -14,7 +14,6 @@ from contracts.environment import EpisodeInfo, EpisodeOutcome
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
-from rl.completion_critic import CompletionTrajectoryAccumulator
 from rl.context_sampler import ContextSampler
 from rl.dspdl import DSPDLStatisticsHub
 from rl.observation_builder import ObservationBuilder
@@ -49,7 +48,6 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         context_sampler: ContextSampler | None = None,
         dspdl_statistics_hub: DSPDLStatisticsHub | None = None,
         curriculum_env_rank: int | None = None,
-        completion_accumulator: CompletionTrajectoryAccumulator | None = None,
         safety_truncation_buffer: SafetyTruncationBuffer | None = None,
         reward_diagnostics_accumulator: RewardDiagnosticsAccumulator | None = None,
     ) -> None:
@@ -59,15 +57,10 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
                 "DSPDL statistics hub and curriculum environment rank "
                 "must be set together"
             )
-        if dspdl_statistics_hub is not None and completion_accumulator is not None:
-            raise ValueError(
-                "traditional and completion DSPDL statistics are mutually exclusive"
-            )
         if dspdl_statistics_hub is not None:
             if context_sampler is None:
                 raise ValueError("DSPDL statistics require a context sampler")
-            if not isinstance(curriculum_env_rank, (int, np.integer)):
-                raise TypeError("curriculum_env_rank must be an integer")
+            assert curriculum_env_rank is not None
             if not 0 <= int(curriculum_env_rank) < dspdl_statistics_hub.num_envs:
                 raise IndexError("curriculum_env_rank is outside the statistics hub")
         self.vehicle: VehicleInfo = vehicle
@@ -110,6 +103,12 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
             max_energy_consumption_kj=self.stepper.max_energy_consumption_kj,
             gamma=gamma,
             reward_config=reward_config,
+            initial_min_operation_time_s=(
+                self.stepper.initial_min_operation_time_s
+                if reward_config is not None
+                and reward_config.enable_potential_punctuality
+                else None
+            ),
         )
         self.reward_config: RewardConfig = self.reward_calculator.reward_config
         self.context_sampler = context_sampler
@@ -117,10 +116,9 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         self.curriculum_env_rank = (
             int(curriculum_env_rank) if curriculum_env_rank is not None else None
         )
-        self.completion_accumulator = completion_accumulator
         self.safety_truncation_buffer = safety_truncation_buffer
         self.reward_diagnostics_accumulator = reward_diagnostics_accumulator
-        self._pending_dspdl_version: int | None = None
+        self._current_context_index: int | None = None
         self.state: OperationalState = self.stepper.reset()
 
         low = np.array([0, 0, -1, -1, -1, -1, 0, 0, -1, -1, 0, 0], dtype=np.float32)
@@ -161,31 +159,10 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         )
         return observation.copy()
 
-    def validate_dspdl_version(self, version: int) -> None:
-        accumulator = self.completion_accumulator
-        if self.context_sampler is None or accumulator is None:
-            raise RuntimeError("DSPDL components are not configured")
-        self._pending_dspdl_version = accumulator.validate_version_update(version)
-
-    def commit_dspdl_version(self, version: int) -> None:
-        accumulator = self.completion_accumulator
-        if accumulator is None:
-            raise RuntimeError("DSPDL accumulator is not configured")
-        if self._pending_dspdl_version != int(version):
-            raise ValueError("DSPDL version was not validated before commit")
-        accumulator.switch_version(int(version))
-        self._pending_dspdl_version = None
-
-    def disable_dspdl_accumulator(self) -> None:
-        completion_accumulator = self.completion_accumulator
-        if completion_accumulator is not None:
-            completion_accumulator.disable()
-
-    def drain_completion_trajectories(self) -> dict[str, object]:
-        accumulator = self.completion_accumulator
-        if accumulator is None:
-            raise RuntimeError("completion accumulator is not configured")
-        return accumulator.drain()
+    @property
+    def current_context_index(self) -> int | None:
+        """Return the context selected for the current episode, if any."""
+        return self._current_context_index
 
     def drain_safety_truncations(self) -> SafetyTruncationBatch:
         buffer = self.safety_truncation_buffer
@@ -226,6 +203,7 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
     ) -> tuple[NDArray[np.float32], dict[str, object]]:
         _ = super().reset(seed=seed, options=options)
         sampler = self.context_sampler
+        context_index: int | None = None
         if sampler is None:
             self.state = self.stepper.reset()
         else:
@@ -233,13 +211,17 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
                 sampler.reseed(seed)
             context = sampler.sample()
             self.state = context.initial_state
-            if self.dspdl_statistics_hub is not None:
-                assert self.curriculum_env_rank is not None
-                self.dspdl_statistics_hub.begin_episode(
-                    env_rank=self.curriculum_env_rank,
-                    context_index=context.context_index,
-                    distribution_version=sampler.version,
-                )
+            context_index = context.context_index
+        self._current_context_index = context_index
+        if self.dspdl_statistics_hub is not None:
+            assert self.curriculum_env_rank is not None
+            assert sampler is not None
+            assert context_index is not None
+            self.dspdl_statistics_hub.begin_episode(
+                env_rank=self.curriculum_env_rank,
+                context_index=context_index,
+                distribution_version=sampler.version,
+            )
         self.episode_info = None
         self.outcome = EpisodeOutcome(terminated=False, truncated=False)
         self._comfort_tav = self._comfort_sum_sq_delta_acc = 0.0
@@ -248,11 +230,6 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         observation = self.observation_builder.build(
             self.state, out=self._observation_buffer
         )
-        if self.completion_accumulator is not None:
-            self.completion_accumulator.begin_episode(observation)
-        # Gym/VecEnv may retain this observation as terminal_observation while
-        # immediately resetting the environment.  Do not expose the reusable
-        # scratch buffer across that ownership boundary.
         return observation.copy(), {}
 
     @override
@@ -275,30 +252,8 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
             assert self.curriculum_env_rank is not None
             self.dspdl_statistics_hub.record_transition(
                 self.curriculum_env_rank,
-                reward.total,
+                reward.total - reward.punctuality_shaping,
                 done=bool(transition.terminated or transition.truncated),
-            )
-        if self.completion_accumulator is not None:
-            success_base, stopping_weight, punctuality_weight = (
-                self.completion_accumulator.completion_weights
-            )
-            completion = self.reward_calculator.task_completion(
-                terminated=bool(transition.terminated),
-                truncated=bool(transition.truncated),
-                stop_error_m=self.state.stop_error_m,
-                operation_time_s=self.state.operation_time_s,
-                success_base=success_base,
-                stopping_weight=stopping_weight,
-                punctuality_weight=punctuality_weight,
-            )
-            self.completion_accumulator.record_transition(
-                next_observation,
-                done=bool(transition.terminated or transition.truncated),
-                completion=(
-                    completion
-                    if transition.terminated or transition.truncated
-                    else None
-                ),
             )
         if self.safety_truncation_buffer is not None:
             self.safety_truncation_buffer.record(
@@ -333,6 +288,10 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
                 "episode": self.episode_info.to_mapping(),
                 "outcome": self.outcome.to_mapping(),
             }
+        if self.reward_config.enable_potential_punctuality and (
+            transition.terminated or transition.truncated
+        ):
+            info["mtto_task_ended"] = True
         return (
             # See reset(): VecEnv may retain a terminal observation after this
             # method returns, so it must not alias the reusable scratch buffer.

@@ -37,6 +37,7 @@ class AnalysisConfig:
     rollout_steps_per_update: int = 2048
     sampling_quality_mode: str = "warn_only"
     output_root: str = "mtto_train_reports"
+    output_run_name: str | None = None
     sampling_health_tags: list[str] | None = None
     final_output_dir: str | None = None
 
@@ -131,7 +132,6 @@ def _annotate_snapshot_severity(
         {**s, "severity": _score_snapshot_severity(s, kl_threshold=kl_threshold)}
         for s in snapshots
     ]
-
 
 
 def run_training_analysis(
@@ -248,7 +248,7 @@ def run_training_analysis(
     output_paths = write_analysis_outputs(
         payload,
         output_root=cfg.output_root,
-        run_name=payload["meta"]["run_name"],
+        run_name=cfg.output_run_name or payload["meta"]["run_name"],
     )
     payload["output_paths"] = output_paths
 

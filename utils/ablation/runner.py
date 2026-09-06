@@ -18,6 +18,7 @@ from contracts.ablation import (
     ArtifactRefs,
     ManifestStatusUpdate,
 )
+from rl.experiment_statistics import assess_constraints
 from rl.experiment_utils import (
     TrainingRunSpec,
     build_default_training_args,
@@ -32,7 +33,11 @@ from rl.training_analysis.collect import (
 )
 from utils.io_utils import load_evaluation_history, load_evaluation_metrics
 
-from .artifacts import artifact_paths, canonical_artifacts_complete
+from .artifacts import (
+    artifact_paths,
+    canonical_training_run_complete,
+    training_budget_complete,
+)
 from .manifest import ManifestStore, build_manifest_payload, manifest_runs, status_map
 from .models import ArtifactLayout, CurveAggregate, FinalMetricAggregate, MetricStats
 from .statistics import aggregate_indexed_series, aggregate_matrix, align_exact
@@ -127,6 +132,7 @@ class FinalMetricSpec:
     name: str
     value: str
     transform: ValueTransform = "identity"
+    feasible_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -261,6 +267,8 @@ class AblationDriver:
                 ]
             elif isinstance(value, SeedValues):
                 result[key] = [value.cast(seed) for seed in self.spec.seeds]
+            elif isinstance(value, Mapping):
+                result[key] = self._resolve_mapping(value, args)
             else:
                 result[key] = self._resolve_value(value, args)
         return result
@@ -471,7 +479,14 @@ class AblationDriver:
                 args, manifest_runs_all, statuses
             ),
             run_id_of=lambda run: run.run_id,
-            required_artifacts=lambda run: canonical_artifacts_complete(run.artifacts),
+            required_artifacts=lambda run: canonical_training_run_complete(
+                run.artifacts,
+                expected_effective_episodes=(
+                    run.training_spec.run_metadata.training_budget.effective_training_episodes
+                    if run.training_spec.run_metadata.training_budget is not None
+                    else None
+                ),
+            ),
             train_one=lambda run: self.train_experiment(
                 run.train_args, spec=run.training_spec
             ),
@@ -664,11 +679,16 @@ class AblationDriver:
                         Path(entry.artifacts.path_for(artifact_name))
                     )
                     successes.append(float(metrics.success))
+                    assessment = assess_constraints(metrics.to_display_mapping())
                     for metric in self.spec.final.metrics:
                         value = _transform(
                             [getattr(metrics, metric.value)], metric.transform
                         )[0]
-                        values[metric.name].append(float(value))
+                        values[metric.name].append(
+                            float(value)
+                            if not metric.feasible_only or assessment.feasible
+                            else float("nan")
+                        )
                 except (OSError, KeyError, TypeError, ValueError) as exc:
                     warnings.append(f"Skipped {variant.label} {source} metrics: {exc}")
             if not successes:
@@ -786,6 +806,15 @@ def execute_matrix(
                 raise RuntimeError(
                     f"required artifacts are incomplete for run_id={run_id}"
                 )
+            metadata = getattr(trained, "run_metadata", None)
+            training_budget = getattr(metadata, "training_budget", None)
+            if training_budget is not None and not training_budget_complete(
+                training_budget
+            ):
+                raise RuntimeError(
+                    "completed-episode training budget was not reached "
+                    f"for run_id={run_id}"
+                )
         except Exception as exc:
             statuses[run_id] = ManifestStatusUpdate(
                 status="failed", error_message=str(exc)
@@ -795,8 +824,6 @@ def execute_matrix(
             return 1
 
         completed_status = ManifestStatusUpdate(status="completed")
-        metadata = getattr(trained, "run_metadata", None)
-        training_budget = getattr(metadata, "training_budget", None)
         if training_budget is not None:
             completed_status = ManifestStatusUpdate(
                 status="completed", training_budget=training_budget

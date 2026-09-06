@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import pytest
 
 from rl.experiment_utils import (
+    DSPDL_ALGORITHM_ID,
     DEFAULT_COMFORT_REWARD_SCALE,
     DEFAULT_DEVICE,
     DEFAULT_ENERGY_REWARD_SCALE,
@@ -22,6 +23,7 @@ from rl.experiment_utils import (
     resolve_output_dir,
     resolve_reward_preset,
     resolve_tb_log_name,
+    resolve_training_run_spec,
     reward_preset_names,
     save_run_metadata,
 )
@@ -35,20 +37,26 @@ def test_default_training_args_use_shared_vector_environment_defaults() -> None:
     assert not hasattr(args, "vec_env_type")
     assert args.rollout_steps_per_update == DEFAULT_ROLLOUT_STEPS_PER_UPDATE
     assert args.device == DEFAULT_DEVICE
+    assert args.reward_preset == "basic_safety_punctuality"
 
 
-def test_curriculum_profiles_resolve_with_disabled_default() -> None:
-    assert curriculum_profile_names() == ("none", "dspdl", "dspdl_completion")
-    assert resolve_curriculum_profile_name() == "none"
+def test_curriculum_profiles_resolve_with_dspdl_default() -> None:
+    assert curriculum_profile_names() == (
+        "none",
+        "dspdl",
+    )
+    assert resolve_curriculum_profile_name() == "dspdl"
+    assert resolve_curriculum_profile_name("none") == "none"
     assert resolve_curriculum_profile_name("dspdl") == "dspdl"
-    assert resolve_curriculum_profile_name("dspdl_completion") == "dspdl_completion"
-    with pytest.raises(
-        ValueError, match="Available profiles: none, dspdl, dspdl_completion"
-    ):
-        _ = resolve_curriculum_profile_name("fixed_reverse")
+    with pytest.raises(ValueError, match="Available profiles: none, dspdl"):
+        _ = resolve_curriculum_profile_name("dspdl_critic")
+    with pytest.raises(ValueError):
+        _ = resolve_curriculum_profile_name("dspdl_completion")
+    with pytest.raises(ValueError):
+        _ = resolve_curriculum_profile_name("dspdl_completion_bayes")
 
 
-def test_curriculum_profile_scopes_nonbaseline_output_name() -> None:
+def test_curriculum_profile_scopes_dspdl_output_name() -> None:
     output_dir = resolve_output_dir(
         output_root="output/optimal/rl",
         schedule_time_s=430.0,
@@ -60,20 +68,56 @@ def test_curriculum_profile_scopes_nonbaseline_output_name() -> None:
     assert Path(output_dir).name == "430p0_30p0__basic__dspdl"
 
 
-def test_completion_curriculum_profile_has_an_independent_output_name() -> None:
-    output_dir = resolve_output_dir(
-        output_root="output/optimal/rl",
-        schedule_time_s=430.0,
-        step_distance=30.0,
-        reward_preset_name="basic",
-        curriculum_profile_name="dspdl_completion",
-    )
+def test_dspdl_profile_has_distinct_identity_and_no_zpd_transform() -> None:
+    args = build_default_training_args()
+    args.curriculum_profile = "dspdl"
+    args.reference_curve_dir = "."
+    spec = resolve_training_run_spec(args)
 
-    assert Path(output_dir).name == "430p0_30p0__basic__dspdl_completion"
+    curriculum = spec.run_metadata["curriculum"]
+    assert spec.curriculum_profile == "dspdl"
+    assert curriculum["value_source"] == "ppo_value_estimate"
+    assert curriculum["algorithm_id"] == DSPDL_ALGORITHM_ID
+    config = curriculum["dspdl_protocol"]
+    assert config is not None
+    assert "initial_gaussian_std_m" not in config
+    assert "initial_peak_remaining_distance_m" not in config
+    assert "initial_uniform_mass" not in config
+    assert "min_completed_episodes" not in config
+    assert "min_completed_episodes_per_env" not in config
+    assert curriculum["alpha_update_protocol"] == {
+        "id": "rollout_discounted_return_eq6_v1",
+        "sample_source": (
+            "all_parallel_ppo_rollout_fragments_since_last_curriculum_update"
+        ),
+        "discounted_return_formula": "sum_t gamma^t r_t",
+        "aggregation": "arithmetic_mean",
+        "formula": (
+            "zeta * max(0, mean_rollout_return) / "
+            "KL(current_distribution || target_distribution)"
+        ),
+        "warmup": "alpha=0 for first alpha_warmup_updates curriculum updates",
+        "negative_mean_policy": "clip_to_zero",
+    }
+    assert curriculum["context_value_estimation_protocol"] == {
+        "id": "sampled_value_eq5_v1",
+        "estimator": "importance_weighted_samples",
+        "value_input": "raw_context_initial_observation",
+        "sampling_unit": "episode_start",
+        "formula": "g(c)=n_c*V(c)/(K*p_i(c)) for sampled c; g(c)=0 otherwise",
+        "distribution_version_policy": (
+            "statistics clear on committed curriculum version update"
+        ),
+    }
+    assert "dspdl" in Path(spec.output_dir).name
 
 
 def test_reward_preset_names_include_real_pbrs_ablation_profiles() -> None:
-    assert reward_preset_names() == ("basic", "basic_safety")
+    assert reward_preset_names() == (
+        "basic",
+        "basic_safety",
+        "basic_safety_punctuality",
+    )
 
 
 @pytest.mark.parametrize(
@@ -111,7 +155,14 @@ def test_reward_preset_owns_the_runtime_config() -> None:
     assert preset.enabled_shaping_components() == ("safety",)
 
 
-def test_resolve_output_dir_always_scopes_default_reward_preset() -> None:
+def test_reward_metadata_contains_no_global_scaling_fields() -> None:
+    metadata = resolve_reward_preset("basic_safety").to_metadata()
+
+    assert all("normalization" not in key for key in metadata)
+    assert all("normalization" not in key for key in metadata["reward_config"])
+
+
+def test_resolve_output_dir_scopes_default_reward_and_curriculum() -> None:
     output_dir = resolve_output_dir(
         output_root="output/optimal/rl",
         schedule_time_s=430.0,
@@ -119,10 +170,12 @@ def test_resolve_output_dir_always_scopes_default_reward_preset() -> None:
         reward_preset_name=DEFAULT_REWARD_PRESET_NAME,
     )
 
-    assert Path(output_dir).name == "430p0_100p0__basic_safety"
+    assert (
+        Path(output_dir).name == "430p0_100p0__basic_safety_punctuality__dspdl"
+    )
 
 
-def test_resolve_output_dir_scopes_non_default_profile_and_experiment_tag() -> None:
+def test_resolve_output_dir_scopes_default_curriculum_and_experiment_tag() -> None:
     output_dir = resolve_output_dir(
         output_root="output/optimal/rl",
         schedule_time_s=430.0,
@@ -131,7 +184,7 @@ def test_resolve_output_dir_scopes_non_default_profile_and_experiment_tag() -> N
         experiment_tag="Trial A",
     )
 
-    assert Path(output_dir).name == "430p0_100p0__basic__trial_a"
+    assert Path(output_dir).name == "430p0_100p0__basic__dspdl__trial_a"
 
 
 def test_resolve_tb_log_name_generates_experiment_scoped_name() -> None:
@@ -144,7 +197,11 @@ def test_resolve_tb_log_name_generates_experiment_scoped_name() -> None:
         experiment_tag=None,
     )
 
-    assert tb_log_name == "train_log__monitor_best__430p0_100p0__basic_safety"
+    assert (
+        tb_log_name
+        == "train_log__monitor_best__430p0_100p0__basic_safety_punctuality__"
+        "dspdl"
+    )
 
 
 def test_load_run_metadata_falls_back_to_parent_directory(tmp_path: Path) -> None:
@@ -293,7 +350,7 @@ def test_add_panel_label_places_text_on_axes() -> None:
 def test_resolve_survival_reward_scale_fallback_on_negative_or_invalid() -> None:
     from rl.experiment_utils import (
         DEFAULT_SURVIVAL_REWARD_SCALE,
-        _reward_config_to_dict,
+        reward_config_parameters,
         resolve_survival_reward_scale,
     )
 
@@ -310,13 +367,20 @@ def test_resolve_survival_reward_scale_fallback_on_negative_or_invalid() -> None
     cfg_custom = build_reward_config("basic", survival_reward_scale=30.0)
     assert cfg_custom.survival_reward_scale == 30.0
 
-    d = _reward_config_to_dict(cfg_custom)
+    d = reward_config_parameters(cfg_custom)
     assert d["energy_reward_scale"] == DEFAULT_ENERGY_REWARD_SCALE
     assert d["comfort_reward_scale"] == DEFAULT_COMFORT_REWARD_SCALE
     assert d["survival_reward_scale"] == 30.0
     assert d["enable_potential_safety"] is False
     assert "enable_energy" not in d
     assert "enable_comfort" not in d
+
+
+def test_punctuality_potential_parameters_are_not_runtime_configurable() -> None:
+    defaults = build_reward_config("basic_safety_punctuality")
+    assert defaults.enable_potential_punctuality
+    assert not hasattr(defaults, "punctuality_potential_scale")
+    assert not hasattr(defaults, "punctuality_potential_sigma_s")
 
 
 def test_derive_training_budget_rules() -> None:
@@ -366,6 +430,7 @@ def test_derive_training_budget_rules() -> None:
 
     # 4. resolve_training_run_spec 快照正确传递 training_budget
     args = build_default_training_args()
+    args.curriculum_profile = "none"
     spec = resolve_training_run_spec(args)
     assert spec.training_episodes == 7000
     assert spec.max_episode_steps == max_steps
@@ -386,3 +451,87 @@ def test_derive_training_budget_rules() -> None:
             rollout_steps_per_update=8192,
             schedule_time_s=465.0,
         )
+
+
+def test_train_single_experiment_persists_and_propagates_completed_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from rl.experiment_utils import (
+        evaluate_final_training_run,
+        train_single_experiment,
+    )
+
+    args = build_default_training_args()
+    args.curriculum_profile = "none"
+    args.training_episodes = 8
+    args.output_root = str(tmp_path / "output")
+    spec = resolve_training_run_spec(args)
+
+    class FakePPO:
+        def __init__(self, *a: object, **kw: object) -> None:
+            self.num_timesteps = 4096
+
+        def learn(self, *a: object, callback: object = None, **kw: object) -> FakePPO:
+            if hasattr(callback, "callbacks"):
+                for cb in callback.callbacks:
+                    if hasattr(cb, "_completed_episode_count"):
+                        cb._completed_episode_count = 8
+                    elif hasattr(cb, "completed_episode_count"):
+                        cb.completed_episode_count = 8
+                    if hasattr(cb, "n_episodes"):
+                        cb.n_episodes = 8
+            return self
+
+        def save(self, *a: object, **kw: object) -> None:
+            pass
+
+        @classmethod
+        def load(cls, *a: object, **kw: object) -> FakePPO:
+            return cls()
+
+    monkeypatch.setattr("rl.experiment_utils.PPO", FakePPO)
+
+    trained_spec = train_single_experiment(args, spec=spec)
+
+    # 1. Returned spec has completed budget metadata
+    returned_budget = trained_spec.run_metadata.training_budget
+    assert returned_budget is not None
+    assert returned_budget.actual_completed_episodes == 8
+    assert returned_budget.actual_training_timesteps == 4096
+    assert returned_budget.target_reached is True
+    assert returned_budget.stop_reason == "completed_episode_target"
+
+    # 2. Persisted metadata on disk has completed budget metadata
+    persisted_meta = load_run_metadata(trained_spec.output_dir)
+    persisted_budget = persisted_meta["training_budget"]
+    assert persisted_budget["actual_completed_episodes"] == 8
+    assert persisted_budget["actual_training_timesteps"] == 4096
+    assert persisted_budget["target_reached"] is True
+    assert persisted_budget["stop_reason"] == "completed_episode_target"
+
+    # 3. Propagated spec into evaluate_final_training_run passes updated metadata
+    captured_metadata: dict[str, object] = {}
+
+    def fake_evaluate_and_save(
+        model: object,
+        env: object,
+        output_path: str,
+        metadata: dict[str, object],
+        deterministic: bool = True,
+        metrics_path: str | None = None,
+    ) -> tuple[object, str, str]:
+        captured_metadata.update(metadata)
+        return (None, output_path, metrics_path or "")
+
+    monkeypatch.setattr(
+        "rl.experiment_utils.evaluate_and_save_final_policy",
+        fake_evaluate_and_save,
+    )
+
+    _ = evaluate_final_training_run(trained_spec)
+    final_budget = captured_metadata.get("training_budget")
+    assert isinstance(final_budget, dict)
+    assert final_budget["actual_completed_episodes"] == 8
+    assert final_budget["actual_training_timesteps"] == 4096
+    assert final_budget["target_reached"] is True
+    assert final_budget["stop_reason"] == "completed_episode_target"
