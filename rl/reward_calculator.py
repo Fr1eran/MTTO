@@ -2,15 +2,33 @@
 
 import math
 from dataclasses import dataclass
+from typing import ClassVar
+
+import numpy as np
+from numpy.typing import NDArray
 
 from model.ocs import TrainService
-from rl.operational_state import OperationalState, OperationalTransition, ViolationCode
+from rl.operational_state import OperationalState, OperationalTransition
 
 DEFAULT_ENERGY_REWARD_SCALE: float = 15.0
 DEFAULT_COMFORT_REWARD_SCALE: float = 20.0
 DEFAULT_SURVIVAL_REWARD_SCALE: float = 50.0
 PUNCTUALITY_POTENTIAL_SCALE: float = 5.0
 PUNCTUALITY_POTENTIAL_SIGMA_S: float = 20.0
+PUNCTUALITY_DECAY_TIME_S: float = 45.0
+STOPPING_SCORE_BETA: float = 0.8
+
+
+def punctuality_potential_from_error(
+    error_s: float | NDArray[np.floating],
+) -> float | NDArray[np.float64]:
+    """Evaluate the bounded punctuality potential from a slack error."""
+    error = np.asarray(error_s, dtype=np.float64)
+    ratio = error / np.hypot(error, PUNCTUALITY_POTENTIAL_SIGMA_S)
+    potential = -PUNCTUALITY_POTENTIAL_SCALE * ratio * ratio
+    if potential.ndim == 0:
+        return float(potential)
+    return np.asarray(potential, dtype=np.float64)
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,9 +72,13 @@ class RewardBreakdown:
 class RewardCalculator:
     """Calculate reward from an explicit transition.
 
-    Optional PBRS guides safety and linear consumption of timetable slack.
+    Optional potential-based shaping guides safety and linear consumption of
+    timetable slack. Together these priors form the PPRS method module.
     Terminal stopping and punctuality scores remain the task objectives.
     """
+
+    PUNCTUALITY_DECAY_TIME_S: ClassVar[float] = PUNCTUALITY_DECAY_TIME_S
+    STOPPING_SCORE_BETA: ClassVar[float] = STOPPING_SCORE_BETA
 
     def __init__(
         self,
@@ -91,22 +113,23 @@ class RewardCalculator:
     def calculate(self, transition: OperationalTransition) -> RewardBreakdown:
         state = transition.next_state
         punctuality_shaping = self.reward_punctuality_potential(transition)
+        safety = (
+            self._reward_safety_potential(transition)
+            if self.reward_config.enable_potential_safety
+            else 0.0
+        )
         if transition.truncated:
             progress = abs(state.position_m - self.train_service.target_position) / max(
                 self.whole_distance_m, 1e-12
             )
             truncation = -(1.0 + progress**2) * 5.0
             return RewardBreakdown(
+                safety=safety,
                 truncation=truncation,
                 punctuality_shaping=punctuality_shaping,
-                total=truncation + punctuality_shaping,
+                total=safety + truncation + punctuality_shaping,
             )
 
-        safety = (
-            self._reward_safety_potential(transition)
-            if self.reward_config.enable_potential_safety
-            else 0.0
-        )
         energy = (
             -self.reward_config.energy_reward_scale
             * transition.energy_delta_kj
@@ -175,33 +198,22 @@ class RewardCalculator:
         error = state.redundant_operation_time_s - self.reference_punctuality_slack(
             state.position_m
         )
-        # hypot avoids overflow in the bounded quadratic for large errors.
-        ratio = error / math.hypot(
-            error, PUNCTUALITY_POTENTIAL_SIGMA_S
-        )
-        return -PUNCTUALITY_POTENTIAL_SCALE * ratio * ratio
+        return float(punctuality_potential_from_error(error))
 
     def reward_punctuality_potential(self, transition: OperationalTransition) -> float:
         if not self.reward_config.enable_potential_punctuality:
             return 0.0
-        task_ended = transition.terminated or (
-            transition.truncated and transition.violation_code != ViolationCode.ONGOING
-        )
-        next_phi = (
-            0.0 if task_ended else self.potential_punctuality(transition.next_state)
-        )
-        return self.gamma * next_phi - self.potential_punctuality(
-            transition.previous_state
-        )
+        return self.gamma * self.potential_punctuality(
+            transition.next_state
+        ) - self.potential_punctuality(transition.previous_state)
 
     def stopping_score(self, stop_error_m: float) -> float:
-        beta = 0.8
         delta = max(0.0, abs(stop_error_m) - self.train_service.max_stop_error)
-        return 1.0 / (1.0 + (delta / beta) ** 2)
+        return 1.0 / (1.0 + (delta / self.STOPPING_SCORE_BETA) ** 2)
 
     def punctuality_score(self, operation_time_s: float) -> float:
         time_error = abs(self.train_service.schedule_time - operation_time_s)
-        return math.exp(-time_error / 45.0)
+        return math.exp(-time_error / self.PUNCTUALITY_DECAY_TIME_S)
 
     def _reward_safety_potential(self, transition: OperationalTransition) -> float:
         previous = transition.previous_state
@@ -222,7 +234,7 @@ class RewardCalculator:
     def _potential_safety(
         *, speed_mps: float, min_speed_mps: float, max_speed_mps: float
     ) -> float:
-        """PBRS safety potential with a band-scaled, non-overlapping buffer."""
+        """Safety potential with a band-scaled, non-overlapping buffer."""
         K_safety = 1.0
         speed_band = max_speed_mps - min_speed_mps
         safety_buffer = min(max(0.15 * speed_band, 1.0), 5.0)

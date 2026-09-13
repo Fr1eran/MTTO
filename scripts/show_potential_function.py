@@ -6,23 +6,59 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.axes import Axes
+from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from numpy.typing import NDArray
 
+from rl.operational_stepper import OperationalStepper
 from rl.reward_calculator import (
     PUNCTUALITY_POTENTIAL_SCALE,
     PUNCTUALITY_POTENTIAL_SIGMA_S,
+    RewardCalculator,
+    RewardConfig,
+    punctuality_potential_from_error,
 )
 from utils.data_loader import load_safeguard_curves, load_speed_limits
-from utils.plot_utils import save_sci_figure, sci_figure_size, set_global_plot_style
+from utils.plot_utils import (
+    add_panel_label,
+    apply_sci_curve_style,
+    apply_sci_grid,
+    save_sci_figure,
+    sci_figure_size,
+)
+from utils.scenario import build_scenario
+
+DEFAULT_PUNCTUALITY_SCHEDULE_TIME_S = 465.0
+
+SAFETY_POTENTIAL_CMAP = LinearSegmentedColormap.from_list(
+    "mtto_safety_penalty",
+    [
+        (0.00, "#E65100"),
+        (0.35, "#F57C00"),
+        (0.65, "#FFA726"),
+        (0.88, "#FFD54F"),
+        (0.97, "#FFF8E1"),
+        (1.00, "#FFFDF9"),
+    ],
+)
+PUNCTUALITY_POTENTIAL_CMAP = LinearSegmentedColormap.from_list(
+    "mtto_punctuality_penalty",
+    [
+        (0.00, "#005596"),
+        (0.35, "#1B8FD1"),
+        (0.65, "#68AFD5"),
+        (0.85, "#BCE0F0"),
+        (0.96, "#F0F8FC"),
+        (1.00, "#FFFFFF"),
+    ],
+)
 
 
 @dataclass(frozen=True)
-class _SeventhAuxiliaryStopField:
-    """第 7 个辅助停车区中两类势函数共用的位置、速度网格与边界。"""
+class _SafetyPotentialField:
+    """第 7 个辅助停车区内安全势函数的位置、速度网格与边界。"""
 
-    target_pos: float
     pos_array: np.ndarray
     speed_array_mps: np.ndarray
     position_grid: np.ndarray
@@ -34,26 +70,16 @@ class _SeventhAuxiliaryStopField:
     feasible_mask: np.ndarray
 
 
-def _potential_safety_position(
-    pos: NDArray[np.floating],
-    min_pos: NDArray[np.floating],
-    max_pos: NDArray[np.floating],
-    target_pos: float,
-) -> NDArray[np.float64]:
-    distance_to_target = np.abs(target_pos - pos)
-    center_pos = (max_pos + min_pos) / 2.0
-    safe_margin = (max_pos - min_pos) / 2.0
+@dataclass(frozen=True)
+class _PunctualityPotentialField:
+    """Full-route punctuality-potential grid derived from runtime semantics."""
 
-    norm_pos_diff = (pos - center_pos) / safe_margin
-    spatial_log_arg = 1.1 - norm_pos_diff**2
-    in_pos_band = (pos >= min_pos) & (pos <= max_pos)
-    valid_mask_spatial = in_pos_band & (spatial_log_arg > 0.0)
-    phi_base = np.full_like(norm_pos_diff, np.nan, dtype=np.float64)
-    phi_base[valid_mask_spatial] = 2.0 * np.log(spatial_log_arg[valid_mask_spatial])
-
-    scale = 1.0 + 1.0 * np.exp(-0.001 * distance_to_target)
-
-    return scale * phi_base
+    position_m: np.ndarray
+    redundant_time_s: np.ndarray
+    position_grid_m: np.ndarray
+    redundant_time_grid_s: np.ndarray
+    reference_slack_s: np.ndarray
+    potential: np.ndarray
 
 
 def _smooth_softplus_risk(
@@ -69,14 +95,10 @@ def _smooth_softplus_risk(
 
 
 def _potential_safety_speed(
-    pos: NDArray[np.floating],
     speed: NDArray[np.floating],
     min_speed: NDArray[np.floating],
     max_speed: NDArray[np.floating],
-    target_pos: float,
 ) -> NDArray[np.float64]:
-    del pos, target_pos
-
     K_Safety = 1.0
     speed_band = max_speed - min_speed
     safety_buffer = np.clip(0.15 * speed_band, 1.0, 5.0)
@@ -100,51 +122,6 @@ def _potential_safety_speed(
     return K_Safety * (phi_upper + phi_lower)
 
 
-def _potential_stopping(
-    pos: NDArray[np.floating] | float,
-    speed: NDArray[np.floating] | float,
-    target_pos: float,
-    max_speed_mps: NDArray[np.floating] | float,
-    *,
-    distance_scale_m: float = 1500.0,
-    potential_scale: float = 1.0,
-    max_exp: float = 2.0,
-) -> NDArray[np.float64]:
-    """Stopping-potential reference used only for visualization and analysis."""
-    if distance_scale_m <= 0.0:
-        raise ValueError("distance_scale_m must be positive")
-    if potential_scale <= 0.0:
-        raise ValueError("potential_scale must be positive")
-    if max_exp <= 0.0:
-        raise ValueError("max_exp must be positive")
-
-    distance_array = np.abs(np.asarray(pos, dtype=np.float64) - target_pos)
-    speed_array = np.asarray(speed, dtype=np.float64)
-    local_max_speed = np.maximum(np.asarray(max_speed_mps, dtype=np.float64), 0.0)
-    speed_scale = 0.5 * local_max_speed + 1.0
-    normalized_error = np.minimum(
-        distance_array / distance_scale_m + speed_array / speed_scale, max_exp
-    )
-    clipped_exponential = np.exp(-normalized_error)
-
-    return (-potential_scale * (1.0 - clipped_exponential)).astype(np.float64)
-
-
-def infer_position_from_speed(
-    curve_pos: NDArray[np.floating],
-    curve_speed: NDArray[np.floating],
-    target_speed: NDArray[np.floating] | float,
-) -> NDArray[np.floating] | np.floating:
-    """在速度曲线单调递减时，根据目标速度反推对应位置。"""
-    return np.interp(
-        target_speed,
-        curve_speed[::-1],
-        curve_pos[::-1],
-        left=float(curve_pos[-1]),
-        right=float(curve_pos[0]),
-    )
-
-
 def interp_with_constant_fill(
     x: NDArray[np.floating],
     y: NDArray[np.floating],
@@ -162,16 +139,15 @@ def interp_with_constant_fill(
     )
 
 
-def _build_seventh_auxiliary_stop_field(
+def _build_safety_potential_field(
     *,
     position_points: int = 1200,
     speed_points: int = 800,
-) -> _SeventhAuxiliaryStopField:
-    """构造第 7 个辅助停车区内安全势函数与停站势函数共用的状态域。"""
+) -> _SafetyPotentialField:
+    """构造第 7 个辅助停车区内安全势函数的状态域。"""
     min_curves_list, max_curves_list = load_safeguard_curves(
         "min_curves_list", "max_curves_list"
     )
-    target_pos = 17828.0
     min_curve = min_curves_list[6]
     max_curve = max_curves_list[7]
     min_curve_pos, min_curve_speed = min_curve[0, :], min_curve[1, :]
@@ -221,8 +197,7 @@ def _build_seventh_auxiliary_stop_field(
     feasible_mask = (speed_grid_mps >= min_speed_grid_mps) & (
         speed_grid_mps <= max_speed_grid_mps
     )
-    return _SeventhAuxiliaryStopField(
-        target_pos=target_pos,
+    return _SafetyPotentialField(
         pos_array=pos_array,
         speed_array_mps=speed_array_mps,
         position_grid=position_grid,
@@ -235,35 +210,107 @@ def _build_seventh_auxiliary_stop_field(
     )
 
 
-def _calculate_guidance_potentials(
-    field: _SeventhAuxiliaryStopField,
-) -> tuple[np.ndarray, np.ndarray]:
-    """只在速度上下限约束内计算安全势函数与停站势函数。"""
+def _calculate_safety_potential(
+    field: _SafetyPotentialField,
+) -> np.ndarray:
+    """只在速度上下限约束内计算安全势函数。"""
     safety_potential = np.full(field.position_grid.shape, np.nan)
     safety_potential[field.feasible_mask] = _potential_safety_speed(
-        field.position_grid[field.feasible_mask],
         field.speed_grid_mps[field.feasible_mask],
         field.min_speed_grid_mps[field.feasible_mask],
         field.max_speed_grid_mps[field.feasible_mask],
-        field.target_pos,
     )
-    stopping_potential = np.full(field.position_grid.shape, np.nan)
-    stopping_potential[field.feasible_mask] = _potential_stopping(
-        field.position_grid[field.feasible_mask],
-        field.speed_grid_mps[field.feasible_mask],
-        field.target_pos,
-        field.max_speed_grid_mps[field.feasible_mask],
-    )
-    return safety_potential, stopping_potential
+    return safety_potential
 
 
-def _plot_guidance_boundaries(
-    ax: Axes,
-    field: _SeventhAuxiliaryStopField,
+def _build_punctuality_potential_field(
     *,
-    show_target_position: bool = True,
-) -> tuple[Line2D, Line2D, Line2D | None]:
-    """绘制速度边界，并按需标出仅与停站势函数相关的目标位置。"""
+    schedule_time_s: float = DEFAULT_PUNCTUALITY_SCHEDULE_TIME_S,
+    position_points: int = 600,
+    redundant_time_points: int = 400,
+) -> _PunctualityPotentialField:
+    """Build the full-route field used by the runtime punctuality potential."""
+    if not np.isfinite(schedule_time_s) or schedule_time_s <= 0.0:
+        raise ValueError("schedule_time_s must be finite and positive")
+    vehicle, track, safeguard_utility, train_service = build_scenario(
+        schedule_time_s=float(schedule_time_s)
+    )
+    stepper = OperationalStepper(
+        vehicle=vehicle,
+        track=track,
+        safeguard_utility=safeguard_utility,
+        train_service=train_service,
+        step_distance_m=30.0,
+    )
+    calculator = RewardCalculator(
+        train_service,
+        max_episode_steps=stepper.required_episode_steps,
+        whole_distance_m=stepper.whole_distance_m,
+        max_energy_consumption_kj=stepper.max_energy_consumption_kj,
+        gamma=0.998,
+        reward_config=RewardConfig(enable_potential_punctuality=True),
+        initial_min_operation_time_s=stepper.initial_min_operation_time_s,
+    )
+    position_m = np.linspace(
+        train_service.start_position,
+        train_service.target_position,
+        position_points,
+    )
+    reference_slack_s = np.asarray(
+        [calculator.reference_punctuality_slack(float(pos)) for pos in position_m],
+        dtype=np.float64,
+    )
+    margin_s = 3.0 * PUNCTUALITY_POTENTIAL_SIGMA_S
+    redundant_time_s = np.linspace(
+        float(np.min(reference_slack_s) - margin_s),
+        float(np.max(reference_slack_s) + margin_s),
+        redundant_time_points,
+    )
+    position_grid_m, redundant_time_grid_s = np.meshgrid(position_m, redundant_time_s)
+    error_s = redundant_time_grid_s - reference_slack_s[np.newaxis, :]
+    potential = punctuality_potential_from_error(error_s)
+    assert isinstance(potential, np.ndarray)
+    return _PunctualityPotentialField(
+        position_m=position_m,
+        redundant_time_s=redundant_time_s,
+        position_grid_m=position_grid_m,
+        redundant_time_grid_s=redundant_time_grid_s,
+        reference_slack_s=reference_slack_s,
+        potential=potential,
+    )
+
+
+def _draw_punctuality_potential(
+    ax: Axes,
+    field: _PunctualityPotentialField,
+) -> tuple[object, Line2D]:
+    mesh = ax.pcolormesh(
+        field.position_grid_m,
+        field.redundant_time_grid_s,
+        field.potential,
+        cmap=PUNCTUALITY_POTENTIAL_CMAP,
+        shading="gouraud",
+        vmin=-PUNCTUALITY_POTENTIAL_SCALE,
+        vmax=0.0,
+        rasterized=True,
+    )
+    reference_line = ax.plot(
+        field.position_m,
+        field.reference_slack_s,
+        color="black",
+        linestyle="--",
+        linewidth=1.4,
+    )[0]
+    ax.set_xlim(field.position_m[0], field.position_m[-1])
+    ax.set_ylim(field.redundant_time_s[0], field.redundant_time_s[-1])
+    return mesh, reference_line
+
+
+def _plot_safety_boundaries(
+    ax: Axes,
+    field: _SafetyPotentialField,
+) -> tuple[Line2D, Line2D]:
+    """绘制安全势函数使用的速度上下边界。"""
     min_speed_line = ax.plot(
         field.pos_array,
         field.min_speed_profile_mps * 3.6,
@@ -276,109 +323,9 @@ def _plot_guidance_boundaries(
         color="tab:red",
         linewidth=1.2,
     )[0]
-    target_position_line = (
-        ax.axvline(
-            field.target_pos,
-            color="black",
-            linestyle="--",
-            linewidth=1.0,
-        )
-        if show_target_position
-        else None
-    )
     _ = ax.set_xlim(field.pos_array[0], field.pos_array[-1])
     _ = ax.set_ylim(0.0, field.speed_array_mps[-1] * 3.6)
-    return min_speed_line, max_speed_line, target_position_line
-
-
-def plot_guidance_potentials_wide(*, minimal: bool = False) -> Figure:
-    """在第 7 个辅助停车区并排展示安全势函数与停站势函数。"""
-    field = _build_seventh_auxiliary_stop_field()
-    safety_potential, stopping_potential = _calculate_guidance_potentials(field)
-
-    if minimal:
-        fig = plt.figure(figsize=sci_figure_size(columns=2, height_in=3.3))
-        grid = fig.add_gridspec(1, 2, wspace=0.12)
-        ax_safety = fig.add_subplot(grid[0, 0])
-        ax_stopping = fig.add_subplot(grid[0, 1], sharex=ax_safety, sharey=ax_safety)
-    else:
-        fig = plt.figure(figsize=sci_figure_size(columns=2, height_in=3.3))
-        grid = fig.add_gridspec(1, 2, wspace=0.12)
-        ax_safety = fig.add_subplot(grid[0, 0])
-        ax_stopping = fig.add_subplot(grid[0, 1], sharex=ax_safety, sharey=ax_safety)
-    fig.subplots_adjust(top=0.84, bottom=0.18, left=0.08, right=0.98)
-
-    safety_mesh = ax_safety.pcolormesh(
-        field.position_grid,
-        field.speed_grid_mps * 3.6,
-        safety_potential,
-        cmap=plt.get_cmap("Spectral"),
-        shading="auto",
-        vmin=-1.0,
-        vmax=0.0,
-    )
-    stopping_mesh = ax_stopping.pcolormesh(
-        field.position_grid,
-        field.speed_grid_mps * 3.6,
-        stopping_potential,
-        cmap=plt.get_cmap("viridis"),
-        shading="auto",
-        vmin=-(1.0 - np.exp(-2.0)),
-        vmax=0.0,
-    )
-
-    min_speed_line, max_speed_line, _ = _plot_guidance_boundaries(
-        ax_safety, field, show_target_position=False
-    )
-    _, _, target_position_line = _plot_guidance_boundaries(ax_stopping, field)
-    assert target_position_line is not None
-
-    if minimal:
-        _apply_minimal_axis_style(ax_safety)
-        _apply_minimal_axis_style(ax_stopping)
-    else:
-        _ = ax_safety.set_xlabel("Position (m)")
-        _ = ax_stopping.set_xlabel("Position (m)")
-        _ = ax_safety.set_ylabel("Velocity (km/h)")
-        ax_stopping.tick_params(axis="y", which="both", left=False, labelleft=False)
-        for ax in (ax_safety, ax_stopping):
-            ax.grid(True, alpha=0.3, linestyle=":")
-        _ = fig.legend(
-            (min_speed_line, max_speed_line, target_position_line),
-            (r"$v_{\min}(x)$", r"$v_{\max}(x)$", "Target position"),
-            loc="upper center",
-            ncols=3,
-            frameon=False,
-            bbox_to_anchor=(0.5, 0.925),
-        )
-        _ = fig.colorbar(
-            safety_mesh,
-            ax=ax_safety,
-            orientation="vertical",
-            pad=0.02,
-            fraction=0.046,
-        )
-        _ = fig.colorbar(
-            stopping_mesh,
-            ax=ax_stopping,
-            orientation="vertical",
-            pad=0.02,
-            fraction=0.046,
-        )
-    for panel_label, ax in (("(a)", ax_safety), ("(b)", ax_stopping)):
-        _ = ax.text(
-            0.02,
-            0.98,
-            panel_label,
-            transform=ax.transAxes,
-            ha="left",
-            va="top",
-            fontsize=10,
-            fontweight="bold",
-        )
-
-    _apply_transparent_background(fig)
-    return fig
+    return min_speed_line, max_speed_line
 
 
 def _apply_minimal_axis_style(ax: Axes) -> None:
@@ -407,29 +354,28 @@ def _apply_transparent_background(fig: Figure) -> None:
 
 def plot_safety_potential_heatmap_speed(*, minimal: bool = False) -> Figure:
     """以第 7 个辅助停车区绘制与联合图一致的安全势函数。"""
-    field = _build_seventh_auxiliary_stop_field()
-    safety_potential, _ = _calculate_guidance_potentials(field)
-    fig, ax = plt.subplots(figsize=sci_figure_size(columns=2, height_in=3.4))
+    field = _build_safety_potential_field()
+    safety_potential = _calculate_safety_potential(field)
+    fig, ax = plt.subplots(figsize=sci_figure_size(columns=1, height_in=2.7))
     safety_mesh = ax.pcolormesh(
         field.position_grid,
         field.speed_grid_mps * 3.6,
         safety_potential,
-        cmap=plt.get_cmap("Spectral"),
+        cmap=SAFETY_POTENTIAL_CMAP,
         shading="auto",
         vmin=-1.0,
         vmax=0.0,
+        rasterized=True,
     )
-    min_speed_line, max_speed_line, _ = _plot_guidance_boundaries(
-        ax, field, show_target_position=False
-    )
+    min_speed_line, max_speed_line = _plot_safety_boundaries(ax, field)
 
     if minimal:
         _apply_minimal_axis_style(ax)
     else:
         fig.subplots_adjust(top=0.85, bottom=0.13, left=0.13, right=0.88)
         _ = ax.set_xlabel("Position (m)")
-        _ = ax.set_ylabel("Velocity (km/h)")
-        ax.grid(True, alpha=0.3, linestyle=":")
+        _ = ax.set_ylabel("Speed (km/h)")
+        apply_sci_grid(ax)
         _ = fig.legend(
             (min_speed_line, max_speed_line),
             (r"$v_{\min}(x)$", r"$v_{\max}(x)$"),
@@ -450,303 +396,16 @@ def plot_safety_potential_heatmap_speed(*, minimal: bool = False) -> Figure:
     return fig
 
 
-def plot_safety_potential_heatmap_position(*, minimal: bool = False) -> Figure:
-    min_curves_list, max_curves_list = load_safeguard_curves(
-        "min_curves_list", "max_curves_list"
-    )
-
-    # 仍然以第7个辅助停车区为示例。
-    target_pos = 17828.0
-
-    upper_speed = 150.0 / 3.6
-    lower_speed = 0.0
-
-    min_curve_pos = min_curves_list[6][0, :]
-    min_curve_speed = min_curves_list[6][1, :]
-    max_curve_pos = max_curves_list[7][0, :]
-    max_curve_speed = max_curves_list[7][1, :]
-
-    # 这里将速度视为自变量，按速度从 0 到 200 km/h 反算位置边界。
-    speed_array_ms = np.linspace(lower_speed, upper_speed, 2000)
-    pos_from_min_curve = infer_position_from_speed(
-        min_curve_pos, min_curve_speed, speed_array_ms
-    )
-    pos_from_max_curve = infer_position_from_speed(
-        max_curve_pos, max_curve_speed, speed_array_ms
-    )
-
-    safe_center_pos_array = (pos_from_min_curve + pos_from_max_curve) / 2.0
-
-    pos_lower_1d = np.minimum(pos_from_min_curve, pos_from_max_curve)
-    pos_upper_1d = np.maximum(pos_from_min_curve, pos_from_max_curve)
-
-    pos_left_bound = float(np.min(pos_lower_1d))
-    pos_right_bound = float(np.max(pos_upper_1d))
-
-    pos_array = np.linspace(pos_left_bound, pos_right_bound, 2000)
-
-    POS, SPEED = np.meshgrid(pos_array, speed_array_ms)
-    POS_LOWER = np.tile(pos_lower_1d[:, None], (1, pos_array.size))
-    POS_UPPER = np.tile(pos_upper_1d[:, None], (1, pos_array.size))
-
-    POTENTIAL = _potential_safety_position(POS, POS_LOWER, POS_UPPER, target_pos)
-    in_pos_band = (POS >= POS_LOWER) & (POS <= POS_UPPER)
-    POTENTIAL_MASKED = np.where(in_pos_band, POTENTIAL, np.nan)
-
-    fig, ax = plt.subplots(figsize=sci_figure_size(columns=2, height_in=3.5))
-
-    cmap = plt.get_cmap("Spectral")
-
-    c = ax.pcolormesh(
-        POS,
-        SPEED * 3.6,
-        POTENTIAL_MASKED,
-        cmap=cmap,
-        shading="auto",
-        vmin=-8.0,
-        vmax=0.0,
-    )
-
-    _ = ax.set_xlim(pos_left_bound - 1000, pos_right_bound + 1000)
-    _ = ax.set_ylim(lower_speed * 3.6, upper_speed * 3.6)
-
-    if minimal:
-        _ = ax.plot(
-            pos_from_max_curve,
-            speed_array_ms * 3.6,
-            color="red",
-            linewidth=1,
-        )
-        _ = ax.plot(
-            pos_from_min_curve,
-            speed_array_ms * 3.6,
-            color="blue",
-            linewidth=1,
-        )
-        _apply_minimal_axis_style(ax)
-    else:
-        _ = ax.plot(
-            pos_from_max_curve,
-            speed_array_ms * 3.6,
-            color="red",
-            linewidth=1,
-            label="maximum speed curve",
-        )
-        _ = ax.plot(
-            pos_from_min_curve,
-            speed_array_ms * 3.6,
-            color="blue",
-            linewidth=1,
-            label="minimum speed curve",
-        )
-        _ = ax.plot(
-            safe_center_pos_array,
-            speed_array_ms * 3.6,
-            color="black",
-            linestyle="--",
-            linewidth=1.5,
-            label="safe center",
-        )
-
-        _ = fig.colorbar(c, ax=ax, extend="min")
-
-        _ = ax.set_xlabel("Position (m)")
-        _ = ax.set_ylabel("Speed (km/h)")
-        _ = ax.legend(loc="lower left", framealpha=0.9)
-        ax.grid(True, alpha=0.3, linestyle=":")
-
-    _apply_transparent_background(fig)
-    fig.subplots_adjust(left=0.10, right=0.92, bottom=0.16, top=0.96)
-    return fig
-
-
-def plot_stopping_potential_heatmap(
-    view_mode: str = "2d",
-    *,
-    minimal: bool = False,
-) -> Figure:
-    """以第 7 个辅助停车区绘制与联合图一致的停站势函数。"""
-    mode = str(view_mode).lower().strip()
-    if mode not in {"2d", "3d"}:
-        raise ValueError("view_mode 仅支持 '2d' 或 '3d'")
-
-    field = _build_seventh_auxiliary_stop_field()
-    _, stopping_potential = _calculate_guidance_potentials(field)
-
-    if mode == "3d":
-        fig = plt.figure(figsize=sci_figure_size(columns=2, height_in=3.6))
-        ax = fig.add_subplot(111, projection="3d")
-        surface_step = 4
-        _ = ax.plot_surface(
-            field.position_grid[::surface_step, ::surface_step],
-            (field.speed_grid_mps * 3.6)[::surface_step, ::surface_step],
-            stopping_potential[::surface_step, ::surface_step],
-            cmap=plt.get_cmap("viridis"),
-            linewidth=0,
-            antialiased=False,
-            vmin=-(1.0 - np.exp(-2.0)),
-            vmax=0.0,
-        )
-        _ = ax.plot(
-            field.pos_array,
-            field.min_speed_profile_mps * 3.6,
-            np.zeros_like(field.pos_array),
-            color="tab:blue",
-            linewidth=1.2,
-        )
-        _ = ax.plot(
-            field.pos_array,
-            field.max_speed_profile_mps * 3.6,
-            np.zeros_like(field.pos_array),
-            color="tab:red",
-            linewidth=1.2,
-        )
-        ax.set_xlim(field.pos_array[0], field.pos_array[-1])
-        ax.set_ylim(0.0, field.speed_array_mps[-1] * 3.6)
-        ax.set_zlim(-(1.0 - np.exp(-2.0)), 0.0)
-        ax.view_init(elev=28, azim=-130)
-        if minimal:
-            _apply_minimal_axis_style(ax)
-        else:
-            _ = ax.set_xlabel("Position (m)")
-            _ = ax.set_ylabel("Velocity (km/h)")
-            _ = ax.set_zlabel("Stopping potential")
-        _apply_transparent_background(fig)
-        return fig
-
-    fig, ax = plt.subplots(figsize=sci_figure_size(columns=2, height_in=3.4))
-    stopping_mesh = ax.pcolormesh(
-        field.position_grid,
-        field.speed_grid_mps * 3.6,
-        stopping_potential,
-        cmap=plt.get_cmap("viridis"),
-        shading="auto",
-        vmin=-(1.0 - np.exp(-2.0)),
-        vmax=0.0,
-    )
-    min_speed_line, max_speed_line, target_position_line = _plot_guidance_boundaries(
-        ax, field
-    )
-
-    if minimal:
-        _apply_minimal_axis_style(ax)
-    else:
-        fig.subplots_adjust(top=0.85, bottom=0.13, left=0.13, right=0.88)
-        _ = ax.set_xlabel("Position (m)")
-        _ = ax.set_ylabel("Velocity (km/h)")
-        ax.grid(True, alpha=0.3, linestyle=":")
-        _ = fig.legend(
-            (min_speed_line, max_speed_line, target_position_line),
-            (r"$v_{\min}(x)$", r"$v_{\max}(x)$", "Target position"),
-            loc="upper center",
-            ncols=3,
-            frameon=False,
-            bbox_to_anchor=(0.5, 0.925),
-        )
-        _ = fig.colorbar(
-            stopping_mesh,
-            ax=ax,
-            orientation="vertical",
-            pad=0.02,
-            fraction=0.046,
-        )
-
-    _apply_transparent_background(fig)
-    return fig
-
-
-def plot_stopping_potential_slices(*, minimal: bool = False) -> Figure:
-    """
-    绘制停站势函数在距离维与速度维上的一维切片，便于调参。
-    """
-
-    target_pos = 29270.046
-    _, max_curves_list = load_safeguard_curves("min_curves_list", "max_curves_list")
-    final_stop_max_curve = max_curves_list[9]
-    max_speed_mps = float(
-        interp_with_constant_fill(
-            final_stop_max_curve[0, :],
-            final_stop_max_curve[1, :],
-            target_pos,
-            left_value=float(final_stop_max_curve[1, 0]),
-            right_value=float(final_stop_max_curve[1, -1]),
-        )
-    )
-
-    distance_scale_m = 1500.0
-    speed_scale_mps = 0.5 * max_speed_mps + 1.0
-    max_exp = 2.0
-
-    distance_error_array = np.linspace(-7500.0, 7500.0, 1800)
-    pos_array = target_pos + distance_error_array
-    speed_array_ms = np.linspace(0.0, max(max_speed_mps, 2.5 * speed_scale_mps), 1200)
-
-    potential_vs_distance = _potential_stopping(
-        pos=pos_array,
-        speed=0.0,
-        target_pos=target_pos,
-        max_speed_mps=max_speed_mps,
-    )
-    potential_vs_speed = _potential_stopping(
-        pos=target_pos,
-        speed=speed_array_ms,
-        target_pos=target_pos,
-        max_speed_mps=max_speed_mps,
-    )
-
-    fig, axes = plt.subplots(1, 2, figsize=sci_figure_size(columns=2, height_in=3.0))
-
-    axes[0].plot(distance_error_array, potential_vs_distance, color="tab:orange")
-
-    axes[1].plot(speed_array_ms * 3.6, potential_vs_speed, color="tab:red")
-
-    if minimal:
-        _apply_minimal_axis_style(axes[0])
-        _apply_minimal_axis_style(axes[1])
-    else:
-        axes[0].axvline(0.0, color="black", linestyle="--", linewidth=1.2)
-        position_plateau_m = max_exp * distance_scale_m
-        axes[0].axvline(position_plateau_m, color="gray", linestyle=":", linewidth=1.2)
-        axes[0].axvline(-position_plateau_m, color="gray", linestyle=":", linewidth=1.2)
-        axes[0].set_xlabel("stopping error (m)")
-        axes[0].set_ylabel(r"$\Phi_D$")
-        axes[0].grid(True, alpha=0.3, linestyle=":")
-
-        axes[1].axvline(0.0, color="black", linestyle="--", linewidth=1.2)
-        speed_plateau_mps = max_exp * speed_scale_mps
-        axes[1].axvline(
-            speed_plateau_mps * 3.6,
-            color="gray",
-            linestyle=":",
-            linewidth=1.2,
-        )
-        axes[1].set_xlabel("speed (km/h)")
-        axes[1].set_ylabel(r"$\Phi_D$")
-        axes[1].grid(True, alpha=0.3, linestyle=":")
-    for panel_label, axis in (("(a)", axes[0]), ("(b)", axes[1])):
-        _ = axis.text(
-            0.02,
-            0.98,
-            panel_label,
-            transform=axis.transAxes,
-            ha="left",
-            va="top",
-            fontsize=10,
-            fontweight="bold",
-        )
-    _apply_transparent_background(fig)
-    fig.subplots_adjust(left=0.10, right=0.98, bottom=0.18, top=0.96, wspace=0.30)
-    return fig
-
-
 PLOT_TYPE_CHOICES: tuple[str, ...] = (
-    "punctuality-slack",
+    "punctuality",
+    "safety-punctuality",
     "safety-speed",
-    "safety-position",
-    "stopping-heatmap",
-    "stopping-slices",
-    "guidance-wide",
 )
+FIGURE_FILENAMES = {
+    "punctuality": "punctuality_potential.pdf",
+    "safety-punctuality": "safety_punctuality_potential.pdf",
+    "safety-speed": "safety_speed_potential.pdf",
+}
 
 
 def _build_cli_parser() -> argparse.ArgumentParser:
@@ -754,14 +413,20 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     _ = parser.add_argument(
         "--plot-type",
         choices=PLOT_TYPE_CHOICES,
-        default="stopping-heatmap",
+        default="safety-punctuality",
         help="选择展示哪种势函数图。",
     )
     _ = parser.add_argument(
-        "--output-file",
+        "--output-dir",
         type=Path,
         default=None,
-        help="输出紧凑版图像路径（如 output/potential.png）。不传时仅展示图像。",
+        help="固定名称 PDF 的输出目录；不传时仅展示图像。",
+    )
+    _ = parser.add_argument(
+        "--schedule-time-s",
+        type=float,
+        default=DEFAULT_PUNCTUALITY_SCHEDULE_TIME_S,
+        help="准点势函数使用的计划运行时间（秒）。",
     )
     _ = parser.add_argument(
         "--minimal",
@@ -778,80 +443,119 @@ def _build_cli_parser() -> argparse.ArgumentParser:
 
 
 def _validate_cli_args(cli_args: argparse.Namespace) -> None:
-    if cli_args.output_file is not None and str(cli_args.output_file).strip() == "":
-        raise ValueError("--output-file must not be empty")
+    if cli_args.output_dir is not None and str(cli_args.output_dir).strip() == "":
+        raise ValueError("--output-dir must not be empty")
+    if not np.isfinite(cli_args.schedule_time_s) or cli_args.schedule_time_s <= 0.0:
+        raise ValueError("--schedule-time-s must be finite and positive")
 
 
-def _resolve_plotter(plot_type: str, *, minimal: bool) -> Callable[[], Figure]:
+def _resolve_plotter(
+    plot_type: str,
+    *,
+    minimal: bool,
+    schedule_time_s: float = DEFAULT_PUNCTUALITY_SCHEDULE_TIME_S,
+) -> Callable[[], Figure]:
     plotters: dict[str, Callable[[], Figure]] = {
-        "punctuality-slack": lambda: plot_punctuality_slack(minimal=minimal),
+        "punctuality": lambda: plot_punctuality_potential(
+            schedule_time_s=schedule_time_s, minimal=minimal
+        ),
+        "safety-punctuality": lambda: plot_safety_punctuality_potentials(
+            schedule_time_s=schedule_time_s, minimal=minimal
+        ),
         "safety-speed": lambda: plot_safety_potential_heatmap_speed(minimal=minimal),
-        "safety-position": lambda: plot_safety_potential_heatmap_position(
-            minimal=minimal
-        ),
-        "stopping-heatmap": lambda: plot_stopping_potential_heatmap(
-            view_mode="2d",
-            minimal=minimal,
-        ),
-        "stopping-slices": lambda: plot_stopping_potential_slices(minimal=minimal),
-        "guidance-wide": lambda: plot_guidance_potentials_wide(minimal=minimal),
     }
     return plotters[plot_type]
 
 
-def plot_punctuality_slack(*, minimal: bool = False) -> Figure:
-    """Illustrative global slack reference and its bounded error potential."""
-    fig, axes = plt.subplots(1, 2, figsize=(8, 3))
-    remaining_fraction = np.linspace(0, 1, 101)
-    for initial_slack in (30.0, 60.0, 90.0):
-        axes[0].plot(
-            remaining_fraction,
-            initial_slack * remaining_fraction,
-            label=f"Initial slack {initial_slack:g} s",
-        )
-    error = np.linspace(-180, 180, 361)
-    axes[1].plot(
-        error,
-        -PUNCTUALITY_POTENTIAL_SCALE
-        * ((error / np.hypot(error, PUNCTUALITY_POTENTIAL_SIGMA_S)) ** 2),
-    )
+def plot_punctuality_potential(
+    *,
+    schedule_time_s: float = DEFAULT_PUNCTUALITY_SCHEDULE_TIME_S,
+    minimal: bool = False,
+) -> Figure:
+    """Plot the runtime punctuality potential over the complete route."""
+    field = _build_punctuality_potential_field(schedule_time_s=schedule_time_s)
+    fig, ax = plt.subplots(figsize=sci_figure_size(columns=1, height_in=2.8))
+    mesh, reference_line = _draw_punctuality_potential(ax, field)
     if minimal:
-        for ax in axes:
-            ax.set_axis_off()
+        _apply_minimal_axis_style(ax)
     else:
-        axes[0].set(
-            xlabel="Remaining distance / full distance", ylabel="Reference slack (s)"
+        fig.subplots_adjust(top=0.85, bottom=0.17, left=0.18, right=0.88)
+        ax.set(
+            xlabel="Position (m)",
+            ylabel="Redundant operation time (s)",
         )
-        axes[0].legend(fontsize=7)
-        axes[1].set(
-            xlabel="Actual slack - reference slack (s)",
-            ylabel=(
-                f"Potential (K={PUNCTUALITY_POTENTIAL_SCALE:g}, "
-                f"sigma={PUNCTUALITY_POTENTIAL_SIGMA_S:g} s)"
-            ),
+        apply_sci_grid(ax)
+        fig.legend(
+            (reference_line,),
+            (r"$\rho^*$",),
+            loc="upper center",
+            frameon=False,
+            bbox_to_anchor=(0.5, 0.94),
         )
-    fig.tight_layout()
+        _ = fig.colorbar(mesh, ax=ax, pad=0.03, fraction=0.06)
+    _apply_transparent_background(fig)
     return fig
 
 
-def _apply_plot_style() -> None:
-    _ = set_global_plot_style(
-        font_preset="sci",
-        preferred_font="Times New Roman",
-        title_font_size=8.0,
-        axis_label_font_size=8.0,
-        tick_font_size=8.0,
-        legend_font_size=8.0,
-        figure_dpi=150.0,
-        savefig_dpi=300.0,
+def plot_safety_punctuality_potentials(
+    *,
+    schedule_time_s: float = DEFAULT_PUNCTUALITY_SCHEDULE_TIME_S,
+    minimal: bool = False,
+) -> Figure:
+    """Plot safety and punctuality potentials as a double-column comparison."""
+    safety_field = _build_safety_potential_field()
+    safety_potential = _calculate_safety_potential(safety_field)
+    punctuality_field = _build_punctuality_potential_field(
+        schedule_time_s=schedule_time_s
     )
+    fig, (ax_safety, ax_punctuality) = plt.subplots(
+        1,
+        2,
+        figsize=sci_figure_size(columns=2, height_in=3.1),
+    )
+    safety_mesh = ax_safety.pcolormesh(
+        safety_field.position_grid,
+        safety_field.speed_grid_mps * 3.6,
+        safety_potential,
+        cmap=SAFETY_POTENTIAL_CMAP,
+        shading="auto",
+        vmin=-1.0,
+        vmax=0.0,
+        rasterized=True,
+    )
+    min_speed_line, max_speed_line = _plot_safety_boundaries(ax_safety, safety_field)
+    punctuality_mesh, reference_line = _draw_punctuality_potential(
+        ax_punctuality, punctuality_field
+    )
+    if minimal:
+        _apply_minimal_axis_style(ax_safety)
+        _apply_minimal_axis_style(ax_punctuality)
+    else:
+        fig.subplots_adjust(top=0.83, bottom=0.18, left=0.08, right=0.96, wspace=0.30)
+        ax_safety.set(xlabel="Position (m)", ylabel="Speed (km/h)")
+        ax_punctuality.set(xlabel="Position (m)", ylabel="Redundant operation time (s)")
+        for axis in (ax_safety, ax_punctuality):
+            apply_sci_grid(axis)
+        fig.legend(
+            (min_speed_line, max_speed_line, reference_line),
+            (r"$v_{\min}(x)$", r"$v_{\max}(x)$", r"$\rho^*$"),
+            loc="upper center",
+            ncols=3,
+            frameon=False,
+            bbox_to_anchor=(0.5, 0.94),
+        )
+        _ = fig.colorbar(safety_mesh, ax=ax_safety, pad=0.02, fraction=0.046)
+        _ = fig.colorbar(punctuality_mesh, ax=ax_punctuality, pad=0.02, fraction=0.046)
+    for panel_label, axis in (("(a)", ax_safety), ("(b)", ax_punctuality)):
+        add_panel_label(axis, panel_label)
+    _apply_transparent_background(fig)
+    return fig
 
 
-def _save_compact_figure(figure: Figure, output_file: Path) -> Path:
-    if output_file.suffix == "":
-        output_file = output_file.with_suffix(".png")
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    return save_sci_figure(figure, output_file, transparent=True)
+def _save_compact_figure(figure: Figure, output_dir: Path, *, plot_type: str) -> Path:
+    return save_sci_figure(
+        figure, output_dir / FIGURE_FILENAMES[plot_type], transparent=True
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -863,11 +567,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
 
-    _apply_plot_style()
-    figure = _resolve_plotter(cli_args.plot_type, minimal=cli_args.minimal)()
+    apply_sci_curve_style()
+    figure = _resolve_plotter(
+        cli_args.plot_type,
+        minimal=cli_args.minimal,
+        schedule_time_s=cli_args.schedule_time_s,
+    )()
 
-    if cli_args.output_file is not None:
-        output_path = _save_compact_figure(figure, cli_args.output_file)
+    if cli_args.output_dir is not None:
+        output_path = _save_compact_figure(
+            figure, cli_args.output_dir, plot_type=cli_args.plot_type
+        )
         print(f"图像已保存: {output_path}")
 
     if not cli_args.no_show:

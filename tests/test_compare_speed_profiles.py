@@ -21,13 +21,12 @@ from scripts.compare_speed_profiles import (
 from utils.trajectory import OptimizedCurveArtifact
 
 
-def test_compare_speed_profiles_cli_defaults() -> None:
-    args = _build_cli_parser().parse_args([])
+def test_compare_speed_profiles_cli_uses_explicit_rl_model_dir() -> None:
+    args = _build_cli_parser().parse_args(["--rl-model-dir", "output/model"])
 
     assert args.real_curve == DEFAULT_REAL_CURVE_PATH
-    assert args.trajectory_source == "best"
+    assert args.rl_model_dir == "output/model"
     assert args.no_safeguard is False
-    assert args.selection_file is None
 
 
 def test_comparison_figure_uses_one_trajectory_only_shared_legend() -> None:
@@ -49,8 +48,8 @@ def test_comparison_figure_uses_one_trajectory_only_shared_legend() -> None:
         "Actual operation",
     ]
     assert [handle.get_color() for handle in legend.legend_handles] == [
-        "#333333",
-        "#E69F00",
+        "#181818",
+        "#ED7D31",
         "#7B61A8",
     ]
     plt.close(figure)
@@ -218,8 +217,10 @@ def test_main_uses_comparison_axes_and_scientific_export(
     )
 
     called_helpers: list[str] = []
+    recovered_time_axes: list[np.ndarray] = []
     orig_create_axes = compare_module._create_comparison_axes
     orig_finalize = compare_module._finalize_comparison_figure
+    orig_recover_time = compare_module.recover_time_axis_from_trajectory
     orig_save_sci = compare_module.save_sci_figure
 
     def spy_create_axes():
@@ -230,22 +231,37 @@ def test_main_uses_comparison_axes_and_scientific_export(
         called_helpers.append("_finalize_comparison_figure")
         return orig_finalize(figure, axes)
 
+    def spy_recover_time(pos_arr, speed_arr):
+        called_helpers.append("recover_time_axis_from_trajectory")
+        np.testing.assert_allclose(pos_arr, pos)
+        np.testing.assert_allclose(speed_arr, speed)
+        recovered_time = orig_recover_time(pos_arr, speed_arr)
+        recovered_time_axes.append(recovered_time)
+        return recovered_time
+
     def spy_save_sci(fig, output_file, **kwargs):
         called_helpers.append("save_sci_figure")
         return orig_save_sci(fig, output_file, **kwargs)
 
     monkeypatch.setattr(compare_module, "_create_comparison_axes", spy_create_axes)
     monkeypatch.setattr(compare_module, "_finalize_comparison_figure", spy_finalize)
+    monkeypatch.setattr(
+        compare_module,
+        "recover_time_axis_from_trajectory",
+        spy_recover_time,
+    )
     monkeypatch.setattr(compare_module, "save_sci_figure", spy_save_sci)
 
-    output_png = tmp_path / "comparison_figure.png"
+    output_dir = tmp_path / "comparison_figure"
     monkeypatch.setattr(
         sys,
         "argv",
         [
             "compare_speed_profiles",
-            "--output-file",
-            str(output_png),
+            "--rl-model-dir",
+            "output/model",
+            "--output-dir",
+            str(output_dir),
             "--no-show",
         ],
     )
@@ -253,9 +269,18 @@ def test_main_uses_comparison_axes_and_scientific_export(
     compare_module.main()
 
     assert called_helpers == [
+        "recover_time_axis_from_trajectory",
         "_create_comparison_axes",
         "_finalize_comparison_figure",
         "save_sci_figure",
     ]
-    assert output_png.is_file()
-    assert output_png.stat().st_size > 0
+    assert len(recovered_time_axes) == 1
+    assert recovered_time_axes[0][-1] > 600.0
+    assert recovered_time_axes[0][-1] != pytest.approx(465.0)
+    assert not np.allclose(
+        np.diff(recovered_time_axes[0]),
+        np.diff(recovered_time_axes[0])[0],
+    )
+    output_pdf = output_dir / "dp_rl_actual_comparison.pdf"
+    assert output_pdf.is_file()
+    assert output_pdf.stat().st_size > 0

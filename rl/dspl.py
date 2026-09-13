@@ -1,4 +1,4 @@
-"""DSPDL curriculum control over a finite context pool."""
+"""DSPL curriculum control over a finite context pool."""
 
 from __future__ import annotations
 
@@ -13,44 +13,70 @@ from stable_baselines3.common.policies import ActorCriticPolicy
 
 from rl.context_pool import ContextPool
 from rl.context_sampler import CurriculumDistributionState
-from rl.dspdl_distribution import DSPDLDistributionSolver
+from rl.dspl_distribution import DSPLDistributionSolver
 
 __all__ = [
-    "DSPDLCallback",
-    "DSPDLStatisticsHub",
-    "DSPDLStatisticsSnapshot",
-    "DSPDL_ALPHA_WARMUP_UPDATES",
-    "DSPDL_RELATIVE_ENTROPY_BOUND",
-    "DSPDL_TARGET_KL_STOP",
-    "DSPDL_TARGET_UNIFORM_MASS",
-    "DSPDL_UPDATE_INTERVAL_ROLLOUTS",
-    "DSPDL_ZETA",
-    "dspdl_protocol_parameters",
+    "DSPLCallback",
+    "DSPLStatisticsHub",
+    "DSPLStatisticsSnapshot",
+    "DSPL_ALPHA_WARMUP_UPDATES",
+    "DSPL_RELATIVE_ENTROPY_BOUND",
+    "DSPL_TARGET_KL_STOP",
+    "DSPL_TARGET_UNIFORM_MASS",
+    "DSPL_UPDATE_INTERVAL_ROLLOUTS",
+    "DSPL_ZETA",
+    "dspl_context_count_limit",
+    "dspl_protocol_parameters",
 ]
 
-DSPDL_TARGET_UNIFORM_MASS = 0.05
-DSPDL_TARGET_KL_STOP = 0.1
-DSPDL_ALPHA_WARMUP_UPDATES = 4
-DSPDL_RELATIVE_ENTROPY_BOUND = 0.01
-DSPDL_ZETA = 4.0
-DSPDL_UPDATE_INTERVAL_ROLLOUTS = 4
+DSPL_TARGET_UNIFORM_MASS = 0.1
+DSPL_TARGET_KL_STOP = 0.02
+DSPL_ALPHA_WARMUP_UPDATES = 4
+DSPL_RELATIVE_ENTROPY_BOUND = 0.01
+DSPL_ZETA = 4.0
+DSPL_UPDATE_INTERVAL_ROLLOUTS = 4
+_CONTEXT_COVERAGE_CONSTANT = 2
 
 
-def dspdl_protocol_parameters() -> dict[str, float | int | str]:
-    """Return the immutable DSPDL protocol parameters for metadata auditing."""
+def dspl_context_count_limit(
+    *,
+    rollout_steps_per_update: int,
+    max_episode_steps: int,
+) -> int:
+    """Return the sampling-budget-scaled upper bound for the context pool."""
+    if rollout_steps_per_update <= 0:
+        raise ValueError("rollout_steps_per_update must be positive")
+    if max_episode_steps <= 0:
+        raise ValueError("max_episode_steps must be positive")
+    return max(
+        1,
+        int(
+            np.floor(
+                rollout_steps_per_update
+                / max_episode_steps
+                * DSPL_UPDATE_INTERVAL_ROLLOUTS
+                * _CONTEXT_COVERAGE_CONSTANT
+            )
+        ),
+    )
+
+
+def dspl_protocol_parameters() -> dict[str, float | int | str]:
+    """Return the immutable DSPL protocol parameters for metadata auditing."""
     return {
-        "target_uniform_mass": DSPDL_TARGET_UNIFORM_MASS,
-        "target_kl_stop": DSPDL_TARGET_KL_STOP,
-        "alpha_warmup_updates": DSPDL_ALPHA_WARMUP_UPDATES,
-        "relative_entropy_bound": DSPDL_RELATIVE_ENTROPY_BOUND,
-        "zeta": DSPDL_ZETA,
-        "update_interval_rollouts": DSPDL_UPDATE_INTERVAL_ROLLOUTS,
+        "target_uniform_mass": DSPL_TARGET_UNIFORM_MASS,
+        "target_kl_stop": DSPL_TARGET_KL_STOP,
+        "alpha_warmup_updates": DSPL_ALPHA_WARMUP_UPDATES,
+        "relative_entropy_bound": DSPL_RELATIVE_ENTROPY_BOUND,
+        "zeta": DSPL_ZETA,
+        "update_interval_rollouts": DSPL_UPDATE_INTERVAL_ROLLOUTS,
+        "context_sampling": "uniform_route_partition_exclude_terminal",
         "context_value_estimator": "importance_weighted_samples",
     }
 
 
 @dataclass(frozen=True, slots=True)
-class DSPDLStatisticsSnapshot:
+class DSPLStatisticsSnapshot:
     """Immutable snapshot of centralized on-policy return statistics."""
 
     version: int
@@ -60,7 +86,7 @@ class DSPDLStatisticsSnapshot:
     rollout_returns: NDArray[np.float64]
 
 
-class DSPDLStatisticsHub:
+class DSPLStatisticsHub:
     """Collect discounted rollout and episode returns for all environment workers."""
 
     def __init__(self, *, context_count: int, num_envs: int, gamma: float) -> None:
@@ -139,7 +165,7 @@ class DSPDLStatisticsHub:
             return
         value = float(reward)
         if not np.isfinite(value):
-            raise ValueError("DSPDL transition reward must be finite")
+            raise ValueError("DSPL transition reward must be finite")
         if self._active_valid[rank]:
             self._active_returns[rank] += self._active_discounts[rank] * value
             self._active_discounts[rank] *= self._gamma
@@ -169,7 +195,7 @@ class DSPDLStatisticsHub:
         self._rollout_discounts_by_env.fill(1.0)
         self._rollout_has_samples.fill(False)
 
-    def snapshot(self, *, version: int) -> DSPDLStatisticsSnapshot:
+    def snapshot(self, *, version: int) -> DSPLStatisticsSnapshot:
         self._validate_requested_version(version)
         if self._enabled:
             counts = self._context_counts.copy()
@@ -183,7 +209,7 @@ class DSPDLStatisticsHub:
             rollout_returns = np.empty(0, dtype=np.float64)
         for values in (counts, indices, returns, rollout_returns):
             values.flags.writeable = False
-        return DSPDLStatisticsSnapshot(
+        return DSPLStatisticsSnapshot(
             version=self._accepted_version,
             context_counts=counts,
             completed_context_indices=indices,
@@ -199,7 +225,7 @@ class DSPDLStatisticsHub:
 
     def validate_version_update(self, version: int) -> int:
         if not self._enabled:
-            raise RuntimeError("DSPDL statistics hub is disabled")
+            raise RuntimeError("DSPL statistics hub is disabled")
         if not isinstance(version, (int, np.integer)):
             raise TypeError("statistics version must be an integer")
         new_version = int(version)
@@ -286,7 +312,7 @@ class DSPDLStatisticsHub:
         self._active_valid[rank] = False
 
 
-class DSPDLCallback(BaseCallback):
+class DSPLCallback(BaseCallback):
     """Update the curriculum from PPO value estimates at sampled context starts."""
 
     def __init__(
@@ -294,7 +320,7 @@ class DSPDLCallback(BaseCallback):
         *,
         context_pool: ContextPool,
         context_observations: NDArray[np.float32],
-        statistics_hub: DSPDLStatisticsHub,
+        statistics_hub: DSPLStatisticsHub,
         context_punctuality_potentials: NDArray[np.float64] | None = None,
         verbose: int = 0,
     ) -> None:
@@ -324,8 +350,8 @@ class DSPDLCallback(BaseCallback):
         self._context_observations = observations
         self._context_observation_tensor: th.Tensor | None = None
         self._statistics_hub = statistics_hub
-        self._solver = DSPDLDistributionSolver(
-            relative_entropy_bound=DSPDL_RELATIVE_ENTROPY_BOUND
+        self._solver = DSPLDistributionSolver(
+            relative_entropy_bound=DSPL_RELATIVE_ENTROPY_BOUND
         )
         self._start_index = int(np.argmax(context_pool.remaining_distances_m))
         self._target_distribution = self._build_target_distribution()
@@ -349,7 +375,7 @@ class DSPDLCallback(BaseCallback):
         return self._target_distribution.copy()
 
     @property
-    def statistics_hub(self) -> DSPDLStatisticsHub:
+    def statistics_hub(self) -> DSPLStatisticsHub:
         return self._statistics_hub
 
     @override
@@ -363,7 +389,7 @@ class DSPDLCallback(BaseCallback):
             raise ValueError(
                 "statistics hub version must match curriculum distribution"
             )
-        self._record_scalar("dspdl/converged", 0.0)
+        self._record_scalar("dspl/converged", 0.0)
         snapshot = self._statistics_hub.snapshot(version=0)
         self._record_curriculum_metrics(snapshot, empirical_distribution=None)
 
@@ -371,8 +397,7 @@ class DSPDLCallback(BaseCallback):
     def _on_rollout_start(self) -> None:
         if (
             not self._converged
-            and self._rollouts_since_update_attempt
-            >= DSPDL_UPDATE_INTERVAL_ROLLOUTS
+            and self._rollouts_since_update_attempt >= DSPL_UPDATE_INTERVAL_ROLLOUTS
         ):
             self._rollouts_since_update_attempt = 0
             self._maybe_update_curriculum()
@@ -408,27 +433,27 @@ class DSPDLCallback(BaseCallback):
         self._record_curriculum_metrics(snapshot, empirical_distribution=empirical)
         current = self._distribution_state.distribution
         target_kl = self._solver.kl_divergence(current, self._target_distribution)
-        if target_kl <= DSPDL_TARGET_KL_STOP:
+        if target_kl <= DSPL_TARGET_KL_STOP:
             self._mark_converged()
             return
 
         rollout_returns = snapshot.rollout_returns
         sample_count = int(rollout_returns.size)
-        self._record_scalar("dspdl/alpha_return_sample_count", float(sample_count))
+        self._record_scalar("dspl/alpha_return_sample_count", float(sample_count))
         context_sample_count = int(np.sum(snapshot.context_counts))
         sampled_indices = np.flatnonzero(snapshot.context_counts)
-        self._record_scalar("dspdl/context_sample_count", float(context_sample_count))
+        self._record_scalar("dspl/context_sample_count", float(context_sample_count))
         self._record_scalar(
-            "dspdl/context_unique_sample_count", float(sampled_indices.size)
+            "dspl/context_unique_sample_count", float(sampled_indices.size)
         )
         if sample_count == 0 or context_sample_count == 0:
             return
         mean_return = float(np.mean(rollout_returns))
-        self._record_scalar("dspdl/alpha_mean_discounted_return", mean_return)
+        self._record_scalar("dspl/alpha_mean_discounted_return", mean_return)
 
         alpha = 0.0
-        if self._context_update_count >= DSPDL_ALPHA_WARMUP_UPDATES:
-            alpha = DSPDL_ZETA * max(0.0, mean_return) / target_kl
+        if self._context_update_count >= DSPL_ALPHA_WARMUP_UPDATES:
+            alpha = DSPL_ZETA * max(0.0, mean_return) / target_kl
 
         context_values, value_indices, value_predictions = (
             self._estimate_context_coefficients(
@@ -448,13 +473,13 @@ class DSPDLCallback(BaseCallback):
             snapshot,
         )
         self._context_update_count += 1
-        self._record_scalar("dspdl/alpha", alpha)
+        self._record_scalar("dspl/alpha", alpha)
         self._record_scalar(
-            "dspdl/update_kl", self._solver.kl_divergence(candidate, current)
+            "dspl/update_kl", self._solver.kl_divergence(candidate, current)
         )
         reaches_target = (
             self._solver.kl_divergence(candidate, self._target_distribution)
-            <= DSPDL_TARGET_KL_STOP
+            <= DSPL_TARGET_KL_STOP
         )
         if not np.allclose(candidate, current, rtol=1e-10, atol=1e-12):
             next_version = version + 1
@@ -472,7 +497,7 @@ class DSPDLCallback(BaseCallback):
 
     @staticmethod
     def _empirical_context_distribution(
-        snapshot: DSPDLStatisticsSnapshot,
+        snapshot: DSPLStatisticsSnapshot,
     ) -> NDArray[np.float64] | None:
         count = int(np.sum(snapshot.context_counts))
         if count <= 0:
@@ -482,7 +507,7 @@ class DSPDLCallback(BaseCallback):
     def _estimate_context_coefficients(
         self,
         *,
-        snapshot: DSPDLStatisticsSnapshot,
+        snapshot: DSPLStatisticsSnapshot,
         current_distribution: NDArray[np.float64],
     ) -> tuple[NDArray[np.float64], NDArray[np.int64], NDArray[np.float64]]:
         """Build importance-weighted coefficients for sampled contexts."""
@@ -506,10 +531,10 @@ class DSPDLCallback(BaseCallback):
             np.float64
         ) / (float(sample_count) * probabilities)
         self._record_scalar(
-            "dspdl/importance_weight_mean", float(np.mean(importance_weights))
+            "dspl/importance_weight_mean", float(np.mean(importance_weights))
         )
         self._record_scalar(
-            "dspdl/importance_weight_max", float(np.max(importance_weights))
+            "dspl/importance_weight_max", float(np.max(importance_weights))
         )
         weight_sum = float(np.sum(importance_weights))
         weight_square_sum = float(np.sum(np.square(importance_weights)))
@@ -518,14 +543,14 @@ class DSPDLCallback(BaseCallback):
             if weight_square_sum > 0.0
             else 0.0
         )
-        self._record_scalar("dspdl/importance_weight_ess", ess)
+        self._record_scalar("dspl/importance_weight_ess", ess)
         self._record_scalar(
-            "dspdl/importance_weight_ess_ratio",
+            "dspl/importance_weight_ess_ratio",
             ess / float(max(1, importance_weights.size)),
         )
         mean_weight = float(np.mean(importance_weights))
         self._record_scalar(
-            "dspdl/importance_weight_max_to_mean",
+            "dspl/importance_weight_max_to_mean",
             float(np.max(importance_weights)) / max(mean_weight, 1e-12),
         )
         coefficients = np.zeros(context_count, dtype=np.float64)
@@ -537,7 +562,7 @@ class DSPDLCallback(BaseCallback):
     ) -> NDArray[np.float64]:
         tensor = self._context_observation_tensor
         if tensor is None:
-            raise RuntimeError("DSPDL context tensor is not initialized")
+            raise RuntimeError("DSPL context tensor is not initialized")
         if indices is None:
             indices = np.arange(self._context_pool.context_count, dtype=np.int64)
         selected_indices = np.asarray(indices, dtype=np.int64)
@@ -564,22 +589,22 @@ class DSPDLCallback(BaseCallback):
 
     def _record_curriculum_metrics(
         self,
-        snapshot: DSPDLStatisticsSnapshot,
+        snapshot: DSPLStatisticsSnapshot,
         *,
         empirical_distribution: NDArray[np.float64] | None,
     ) -> None:
         self._record_scalar(
-            "dspdl/current_to_target_kl",
+            "dspl/current_to_target_kl",
             self._solver.kl_divergence(
                 self._distribution_state.distribution, self._target_distribution
             ),
         )
         self._record_scalar(
-            "dspdl/empirical_context_count", float(np.sum(snapshot.context_counts))
+            "dspl/empirical_context_count", float(np.sum(snapshot.context_counts))
         )
         if empirical_distribution is not None:
             self._record_scalar(
-                "dspdl/empirical_to_target_kl",
+                "dspl/empirical_to_target_kl",
                 self._solver.kl_divergence(
                     empirical_distribution, self._target_distribution
                 ),
@@ -589,7 +614,7 @@ class DSPDLCallback(BaseCallback):
         self,
         value_indices: NDArray[np.int64],
         values: NDArray[np.float64],
-        snapshot: DSPDLStatisticsSnapshot,
+        snapshot: DSPLStatisticsSnapshot,
     ) -> None:
         if snapshot.completed_returns.size == 0:
             return
@@ -601,7 +626,7 @@ class DSPDLCallback(BaseCallback):
         predictions = values[completed_positions]
         returns = snapshot.completed_returns
         self._record_scalar(
-            "dspdl/value_return_mae", float(np.mean(np.abs(predictions - returns)))
+            "dspl/value_return_mae", float(np.mean(np.abs(predictions - returns)))
         )
         correlation = 0.0
         if (
@@ -610,7 +635,7 @@ class DSPDLCallback(BaseCallback):
             and np.std(returns) > 1e-12
         ):
             correlation = float(np.corrcoef(predictions, returns)[0, 1])
-        self._record_scalar("dspdl/value_return_pearson", correlation)
+        self._record_scalar("dspl/value_return_pearson", correlation)
 
     def _record_scalar(self, key: str, value: float) -> None:
         logger = getattr(self.model, "logger", None)
@@ -627,8 +652,8 @@ class DSPDLCallback(BaseCallback):
         start[self._start_index] = 1.0
         uniform = np.full_like(start, 1.0 / start.size)
         result = (
-            1.0 - DSPDL_TARGET_UNIFORM_MASS
-        ) * start + DSPDL_TARGET_UNIFORM_MASS * uniform
+            1.0 - DSPL_TARGET_UNIFORM_MASS
+        ) * start + DSPL_TARGET_UNIFORM_MASS * uniform
         return result / float(np.sum(result))
 
     def _mark_converged(self) -> None:
@@ -636,4 +661,4 @@ class DSPDLCallback(BaseCallback):
             return
         self._converged = True
         self._statistics_hub.disable()
-        self._record_scalar("dspdl/converged", 1.0)
+        self._record_scalar("dspl/converged", 1.0)

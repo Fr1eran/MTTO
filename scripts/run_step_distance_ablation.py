@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
 
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
@@ -13,20 +12,17 @@ from matplotlib.figure import Figure
 from contracts.ablation import AblationManifest
 from rl.experiment_statistics import assess_constraints
 from rl.experiment_utils import (
-    DSPDL_ALGORITHM_ID,
     DEFAULT_DEVICE,
-    DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
     DEFAULT_NUM_ENVS,
     DEFAULT_REWARD_DISCOUNT,
     DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
     DEFAULT_SCHEDULE_TIME_S,
-    DEFAULT_TRAINING_EPISODES,
-    add_panel_label,
-    apply_rl_curve_plot_style,
+    DSPL_ALGORITHM_ID,
+    dspl_protocol_parameters,
     evaluate_final_training_run,
-    dspdl_protocol_parameters,
-    reward_config_parameters,
+    learning_rate_schedule_parameters,
     resolve_reward_preset,
+    reward_config_parameters,
     train_single_experiment,
 )
 from utils.ablation import (
@@ -49,24 +45,52 @@ from utils.ablation import (
 )
 from utils.ablation.plotting import save_ablation_figure
 from utils.io_utils import format_float_token, load_evaluation_metrics
-from utils.plot_utils import SCI_EXPORT_PAD_INCHES, apply_sci_figure_layout
+from utils.plot_utils import (
+    SCI_BAND_ALPHA,
+    SCI_LINE_WIDTH,
+    SCI_SERIES_LINE_STYLES,
+    VIS_ACTUAL_PURPLE,
+    VIS_PPO_GRAY,
+    VIS_PROPOSED_ORANGE,
+    VIS_SAFE_BLUE,
+    add_panel_label,
+    apply_sci_curve_style,
+    apply_sci_figure_layout,
+    apply_sci_grid,
+)
 
 DEFAULT_STEP_DISTANCES = (10.0, 30.0, 50.0, 100.0)
 DEFAULT_SEEDS = (11, 131, 239, 359, 443)
-DEFAULT_OUTPUT_ROOT = "output/paper_experiment/01_step_distance_dspdl_v3"
+DEFAULT_OUTPUT_ROOT = "output/paper_experiment/01_step_distance"
 DEFAULT_REFERENCE_CURVE_DIR = "output/optimal/dp/465p0_0p1_uni10p0"
-DEFAULT_EPISODE_SMOOTHING_WINDOW = 100
+DEFAULT_EVALUATION_INTERVAL_EPISODES = 100
+DEFAULT_EPISODE_SMOOTHING_WINDOW = 5
+STEP_DISTANCE_TRAINING_EPISODES = 4_000
 STEP_DISTANCE_MANIFEST_FILENAME = "manifest.json"
+STEP_DISTANCE_FIGURE_FILENAME = "step_distance_learning_curves.pdf"
 MANIFEST_VERSION = 1
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 10
 FIXED_REWARD_PRESET = "basic_safety_punctuality"
-FIXED_CURRICULUM_PROFILE = "dspdl"
+FIXED_CURRICULUM_PROFILE = "dspl"
 TRAJECTORY_METRIC_KEYS = (
     "stop_error_m",
     "abs_time_error_s",
     "total_energy_kj",
     "comfort_tav",
 )
+_STEP_DISTANCE_COLORS = {
+    "10p0": VIS_PPO_GRAY,
+    "30p0": VIS_PROPOSED_ORANGE,
+    "50p0": VIS_SAFE_BLUE,
+    "100p0": VIS_ACTUAL_PURPLE,
+}
+_STEP_DISTANCE_STYLES = {
+    variant_id: {
+        "color": _STEP_DISTANCE_COLORS[variant_id],
+        **SCI_SERIES_LINE_STYLES[index],
+    }
+    for index, variant_id in enumerate(_STEP_DISTANCE_COLORS)
+}
 
 
 def _step_variant(distance: float) -> VariantSpec:
@@ -91,12 +115,9 @@ SPEC = AblationSpec(
     variants=_step_variants(),
     seeds=DEFAULT_SEEDS,
     cli=CLIConfig(
-        description=(
-            "Run fixed spatial control-step ablation with PBRS + "
-            "DSPDL."
-        ),
+        description=("Run fixed spatial control-step ablation with PPRS + DSPL."),
         train_help="Run the ablation matrix.",
-        show_help="Plot episode-metrics learning curves.",
+        show_help="Plot periodic independent-evaluation learning curves.",
         train_arguments=(
             ArgumentSpec(
                 ("--output-root", "--ablation-output-root"),
@@ -112,18 +133,7 @@ SPEC = AblationSpec(
                     "default": DEFAULT_REFERENCE_CURVE_DIR,
                     "help": (
                         "Directory containing the matching DP reference trajectory "
-                        "required by DSPDL."
-                    ),
-                },
-            ),
-            ArgumentSpec(
-                ("--enable-best-evaluation-artifacts",),
-                {
-                    "action": argparse.BooleanOptionalAction,
-                    "default": False,
-                    "help": (
-                        "Optionally retain periodic best-trajectory evaluation; "
-                        "final-policy evaluation is always enabled."
+                        "required by DSPL."
                     ),
                 },
             ),
@@ -131,7 +141,7 @@ SPEC = AblationSpec(
                 ("--training-episodes",),
                 {
                     "type": int,
-                    "default": DEFAULT_TRAINING_EPISODES,
+                    "default": STEP_DISTANCE_TRAINING_EPISODES,
                     "help": (
                         "Global completed training episodes for every ablation run."
                     ),
@@ -151,12 +161,12 @@ SPEC = AblationSpec(
                 {"type": int, "default": DEFAULT_ROLLOUT_STEPS_PER_UPDATE},
             ),
             ArgumentSpec(
-                ("--evaluation-interval-rollouts",),
+                ("--evaluation-interval-episodes",),
                 {
                     "type": int,
-                    "default": DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
+                    "default": DEFAULT_EVALUATION_INTERVAL_EPISODES,
                     "help": (
-                        "Completed-rollout interval for best trajectory evaluation."
+                        "Completed-training-episode interval for periodic evaluation."
                     ),
                 },
             ),
@@ -200,12 +210,12 @@ SPEC = AblationSpec(
                 },
             ),
             ArgumentSpec(
-                ("--output-file",),
+                ("--figure-output-dir",),
                 {
                     "type": Path,
                     "default": None,
                     "help": (
-                        "Path for saving a compact paper-ready figure. If omitted, "
+                        "Directory for the fixed-name paper-ready PDF. If omitted, "
                         "only display the figure."
                     ),
                 },
@@ -216,25 +226,9 @@ SPEC = AblationSpec(
                     "type": int,
                     "default": DEFAULT_EPISODE_SMOOTHING_WINDOW,
                     "help": (
-                        "Trailing moving-average window in completed training "
-                        "episodes (default: 100)."
+                        "Evaluation-point trailing moving-average window with an "
+                        "expanding warm-up (default: 5)."
                     ),
-                },
-            ),
-            ArgumentSpec(
-                ("--dpi",),
-                {
-                    "type": float,
-                    "default": 300.0,
-                    "help": "DPI used when saving the figure.",
-                },
-            ),
-            ArgumentSpec(
-                ("--pad-inches",),
-                {
-                    "type": float,
-                    "default": SCI_EXPORT_PAD_INCHES,
-                    "help": "Padding around the tight saved figure.",
                 },
             ),
             ArgumentSpec(
@@ -268,38 +262,35 @@ SPEC = AblationSpec(
         "reward_config": reward_config_parameters(
             resolve_reward_preset(FIXED_REWARD_PRESET).config
         ),
-        "dspdl_protocol": dspdl_protocol_parameters(),
+        "dspl_protocol": dspl_protocol_parameters(),
     },
     training_signature={
         "protocol_version": PROTOCOL_VERSION,
-        "curriculum_algorithm_id": DSPDL_ALGORITHM_ID,
+        "budget_mode": "completed_episodes",
+        "curriculum_algorithm_id": DSPL_ALGORITHM_ID,
         "schedule_time_s": ArgRef("schedule_time_s", float),
         "reward_discount": ArgRef("reward_discount", float),
         "num_envs": ArgRef("num_envs", int),
         "rollout_steps_per_update": ArgRef("rollout_steps_per_update", int),
         "n_steps_per_env": None,
         "training_episodes": ArgRef("training_episodes", int),
+        "learning_rate_schedule": learning_rate_schedule_parameters(),
         "device": ArgRef("device", str),
         "enable_monitor": True,
         "enable_auto_analysis": False,
-        "enable_best_evaluation_artifacts": ArgRef(
-            "enable_best_evaluation_artifacts", bool
-        ),
-        "evaluation_interval_rollouts": ArgRef(
-            "evaluation_interval_rollouts", lambda value: max(1, int(value))
-        ),
+        "enable_best_evaluation_artifacts": True,
+        "evaluation_interval_episodes": ArgRef("evaluation_interval_episodes", int),
         "evaluation_deterministic": True,
     },
     training_overrides={
+        "budget_mode": "completed_episodes",
+        "training_rollouts": None,
         "reward_preset": FIXED_REWARD_PRESET,
         "curriculum_profile": FIXED_CURRICULUM_PROFILE,
         "reference_curve_dir": ArgRef("reference_curve_dir"),
-        "enable_best_evaluation_artifacts": ArgRef(
-            "enable_best_evaluation_artifacts", bool
-        ),
-        "evaluation_interval_rollouts": ArgRef(
-            "evaluation_interval_rollouts", lambda value: max(1, int(value))
-        ),
+        "enable_best_evaluation_artifacts": True,
+        "evaluation_interval_rollouts": None,
+        "evaluation_interval_episodes": ArgRef("evaluation_interval_episodes", int),
         "tensorboard_log_dir": None,
         "tb_log_name": None,
     },
@@ -307,14 +298,23 @@ SPEC = AblationSpec(
         episode_reader="sequence",
         metrics=(
             CurveMetricSpec(
-                "ep_reward", "episode", "total_reward", "episode_number", smooth=True
+                "trip_completion_pct",
+                "evaluation",
+                "route_completion_ratio",
+                "scheduled_completed_training_episodes",
+                transform="ratio_to_pct",
+                smooth=True,
             ),
             CurveMetricSpec(
-                "ep_len", "episode", "length", "episode_number", smooth=True
+                "evaluation_episode_return",
+                "evaluation",
+                "total_reward",
+                "scheduled_completed_training_episodes",
+                smooth=True,
             ),
         ),
-        primary_metric="ep_reward",
-        x_name="episode_number",
+        primary_metric="trip_completion_pct",
+        x_name="scheduled_completed_training_episodes",
         default_smoothing_window=DEFAULT_EPISODE_SMOOTHING_WINDOW,
         warn_non_completed=True,
     ),
@@ -322,12 +322,10 @@ SPEC = AblationSpec(
         metrics=(
             FinalMetricSpec("stop_error_m", "stop_error_m"),
             FinalMetricSpec("abs_time_error_s", "time_error_s", transform="abs"),
-            FinalMetricSpec(
-                "total_energy_kj", "total_energy_kj", feasible_only=True
-            ),
+            FinalMetricSpec("total_energy_kj", "total_energy_kj", feasible_only=True),
             FinalMetricSpec("comfort_tav", "comfort_tav"),
         ),
-        source="final",
+        source="best",
         warn_non_completed=True,
     ),
     run_label_template=(
@@ -384,15 +382,11 @@ def build_metric_aggregates(
     manifest: AblationManifest | dict[str, object],
     *,
     step_distances: list[float] | None = None,
-    metric_source: str = "final",
+    metric_source: str = "best",
 ) -> tuple[list[FinalMetricAggregate], list[str]]:
     return DRIVER.build_final_aggregates(
         manifest, step_distances, metric_source=metric_source
     )
-
-
-def _color_for_index(index: int) -> Any:
-    return plt.get_cmap("tab10")(index % 10)
 
 
 def plot_curve_aggregates(
@@ -401,33 +395,61 @@ def plot_curve_aggregates(
     if not aggregates:
         print("No curve aggregates available; skipped plotting.")
         return None
-    apply_rl_curve_plot_style()
+    apply_sci_curve_style()
     figure, axes = plt.subplots(nrows=1, ncols=2, squeeze=False)
-    reward_axis, length_axis = axes[0]
-    for axis in (reward_axis, length_axis):
+    completion_axis, return_axis = axes[0]
+    for axis in (completion_axis, return_axis):
         axis.set_box_aspect(3 / 4)
-    for index, aggregate in enumerate(aggregates):
-        color = _color_for_index(index)
+    for aggregate in aggregates:
+        style = _STEP_DISTANCE_STYLES[aggregate.variant_id]
+        color = style["color"]
         label = aggregate.label or f"{aggregate.variant_id} m"
         for axis, key in (
-            (reward_axis, "ep_reward"),
-            (length_axis, "ep_len"),
+            (completion_axis, "trip_completion_pct"),
+            (return_axis, "evaluation_episode_return"),
         ):
             mean, std = aggregate.means[key], aggregate.stds[key]
-            axis.plot(aggregate.x, mean, color=color, label=label)
-            axis.fill_between(
-                aggregate.x, mean - std, mean + std, color=color, alpha=0.18
+            x = aggregate.axis_for(key)
+            axis.plot(
+                x,
+                mean,
+                color=color,
+                linestyle=style["linestyle"],
+                marker=style["marker"],
+                markevery=3,
+                markersize=3.0,
+                markerfacecolor="white",
+                markeredgewidth=0.7,
+                linewidth=(
+                    SCI_LINE_WIDTH + 0.4
+                    if aggregate.variant_id == "30p0"
+                    else SCI_LINE_WIDTH
+                ),
+                label=label,
             )
-    reward_axis.set(
-        xlabel="Completed training episodes", ylabel="Mean episode reward"
+            axis.fill_between(
+                x,
+                mean - std,
+                mean + std,
+                color=color,
+                alpha=SCI_BAND_ALPHA,
+                linewidth=0,
+            )
+    completion_axis.set(
+        xlabel="Completed training episodes",
+        ylabel="Policy trip completion (%)",
+        xlim=(0, STEP_DISTANCE_TRAINING_EPISODES),
+        ylim=(0, 100),
     )
-    length_axis.set(
-        xlabel="Completed training episodes", ylabel="Mean episode length"
+    return_axis.set(
+        xlabel="Completed training episodes",
+        ylabel="Evaluation episode return",
+        xlim=(0, STEP_DISTANCE_TRAINING_EPISODES),
     )
-    for axis, panel in ((reward_axis, "(a)"), (length_axis, "(b)")):
-        axis.grid(True, alpha=0.3)
+    for axis, panel in ((completion_axis, "(a)"), (return_axis, "(b)")):
+        apply_sci_grid(axis)
         add_panel_label(ax=axis, label=panel)
-    handles, labels = reward_axis.get_legend_handles_labels()
+    handles, labels = completion_axis.get_legend_handles_labels()
     figure.legend(
         handles,
         labels,
@@ -453,12 +475,8 @@ def plot_curve_aggregates(
     return figure
 
 
-def save_compact_figure(
-    figure: Figure, output_file: Path, dpi: float, pad_inches: float
-) -> Path:
-    if output_file.suffix == "":
-        output_file = output_file.with_suffix(".png")
-    saved = save_ablation_figure(figure, output_file, dpi=dpi, pad_inches=pad_inches)
+def save_compact_figure(figure: Figure, output_dir: Path) -> Path:
+    saved = save_ablation_figure(figure, output_dir / STEP_DISTANCE_FIGURE_FILENAME)
     assert saved is not None
     return saved
 
@@ -524,16 +542,16 @@ def _print_metric_table(
 
 
 def _print_constraint_table(manifest: AblationManifest) -> None:
-    print("Final-policy constraint rates:")
+    print("Best-evaluation constraint rates:")
     print("step_distance | success | precise | punctual | safe | feasible | n")
     for variant in _step_variants():
         assessments = []
         for run in manifest.runs:
             if run.variant_id == variant.id:
                 metrics = load_evaluation_metrics(
-                    Path(run.artifacts.path_for("metrics_final"))
+                    Path(run.artifacts.path_for("metrics_best"))
                 )
-                assessments.append(assess_constraints(metrics.to_display_mapping()))
+                assessments.append(assess_constraints(metrics))
         n = len(assessments)
         fields = (
             "success",
@@ -564,7 +582,7 @@ def _validate_analysis_manifest(manifest: AblationManifest) -> None:
     if manifest.matrix_config.get("protocol_version") != PROTOCOL_VERSION:
         raise ValueError(
             "step-distance manifest uses an obsolete protocol; rerun in the "
-            "DSPDL v3 output directory"
+            "current protocol-v10 output directory"
         )
     expected_config = {
         "step_distances": list(DEFAULT_STEP_DISTANCES),
@@ -574,16 +592,24 @@ def _validate_analysis_manifest(manifest: AblationManifest) -> None:
         "reward_config": reward_config_parameters(
             resolve_reward_preset(FIXED_REWARD_PRESET).config
         ),
-        "dspdl_protocol": dspdl_protocol_parameters(),
+        "dspl_protocol": dspl_protocol_parameters(),
     }
     for key, value in expected_config.items():
         if manifest.matrix_config.get(key) != value:
             raise ValueError(f"step-distance manifest {key} is incompatible")
+    if manifest.training_signature.get("curriculum_algorithm_id") != DSPL_ALGORITHM_ID:
+        raise ValueError("step-distance DSPL protocol is incompatible")
     if (
-        manifest.training_signature.get("curriculum_algorithm_id")
-        != DSPDL_ALGORITHM_ID
+        manifest.training_signature.get("training_episodes")
+        != STEP_DISTANCE_TRAINING_EPISODES
     ):
-        raise ValueError("step-distance DSPDL protocol is incompatible")
+        raise ValueError("step-distance training episode budget is incompatible")
+    if (
+        manifest.training_signature.get("evaluation_interval_episodes")
+        != DEFAULT_EVALUATION_INTERVAL_EPISODES
+        or "evaluation_interval_rollouts" in manifest.training_signature
+    ):
+        raise ValueError("step-distance episode evaluation schedule is incompatible")
     expected = {
         "step_distance__"
         f"ds{format_float_token(distance)}__seed{seed:04d}__r{index + 1:02d}"
@@ -647,8 +673,8 @@ def _run_show_command(args: argparse.Namespace) -> int:
         raise SystemExit("Step-distance analysis refused a partial aggregation")
     _print_curve_summary(curves)
     print(
-        f"Episode smoothing: trailing window={args.episode_smoothing_window} "
-        "completed episodes."
+        "Evaluation smoothing: expanding warm-up then trailing "
+        f"window={args.episode_smoothing_window} evaluation points."
     )
     _print_metric_table(metrics, metric_source=metric_source)
     _print_constraint_table(manifest)
@@ -659,14 +685,12 @@ def _run_show_command(args: argparse.Namespace) -> int:
         )
         return 0
     if not curves:
-        raise SystemExit("No valid monitor curves available for plotting.")
+        raise SystemExit("No valid periodic-evaluation curves available for plotting.")
     figure = plot_curve_aggregates(curves, show=False)
     if figure is None:
-        raise SystemExit("No valid monitor curves available for plotting.")
-    if args.output_file is not None:
-        output_path = save_compact_figure(
-            figure, args.output_file, args.dpi, args.pad_inches
-        )
+        raise SystemExit("No valid periodic-evaluation curves available for plotting.")
+    if args.figure_output_dir is not None:
+        output_path = save_compact_figure(figure, args.figure_output_dir)
         print(f"Saved compact figure to {output_path}")
     if not args.no_show:
         plt.show()

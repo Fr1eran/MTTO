@@ -12,14 +12,9 @@ from dp.experiment_utils import DP_CURVE_FILENAME, load_dp_curve_artifact
 from model.ocs import TrainService
 from rl.context_pool import ReferenceTrajectory
 from utils.trajectory import OptimizedCurveArtifact
+from utils.type_utils import as_float
 
 __all__ = ["DPTrajectoryReader"]
-
-
-def _metric_as_float(value: object) -> float | None:
-    if isinstance(value, (int, float, np.integer, np.floating)):
-        return float(value)
-    return None
 
 
 class DPTrajectoryReader:
@@ -27,7 +22,7 @@ class DPTrajectoryReader:
 
     The class deliberately no longer samples DP nodes or constructs RL states.
     Use :class:`rl.context_pool.ContextPoolBuilder`
-    for RL-grid resampling and environment-state reconstruction.
+    for route-uniform context sampling and environment-state reconstruction.
     """
 
     _METRIC_EXPECTATIONS: tuple[tuple[str, str], ...] = (
@@ -142,10 +137,19 @@ class DPTrajectoryReader:
                 "DP trajectory artifact has an incompatible upper-speed-envelope "
                 + "version; regenerate the reference trajectory."
             )
+        position = np.asarray(position, dtype=np.float64)
+        speed = np.asarray(speed, dtype=np.float64)
+        cumulative_time = np.asarray(cumulative_time, dtype=np.float64)
+        if position.size > 1:
+            keep = np.ones(position.size, dtype=np.bool_)
+            keep[:-1] = np.abs(np.diff(position)) > 1e-9
+            position = position[keep]
+            speed = speed[keep]
+            cumulative_time = cumulative_time[keep]
         return ReferenceTrajectory(
-            position_m=np.asarray(position, dtype=np.float64),
-            speed_mps=np.asarray(speed, dtype=np.float64),
-            cumulative_time_s=np.asarray(cumulative_time, dtype=np.float64),
+            position_m=position,
+            speed_mps=speed,
+            cumulative_time_s=cumulative_time,
             metadata=metrics,
         )
 
@@ -197,14 +201,12 @@ class DPTrajectoryReader:
         expected_values["start_speed_mps"] = 0.0
         expected_values["target_speed_mps"] = float(target_speed)
         return all(
-            (actual := _metric_as_float(metrics.get(key))) is not None
+            (actual := as_float(metrics.get(key))) is not None
             and abs(actual - expected) <= match_tolerance
             for key, expected in expected_values.items()
         )
 
     @classmethod
-    def _metrics_have_current_envelope_version(
-        cls, metrics: dict[str, object]
-    ) -> bool:
-        envelope_version = _metric_as_float(metrics.get(cls._ENVELOPE_VERSION_METRIC))
+    def _metrics_have_current_envelope_version(cls, metrics: dict[str, object]) -> bool:
+        envelope_version = as_float(metrics.get(cls._ENVELOPE_VERSION_METRIC))
         return envelope_version == float(DP_UPPER_SPEED_ENVELOPE_VERSION)

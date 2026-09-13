@@ -8,21 +8,13 @@ import numpy as np
 from numpy.typing import NDArray
 
 from utils.data_loader import load_excel, load_stations_goal_positions
+from utils.type_utils import as_1d_float_array
 
 DEFAULT_INPUT_FILE = "data/operation/a_longyang_to_airport.xlsx"
 DEFAULT_SHEET_NAME = "a轨_双端两步4节_龙阳－机场"
 DEFAULT_OUTPUT_FILE = "output/real_operation/aligned_real_operation_curve.npz"
 REQUIRED_COLUMNS = ("里程(km)", "速度(km/h)", "加速度(m/s2)", "时间(s)")
 MIN_TIME_STEP_S = 1e-9
-
-
-def _as_1d_float_array(
-    name: str, values: NDArray[np.floating] | Sequence[float]
-) -> NDArray[np.float64]:
-    array = np.asarray(values, dtype=np.float64)
-    if array.ndim != 1:
-        raise ValueError(f"{name} must be a 1-D array")
-    return array
 
 
 def recompute_time_and_acceleration(
@@ -32,9 +24,9 @@ def recompute_time_and_acceleration(
     source_time_s: NDArray[np.float64],
     position_scale: float,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-    position = _as_1d_float_array("position_m", position_m)
-    speed = _as_1d_float_array("speed_mps", speed_mps)
-    source_time = _as_1d_float_array("source_time_s", source_time_s)
+    position = as_1d_float_array(position_m, "position_m")
+    speed = as_1d_float_array(speed_mps, "speed_mps")
+    source_time = as_1d_float_array(source_time_s, "source_time_s")
     if not (position.size == speed.size == source_time.size):
         raise ValueError("position_m, speed_mps, and source_time_s must match length")
     if position.size < 2:
@@ -87,10 +79,10 @@ def transform_operation_curve_arrays(
     start_position_m: float,
     target_position_m: float,
 ) -> dict[str, NDArray[np.float64] | np.float64]:
-    source_position = _as_1d_float_array("source_position_m", source_position_m)
-    speed_kmh_arr = _as_1d_float_array("speed_kmh", speed_kmh)
-    acc_arr = _as_1d_float_array("acc_mps2", acc_mps2)
-    time_arr = _as_1d_float_array("time_s", time_s)
+    source_position = as_1d_float_array(source_position_m, "source_position_m")
+    speed_kmh_arr = as_1d_float_array(speed_kmh, "speed_kmh")
+    acc_arr = as_1d_float_array(acc_mps2, "acc_mps2")
+    time_arr = as_1d_float_array(time_s, "time_s")
 
     sample_count = source_position.size
     if sample_count < 2:

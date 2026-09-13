@@ -7,8 +7,6 @@ from collections.abc import Sequence
 import numpy as np
 from numpy.typing import NDArray
 
-from rl.training_analysis.process import trailing_moving_average
-
 
 def align_exact(
     reference: NDArray[np.float64],
@@ -47,19 +45,29 @@ def smooth_episode_curve(
     *,
     window: int,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-    """Apply trailing moving average and retain the corresponding x-axis."""
+    """Smooth a curve with expanding warm-up and a fixed trailing window.
+
+    The first ``window - 1`` points use every observation available so far.
+    Once the window is full, each point uses the latest ``window`` observations.
+    The returned x-axis therefore always retains the original episode alignment.
+    """
     if window < 1:
         raise ValueError("episode_smoothing_window must be >= 1")
     episodes = np.asarray(episode_numbers, dtype=np.float64)
     values = np.asarray(values, dtype=np.float64)
     if episodes.ndim != 1 or values.ndim != 1 or episodes.size != values.size:
         raise ValueError("episode_numbers and values must be one-dimensional and equal")
-    if values.size < window:
-        return (
-            np.empty(0, dtype=np.float64),
-            np.empty(0, dtype=np.float64),
-        )
-    return episodes[window - 1 :], trailing_moving_average(values, window)
+    if values.size == 0:
+        return episodes.copy(), values.copy()
+    order = np.argsort(episodes, kind="stable")
+    episodes = episodes[order]
+    values = values[order]
+    window_size = int(window)
+    totals = np.convolve(values, np.ones(window_size, dtype=np.float64), mode="full")[
+        : values.size
+    ]
+    counts = np.minimum(np.arange(1, values.size + 1, dtype=np.float64), window_size)
+    return episodes.copy(), totals / counts
 
 
 def aggregate_matrix(
@@ -120,3 +128,33 @@ def aggregate_indexed_series(
     x_mean, _, _ = aggregate_matrix(x_matrix)
     mean, std, counts = aggregate_matrix(value_matrix)
     return x_mean, mean, std, counts
+
+
+def aggregate_step_binned_series(
+    series: Sequence[tuple[NDArray[np.float64], NDArray[np.float64]]],
+    *,
+    bin_width: int,
+    axis_max: int,
+) -> tuple[
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.int64],
+]:
+    """Aggregate each run within fixed environment-transition bins."""
+    if bin_width <= 0 or axis_max <= 0:
+        raise ValueError("bin_width and axis_max must be positive")
+    ends = np.arange(bin_width, axis_max + 1, bin_width, dtype=np.float64)
+    if ends.size == 0 or ends[-1] < axis_max:
+        ends = np.append(ends, float(axis_max))
+    matrix = np.full((len(series), ends.size), np.nan, dtype=np.float64)
+    starts = np.concatenate(([0.0], ends[:-1]))
+    for row, (steps, values) in enumerate(series):
+        x = np.asarray(steps, dtype=np.float64)
+        y = np.asarray(values, dtype=np.float64)
+        for column, (start, end) in enumerate(zip(starts, ends, strict=True)):
+            mask = (x > start) & (x <= end) & np.isfinite(y)
+            if np.any(mask):
+                matrix[row, column] = float(np.mean(y[mask]))
+    mean, std, counts = aggregate_matrix(matrix)
+    return ends, mean, std, counts

@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -76,7 +77,17 @@ class ManifestStore:
         except ContractError as exc:
             raise ManifestSchemaError(f"Invalid manifest {self.path}: {exc}") from exc
         self.validate_shape(manifest)
-        return manifest
+        return replace(
+            manifest,
+            output_root=str(self.output_root),
+            runs=tuple(
+                replace(
+                    run,
+                    artifacts=replace(run.artifacts, base_dir=str(self.output_root)),
+                )
+                for run in manifest.runs
+            ),
+        )
 
     def validate_shape(self, payload: AblationManifest | Mapping[str, object]) -> None:
         manifest = (

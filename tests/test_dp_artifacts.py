@@ -9,7 +9,11 @@ import pytest
 
 import utils.io_utils as io_utils
 from dp.core import DP_UPPER_SPEED_ENVELOPE_VERSION, VariableSpacingDPOptimizer
-from dp.experiment_utils import compute_dp_reference_curve, load_dp_curve_artifact
+from dp.experiment_utils import (
+    compute_dp_reference_curve,
+    load_dp_curve_artifact,
+    render_dp_curve_on_axes,
+)
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
@@ -21,6 +25,39 @@ def test_dp_optimizer_constructor_does_not_accept_max_speed() -> None:
     parameters = inspect.signature(VariableSpacingDPOptimizer).parameters
 
     assert "max_speed" not in parameters
+
+
+def test_render_dp_curve_wrapper_supplies_dp_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        "dp.experiment_utils.render_trajectory_on_axes",
+        lambda **kwargs: captured.update(kwargs),
+    )
+    position = np.asarray([0.0, 10.0])
+    speed = np.asarray([0.0, 1.0])
+    metrics = {"start_position_m": 0.0, "target_position_m": 10.0}
+
+    render_dp_curve_on_axes(
+        ax="axis",
+        pos_arr=position,
+        speed_arr=speed,
+        metrics=metrics,
+        no_safeguard=True,
+        factor=0.95,
+        render_endpoints=False,
+    )
+
+    assert captured["ax"] == "axis"
+    assert captured["pos_arr"] is position
+    assert captured["speed_arr"] is speed
+    assert captured["metrics"] is metrics
+    assert captured["curve_color"] == "tab:red"
+    assert captured["curve_label"] == "DP optimized speed curve"
+    assert captured["no_safeguard"] is True
+    assert captured["factor"] == pytest.approx(0.95)
+    assert captured["render_endpoints"] is False
 
 
 def test_dp_inner_result_includes_cumulative_time_from_policy() -> None:
@@ -67,9 +104,7 @@ def test_dp_inner_result_includes_cumulative_time_from_policy() -> None:
 def test_stage_speed_upper_indices_include_task_upper_curve() -> None:
     optimizer = VariableSpacingDPOptimizer.__new__(VariableSpacingDPOptimizer)
     optimizer.speed_grid_upper_mps = 20.0
-    optimizer.vehicle = cast(
-        VehicleInfo, cast(object, SimpleNamespace(max_speed=20.0))
-    )
+    optimizer.vehicle = cast(VehicleInfo, cast(object, SimpleNamespace(max_speed=20.0)))
     optimizer.safeguard_utility = cast(
         SafeGuardUtility,
         cast(

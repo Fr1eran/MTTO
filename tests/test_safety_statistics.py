@@ -28,11 +28,6 @@ def test_safety_truncation_buffer_records_only_speed_bound_truncations() -> None
         violation_code=ViolationCode.FAILED_STOP,
         truncated=True,
     )
-    buffer.record(
-        position_m=500.0,
-        violation_code=ViolationCode.STEP_LIMIT,
-        truncated=True,
-    )
 
     batch = buffer.drain()
 

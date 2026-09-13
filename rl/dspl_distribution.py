@@ -1,15 +1,15 @@
-"""Generic KL-constrained distribution updates for DSPDL variants."""
+"""Generic KL-constrained distribution updates for DSPL variants."""
 
 from __future__ import annotations
 
 import numpy as np
 from numpy.typing import NDArray
 
-__all__ = ["DSPDLDistributionSolver"]
+__all__ = ["DSPLDistributionSolver"]
 
 
-class DSPDLDistributionSolver:
-    """Solve a finite DSPDL KL-constrained distribution update.
+class DSPLDistributionSolver:
+    """Solve a finite DSPL KL-constrained distribution update.
 
     The solver is shared by curriculum variants.  It contains no assumption
     about how context values are produced; each evaluator variant supplies the
@@ -45,7 +45,7 @@ class DSPDLDistributionSolver:
         current = np.asarray(current_distribution, dtype=np.float64)
         target = np.asarray(target_distribution, dtype=np.float64)
         if values.shape != current.shape or target.shape != current.shape:
-            raise ValueError("DSPDL solver inputs must have matching shapes")
+            raise ValueError("DSPL solver inputs must have matching shapes")
         if alpha < 0.0:
             raise ValueError("alpha must be non-negative")
         if alpha == 0.0 and np.allclose(
@@ -78,7 +78,7 @@ class DSPDLDistributionSolver:
         ):
             upper *= 2.0
             if upper > 1e12:
-                raise RuntimeError("could not satisfy the DSPDL relative-entropy bound")
+                raise RuntimeError("could not satisfy the DSPL relative-entropy bound")
 
         feasible = self._distribution_at_dual(
             values, alpha, upper, log_target, log_current
@@ -117,7 +117,7 @@ class DSPDLDistributionSolver:
     ) -> NDArray[np.float64]:
         denominator = alpha + dual
         if denominator <= 0.0:
-            raise ValueError("DSPDL dual denominator must be positive")
+            raise ValueError("DSPL dual denominator must be positive")
         logits = (
             values / denominator
             + alpha / denominator * log_target

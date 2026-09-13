@@ -12,6 +12,7 @@ from stable_baselines3.common.callbacks import BaseCallback, ProgressBarCallback
 from contracts.evaluation import EvaluationHistory
 from rl.evaluation import (
     PolicyEvaluationResult,
+    calculate_route_completion_ratio,
     describe_best_update_reason,
     evaluate_policy_once,
     save_policy_evaluation_curve,
@@ -27,12 +28,51 @@ from utils.io_utils import save_evaluation_history
 DEFAULT_EVALUATION_INTERVAL_ROLLOUTS = 12
 
 
+@dataclass(slots=True)
+class CompletedEpisodeProgress:
+    """Mutable global episode progress shared by stopping and schedules."""
+
+    target_episodes: int
+    completed_episodes: int = 0
+
+    def __post_init__(self) -> None:
+        if self.target_episodes < 1:
+            raise ValueError("target_episodes must be >= 1")
+
+    @property
+    def fraction(self) -> float:
+        return min(1.0, max(0.0, self.completed_episodes / self.target_episodes))
+
+
+class StopTrainingOnCompletedEpisodes(BaseCallback):
+    """Stop at a global completed-episode target and update shared progress."""
+
+    def __init__(self, progress: CompletedEpisodeProgress, verbose: int = 0) -> None:
+        super().__init__(verbose=verbose)
+        self.progress = progress
+
+    @property
+    def n_episodes(self) -> int:
+        """Compatibility view used by diagnostics and test doubles."""
+        return self.progress.completed_episodes
+
+    @n_episodes.setter
+    def n_episodes(self, value: int) -> None:
+        self.progress.completed_episodes = int(value)
+
+    def _on_step(self) -> bool:
+        assert "dones" in self.locals, "dones is required for episode accounting"
+        self.progress.completed_episodes += int(np.sum(self.locals["dones"]))
+        return self.progress.completed_episodes < self.progress.target_episodes
+
+
 @dataclass(frozen=True, slots=True)
 class PolicyEvaluationEvent:
     result: PolicyEvaluationResult
     training_step: int
     rollout_index: int
     completed_training_episodes: int = 0
+    scheduled_completed_training_episodes: int = 0
 
 
 class EvaluationResultHandler(Protocol):
@@ -492,7 +532,8 @@ class BestEvaluationArtifactHandler:
         if reason is None:
             return
         tracked = event.result
-        host.model.save(os.path.join(self.output_dir, "policy_best"))
+        # A selected best directory must remain directly loadable by consumers.
+        host.model.save(os.path.join(self.output_dir, "policy"))
         metrics = tracked.to_metrics(
             num_timesteps=event.training_step,
             evaluation_rollout_index=event.rollout_index,
@@ -502,9 +543,9 @@ class BestEvaluationArtifactHandler:
         metrics["best_update_reason"] = reason
         save_policy_evaluation_curve(
             tracked,
-            os.path.join(self.output_dir, "best_trajectory.npz"),
+            os.path.join(self.output_dir, "trajectory.npz"),
             extra_metrics=metrics,
-            metrics_path=os.path.join(self.output_dir, "metrics_best.json"),
+            metrics_path=os.path.join(self.output_dir, "metrics.json"),
         )
         self.best_result = tracked
         self._log_result(host, tracked, prefix="best")
@@ -564,6 +605,10 @@ class EvaluationHistoryArtifactHandler:
             success=np.asarray(
                 [event.result.success for event in self._events], dtype=np.bool_
             ),
+            safe=np.asarray(
+                [event.result.safe for event in self._events],
+                dtype=np.bool_,
+            ),
             stop_error_m=np.asarray(
                 [event.result.stop_error_m for event in self._events], dtype=np.float64
             ),
@@ -581,6 +626,21 @@ class EvaluationHistoryArtifactHandler:
                 [event.completed_training_episodes for event in self._events],
                 dtype=np.int64,
             ),
+            scheduled_completed_training_episodes=np.asarray(
+                [event.scheduled_completed_training_episodes for event in self._events],
+                dtype=np.int64,
+            ),
+            route_completion_ratio=np.asarray(
+                [
+                    calculate_route_completion_ratio(
+                        start_position_m=event.result.start_position_m,
+                        target_position_m=event.result.target_position_m,
+                        final_position_m=event.result.final_position_m,
+                    )
+                    for event in self._events
+                ],
+                dtype=np.float64,
+            ),
             safety_violation_positions_m=flattened,
             safety_violation_position_offsets=offsets,
         )
@@ -593,22 +653,65 @@ class ScheduledPolicyEvaluationCallback(BaseCallback):
         *,
         eval_env: Any,
         handlers: Sequence[EvaluationResultHandler],
-        evaluation_interval_rollouts: int = DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
+        evaluation_interval_rollouts: int | None = None,
+        evaluation_interval_episodes: int | None = None,
         deterministic: bool = True,
         get_completed_training_episodes: Callable[[], int] | None = None,
         evaluate_at_boundaries: bool = False,
+        max_rollouts_exclusive: int | None = None,
+        max_completed_episodes_exclusive: int | None = None,
         verbose: int = 0,
     ) -> None:
         super().__init__(verbose=verbose)
-        if evaluation_interval_rollouts <= 0:
+        if (
+            evaluation_interval_rollouts is None
+            and evaluation_interval_episodes is None
+        ):
+            evaluation_interval_rollouts = DEFAULT_EVALUATION_INTERVAL_ROLLOUTS
+        elif (
+            evaluation_interval_rollouts is not None
+            and evaluation_interval_episodes is not None
+        ):
+            raise ValueError(
+                "exactly one of evaluation_interval_rollouts and "
+                "evaluation_interval_episodes must be configured"
+            )
+        if (
+            evaluation_interval_rollouts is not None
+            and evaluation_interval_rollouts <= 0
+        ):
             raise ValueError("evaluation_interval_rollouts must be positive")
+        if (
+            evaluation_interval_episodes is not None
+            and evaluation_interval_episodes <= 0
+        ):
+            raise ValueError("evaluation_interval_episodes must be positive")
+        if (
+            evaluation_interval_episodes is not None
+            and get_completed_training_episodes is None
+        ):
+            raise ValueError(
+                "episode evaluation scheduling requires completed-episode progress"
+            )
         self.eval_env = eval_env
         self.handlers = list(handlers)
-        self.evaluation_interval_rollouts = int(evaluation_interval_rollouts)
+        self.evaluation_interval_rollouts = (
+            None
+            if evaluation_interval_rollouts is None
+            else int(evaluation_interval_rollouts)
+        )
+        self.evaluation_interval_episodes = (
+            None
+            if evaluation_interval_episodes is None
+            else int(evaluation_interval_episodes)
+        )
         self.deterministic = bool(deterministic)
         self.get_completed_training_episodes = get_completed_training_episodes
         self.evaluate_at_boundaries = evaluate_at_boundaries
+        self.max_rollouts_exclusive = max_rollouts_exclusive
+        self.max_completed_episodes_exclusive = max_completed_episodes_exclusive
         self._rollouts_completed = 0
+        self._last_scheduled_completed_episodes = 0
 
     @override
     def _init_callback(self) -> None:
@@ -630,13 +733,38 @@ class ScheduledPolicyEvaluationCallback(BaseCallback):
             self._emit_evaluation()
 
     @override
+    def _on_rollout_start(self) -> None:
+        interval = self.evaluation_interval_episodes
+        if interval is None:
+            return
+        assert self.get_completed_training_episodes is not None
+        completed = int(self.get_completed_training_episodes())
+        scheduled = (completed // interval) * interval
+        if scheduled <= self._last_scheduled_completed_episodes:
+            return
+        if (
+            self.max_completed_episodes_exclusive is not None
+            and scheduled >= self.max_completed_episodes_exclusive
+        ):
+            return
+        self._last_scheduled_completed_episodes = scheduled
+        self._emit_evaluation(scheduled_completed_episodes=scheduled)
+
+    @override
     def _on_rollout_end(self) -> None:
         self._rollouts_completed += 1
+        if (
+            self.max_rollouts_exclusive is not None
+            and self._rollouts_completed >= self.max_rollouts_exclusive
+        ):
+            return
+        if self.evaluation_interval_rollouts is None:
+            return
         if self._rollouts_completed % self.evaluation_interval_rollouts != 0:
             return
         self._emit_evaluation()
 
-    def _emit_evaluation(self) -> None:
+    def _emit_evaluation(self, *, scheduled_completed_episodes: int = 0) -> None:
         result = self.run_evaluation()
         event = PolicyEvaluationEvent(
             result=result,
@@ -647,6 +775,7 @@ class ScheduledPolicyEvaluationCallback(BaseCallback):
                 if self.get_completed_training_episodes is not None
                 else 0
             ),
+            scheduled_completed_training_episodes=scheduled_completed_episodes,
         )
         for handler in self.handlers:
             handler.handle_evaluation(self, event)

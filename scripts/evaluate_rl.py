@@ -25,7 +25,11 @@ from rl.experiment_utils import (
     reward_preset_names,
 )
 from rl.operational_state import OperationalState
-from utils.plot_utils import apply_sci_figure_layout
+from utils.plot_utils import (
+    apply_sci_curve_style,
+    apply_sci_figure_layout,
+    apply_sci_grid,
+)
 from utils.scenario import build_scenario
 
 
@@ -120,6 +124,7 @@ def plot_operation_time_series(
         print("No operation-time samples collected; skipped time-series plot.")
         return
 
+    apply_sci_curve_style()
     import matplotlib.pyplot as plt
 
     step_axis = np.arange(len(operation_time_seq), dtype=np.int32)
@@ -146,7 +151,7 @@ def plot_operation_time_series(
         label="Schedule time",
     )
     ax_time.set_ylabel("Operation time (s)")
-    ax_time.grid(True, alpha=0.3)
+    apply_sci_grid(ax_time)
     ax_time.legend()
 
     ax_redundant.plot(
@@ -165,7 +170,7 @@ def plot_operation_time_series(
         label="No redundancy",
     )
     ax_redundant.set_ylabel("Redundant operation time (s)")
-    ax_redundant.grid(True, alpha=0.3)
+    apply_sci_grid(ax_redundant)
     ax_redundant.legend()
 
     ax_redundant.set_xlabel("Agent step")
@@ -207,10 +212,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="评估 MTTO PPO 策略",
     )
     _ = parser.add_argument(
-        "--load-dir",
+        "--model-dir",
         type=str,
-        default="output/optimal/rl/final/",
-        help="PPO 模型文件所在目录",
+        required=True,
+        help="包含 policy.zip 和 metadata.json 的 PPO 模型目录",
     )
     _ = parser.add_argument(
         "--reward-discount",
@@ -357,7 +362,9 @@ def _run_evaluation(
             if isinstance(run_metadata, RunMetadata)
             else dict(run_metadata)
         )
-        evaluation_metadata["evaluation_load_dir"] = load_dir
+        evaluation_metadata["evaluation_model_dir"] = os.path.relpath(
+            load_dir, output_dir
+        )
         if args.save_trajectory:
             (
                 evaluation_result,
@@ -366,10 +373,10 @@ def _run_evaluation(
             ) = evaluate_and_save_final_policy(
                 model,
                 evaluation_env,
-                output_path=os.path.join(output_dir, "final_trajectory.npz"),
+                output_path=os.path.join(output_dir, "trajectory.npz"),
                 metadata=evaluation_metadata,
                 deterministic=args.deterministic,
-                metrics_path=os.path.join(output_dir, "metrics_final.json"),
+                metrics_path=os.path.join(output_dir, "metrics.json"),
             )
         else:
             evaluation_result = evaluate_policy_once(
@@ -420,7 +427,7 @@ def _print_evaluation_results(
 def main() -> None:
     args = build_arg_parser().parse_args()
 
-    load_dir = args.load_dir
+    load_dir = args.model_dir
     run_metadata = load_run_metadata(load_dir)
 
     schedule_time_s = float(
@@ -446,7 +453,7 @@ def main() -> None:
 
     if args.dry_run:
         print("========== Evaluation Dry Run ==========")
-        print(f"  load_dir:            {load_dir}")
+        print(f"  model_dir:           {load_dir}")
         print(f"  output_dir:          {output_dir}")
         print(f"  reward_preset:      {reward_preset.name}")
         print(f"  reward_config:       {reward_preset.config}")

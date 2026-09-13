@@ -3,14 +3,12 @@ import argparse
 from rl.experiment_utils import (
     DEFAULT_CURRICULUM_PROFILE_NAME,
     DEFAULT_DEVICE,
-    DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
     DEFAULT_NUM_ENVS,
     DEFAULT_REWARD_DISCOUNT,
     DEFAULT_REWARD_PRESET_NAME,
     DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
     DEFAULT_SCHEDULE_TIME_S,
     DEFAULT_STEP_DISTANCE,
-    DEFAULT_TRAINING_EPISODES,
     TrainingRunSpec,
     curriculum_profile_names,
     resolve_training_run_spec,
@@ -50,8 +48,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=DEFAULT_REWARD_PRESET_NAME,
         help=(
             "奖励配置预设。basic 固定包含 energy/comfort；"
-            "basic_safety 额外启用安全 PBRS。"
-            "basic_safety_punctuality 再加入线性剩余裕度准点 PBRS。"
+            "basic_safety 额外启用安全势函数塑形。"
+            "basic_safety_punctuality 启用由安全势与线性剩余裕度准点势组成的 PPRS。"
         ),
     )
     _ = parser.add_argument(
@@ -60,8 +58,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         choices=tuple(curriculum_profile_names()),
         default=DEFAULT_CURRICULUM_PROFILE_NAME,
         help=(
-            "初态课程预设。none 保持真实起点训练；"
-            "dspdl 使用离散自步学习机制（默认）。"
+            "初态课程预设。none 保持真实起点训练；dspl 使用离散自步学习机制（默认）。"
         ),
     )
     _ = parser.add_argument(
@@ -158,10 +155,22 @@ def build_cli_parser() -> argparse.ArgumentParser:
              则根据 rollout-steps-per-update 和 num-envs 计算得出。",
     )
     _ = parser.add_argument(
+        "--budget-mode",
+        choices=("completed_episodes", "environment_steps"),
+        default="completed_episodes",
+        help="训练预算单位：完成回合数或 PPO rollout 对应的环境交互步数。",
+    )
+    _ = parser.add_argument(
         "--training-episodes",
         type=int,
-        default=DEFAULT_TRAINING_EPISODES,
+        default=None,
         help="全局完成训练回合数；多环境时自动向上取整并推导 PPO 环境步上限。",
+    )
+    _ = parser.add_argument(
+        "--training-rollouts",
+        type=int,
+        default=None,
+        help="environment_steps 预算下的 PPO rollout 总数。",
     )
     _ = parser.add_argument(
         "--tensorboard-log-dir",
@@ -181,11 +190,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=None,
         help="PPO log_interval。仅在启用日志记录功能时生效。`tune`模式下默认为1。",
     )
-    _ = parser.add_argument(
+    evaluation_schedule = parser.add_mutually_exclusive_group()
+    _ = evaluation_schedule.add_argument(
         "--evaluation-interval-rollouts",
         type=int,
-        default=DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
+        default=None,
         help="两次策略评估之间完成的 PPO rollout 数。",
+    )
+    _ = evaluation_schedule.add_argument(
+        "--evaluation-interval-episodes",
+        type=int,
+        default=None,
+        help="两次策略评估之间的全局完成训练回合数。",
     )
     _ = parser.add_argument(
         "--evaluation-deterministic",
@@ -253,7 +269,9 @@ def print_training_run_spec(spec: TrainingRunSpec) -> None:
     print(f"- n_steps_per_env={spec.n_steps_per_env}")
     print(f"- rollout_steps_per_update={spec.rollout_steps_per_update}")
     print(f"- output_dir={spec.output_dir}")
+    print(f"- budget_mode={spec.budget_mode}")
     print(f"- training_episodes={spec.training_episodes}")
+    print(f"- training_rollouts={spec.training_rollouts}")
     print(f"- max_episode_steps={spec.max_episode_steps}")
     print(f"- derived_total_timesteps={spec.total_timesteps}")
     print(f"- tensorboard_log_dir={spec.tensorboard_log_dir}")
@@ -266,6 +284,7 @@ def print_training_run_spec(spec: TrainingRunSpec) -> None:
         print("- log_interval=ignored (logging disabled by current switches)")
     print(f"- reward_diagnostics_path={spec.reward_diagnostics_path}")
     print("- evaluation_interval_rollouts=" + f"{spec.evaluation_interval_rollouts}")
+    print("- evaluation_interval_episodes=" + f"{spec.evaluation_interval_episodes}")
     print(f"- best_eval_output_dir={spec.best_eval_output_dir}")
     print(f"- evaluation_deterministic={spec.evaluation_deterministic}")
     print(f"- evaluation_history_path={spec.evaluation_history_path}")

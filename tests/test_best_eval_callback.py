@@ -9,14 +9,18 @@ from stable_baselines3.common.base_class import BaseAlgorithm
 from model.ocs import TrainService
 from rl.callbacks import (
     BestEvaluationArtifactHandler,
+    CompletedEpisodeProgress,
     EvaluationHistoryArtifactHandler,
     RewardDiagnosticsArtifactCallback,
     SafetyTruncationPositionHistogramCallback,
     ScheduledPolicyEvaluationCallback,
+    StopTrainingOnCompletedEpisodes,
 )
 from rl.evaluation import (
     BEST_TRAJECTORY_SELECTION_RULE,
     PolicyEvaluationResult,
+    build_policy_evaluation_comparison_key,
+    calculate_route_completion_ratio,
     classify_arrival_status,
     describe_best_update_reason,
     get_strict_time_error_limit_s,
@@ -128,6 +132,21 @@ def _init(callback: object, training_env: object) -> None:
     )
 
 
+def test_completed_episode_stop_callback_drives_shared_progress() -> None:
+    progress = CompletedEpisodeProgress(target_episodes=3)
+    callback = StopTrainingOnCompletedEpisodes(progress)
+    callback.locals = {"dones": np.asarray([True, False])}
+
+    assert callback._on_step() is True
+    assert callback.n_episodes == 1
+    assert progress.fraction == pytest.approx(1.0 / 3.0)
+
+    callback.locals = {"dones": np.asarray([True, True])}
+    assert callback._on_step() is False
+    assert callback.n_episodes == 3
+    assert progress.fraction == pytest.approx(1.0)
+
+
 def test_punctual_arrival_uses_train_service_absolute_limit() -> None:
     service = TrainService(
         start_position=0.0,
@@ -221,12 +240,17 @@ def test_scheduled_evaluation_shares_one_result_between_handlers(
 
     assert calls == 1
     assert best.best_result is not None
-    metrics = json.loads((tmp_path / "best" / "metrics_best.json").read_text())
+    assert (tmp_path / "best" / "policy.zip").is_file()
+    metrics = json.loads((tmp_path / "best" / "metrics.json").read_text())
     assert metrics["evaluation_rollout_index"] == 12
     with np.load(history_path) as data:
         np.testing.assert_array_equal(data["training_steps"], [120])
         np.testing.assert_array_equal(data["rollout_indices"], [12])
         np.testing.assert_array_equal(data["completed_training_episodes"], [17])
+        np.testing.assert_array_equal(
+            data["scheduled_completed_training_episodes"], [0]
+        )
+        np.testing.assert_allclose(data["route_completion_ratio"], [1.0])
         np.testing.assert_allclose(data["safety_violation_positions_m"], [20.0])
 
 
@@ -251,6 +275,104 @@ def test_scheduled_evaluation_repeats_at_rollout_interval(
         callback.num_timesteps = rollout_index * 10
         callback._on_rollout_end()
         assert calls == rollout_index // 12
+
+
+def test_episode_schedule_evaluates_on_next_rollout_start_after_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completed = [99]
+    callback = ScheduledPolicyEvaluationCallback(
+        eval_env=DummyEvalEnv(),
+        handlers=[],
+        evaluation_interval_episodes=100,
+        get_completed_training_episodes=lambda: completed[0],
+        max_completed_episodes_exclusive=5000,
+    )
+    _init(callback, DummyTrainingEnv())
+    calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        callback,
+        "run_evaluation",
+        lambda: (
+            calls.append((callback._rollouts_completed, completed[0]))
+            or _build_result(success=False, total_reward=-1.0)
+        ),
+    )
+
+    callback._on_rollout_start()
+    completed[0] = 107
+    callback.num_timesteps = 8192
+    callback._on_rollout_end()
+    assert calls == []
+    callback._on_rollout_start()
+
+    assert calls == [(1, 107)]
+
+
+def test_episode_schedule_collapses_crossed_thresholds_and_skips_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completed = [350]
+    history_path = tmp_path / "episode_evaluations.npz"
+    callback = ScheduledPolicyEvaluationCallback(
+        eval_env=DummyEvalEnv(),
+        handlers=[EvaluationHistoryArtifactHandler(output_path=str(history_path))],
+        evaluation_interval_rollouts=None,
+        evaluation_interval_episodes=100,
+        get_completed_training_episodes=lambda: completed[0],
+        max_completed_episodes_exclusive=5000,
+    )
+    _init(callback, DummyTrainingEnv())
+    calls: list[int] = []
+    monkeypatch.setattr(
+        callback,
+        "run_evaluation",
+        lambda: (
+            calls.append(completed[0])
+            or _build_result(success=False, total_reward=-1.0)
+        ),
+    )
+
+    callback._on_rollout_start()
+    callback._on_rollout_start()
+    completed[0] = 5000
+    callback._on_rollout_start()
+    callback._on_training_end()
+
+    assert calls == [350]
+    assert callback._last_scheduled_completed_episodes == 300
+    with np.load(history_path) as data:
+        np.testing.assert_array_equal(
+            data["scheduled_completed_training_episodes"], [300]
+        )
+        np.testing.assert_array_equal(data["completed_training_episodes"], [350])
+        np.testing.assert_array_equal(data["training_steps"], [0])
+        np.testing.assert_array_equal(data["rollout_indices"], [0])
+
+
+def test_scheduled_evaluation_skips_terminal_budget_rollout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    callback = ScheduledPolicyEvaluationCallback(
+        eval_env=DummyEvalEnv(),
+        handlers=[],
+        evaluation_interval_rollouts=100,
+        max_rollouts_exclusive=500,
+    )
+    _init(callback, DummyTrainingEnv())
+    calls: list[int] = []
+
+    def evaluate(*_args: object, **_kwargs: object) -> PolicyEvaluationResult:
+        calls.append(callback._rollouts_completed)
+        return _build_result(success=True, total_reward=5.0)
+
+    monkeypatch.setattr("rl.callbacks.evaluate_policy_once", evaluate)
+    for rollout_index in range(1, 501):
+        callback.num_timesteps = rollout_index * 10
+        callback._on_rollout_end()
+
+    assert calls == [100, 200, 300, 400]
 
 
 def test_optional_boundary_evaluations_include_latest_final_policy(
@@ -292,6 +414,38 @@ def test_scheduled_evaluation_rejects_nonpositive_rollout_interval() -> None:
             handlers=[],
             evaluation_interval_rollouts=0,
         )
+
+
+def test_evaluation_schedule_modes_are_mutually_exclusive() -> None:
+    with pytest.raises(ValueError, match="exactly one"):
+        ScheduledPolicyEvaluationCallback(
+            eval_env=DummyEvalEnv(),
+            handlers=[],
+            evaluation_interval_rollouts=12,
+            evaluation_interval_episodes=100,
+            get_completed_training_episodes=lambda: 0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("start", "target", "final", "expected"),
+    (
+        (0.0, 100.0, 40.0, 0.4),
+        (100.0, 0.0, 60.0, 0.4),
+        (0.0, 100.0, -20.0, 0.0),
+        (100.0, 0.0, 120.0, 0.0),
+        (0.0, 100.0, 130.0, 1.0),
+        (100.0, 0.0, -30.0, 1.0),
+    ),
+)
+def test_route_completion_ratio_uses_clipped_net_directional_progress(
+    start: float, target: float, final: float, expected: float
+) -> None:
+    assert calculate_route_completion_ratio(
+        start_position_m=start,
+        target_position_m=target,
+        final_position_m=final,
+    ) == pytest.approx(expected)
 
 
 def test_safety_histogram_has_no_step_hook_and_saves_rollout_data(
@@ -376,7 +530,26 @@ def test_best_selection_and_metrics_contract() -> None:
     failed = _build_result(success=False, total_reward=100.0)
     succeeded = _build_result(success=True, total_reward=1.0)
     assert (
-        describe_best_update_reason(succeeded, failed)
-        == "success_replaces_reward_fallback"
+        describe_best_update_reason(succeeded, failed) == "strict_feasibility_reached"
     )
-    assert succeeded.to_metrics()["selection_rule"] == BEST_TRAJECTORY_SELECTION_RULE
+    metrics = succeeded.to_metrics()
+    assert metrics["selection_rule"] == BEST_TRAJECTORY_SELECTION_RULE
+    assert metrics["safety_violation_count"] == 0
+    assert metrics["safe"] is True
+    assert metrics["feasible"] is True
+
+
+def test_best_selection_requires_safety_for_strict_feasibility() -> None:
+    unsafe = _build_result(
+        success=True,
+        total_reward=100.0,
+        total_energy_j=1.0,
+        safety_positions=(20.0,),
+    )
+    safe = _build_result(success=True, total_reward=1.0, total_energy_j=10.0)
+
+    assert unsafe.safe is False
+    assert unsafe.feasible is False
+    assert build_policy_evaluation_comparison_key(
+        safe
+    ) > build_policy_evaluation_comparison_key(unsafe)

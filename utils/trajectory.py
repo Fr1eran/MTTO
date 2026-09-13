@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -349,6 +350,13 @@ def compute_cumulative_energy_from_trajectory(
         else:
             t = (v1 - v0) / acc
 
+        if t < 0.0 or not math.isfinite(t):
+            raise ValueError(
+                f"Invalid operation time t={t:.4f}s at segment {i} "
+                f"(pos: {pos[i]:.2f}->{pos[i + 1]:.2f}, "
+                f"v0: {v0:.2f}, v1: {v1:.2f}, acc: {acc:.2f})"
+            )
+
         try:
             prop_e, levi_e = ecc.calc_energy(
                 begin_pos=float(pos[i]),
@@ -361,7 +369,10 @@ def compute_cumulative_energy_from_trajectory(
                 track=track,
             )
             cum_energy[i + 1] = cum_energy[i] + (prop_e + levi_e)
-        except Exception:
-            cum_energy[i + 1] = cum_energy[i]
+        except Exception as err:
+            raise RuntimeError(
+                f"Energy calculation failed at segment {i} "
+                f"({pos[i]:.2f}m -> {pos[i + 1]:.2f}m): {err}"
+            ) from err
 
     return cum_energy

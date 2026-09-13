@@ -22,12 +22,15 @@ from dp.experiment_utils import (
 )
 from model.common import min_operation_time
 from utils.plot_utils import (
-    SCI_EXPORT_PAD_INCHES,
     apply_sci_figure_layout,
+    apply_sci_grid,
     save_sci_figure,
     set_global_plot_style,
 )
 from utils.scenario import build_scenario
+from utils.type_utils import as_1d_float_array, as_float
+
+FIGURE_FILENAME = "dp_redundancy_error.pdf"
 
 DEFAULT_REDUNDANT_ARRAY_KEYS: tuple[str, ...] = (
     "redundant_operation_time_s",
@@ -45,19 +48,6 @@ class RedundancySeries:
     key: str | None
 
 
-def _as_1d_float_array(
-    values: Sequence[float] | NDArray[Any], name: str
-) -> NDArray[np.float64]:
-    arr = np.asarray(values, dtype=np.float64)
-    if arr.ndim != 1:
-        raise ValueError(f"{name} must be a 1-D array")
-    if arr.size == 0:
-        raise ValueError(f"{name} must contain at least one sample")
-    if not np.all(np.isfinite(arr)):
-        raise ValueError(f"{name} must contain only finite values")
-    return arr
-
-
 def _validate_same_length(
     named_arrays: Sequence[tuple[str, NDArray[np.float64]]],
 ) -> None:
@@ -67,15 +57,8 @@ def _validate_same_length(
         raise ValueError(f"{names} must have the same length")
 
 
-def _metric_as_float(metrics: dict[str, Any], key: str) -> float | None:
-    value = metrics.get(key)
-    if isinstance(value, (int, float, np.integer, np.floating)):
-        return float(value)
-    return None
-
-
 def _require_metric_float(metrics: dict[str, Any], key: str) -> float:
-    value = _metric_as_float(metrics, key)
+    value = as_float(metrics.get(key))
     if value is None:
         raise ValueError(f"DP metrics must contain numeric '{key}'")
     return value
@@ -105,7 +88,7 @@ def load_redundant_operation_time_from_npz(
             if selected_key is None:
                 return None
 
-        values = _as_1d_float_array(npz_data[selected_key], selected_key)
+        values = as_1d_float_array(npz_data[selected_key], selected_key)
 
     if values.size != int(expected_size):
         raise ValueError(
@@ -129,9 +112,9 @@ def reconstruct_redundant_operation_time(
     target_speed: float,
     min_remaining_time_fn: Callable[[float, float, float, float], float],
 ) -> NDArray[np.float64]:
-    pos = _as_1d_float_array(pos_arr, "pos_arr")
-    speed = _as_1d_float_array(speed_arr, "speed_arr")
-    cum_time = _as_1d_float_array(cum_time_arr, "cum_time_arr")
+    pos = as_1d_float_array(pos_arr, "pos_arr")
+    speed = as_1d_float_array(speed_arr, "speed_arr")
+    cum_time = as_1d_float_array(cum_time_arr, "cum_time_arr")
     _validate_same_length(
         (("pos_arr", pos), ("speed_arr", speed), ("cum_time_arr", cum_time))
     )
@@ -172,7 +155,7 @@ def load_or_reconstruct_redundant_operation_time(
     redundant_key: str | None,
     min_remaining_time_fn: Callable[[float, float, float, float], float],
 ) -> RedundancySeries:
-    pos = _as_1d_float_array(pos_arr, "pos_arr")
+    pos = as_1d_float_array(pos_arr, "pos_arr")
     loaded = load_redundant_operation_time_from_npz(
         npz_path,
         expected_size=pos.size,
@@ -204,7 +187,7 @@ def compute_expected_redundant_operation_time(
     target_position: float,
     initial_redundant_s: float,
 ) -> NDArray[np.float64]:
-    pos = _as_1d_float_array(pos_arr, "pos_arr")
+    pos = as_1d_float_array(pos_arr, "pos_arr")
     denominator = float(target_position) - float(start_position)
     if not math.isfinite(denominator) or abs(denominator) <= 1e-12:
         raise ValueError("start_position and target_position must be distinct")
@@ -240,9 +223,9 @@ def summarize_error_statistics(
     error_arr: Sequence[float] | NDArray[Any],
     zero_eps: float = 1e-9,
 ) -> dict[str, Any]:
-    pos = _as_1d_float_array(pos_arr, "pos_arr")
-    cum_time = _as_1d_float_array(cum_time_arr, "cum_time_arr")
-    error = _as_1d_float_array(error_arr, "error_arr")
+    pos = as_1d_float_array(pos_arr, "pos_arr")
+    cum_time = as_1d_float_array(cum_time_arr, "cum_time_arr")
+    error = as_1d_float_array(error_arr, "error_arr")
     _validate_same_length(
         (("pos_arr", pos), ("cum_time_arr", cum_time), ("error_arr", error))
     )
@@ -325,10 +308,10 @@ def plot_redundancy_error_series(
     expected_redundant_arr: Sequence[float] | NDArray[Any],
     error_arr: Sequence[float] | NDArray[Any],
 ) -> Figure:
-    pos = _as_1d_float_array(pos_arr, "pos_arr")
-    actual = _as_1d_float_array(actual_redundant_arr, "actual_redundant_arr")
-    expected = _as_1d_float_array(expected_redundant_arr, "expected_redundant_arr")
-    error = _as_1d_float_array(error_arr, "error_arr")
+    pos = as_1d_float_array(pos_arr, "pos_arr")
+    actual = as_1d_float_array(actual_redundant_arr, "actual_redundant_arr")
+    expected = as_1d_float_array(expected_redundant_arr, "expected_redundant_arr")
+    error = as_1d_float_array(error_arr, "error_arr")
     _validate_same_length(
         (
             ("pos_arr", pos),
@@ -368,7 +351,7 @@ def plot_redundancy_error_series(
         label="No redundancy",
     )
     ax_redundant.set_ylabel("Redundant time (s)")
-    ax_redundant.grid(True, alpha=0.3)
+    apply_sci_grid(ax_redundant)
     ax_redundant.legend(loc="best")
 
     ax_error.plot(
@@ -388,7 +371,7 @@ def plot_redundancy_error_series(
     )
     ax_error.set_xlabel("Position (m)")
     ax_error.set_ylabel("Error (s)")
-    ax_error.grid(True, alpha=0.3)
+    apply_sci_grid(ax_error)
     ax_error.legend(loc="best")
     _ = ax_redundant.text(
         0.02,
@@ -425,14 +408,9 @@ def plot_redundancy_error_series(
 
 def save_compact_figure(
     fig: Figure,
-    output_file: Path,
-    dpi: float,
-    pad_inches: float,
+    output_dir: Path,
 ) -> Path:
-    if output_file.suffix == "":
-        output_file = output_file.with_suffix(".png")
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    return save_sci_figure(fig, output_file, dpi=dpi, pad_inches=pad_inches)
+    return save_sci_figure(fig, output_dir / FIGURE_FILENAME)
 
 
 def write_point_csv(
@@ -445,12 +423,12 @@ def write_point_csv(
     expected_redundant_arr: Sequence[float] | NDArray[Any],
     error_arr: Sequence[float] | NDArray[Any],
 ) -> Path:
-    pos = _as_1d_float_array(pos_arr, "pos_arr")
-    speed = _as_1d_float_array(speed_arr, "speed_arr")
-    cum_time = _as_1d_float_array(cum_time_arr, "cum_time_arr")
-    actual = _as_1d_float_array(actual_redundant_arr, "actual_redundant_arr")
-    expected = _as_1d_float_array(expected_redundant_arr, "expected_redundant_arr")
-    error = _as_1d_float_array(error_arr, "error_arr")
+    pos = as_1d_float_array(pos_arr, "pos_arr")
+    speed = as_1d_float_array(speed_arr, "speed_arr")
+    cum_time = as_1d_float_array(cum_time_arr, "cum_time_arr")
+    actual = as_1d_float_array(actual_redundant_arr, "actual_redundant_arr")
+    expected = as_1d_float_array(expected_redundant_arr, "expected_redundant_arr")
+    error = as_1d_float_array(error_arr, "error_arr")
     _validate_same_length(
         (
             ("pos_arr", pos),
@@ -599,21 +577,9 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         help="Optional path for saving per-sample analysis rows as CSV.",
     )
     _ = parser.add_argument(
-        "--output-file",
+        "--output-dir",
         type=Path,
-        help="Optional path for saving the figure. A .png suffix is added if omitted.",
-    )
-    _ = parser.add_argument(
-        "--dpi",
-        type=float,
-        default=300.0,
-        help="DPI used when saving the figure.",
-    )
-    _ = parser.add_argument(
-        "--pad-inches",
-        type=float,
-        default=SCI_EXPORT_PAD_INCHES,
-        help="Padding around the tight saved figure.",
+        help=f"Optional figure directory; saves {FIGURE_FILENAME}.",
     )
     _ = parser.add_argument(
         "--no-show",
@@ -628,13 +594,13 @@ def _resolve_target_context(
     *,
     train_service: Any,
 ) -> tuple[float, float, float]:
-    start_position = _metric_as_float(metrics, "start_position_m")
+    start_position = as_float(metrics.get("start_position_m"))
     if start_position is None:
         start_position = float(train_service.start_position)
-    target_position = _metric_as_float(metrics, "target_position_m")
+    target_position = as_float(metrics.get("target_position_m"))
     if target_position is None:
         target_position = float(train_service.target_position)
-    target_speed = _metric_as_float(metrics, "target_speed_mps")
+    target_speed = as_float(metrics.get("target_speed_mps"))
     if target_speed is None:
         target_speed = 0.0
     return start_position, target_position, target_speed
@@ -732,13 +698,12 @@ def main() -> None:
 
     _ = set_global_plot_style(
         font_preset="sci",
-        preferred_font="Calibri",
+        preferred_font="Arial",
         title_font_size=9.0,
         axis_label_font_size=9.0,
         tick_font_size=8.0,
         legend_font_size=8.0,
         figure_dpi=150.0,
-        savefig_dpi=300.0,
     )
     fig = plot_redundancy_error_series(
         pos_arr=pos_arr,
@@ -747,13 +712,8 @@ def main() -> None:
         error_arr=error_arr,
     )
 
-    if args.output_file is not None:
-        output_file = save_compact_figure(
-            fig,
-            args.output_file,
-            args.dpi,
-            args.pad_inches,
-        )
+    if args.output_dir is not None:
+        output_file = save_compact_figure(fig, args.output_dir)
         print(f"Saved compact figure to {output_file}")
 
     if not args.no_show:

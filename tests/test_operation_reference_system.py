@@ -138,9 +138,11 @@ def test_min_runtime_operations_kinematic_consistency(reference_context):
         )
         # 验证所有工况加速度均在合理物理边界内
         for a in acc_arr:
-            assert np.isclose(a, vehicle.max_acc, atol=1e-6) or \
-                   np.isclose(a, vehicle.max_dec, atol=1e-6) or \
-                   np.isclose(a, 0.0, atol=1e-6)
+            assert (
+                np.isclose(a, vehicle.max_acc, atol=1e-6)
+                or np.isclose(a, vehicle.max_dec, atol=1e-6)
+                or np.isclose(a, 0.0, atol=1e-6)
+            )
 
         # 积分运动学还原位移与速度
         cur_p = begin_pos

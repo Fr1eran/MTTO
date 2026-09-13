@@ -13,9 +13,13 @@ from model.track import TrackInfo, get_slope_scalar_numba
 from model.vehicle import VehicleInfo, calc_levi_deceleration_scalar_numba
 from rl.context_pool import Context, ContextPool
 from rl.context_sampler import ContextSampler, CurriculumDistributionState
-from rl.dspdl import DSPDLStatisticsHub
+from rl.dspl import DSPLStatisticsHub
 from rl.env_factory import make_env
-from rl.evaluation import evaluate_operational_policy_once, evaluate_policy_once
+from rl.evaluation import (
+    classify_arrival_status,
+    evaluate_operational_policy_once,
+    evaluate_policy_once,
+)
 from rl.mtto_env import MTTOEnv
 from rl.observation_builder import ObservationBuilder
 from rl.operational_state import OperationalState, OperationalTransition, ViolationCode
@@ -35,7 +39,7 @@ from utils.data_loader import (
 class _MTTOEnvOverrides(TypedDict, total=False):
     stepper: OperationalStepper | None
     context_sampler: ContextSampler | None
-    dspdl_statistics_hub: DSPDLStatisticsHub | None
+    dspl_statistics_hub: DSPLStatisticsHub | None
     curriculum_env_rank: int | None
     enable_trajectory_tracking: bool
     safety_truncation_buffer: SafetyTruncationBuffer | None
@@ -152,14 +156,14 @@ def test_punctuality_curriculum_statistics_exclude_shaping(mtto_env):
     source.reset()
     state = replace(source.state, redundant_operation_time_s=100)
     pool = ContextPool((Context(0, source.stepper.whole_distance_m, state),))
-    hub = DSPDLStatisticsHub(context_count=1, num_envs=1, gamma=source.gamma)
+    hub = DSPLStatisticsHub(context_count=1, num_envs=1, gamma=source.gamma)
     env = _build_env_like(
         source,
         reward_config=RewardConfig(enable_potential_punctuality=True),
         context_sampler=ContextSampler(
             context_pool=pool, initial_distribution=np.ones(1), seed=1
         ),
-        dspdl_statistics_hub=hub,
+        dspl_statistics_hub=hub,
         curriculum_env_rank=0,
     )
     env.reset()
@@ -298,13 +302,13 @@ def test_reset(mtto_env: MTTOEnv):
     np.testing.assert_allclose(obs[8], 0.0)  # current_slope
     np.testing.assert_allclose(
         obs[9],
-        mtto_env.observation_builder.get_lookahead_avg_slope(mtto_env.state.step_count)
+        mtto_env.observation_builder.get_lookahead_avg_slope(mtto_env.state.position_m)
         / mtto_env.vehicle.max_slope_capacity,
     )  # lookahead_avg_slope
     np.testing.assert_allclose(
         obs[10],
         mtto_env.observation_builder.get_lookahead_avg_upper_speed(
-            mtto_env.state.step_count
+            mtto_env.state.position_m
         )
         / mtto_env.vehicle.max_speed,
     )  # lookahead_avg_upper_speed
@@ -388,7 +392,7 @@ def test_factory_shares_critic_statistics(
     distribution_state = CurriculumDistributionState(
         context_count=1, initial_distribution=[1.0]
     )
-    hub = DSPDLStatisticsHub(context_count=1, num_envs=1, gamma=0.9)
+    hub = DSPLStatisticsHub(context_count=1, num_envs=1, gamma=0.9)
     kwargs = {
         "vehicle": mtto_env.vehicle,
         "track": mtto_env.track,
@@ -399,12 +403,12 @@ def test_factory_shares_critic_statistics(
         "stepper": mtto_env.stepper,
         "context_pool": pool,
         "curriculum_distribution_state": distribution_state,
-        "dspdl_statistics_hub": hub,
+        "dspl_statistics_hub": hub,
         "curriculum_env_rank": 0,
     }
 
     env = make_env(**kwargs)
-    assert env.dspdl_statistics_hub is hub
+    assert env.dspl_statistics_hub is hub
 
 
 class _ContextSamplerStub:
@@ -509,11 +513,14 @@ def test_mtto_env_does_not_expose_removed_compatibility_members(
         "VIOLATION_CODE_FAILED_STOP",
         "VIOLATION_CODE_SPEED_LOW",
         "VIOLATION_CODE_SPEED_HIGH",
-        "VIOLATION_CODE_STEP_LIMIT",
     ],
 )
 def test_mtto_env_does_not_expose_legacy_violation_constants(member: str) -> None:
     assert not hasattr(MTTOEnv, member)
+
+
+def test_mtto_env_render_metadata_only_declares_supported_modes() -> None:
+    assert MTTOEnv.metadata == {"render_modes": ["human", "rgb_array"]}
 
 
 def test_suggested_dec_uses_coasting_acc_outside_final_approach(mtto_env: MTTOEnv):
@@ -614,10 +621,10 @@ def test_lookahead_cache_matches_window_average(mtto_env: MTTOEnv) -> None:
     )
 
     np.testing.assert_allclose(
-        builder.get_lookahead_avg_slope(step_index), expected_slope
+        builder.get_lookahead_avg_slope(position_m), expected_slope
     )
     np.testing.assert_allclose(
-        builder.get_lookahead_avg_upper_speed(step_index), expected_upper_speed
+        builder.get_lookahead_avg_upper_speed(position_m), expected_upper_speed
     )
 
 
@@ -641,23 +648,20 @@ def test_lookahead_features_are_read_only_and_not_recomputed_during_build(
     assert builder._lookahead_avg_upper_speed_by_step.flags.writeable is False
 
 
-@pytest.mark.parametrize("step_index", (-1, 10**9))
-def test_lookahead_cache_rejects_out_of_range_index(
+@pytest.mark.parametrize("position_offset_m", (-1.0, 10**9))
+def test_lookahead_cache_rejects_out_of_route_position(
     mtto_env: MTTOEnv,
-    step_index: int,
+    position_offset_m: float,
 ) -> None:
-    with pytest.raises(IndexError, match="cached lookahead range"):
-        _ = mtto_env.observation_builder.get_lookahead_avg_slope(step_index)
+    position_m = (
+        mtto_env.train_service.start_position
+        + mtto_env.stepper.direction * position_offset_m
+    )
+    with pytest.raises(ValueError, match="outside the task route"):
+        _ = mtto_env.observation_builder.get_lookahead_avg_slope(position_m)
 
 
-def test_lookahead_cache_rejects_noninteger_index(mtto_env: MTTOEnv) -> None:
-    with pytest.raises(TypeError, match="step_index must be an integer"):
-        _ = mtto_env.observation_builder.get_lookahead_avg_upper_speed(  # type: ignore[arg-type]
-            1.5
-        )
-
-
-def test_reverse_direction_lookahead_cache_uses_step_index_grid() -> None:
+def test_reverse_direction_lookahead_cache_uses_position() -> None:
     vehicle = VehicleInfo(mass=100.0, numoftrainsets=1, length=10.0)
     track = TrackInfo(
         slopes=np.asarray([1.0, 3.0]),
@@ -694,8 +698,8 @@ def test_reverse_direction_lookahead_cache_uses_step_index_grid() -> None:
 
     assert builder._lookahead_avg_slope_by_step.size == expected_node_count
     assert upper_speed_query_count == expected_query_count
-    assert builder.get_lookahead_avg_upper_speed(0) == pytest.approx(9.0)
-    assert builder.get_lookahead_avg_slope(0) == pytest.approx(1.2)
+    assert builder.get_lookahead_avg_upper_speed(100.0) == pytest.approx(9.0)
+    assert builder.get_lookahead_avg_slope(100.0) == pytest.approx(1.2)
     assert upper_speed_query_count == expected_query_count
 
 
@@ -746,6 +750,12 @@ def test_step_info_excludes_reward_diagnostics(mtto_env: MTTOEnv):
         "terminated": terminated,
         "truncated": truncated,
     }
+    assert info["safety_margin_mps"] == pytest.approx(
+        min(
+            mtto_env.state.max_speed_mps - mtto_env.state.speed_mps,
+            mtto_env.state.speed_mps - mtto_env.state.min_speed_mps,
+        )
+    )
     assert "rewards" not in info
 
 
@@ -846,6 +856,7 @@ def test_step_failed_stop_is_truncated_with_fixed_penalty(
 ) -> None:
     _ = mtto_env.reset()
     _patch_step_dependencies_for_outcome_tests(mtto_env, monkeypatch, next_speed=0.0)
+    previous_state = mtto_env.state
 
     _, reward, terminated, truncated, info = mtto_env.step(
         np.asarray([0.0], dtype=np.float32)
@@ -853,7 +864,19 @@ def test_step_failed_stop_is_truncated_with_fixed_penalty(
 
     assert terminated is False
     assert truncated is True
-    assert reward == pytest.approx(-10.0)
+    current_state = mtto_env.state
+    expected_safety = mtto_env.reward_calculator.gamma * (
+        mtto_env.reward_calculator._potential_safety(
+            speed_mps=current_state.speed_mps,
+            min_speed_mps=current_state.min_speed_mps,
+            max_speed_mps=current_state.max_speed_mps,
+        )
+    ) - mtto_env.reward_calculator._potential_safety(
+        speed_mps=previous_state.speed_mps,
+        min_speed_mps=previous_state.min_speed_mps,
+        max_speed_mps=previous_state.max_speed_mps,
+    )
+    assert reward == pytest.approx(-10.0 + expected_safety)
     assert info["outcome"] == {"terminated": False, "truncated": True}
     assert "constraint" not in info
 
@@ -921,15 +944,142 @@ def test_step_success_is_terminated_without_truncation(
     assert "constraint" not in info
 
 
-def test_stepper_truncates_at_required_transition_budget(
+def _advance_with_terminal_state(
     mtto_env: MTTOEnv,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    stop_error_m: float,
+    speed_mps: float,
+) -> OperationalTransition:
+    stepper = mtto_env.stepper
+    monkeypatch.setattr(stepper.train_service, "max_stop_error", 0.3)
+    state = replace(stepper.reset(), speed_mps=max(speed_mps, 0.0))
+
+    monkeypatch.setattr(
+        "rl.operational_stepper.calc_transition_from_acc_scalar_numba",
+        lambda *_args: (speed_mps, stepper.step_distance_m, 1.0),
+    )
+    monkeypatch.setattr(stepper.ecc, "calc_energy", lambda **_kwargs: (0.0, 0.0))
+    monkeypatch.setattr(
+        stepper.sps,
+        "advance",
+        lambda *_args, **_kwargs: state.sps_state,
+    )
+
+    def _build_state(**kwargs: object) -> OperationalState:
+        return replace(
+            state,
+            position_m=float(kwargs["position_m"]),
+            speed_mps=speed_mps,
+            acceleration_mps2=float(kwargs["acceleration_mps2"]),
+            operation_time_s=float(kwargs["operation_time_s"]),
+            energy_consumption_kj=float(kwargs["energy_consumption_kj"]),
+            step_count=int(kwargs["step_count"]),
+            stop_error_m=stop_error_m,
+            min_speed_mps=-100.0,
+            max_speed_mps=100.0,
+            sps_state=kwargs["sps_state"],
+        )
+
+    monkeypatch.setattr(stepper, "build_state", _build_state)
+    return stepper.advance(state, 0.0)
+
+
+@pytest.mark.parametrize(
+    ("stop_error_m", "speed_mps"),
+    [(8.999, -0.01), (9.0, 0.0), (9.0, 0.01)],
+)
+def test_stepper_succeeds_within_relaxed_stop_tolerance(
+    mtto_env: MTTOEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    stop_error_m: float,
+    speed_mps: float,
+) -> None:
+    transition = _advance_with_terminal_state(
+        mtto_env,
+        monkeypatch,
+        stop_error_m=stop_error_m,
+        speed_mps=speed_mps,
+    )
+
+    assert transition.terminated is True
+    assert transition.truncated is False
+    assert transition.violation_code is ViolationCode.ONGOING
+
+
+def test_stepper_rejects_stop_outside_relaxed_tolerance(
+    mtto_env: MTTOEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transition = _advance_with_terminal_state(
+        mtto_env,
+        monkeypatch,
+        stop_error_m=9.001,
+        speed_mps=0.0,
+    )
+
+    assert transition.terminated is False
+    assert transition.truncated is True
+    assert transition.violation_code is ViolationCode.FAILED_STOP
+
+
+@pytest.mark.parametrize(
+    ("speed_mps", "expected_code"),
+    [(-100.001, ViolationCode.SPEED_LOW), (100.001, ViolationCode.SPEED_HIGH)],
+)
+def test_stepper_still_truncates_speed_bound_violations(
+    mtto_env: MTTOEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    speed_mps: float,
+    expected_code: ViolationCode,
+) -> None:
+    transition = _advance_with_terminal_state(
+        mtto_env,
+        monkeypatch,
+        stop_error_m=10.0,
+        speed_mps=speed_mps,
+    )
+
+    assert transition.terminated is False
+    assert transition.truncated is True
+    assert transition.violation_code is expected_code
+
+
+def test_relaxed_success_does_not_imply_precise_arrival(
+    mtto_env: MTTOEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transition = _advance_with_terminal_state(
+        mtto_env,
+        monkeypatch,
+        stop_error_m=1.0,
+        speed_mps=0.0,
+    )
+
+    success, precise_arrival, _ = classify_arrival_status(
+        stop_error_m=transition.next_state.stop_error_m,
+        time_error_s=0.0,
+        final_speed_mps=transition.next_state.speed_mps,
+        train_service=mtto_env.train_service,
+        terminated=transition.terminated,
+        truncated=transition.truncated,
+    )
+
+    assert success is True
+    assert precise_arrival is False
+
+
+@pytest.mark.parametrize("step_offset", [0, 1])
+def test_stepper_does_not_truncate_at_or_over_required_transition_budget(
+    mtto_env: MTTOEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    step_offset: int,
 ) -> None:
     stepper = mtto_env.stepper
     state = replace(
         stepper.reset(),
         speed_mps=10.0,
-        step_count=stepper.required_episode_steps - 1,
+        step_count=stepper.required_episode_steps - 1 + step_offset,
     )
 
     def _build_state(**kwargs: object):
@@ -947,13 +1097,15 @@ def test_stepper_truncates_at_required_transition_budget(
             stop_error_m=10.0,
         )
 
-    monkeypatch.setattr(stepper, "_build_state", _build_state)
+    monkeypatch.setattr(stepper, "build_state", _build_state)
     transition = stepper.advance(state, 0.0)
 
-    assert transition.next_state.step_count == stepper.required_episode_steps
+    assert transition.next_state.step_count == (
+        stepper.required_episode_steps + step_offset
+    )
     assert transition.terminated is False
-    assert transition.truncated is True
-    assert transition.violation_code is ViolationCode.STEP_LIMIT
+    assert transition.truncated is False
+    assert transition.violation_code is ViolationCode.ONGOING
 
 
 def test_stepper_allows_success_on_required_transition_budget(
@@ -981,13 +1133,71 @@ def test_stepper_allows_success_on_required_transition_budget(
             stop_error_m=0.0,
         )
 
-    monkeypatch.setattr(stepper, "_build_state", _build_state)
+    monkeypatch.setattr(stepper, "build_state", _build_state)
     transition = stepper.advance(state, 0.0)
 
     assert transition.next_state.step_count == stepper.required_episode_steps
     assert transition.terminated is True
     assert transition.truncated is False
     assert transition.violation_code is ViolationCode.ONGOING
+
+
+def test_stepper_shortens_final_step_and_rejects_nonzero_terminal_speed(
+    mtto_env: MTTOEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stepper = mtto_env.stepper
+    remaining_distance_m = stepper.step_distance_m / 2.0
+    state = replace(
+        stepper.reset(),
+        position_m=(
+            stepper.train_service.target_position
+            - stepper.direction * remaining_distance_m
+        ),
+        speed_mps=10.0,
+        stop_error_m=remaining_distance_m,
+    )
+
+    def _transition(
+        speed_mps: float, acceleration_mps2: float, distance_m: float
+    ) -> tuple[float, float, float]:
+        del speed_mps, acceleration_mps2
+        return 10.0, distance_m, distance_m / 10.0
+
+    def _build_state(**kwargs: object) -> OperationalState:
+        return replace(
+            state,
+            position_m=float(kwargs["position_m"]),
+            speed_mps=10.0,
+            operation_time_s=float(kwargs["operation_time_s"]),
+            energy_consumption_kj=float(kwargs["energy_consumption_kj"]),
+            step_count=int(kwargs["step_count"]),
+            stop_error_m=0.0,
+            min_speed_mps=0.0,
+            max_speed_mps=100.0,
+            sps_state=kwargs["sps_state"],
+        )
+
+    monkeypatch.setattr(
+        "rl.operational_stepper.calc_transition_from_acc_scalar_numba", _transition
+    )
+    monkeypatch.setattr(stepper.ecc, "calc_energy", lambda **_kwargs: (0.0, 0.0))
+    monkeypatch.setattr(
+        stepper.sps,
+        "advance",
+        lambda *_args, **_kwargs: state.sps_state,
+    )
+    monkeypatch.setattr(stepper, "build_state", _build_state)
+
+    transition = stepper.advance(state, 0.0)
+
+    assert transition.distance_m == pytest.approx(remaining_distance_m)
+    assert transition.next_state.position_m == pytest.approx(
+        stepper.train_service.target_position
+    )
+    assert transition.terminated is False
+    assert transition.truncated is True
+    assert transition.violation_code is ViolationCode.FAILED_STOP
 
 
 def test_stepper_custom_requested_distance_matches_default_at_maximum(

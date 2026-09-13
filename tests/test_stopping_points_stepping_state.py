@@ -28,9 +28,7 @@ def test_sps_advances_explicit_state_after_delay() -> None:
     assert requested.request_pending is True
     assert requested.request_started_at_s == 5.0
 
-    completed = sps.advance(
-        requested, position_m=0.0, speed_mps=2.0, time_s=7.0
-    )
+    completed = sps.advance(requested, position_m=0.0, speed_mps=2.0, time_s=7.0)
     assert completed.target_stopping_point_index == 0
     assert completed.request_pending is False
 

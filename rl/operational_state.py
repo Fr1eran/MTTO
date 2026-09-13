@@ -11,7 +11,6 @@ class ViolationCode(IntEnum):
     FAILED_STOP = 1
     SPEED_LOW = 2
     SPEED_HIGH = 3
-    STEP_LIMIT = 4
 
 
 @dataclass(frozen=True, slots=True)

@@ -17,28 +17,36 @@ from dp.experiment_utils import (
 )
 from model.common import ECC
 from rl.experiment_utils import (
-    RL_DEFAULT_SEARCH_DIR,
-    RL_TRAJECTORY_SOURCE_CHOICES,
-    apply_rl_curve_plot_style,
     load_rl_curve_artifact,
     render_rl_curve_on_axes,
     resolve_rl_curve_artifact,
 )
-from utils.plot_utils import apply_sci_figure_layout, save_sci_figure
-from utils.policy_selection import load_selected_policy_dir
+from utils.plot_utils import (
+    VIS_ACTUAL_PURPLE,
+    VIS_DP_BLACK,
+    VIS_PROPOSED_ORANGE,
+    apply_sci_curve_style,
+    apply_sci_figure_layout,
+    apply_sci_grid,
+    save_sci_figure,
+)
 from utils.scenario import build_safeguard_utility, build_scenario
 from utils.trajectory import (
     OptimizedCurveArtifact,
     compute_comfort_metrics_from_trajectory,
     compute_cumulative_energy_from_trajectory,
     compute_segment_accelerations,
+    recover_time_axis_from_trajectory,
 )
+from utils.type_utils import as_1d_float_array, as_float
 
+FIGURE_FILENAME = "dp_rl_actual_comparison.pdf"
 DEFAULT_REAL_CURVE_PATH = "output/real_operation/aligned_real_operation_curve.npz"
 _REAL_CURVE_REQUIRED_KEYS = ("position_m", "speed_mps", "time_s", "target_position_m")
 _TARGET_TIME_TOLERANCE_S = 1e-6
 _TARGET_POSITION_TOLERANCE_M = 1e-3
-_TRAJECTORY_COLORS = ("#333333", "#E69F00", "#7B61A8")
+_TRAJECTORY_COLORS = (VIS_DP_BLACK, VIS_PROPOSED_ORANGE, VIS_ACTUAL_PURPLE)
+_TRAJECTORY_LINESTYLES = ("-", "--", "-.")
 _TRAJECTORY_LEGEND_LABELS = (
     "DP optimization",
     "Proposed RL",
@@ -61,12 +69,6 @@ class ProfileMetrics:
     stop_error_m: float
     total_energy_kj: float
     comfort_tav: float
-
-
-def _metric_as_float(value: object) -> float | None:
-    if isinstance(value, (int, float, np.integer, np.floating)):
-        return float(value)
-    return None
 
 
 def _compute_segment_midpoints(pos_arr: np.ndarray | list[float]) -> np.ndarray:
@@ -93,13 +95,11 @@ def _build_ecc() -> ECC:
 def _resolve_curve_artifacts(
     *,
     dp_curve_dir: str,
-    rl_curve_dir: str,
-    trajectory_source: str,
+    rl_model_dir: str,
 ) -> tuple[OptimizedCurveArtifact, OptimizedCurveArtifact]:
     dp_artifact = resolve_dp_curve_artifact(curve_dir=dp_curve_dir)
     rl_artifact = resolve_rl_curve_artifact(
-        curve_dir=rl_curve_dir,
-        trajectory_source=trajectory_source,
+        curve_dir=rl_model_dir,
     )
     return dp_artifact, rl_artifact
 
@@ -107,8 +107,8 @@ def _resolve_curve_artifacts(
 def _resolve_target_schedule_time(
     *, dp_metrics: dict[str, object], rl_metrics: dict[str, object]
 ) -> float:
-    dp_target_time_s = _metric_as_float(dp_metrics.get("target_time_s"))
-    rl_target_time_s = _metric_as_float(rl_metrics.get("target_time_s"))
+    dp_target_time_s = as_float(dp_metrics.get("target_time_s"))
+    rl_target_time_s = as_float(rl_metrics.get("target_time_s"))
     if dp_target_time_s is not None and dp_target_time_s <= 0.0:
         raise ValueError("DP target_time_s must be positive")
     if rl_target_time_s is not None and rl_target_time_s <= 0.0:
@@ -129,25 +129,10 @@ def _resolve_target_schedule_time(
     )
 
 
-def _as_valid_trajectory_array(name: str, values: object) -> np.ndarray:
-    array = np.asarray(values, dtype=np.float64)
-    if array.ndim != 1 or array.size < 2:
-        raise ValueError(f"{name} must be a 1-D array with at least two samples")
-    if not np.all(np.isfinite(array)):
-        raise ValueError(f"{name} must contain only finite values")
-    return array
-
-
-def _build_uniform_time_array(*, total_time_s: float, sample_count: int) -> np.ndarray:
-    if total_time_s <= 0.0:
-        raise ValueError("total_time_s must be positive")
-    return np.linspace(0.0, total_time_s, sample_count, dtype=np.float64)
-
-
 def _resolve_target_position(
     *, metrics: dict[str, object], position_m: np.ndarray, source_name: str
 ) -> float:
-    target_position_m = _metric_as_float(metrics.get("target_position_m"))
+    target_position_m = as_float(metrics.get("target_position_m"))
     if target_position_m is None:
         raise ValueError(f"{source_name} metrics are missing target_position_m")
     if not np.isfinite(target_position_m):
@@ -172,9 +157,15 @@ def load_real_operation_profile(curve_path: str | Path) -> SpeedProfile:
                 "Real operation curve is missing required arrays: "
                 + ", ".join(missing_keys)
             )
-        position_m = _as_valid_trajectory_array("position_m", curve_data["position_m"])
-        speed_mps = _as_valid_trajectory_array("speed_mps", curve_data["speed_mps"])
-        time_s = _as_valid_trajectory_array("time_s", curve_data["time_s"])
+        position_m = as_1d_float_array(
+            curve_data["position_m"], "position_m", min_length=2, check_finite=True
+        )
+        speed_mps = as_1d_float_array(
+            curve_data["speed_mps"], "speed_mps", min_length=2, check_finite=True
+        )
+        time_s = as_1d_float_array(
+            curve_data["time_s"], "time_s", min_length=2, check_finite=True
+        )
         target_values = np.asarray(curve_data["target_position_m"], dtype=np.float64)
 
     if not (position_m.size == speed_mps.size == time_s.size):
@@ -292,7 +283,10 @@ def _finalize_comparison_figure(
         if legend is not None:
             legend.remove()
     handles = [
-        Line2D([0], [0], color=color, linewidth=1.8) for color in _TRAJECTORY_COLORS
+        Line2D([0], [0], color=color, linestyle=linestyle, linewidth=1.8)
+        for color, linestyle in zip(
+            _TRAJECTORY_COLORS, _TRAJECTORY_LINESTYLES, strict=True
+        )
     ]
     figure.legend(
         handles,
@@ -330,30 +324,19 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument("--dp-curve-dir", default=DP_DEFAULT_SEARCH_DIR)
-    parser.add_argument("--rl-curve-dir", default=RL_DEFAULT_SEARCH_DIR)
-    parser.add_argument(
-        "--selection-file",
-        type=Path,
-        default=None,
-        help="Use the final RL policy directory recorded by selected_policy.json.",
-    )
+    parser.add_argument("--rl-model-dir", required=True)
     parser.add_argument(
         "--real-curve",
         default=DEFAULT_REAL_CURVE_PATH,
         help="Aligned actual curve NPZ path.",
     )
-    parser.add_argument(
-        "--trajectory-source",
-        choices=RL_TRAJECTORY_SOURCE_CHOICES,
-        default="best",
-    )
     parser.add_argument("--no-safeguard", action="store_true")
     parser.add_argument("--factor", type=float, default=0.99)
     parser.add_argument(
-        "--output-file",
+        "--output-dir",
         type=Path,
         default=None,
-        help="Optional path to save the generated comparison figure.",
+        help=f"Optional figure directory; saves {FIGURE_FILENAME}.",
     )
     parser.add_argument(
         "--no-show",
@@ -363,25 +346,17 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _build_rl_curve_label(trajectory_source: str) -> str:
-    return (
-        "RL final trajectory" if trajectory_source == "final" else "RL best trajectory"
-    )
+def _build_rl_curve_label() -> str:
+    return "RL policy trajectory"
 
 
 def main() -> None:
     parser = _build_cli_parser()
     args = parser.parse_args()
     try:
-        rl_curve_dir = (
-            str(load_selected_policy_dir(args.selection_file))
-            if args.selection_file is not None
-            else args.rl_curve_dir
-        )
         dp_artifact, rl_artifact = _resolve_curve_artifacts(
             dp_curve_dir=args.dp_curve_dir,
-            rl_curve_dir=rl_curve_dir,
-            trajectory_source=args.trajectory_source,
+            rl_model_dir=args.rl_model_dir,
         )
         dp_pos, dp_speed, dp_time, dp_metadata = load_dp_curve_artifact(dp_artifact)
         rl_pos, rl_speed, rl_metadata = load_rl_curve_artifact(rl_artifact)
@@ -390,22 +365,32 @@ def main() -> None:
         )
         dp_profile = SpeedProfile(
             label="DP optimization",
-            position_m=_as_valid_trajectory_array("DP position", dp_pos),
-            speed_mps=_as_valid_trajectory_array("DP speed", dp_speed),
-            time_s=_as_valid_trajectory_array("DP cumulative time", dp_time),
+            position_m=as_1d_float_array(
+                dp_pos, "DP position", min_length=2, check_finite=True
+            ),
+            speed_mps=as_1d_float_array(
+                dp_speed, "DP speed", min_length=2, check_finite=True
+            ),
+            time_s=as_1d_float_array(
+                dp_time, "DP cumulative time", min_length=2, check_finite=True
+            ),
             target_position_m=_resolve_target_position(
                 metrics=dp_metadata, position_m=dp_pos, source_name="DP"
             ),
         )
-        rl_total_time_s = _metric_as_float(rl_metadata.get("total_time_s"))
-        if rl_total_time_s is None:
-            raise ValueError("RL metrics are missing total_time_s")
+        rl_position_m = as_1d_float_array(
+            rl_pos, "RL position", min_length=2, check_finite=True
+        )
+        rl_speed_mps = as_1d_float_array(
+            rl_speed, "RL speed", min_length=2, check_finite=True
+        )
         rl_profile = SpeedProfile(
             label="Proposed RL",
-            position_m=_as_valid_trajectory_array("RL position", rl_pos),
-            speed_mps=_as_valid_trajectory_array("RL speed", rl_speed),
-            time_s=_build_uniform_time_array(
-                total_time_s=rl_total_time_s, sample_count=len(rl_pos)
+            position_m=rl_position_m,
+            speed_mps=rl_speed_mps,
+            time_s=recover_time_axis_from_trajectory(
+                rl_position_m,
+                rl_speed_mps,
             ),
             target_position_m=_resolve_target_position(
                 metrics=rl_metadata, position_m=rl_pos, source_name="RL"
@@ -441,7 +426,7 @@ def main() -> None:
     print("\nTrajectory comparison metrics:")
     print(format_comparison_table(metrics_by_label))
 
-    apply_rl_curve_plot_style()
+    apply_sci_curve_style()
     fig, (ax_speed, ax_acc, ax_energy) = _create_comparison_axes()
     safeguard = None if args.no_safeguard else build_safeguard_utility(args.factor)
     render_dp_curve_on_axes(
@@ -463,13 +448,32 @@ def main() -> None:
         no_safeguard=True,
         factor=args.factor,
         curve_color=_TRAJECTORY_COLORS[1],
-        curve_label=_build_rl_curve_label(args.trajectory_source),
+        curve_label=_build_rl_curve_label(),
         safeguard=safeguard,
+        render_endpoints=False,
     )
+    for line, linestyle in zip(
+        (
+            next(
+                line
+                for line in ax_speed.lines
+                if line.get_label() == "DP optimized speed curve"
+            ),
+            next(
+                line
+                for line in ax_speed.lines
+                if line.get_label() == _build_rl_curve_label()
+            ),
+        ),
+        _TRAJECTORY_LINESTYLES[:2],
+        strict=True,
+    ):
+        line.set_linestyle(linestyle)
     ax_speed.plot(
         real_profile.position_m,
         real_profile.speed_mps * 3.6,
         color=_TRAJECTORY_COLORS[2],
+        linestyle=_TRAJECTORY_LINESTYLES[2],
         linewidth=1.5,
         label="Actual operation speed curve",
     )
@@ -484,11 +488,14 @@ def main() -> None:
         fontweight="bold",
     )
 
-    for profile, color in zip(profiles, _TRAJECTORY_COLORS, strict=True):
+    for profile, color, linestyle in zip(
+        profiles, _TRAJECTORY_COLORS, _TRAJECTORY_LINESTYLES, strict=True
+    ):
         ax_acc.plot(
             _compute_segment_midpoints(profile.position_m),
             compute_segment_accelerations(profile.position_m, profile.speed_mps),
             color=color,
+            linestyle=linestyle,
             linewidth=1.5,
             label=f"{profile.label} acceleration",
         )
@@ -503,9 +510,11 @@ def main() -> None:
         fontsize=10,
         fontweight="bold",
     )
-    ax_acc.grid(True, alpha=0.3)
+    apply_sci_grid(ax_acc)
 
-    for profile, color in zip(profiles, _TRAJECTORY_COLORS, strict=True):
+    for profile, color, linestyle in zip(
+        profiles, _TRAJECTORY_COLORS, _TRAJECTORY_LINESTYLES, strict=True
+    ):
         cumulative_energy = compute_cumulative_energy_from_trajectory(
             pos_arr=profile.position_m,
             speed_arr=profile.speed_mps,
@@ -515,13 +524,14 @@ def main() -> None:
         )
         ax_energy.plot(
             profile.position_m,
-            cumulative_energy,
+            cumulative_energy / 1_000_000.0,
             color=color,
+            linestyle=linestyle,
             linewidth=1.5,
             label=f"{profile.label} cumulative energy",
         )
     ax_energy.set_xlabel("Position (m)")
-    ax_energy.set_ylabel("Cumulative energy (kJ)")
+    ax_energy.set_ylabel("Cumulative energy (GJ)")
     ax_energy.text(
         0.02,
         0.92,
@@ -530,12 +540,12 @@ def main() -> None:
         fontsize=10,
         fontweight="bold",
     )
-    ax_energy.grid(True, alpha=0.3)
+    apply_sci_grid(ax_energy)
     _finalize_comparison_figure(fig, (ax_speed, ax_acc, ax_energy))
 
-    if args.output_file is not None:
-        save_sci_figure(fig, args.output_file)
-        print(f"Saved comparison figure to: {args.output_file}")
+    if args.output_dir is not None:
+        saved_path = save_sci_figure(fig, args.output_dir / FIGURE_FILENAME)
+        print(f"Saved comparison figure to: {saved_path}")
 
     if not args.no_show:
         plt.show()

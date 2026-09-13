@@ -1,10 +1,10 @@
-# 离散型 Self-Paced Deep Reinforcement Learning：理论推导与求解算法（学位论文草稿）
+# Discrete Self-Paced Learning（DSPL）：理论推导与求解算法（学位论文草稿）
 
 ## 4.3 离散型自步课程学习机制
 
 为避免深度强化学习策略直接在完整复杂任务空间中训练而产生探索效率低、收敛不稳定等问题，本文将课程学习建模为有限任务池上的概率分布优化问题。该机制在每轮策略改进后更新任务采样分布：一方面优先选择当前策略能够有效处理的任务，另一方面逐步向目标任务分布迁移，并通过 KL 信赖域限制相邻课程之间的变化幅度。
 
-该机制以 Actor–Critic 类深度强化学习算法为内层学习器。PPO 是本文采用的具体实例；SAC、TD3 和 DDPG 等能够提供当前策略价值估计的算法也可按相同外层课程更新规则进行耦合。需要强调的是，离散型 SPDL 的理论对象是任务采样分布，而非某一特定策略优化算法。
+该机制以 Actor–Critic 类深度强化学习算法为内层学习器。PPO 是本文采用的具体实例；SAC、TD3 和 DDPG 等能够提供当前策略价值估计的算法也可按相同外层课程更新规则进行耦合。需要强调的是，离散自步学习（Discrete Self-Paced Learning, DSPL）的理论对象是任务采样分布，而非某一特定策略优化算法。
 
 ### 4.3.1 任务池构建与课程优化模型
 
@@ -30,6 +30,8 @@ s_0=s_i,\pi_\theta
 $$
 
 对于高速磁浮列车速度曲线优化问题，$c_i$ 可由候选起始状态、目标停车条件或其他可控工况参数构成；$g(c_i)$ 必须包含策略与评论家计算所需的全部状态量，而不能只包含其中的任务标签。
+
+本文按任务池数量直接均匀划分有向线路。令线路长度为 $L=|x_T-x_0|$、运行方向为 $d=\operatorname{sign}(x_T-x_0)$，则第 $i$ 个 context 的位置为 $x_i=x_0+d(iL/N)$，其中 $i=0,\ldots,N-1$。因此任务池包含完整任务起点而排除终点，且不依赖 RL 控制步长网格。来源轨迹须满足起终点、起终速度、运行方向、计划时间、车辆加速度、安全速度边界及停车点步进约束；随后在 $x_i$ 上线性插值速度与累计时间，按所在来源分段计算加速度，并独立回放停车点状态与累计能耗。最后通过同一公共状态构造器 $g(c_i)$ 生成策略和评论家所需的完整状态，context 内的回合步数从 0 重新计数。
 
 课程分布、目标任务分布及上一轮课程分布分别记为
 
@@ -59,7 +61,7 @@ $$
 
 后续推导只需保证任务池有限，且每个任务在 $q$ 和 $\mu$ 中都具有正概率，即 $q_i>0$、$\mu_i>0$。直观而言，这意味着不能把任何任务彻底排除在训练或目标分布之外；实现中可通过加入很小的平滑概率满足这一要求。概率单纯形本身只要求 $p_i\geq0$，无需预先额外规定 $p_i>0$。
 
-#### （2）离散型 SPDL 课程优化目标
+#### （2）离散自步学习（DSPL）课程优化目标
 
 给定课程分布 $p$，策略在该课程下的性能可写为
 
@@ -67,7 +69,7 @@ $$
 J(\theta,p)=\sum_{i=1}^Np_iV^{\pi_\theta}(c_i).
 $$
 
-第 $k$ 轮中，内层 Actor–Critic 学习器先将策略参数和评论家参数由 $(\theta_k,\phi_k)$ 更新为 $(\theta_{k+1},\phi_{k+1})$；随后固定更新后的策略，仅优化课程分布。设 $a_i$ 为上下文 $c_i$ 的任务价值估计，则离散型 SPDL 的课程更新定义为
+第 $k$ 轮中，内层 Actor–Critic 学习器先将策略参数和评论家参数由 $(\theta_k,\phi_k)$ 更新为 $(\theta_{k+1},\phi_{k+1})$；随后固定更新后的策略，仅优化课程分布。设 $a_i$ 为上下文 $c_i$ 的任务价值估计，则 DSPL 的课程更新定义为
 
 $$
 \begin{aligned}
@@ -121,28 +123,36 @@ a_i^{\mathrm{IS}}
 \tag{4}
 $$
 
-从而有 $\widehat J_{k+1}^{\mathrm{IS}}(p)=\sum_{i=1}^Np_ia_i^{\mathrm{IS}}$。若 $\widehat V^{(m)}$ 在给定 $c^{(m)}$ 时对更新后策略的真实价值无偏，且其构造不与同一采样过程产生额外依赖，则式（3）在期望意义下无偏。
-
-然而，$M$ 有限而任务池可能较大。若 $c_i$ 未在本轮出现，则式（4）会机械地给出 $a_i^{\mathrm{IS}}=0$；将该随机系数代入指数型课程更新，会不合理地下调未采样任务的概率。此外，利用同一批 PPO 数据训练评论家后再评价该批样本，并不能自动满足上述无偏条件。因此，式（3）--（4）仅用于说明 on-policy 经验目标的来源，而不作为本文的实际课程价值估计器。
-
-本文在每轮内层学习器更新后，对完整有限任务池进行批量评论家估值，并定义
+从而有 $\widehat J_{k+1}^{\mathrm{IS}}(p)=\sum_{i=1}^Np_ia_i^{\mathrm{IS}}$。设在当前课程更新周期内，各任务上下文的实际采样频次为 $n_i = \sum_{m=1}^M \mathbb{I}\{c^{(m)}=c_i\}$，总采样次数为 $M = \sum_{i=1}^N n_i$。对于被采样的上下文集合 $\mathcal{S}_{\mathrm{sampled}} = \{i \mid n_i > 0\}$，其归一化经验采样重要性权重定义为：
 
 $$
-a_i
-=\widehat V_{\phi_{k+1}}^{\pi_{\theta_{k+1}}}\bigl(g(c_i)\bigr),
-\qquad i=1,\ldots,N.
+w_i = \frac{n_i}{M \cdot q_i}, \qquad \forall i \in \mathcal{S}_{\mathrm{sampled}}.
+$$
+
+对被采样的上下文，利用最新更新的评论家网络对其初始状态进行推断估计 $\widehat V(s_i) = \widehat V_{\phi_{k+1}}(s_i) + \Phi_{\mathrm{punct}}(s_i)$；对于本周期未被采样的上下文，直接赋予系数 0。因此，实际送入对偶求解器的经验课程价值系数向量构造为：
+
+$$
+a_i = \begin{cases}
+w_i \cdot \widehat V(s_i) = \dfrac{n_i}{M q_i} \left(\widehat V_{\phi_{k+1}}(g(c_i)) + \Phi_{\mathrm{punct}}(g(c_i))\right), & \text{若 } n_i > 0, \\[8pt]
+0, & \text{若 } n_i = 0.
+\end{cases}
 \tag{5}
 $$
 
-式（5）是实际用于式（2）的 $a_i$ 构造。它保留了课程目标对 $p$ 的线性结构，同时避免了未采样上下文的零估计和由此导致的高方差。全部 $N$ 个任务价值可通过一次或若干次批量前向计算获得。
+式（5）构成了本文实际运行的**基于重要性采样加权（Importance-Weighted Samples）**的课程估计器。针对经典重要性采样在任务池规模较大、单轮样本量有限时容易出现的“未采样任务系数赋零”与“权重方差膨胀”问题，本文在系统架构中设计了三重稳健保障机制：
 
-不同 Actor–Critic 算法中，式（5）的计算接口有所不同：
+1. **基于采样预算的任务池容量控制（Budget-Scaled Context Bounding）**：
+   为避免有限采样预算下上下文过多导致采样极度稀疏，系统根据单次策略更新的 Rollout 步数、单回合最大步数以及课程更新间隔，显式施加任务池容量上限约束：
+   $$N_{\max} = \left\lfloor \frac{\text{rollout\_steps\_per\_update}}{\text{max\_episode\_steps}} \times \text{update\_interval} \times 2 \right\rfloor$$
+   该预算约束保证了在每个课程更新周期内，候选任务能够获得充足的采样覆盖。
 
-- 对具有状态价值评论家的 PPO、A2C 等算法，$a_i=\widehat V_{\phi_{k+1}}(s_i)$；
-- 对具有随机策略动作价值评论家的算法，$a_i=\mathbb E_{a\sim\pi_{\theta_{k+1}}(\cdot\mid s_i)}[\widehat Q_{\phi_{k+1}}(s_i,a)]$；
-- 对具有确定性策略动作价值评论家的算法，$a_i=\widehat Q_{\phi_{k+1}}(s_i,\pi_{\theta_{k+1}}(s_i))$。
+2. **有效样本量（Effective Sample Size, ESS）实时监控**：
+   在每次计算重要性权重后，系统在线计算有效样本量及权重极值比：
+   $$\mathrm{ESS} = \frac{\left(\sum_{i \in \mathcal{S}_{\mathrm{sampled}}} w_i\right)^2}{\sum_{i \in \mathcal{S}_{\mathrm{sampled}}} w_i^2}, \qquad \text{ESS\_ratio} = \frac{\mathrm{ESS}}{|\mathcal{S}_{\mathrm{sampled}}|}$$
+   实时评估重要性权重的分布退化风险，并记录权重最大值与均值比值 $\frac{\max w_i}{\bar w}$，确保权重分布平稳。
 
-使用式（5）时需要注意：不同任务的 $a_i$ 必须处于同一回报尺度，才能比较“哪个任务对当前策略更容易”。若内层算法使用熵正则、奖励归一化或其他附加项，则课程价值宜采用去除附加项后的评价回报，或用独立评估轨迹进行校准；不应直接比较不同尺度的评论家输出。
+3. **相邻课程 KL 信赖域约束保护**：
+   式（2）中的 $D_{\mathrm{KL}}(p \parallel q) \le \varepsilon$ 信赖域硬约束从数学上严格限制了任意任务采样概率的单步下调与跃迁幅度，使得未采样任务不会因单次 $a_i = 0$ 而发生概率坍塌，保障了任务调度过程的平滑连续性。
 
 #### （4）自步调系数
 
@@ -344,12 +354,12 @@ $$
 
 ### 4.3.3 与 Actor–Critic 类深度强化学习算法的协同训练流程
 
-离散型 SPDL 将任务采样分布作为外层变量，将策略优化与评论家训练交由内层 Actor–Critic 学习器完成。为保持方法的通用性，将内层更新抽象为 `UpdateActorCritic`，将任务价值估计抽象为 `EvaluateContextValues`。前者可由 PPO、SAC、TD3 或 DDPG 等算法实例化，后者按照式（5）输出完整任务池的价值向量。
+DSPL 将任务采样分布作为外层变量，将策略优化与评论家训练交由内层 Actor–Critic 学习器完成。为保持方法的通用性，将内层更新抽象为 `UpdateActorCritic`，将任务价值估计抽象为 `EstimateContextCoefficients`。前者可由 PPO、SAC、TD3 或 DDPG 等算法实例化，后者按照式（5）基于实际采样子集计算重要性加权系数 $a_i$。
 
-在本文配套项目中，理论方法仍称为离散型 SPDL，代码实现统一采用 `DSPDL` 前缀以避免与连续上下文实现混淆。实现对象依次为：`ReferenceTrajectory` 表示 DP 参考轨迹，`ContextPoolBuilder` 负责在父进程中采样并重建参考状态，`ContextPool` 保存有限任务池，`Context` 表示单个参考状态上下文，`ContextSampler` 持有当前版本的采样分布；每个训练环境外挂 `DSPDLEpisodeAccumulator` 统计当前版本数据，`DSPDLCallback` 按课程更新周期汇总统计并评估完整任务池，`DSPDLDistributionSolver` 执行下述 KL 约束分布求解，全部超参数集中在 `DSPDLConfig` 中。
+配套项目统一使用 `DSPL` 前缀。`ReferenceTrajectory` 表示 DP 参考轨迹，`ContextPoolBuilder` 负责来源校验、轨迹状态回放和 context 状态构造，`ContextPool` 保存有限任务池，`Context` 表示单个参考状态上下文，`ContextSampler` 持有当前版本的采样分布；`DSPLStatisticsHub` 汇总各训练环境的课程统计，`DSPLCallback` 按课程更新周期在采样子集上估计重要性加权系数，`DSPLDistributionSolver` 执行 KL 约束分布求解。
 
 ```text
-Algorithm 1: Discrete-SPDL-Distribution-Update
+Algorithm 1: Discrete-DSPL-Distribution-Update
 Input: a[1:N], q[1:N], mu[1:N], alpha, epsilon, tol, max_iter
 Require: q_i > 0, mu_i > 0, alpha >= 0, epsilon > 0
 
@@ -401,9 +411,9 @@ return Candidate(beta_high)
 ```
 
 ```text
-Algorithm 2: Actor-Critic Discrete-SPDL Training
+Algorithm 2: Actor-Critic Discrete-DSPL Training
 Input: p^(0), mu, epsilon, K0, zeta, ActorCriticUpdate,
-       EvaluateContextValues, optional replay buffer B
+       EstimateContextCoefficients, optional replay buffer B
 Require: p^(0) and mu have full support
 
 Initialize policy parameters theta_0 and critic parameters phi_0
@@ -412,15 +422,15 @@ for k = 0,...,K-1 do
     D_k <- Collect online transitions by sampling task contexts from q
     B <- Append(B, D_k), when an experience replay buffer is used
     (theta_(k+1), phi_(k+1)) <- ActorCriticUpdate(theta_k, phi_k, D_k, B)
-    a[1:N] <- EvaluateContextValues(C, theta_(k+1), phi_(k+1))
+    a[1:N] <- EstimateContextCoefficients(snapshot_k, q, theta_(k+1), phi_(k+1))
     alpha_k <- SelfPacedCoefficient(q, mu, K0, zeta, k)
-    p^(k+1) <- Discrete-SPDL-Distribution-Update(a, q, mu, alpha_k, epsilon)
+    p^(k+1) <- Discrete-DSPL-Distribution-Update(a, q, mu, alpha_k, epsilon)
 return pi_(theta_K)
 ```
 
-对 PPO 等 on-policy 算法，`ActorCriticUpdate` 仅使用当前轮在线数据 $D_k$，因而式（3）的上下文采样推导直接适用。对 SAC、TD3、DDPG 等 off-policy 算法，在线新经验仍应按当前课程 $q$ 采集，但内层更新可从回放池 $B$ 的历史混合数据中抽样；此时必须在经验中保存任务或上下文标识。无论采用何种内层算法，课程更新均应使用当前策略与当前评论家对全部 $c_i$ 的估值，而不应以回放池内各任务的出现次数或历史平均回报直接构造 $a_i$。
+对 PPO 等 on-policy 算法，`ActorCriticUpdate` 仅使用当前轮在线数据 $D_k$，因而式（3）--（5）的上下文重要性采样推导直接适用。对 SAC、TD3、DDPG 等 off-policy 算法，在线新经验仍应按当前课程 $q$ 采集，但内层更新可从回放池 $B$ 的历史混合数据中抽样；此时必须在经验中保存任务或上下文标识。
 
-对给定的 $a$，一次候选分布计算和一次 KL 计算的复杂度均为 $O(N)$。若二分法迭代 $T$ 次，则课程分布更新复杂度为 $O(TN)$；按式（5）批量估值全部任务的复杂度为 $O(N)$ 次价值前向计算。因此，外层课程更新总复杂度为 $O((T+1)N)$，不包括内层 Actor–Critic 策略更新开销。
+对给定的重要性加权系数向量 $a$，一次候选分布计算和一次 KL 计算的复杂度均为 $O(N)$。若二分法迭代 $T$ 次，则课程分布更新复杂度为 $O(TN)$；按式（5）仅对本周期采样子集执行价值前向计算，复杂度为 $O(|\mathcal{S}_{\mathrm{sampled}}|)$ 次前向传播（其中 $|\mathcal{S}_{\mathrm{sampled}}| \le N$）。因此，外层课程更新总复杂度为 $O(TN + |\mathcal{S}_{\mathrm{sampled}}|)$，不包括内层 Actor–Critic 策略更新开销。
 
 实际训练中还应设置最小采样概率、KL 半径、价值估计更新周期和二分容差，并以独立评估轨迹检查课程价值排序是否与实际任务性能一致。该机制保证的是给定价值估计和 KL 信赖域下的课程分布最优性；它不保证评论家无偏、策略全局最优、训练过程安全或有限任务池外的泛化性能。
 

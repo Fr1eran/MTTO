@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import gymnasium as gym
+import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 from stable_baselines3.common.vec_env import VecEnv
@@ -14,6 +15,8 @@ def test_evaluate_rl_cli_accepts_dry_run_and_shared_args() -> None:
     parser = build_arg_parser()
     args = parser.parse_args(
         [
+            "--model-dir",
+            "output/model",
             "--dry-run",
             "--schedule-time-s",
             "430.0",
@@ -35,12 +38,16 @@ def test_evaluate_rl_cli_accepts_dry_run_and_shared_args() -> None:
 
 def test_evaluate_rl_cli_rejects_removed_punctuality_dense_reward_option() -> None:
     with pytest.raises(SystemExit):
-        _ = build_arg_parser().parse_args(["--plot-punctuality-dense-reward"])
+        _ = build_arg_parser().parse_args(
+            ["--model-dir", "output/model", "--plot-punctuality-dense-reward"]
+        )
 
 
 def test_evaluate_rl_cli_rejects_survival_reward_scale() -> None:
     with pytest.raises(SystemExit):
-        _ = build_arg_parser().parse_args(["--survival-reward-scale", "50"])
+        _ = build_arg_parser().parse_args(
+            ["--model-dir", "output/model", "--survival-reward-scale", "50"]
+        )
 
 
 def test_build_initial_rollout_series_reads_reset_environment_state() -> None:
@@ -70,6 +77,26 @@ def test_build_initial_rollout_series_reads_reset_environment_state() -> None:
     assert speed_seq == [4.5]
     assert operation_time_seq == [0.0]
     assert redundant_operation_time_seq == [26.0]
+
+
+def test_operation_time_plot_applies_project_sans_serif_style(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(plt, "show", lambda: None)
+
+    with plt.rc_context():
+        evaluate_rl.plot_operation_time_series([0.0, 1.0], [2.0, 1.0], 1.0)
+
+        assert plt.rcParams["font.family"][0] in {
+            "Arial",
+            "Liberation Sans",
+            "Nimbus Sans",
+            "DejaVu Sans",
+        }
+        assert plt.rcParams["mathtext.fontset"] == "custom"
+        assert plt.rcParams["mathtext.fallback"] == "stixsans"
+
+    plt.close("all")
 
 
 def _run_args(**overrides: object) -> SimpleNamespace:
@@ -113,7 +140,7 @@ def test_run_evaluation_delegates_saved_rollout_to_canonical_evaluator(
     fake_env = _FakeEnv()
     fake_result = SimpleNamespace()
     calls: dict[str, object] = {}
-    model_path = tmp_path / "run" / "policy_final.zip"
+    model_path = tmp_path / "run" / "policy.zip"
     model_path.parent.mkdir()
     model_path.touch()
 
@@ -163,19 +190,18 @@ def test_run_evaluation_delegates_saved_rollout_to_canonical_evaluator(
     assert trace is None
     assert fake_env.closed is True
     assert calls["model_load"] == (
-        str(tmp_path / "run" / "policy_final.zip"),
+        str(tmp_path / "run" / "policy.zip"),
         "cpu",
     )
     env_kwargs = cast(dict[str, object], calls["env_kwargs"])
     assert env_kwargs["enable_trajectory_tracking"] is True
     save_kwargs = cast(dict[str, object], calls["save_kwargs"])
-    assert save_kwargs["output_path"] == str(
-        tmp_path / "artifacts" / "final_trajectory.npz"
-    )
+    assert save_kwargs["output_path"] == str(tmp_path / "artifacts" / "trajectory.npz")
     assert save_kwargs["deterministic"] is True
-    assert cast(dict[str, object], save_kwargs["metadata"])[
-        "evaluation_load_dir"
-    ] == str(tmp_path / "run")
+    assert (
+        cast(dict[str, object], save_kwargs["metadata"])["evaluation_model_dir"]
+        == "../run"
+    )
 
 
 def test_run_evaluation_without_saving_uses_canonical_rollout(
@@ -185,7 +211,7 @@ def test_run_evaluation_without_saving_uses_canonical_rollout(
     fake_env = _FakeEnv()
     fake_result = SimpleNamespace()
     calls: dict[str, object] = {}
-    model_path = tmp_path / "run" / "policy_final.zip"
+    model_path = tmp_path / "run" / "policy.zip"
     model_path.parent.mkdir()
     model_path.touch()
 
@@ -277,7 +303,7 @@ def test_run_evaluation_configures_single_env_video_wrapper(
     fake_env = _FakeEnv()
     fake_result = SimpleNamespace()
     calls: dict[str, object] = {}
-    model_path = tmp_path / "run" / "policy_final.zip"
+    model_path = tmp_path / "run" / "policy.zip"
     model_path.parent.mkdir()
     model_path.touch()
 

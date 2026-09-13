@@ -11,6 +11,7 @@ from numpy.typing import ArrayLike, NDArray
 from utils.curve_geometry import cal_regions, pad_2curve_lists
 from utils.curve_plot import concatenate_curves_with_NaN, draw_regions
 from utils.indexing_utils import get_interval_index, get_interval_index_scalar_numba
+from utils.plot_utils import VIS_DANGER_CORAL, VIS_HARD_LIMIT_RED, VIS_SAFE_BLUE
 
 ScalarNumeric = float | np.floating
 
@@ -944,7 +945,7 @@ class SafeGuardUtility:
                     self.speed_limit_intervals[:-1],
                     self.speed_limits * speed_scale,
                     where="post",
-                    color="red",
+                    color=VIS_HARD_LIMIT_RED,
                     linestyle="dashdot",
                     label="Track speed limit",
                     linewidth=1.5,
@@ -955,7 +956,7 @@ class SafeGuardUtility:
                     above_curves_list=self._min_curves_part_list_padded,
                     below_curves_list=self._max_curves_part_list_padded,
                     label="Dangerous speed region",
-                    color="red",
+                    color=VIS_DANGER_CORAL,
                     alpha=0.5,
                 )
             elif layer == "min_curve_part":
@@ -965,7 +966,7 @@ class SafeGuardUtility:
                     speed=self._min_curves_parts_speed_con,
                     speed_scale=speed_scale,
                     label="Minimum speed curve",
-                    color="blue",
+                    color=VIS_SAFE_BLUE,
                     linewidth=1.2,
                 )
             elif layer == "max_curve_part":
@@ -975,7 +976,7 @@ class SafeGuardUtility:
                     speed=self._max_curves_parts_speed_con,
                     speed_scale=speed_scale,
                     label="Maximum speed curve",
-                    color="red",
+                    color=VIS_HARD_LIMIT_RED,
                     linewidth=1.2,
                 )
             elif layer == "levi_curve_full":
@@ -985,7 +986,7 @@ class SafeGuardUtility:
                     speed=self._levi_curves_speed_con,
                     speed_scale=speed_scale,
                     label="Safe levitation curve",
-                    color="blue",
+                    color=VIS_SAFE_BLUE,
                     linestyle="dashed",
                     linewidth=1.2,
                 )
@@ -996,7 +997,7 @@ class SafeGuardUtility:
                     speed=self._brake_curves_speed_con,
                     speed_scale=speed_scale,
                     label="Safe braking curve",
-                    color="red",
+                    color=VIS_HARD_LIMIT_RED,
                     linestyle="dashed",
                     linewidth=1.2,
                 )
@@ -1007,7 +1008,7 @@ class SafeGuardUtility:
                     speed=self._min_curves_speed_con,
                     speed_scale=speed_scale,
                     label="Minimum speed curve",
-                    color="blue",
+                    color=VIS_SAFE_BLUE,
                     linewidth=1.2,
                 )
             elif layer == "max_curve_full":
@@ -1017,7 +1018,7 @@ class SafeGuardUtility:
                     speed=self._max_curves_speed_con,
                     speed_scale=speed_scale,
                     label="Maximum speed curve",
-                    color="red",
+                    color=VIS_HARD_LIMIT_RED,
                     linewidth=1.2,
                 )
             elif layer == "idp_points":

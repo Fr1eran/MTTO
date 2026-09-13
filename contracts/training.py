@@ -9,7 +9,7 @@ from .common import JSONMapping, MappingView, from_dict, to_dict
 
 CurriculumProfileName = Literal[
     "none",
-    "dspdl",
+    "dspl",
 ]
 
 
@@ -22,6 +22,8 @@ class RewardConfigSnapshot(MappingView):
     enable_potential_punctuality: bool = False
     punctuality_potential_scale: float = 5.0
     punctuality_potential_sigma_s: float = 20.0
+    potential_transition_formula: str | None = None
+    terminal_next_potential: str | None = None
 
     def to_mapping(self) -> JSONMapping:
         return to_dict(self)
@@ -32,7 +34,7 @@ class CurriculumMetadata(MappingView):
     profile_name: CurriculumProfileName
     enabled: bool
     value_source: str | None
-    dspdl_protocol: JSONMapping | None
+    dspl_protocol: JSONMapping | None
     reference_curve_dir: str | None
     reference_curve_artifact_path: str | None
     reference_curve_metrics_path: str | None
@@ -49,13 +51,15 @@ class CurriculumMetadata(MappingView):
 
 @dataclass(frozen=True, slots=True)
 class TrainingBudget(MappingView):
-    mode: Literal["completed_episodes"]
+    mode: Literal["completed_episodes", "environment_steps"]
     training_episodes: int | None = field(metadata={"minimum": 0})
     effective_training_episodes: int | None = field(metadata={"minimum": 0})
     max_episode_steps: int | None = field(metadata={"minimum": 0})
     derived_total_timesteps: int = field(metadata={"minimum": 0})
+    training_rollouts: int | None = field(default=None, metadata={"minimum": 0})
     actual_completed_episodes: int | None = field(default=None, metadata={"minimum": 0})
     actual_training_timesteps: int | None = field(default=None, metadata={"minimum": 0})
+    actual_training_rollouts: int | None = field(default=None, metadata={"minimum": 0})
     target_reached: bool | None = None
     stop_reason: str | None = None
 
@@ -93,6 +97,7 @@ class RunMetadata(MappingView):
     enable_safety_truncation_histogram: bool | None = None
     safety_truncation_bin_size_m: float | None = None
     evaluation_interval_rollouts: int | None = None
+    evaluation_interval_episodes: int | None = None
     evaluation_deterministic: bool | None = None
     evaluation_history_path: str | None = None
     num_envs: int | None = None
@@ -109,7 +114,27 @@ class RunMetadata(MappingView):
     extensions: JSONMapping = field(default_factory=dict)
 
     ARTIFACT_TYPE: ClassVar[str] = "rl_training_metadata"
-    SCHEMA_VERSION: ClassVar[int] = 2
+    SCHEMA_VERSION: ClassVar[int] = 5
+
+    def __post_init__(self) -> None:
+        if (
+            self.evaluation_interval_rollouts is not None
+            and self.evaluation_interval_episodes is not None
+        ):
+            raise ValueError(
+                "evaluation_interval_rollouts and evaluation_interval_episodes "
+                "are mutually exclusive"
+            )
+        if (
+            self.evaluation_interval_rollouts is not None
+            and self.evaluation_interval_rollouts <= 0
+        ):
+            raise ValueError("evaluation_interval_rollouts must be positive")
+        if (
+            self.evaluation_interval_episodes is not None
+            and self.evaluation_interval_episodes <= 0
+        ):
+            raise ValueError("evaluation_interval_episodes must be positive")
 
     def to_mapping(self) -> JSONMapping:
         return to_dict(

@@ -91,30 +91,6 @@ def _load_curve_arrays(
     return pos_arr, speed_arr, cum_time_arr
 
 
-def load_optimized_curve_and_metrics(
-    npz_path: str,
-    metrics_path: str | None = None,
-    *,
-    dtype: np.dtype | type[np.floating] = np.float32,
-    use_metrics_cache: bool = True,
-) -> tuple[
-    NDArray[np.floating],
-    NDArray[np.floating],
-    dict[str, Any],
-]:
-    """Load optimized trajectory arrays and metrics payload."""
-    pos_arr, speed_arr, _ = _load_curve_arrays(
-        npz_path,
-        dtype=dtype,
-        include_cum_time=False,
-    )
-    metrics = _load_metrics(
-        _resolve_metrics_path(npz_path, metrics_path),
-        use_metrics_cache=use_metrics_cache,
-    )
-    return pos_arr, speed_arr, metrics
-
-
 def load_curve_with_cum_time_and_metrics(
     npz_path: str,
     metrics_path: str | None = None,

@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,7 +16,6 @@ from utils.ablation import (
     build_manifest_payload,
     canonical_artifacts_complete,
     execute_matrix,
-    materialize_canonical_artifacts,
     smooth_episode_curve,
     training_budget_complete,
 )
@@ -76,7 +75,29 @@ def test_completed_episode_budget_requires_target_and_actual_count() -> None:
     )
 
 
-def test_exact_alignment_and_trailing_smoothing_preserve_axes() -> None:
+def test_environment_step_budget_requires_steps_and_rollouts() -> None:
+    budget = TrainingBudget(
+        mode="environment_steps",
+        training_episodes=None,
+        effective_training_episodes=None,
+        max_episode_steps=972,
+        derived_total_timesteps=4_096_000,
+        training_rollouts=500,
+        actual_completed_episodes=6_000,
+        actual_training_timesteps=4_096_000,
+        actual_training_rollouts=500,
+        target_reached=True,
+        stop_reason="environment_step_target",
+    )
+    assert training_budget_complete(
+        budget,
+        expected_training_timesteps=4_096_000,
+        expected_training_rollouts=500,
+    )
+    assert not training_budget_complete(replace(budget, actual_training_rollouts=499))
+
+
+def test_exact_alignment_and_episode_smoothing_preserve_full_axes() -> None:
     aligned = align_exact(
         np.asarray([1.0, 2.0, 3.0]),
         np.asarray([1.0, 3.0]),
@@ -90,8 +111,37 @@ def test_exact_alignment_and_trailing_smoothing_preserve_axes() -> None:
         np.asarray([1.0, 3.0, 5.0]),
         window=2,
     )
-    np.testing.assert_allclose(episodes, [2.0, 3.0])
+    np.testing.assert_allclose(episodes, [1.0, 2.0, 3.0])
+    np.testing.assert_allclose(values, [1.0, 2.0, 4.0])
+
+
+def test_episode_smoothing_expands_when_window_exceeds_history() -> None:
+    episodes, values = smooth_episode_curve(
+        np.asarray([1.0, 2.0, 3.0]),
+        np.asarray([1.0, 3.0, 8.0]),
+        window=100,
+    )
+
+    np.testing.assert_allclose(episodes, [1.0, 2.0, 3.0])
+    np.testing.assert_allclose(values, [1.0, 2.0, 4.0])
+
+
+def test_episode_smoothing_handles_identity_empty_and_invalid_windows() -> None:
+    episodes, values = smooth_episode_curve(
+        np.asarray([1.0, 2.0]), np.asarray([2.0, 4.0]), window=1
+    )
+    np.testing.assert_allclose(episodes, [1.0, 2.0])
     np.testing.assert_allclose(values, [2.0, 4.0])
+
+    empty_episodes, empty_values = smooth_episode_curve(
+        np.asarray([], dtype=np.float64),
+        np.asarray([], dtype=np.float64),
+        window=100,
+    )
+    assert empty_episodes.size == 0
+    assert empty_values.size == 0
+    with pytest.raises(ValueError, match="episode_smoothing_window"):
+        smooth_episode_curve(np.asarray([1.0]), np.asarray([1.0]), window=0)
 
 
 def test_manifest_is_atomic_and_rejects_old_shape(tmp_path: Path) -> None:
@@ -99,7 +149,10 @@ def test_manifest_is_atomic_and_rejects_old_shape(tmp_path: Path) -> None:
     payload = _payload(("run-1",))
     store.save_atomic(payload)
 
-    assert store.load() == payload
+    loaded = store.load()
+    assert loaded.matrix_id == payload.matrix_id
+    assert loaded.runs == payload.runs
+    assert loaded.output_root == str(tmp_path)
     assert not (tmp_path / ".manifest.json.tmp").exists()
     with pytest.raises(ManifestSchemaError):
         store.save_atomic({"manifest_version": 1, "runs": []})
@@ -118,62 +171,79 @@ def test_manifest_archive_preserves_existing_file(tmp_path: Path) -> None:
     assert archive_path.read_bytes() == original
 
 
-def test_canonical_artifact_check_does_not_materialize_legacy_files(
+def test_relative_manifest_artifacts_follow_a_moved_output_root(
     tmp_path: Path,
 ) -> None:
+    original = tmp_path / "original"
+    payload = build_manifest_payload(
+        matrix_id="test",
+        matrix_config={"variants": ["a"], "seeds": [1]},
+        training_signature={"episodes": 1},
+        runs=[
+            {
+                "run_id": "run-1",
+                "variant_id": "a",
+                "variant": {"name": "a"},
+                "repeat_index": 0,
+                "seed": 1,
+                "artifacts": {"policy_final": "runs/run-1/final/policy.zip"},
+                "status": "pending",
+            }
+        ],
+    )
+    store = ManifestStore(original, matrix_id="test")
+    store.save_atomic(payload)
+    moved = tmp_path / "moved"
+    original.rename(moved)
+
+    loaded = ManifestStore(moved, matrix_id="test").load()
+
+    assert loaded.output_root == str(moved)
+    assert loaded.runs[0].artifacts.path_for("policy_final") == str(
+        moved / "runs/run-1/final/policy.zip"
+    )
+    assert loaded.runs[0].artifacts.to_mapping()["policy_final"] == (
+        "runs/run-1/final/policy.zip"
+    )
+
+
+def test_best_enabled_layout_requires_complete_best_artifacts(tmp_path: Path) -> None:
     output_dir = tmp_path / "run"
     final_dir = output_dir / "final"
     spec = SimpleNamespace(
         output_dir=str(output_dir),
         final_output_dir=str(final_dir),
-        best_eval_output_dir=str(output_dir / "best_rollouts"),
-        enable_best_evaluation_artifacts=False,
-        evaluation_history_path=str(final_dir / "evaluation_history.npz"),
-        final_model_save_path=str(final_dir / "final_model.zip"),
-        run_metadata_path=str(output_dir / "run_metadata.json"),
-        reward_diagnostics_path=str(final_dir / "reward_diagnostics.npz"),
+        best_eval_output_dir=str(output_dir / "best"),
+        enable_best_evaluation_artifacts=True,
+        evaluation_history_path=str(final_dir / "evaluations.npz"),
+        final_model_save_path=str(final_dir / "policy.zip"),
+        run_metadata_path=str(output_dir / "metadata.json"),
+        reward_diagnostics_path=str(final_dir / "episodes.npz"),
     )
     layout = ArtifactLayout.from_training_spec(spec)
-    for source in layout.legacy_paths.values():
-        if source is not None:
-            source.parent.mkdir(parents=True, exist_ok=True)
-            source.write_bytes(b"legacy")
-
+    required = (
+        layout.policy_final,
+        layout.metadata,
+        layout.episodes,
+        layout.evaluations,
+        layout.trajectory_final,
+        layout.metrics_final,
+    )
+    for path in required:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"artifact")
     assert not canonical_artifacts_complete(layout)
-    assert not layout.policy_final.exists()
 
-    materialize_canonical_artifacts(layout)
-    layout.trajectory_final.parent.mkdir(parents=True, exist_ok=True)
-    layout.trajectory_final.write_bytes(b"trajectory")
+    for path in (
+        layout.policy_best,
+        layout.metadata_best,
+        layout.trajectory_best,
+        layout.metrics_best,
+    ):
+        assert path is not None
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"best")
     assert canonical_artifacts_complete(layout)
-
-
-def test_artifact_layout_materializes_legacy_training_outputs(tmp_path: Path) -> None:
-    output_dir = tmp_path / "run"
-    final_dir = output_dir / "final"
-    legacy_evaluations = final_dir / "evaluation_history.npz"
-    spec = SimpleNamespace(
-        output_dir=str(output_dir),
-        final_output_dir=str(final_dir),
-        best_eval_output_dir=str(output_dir / "best_rollouts"),
-        enable_best_evaluation_artifacts=False,
-        evaluation_history_path=str(legacy_evaluations),
-        final_model_save_path=str(final_dir / "final_model.zip"),
-        run_metadata_path=str(output_dir / "run_metadata.json"),
-        reward_diagnostics_path=str(final_dir / "reward_diagnostics.npz"),
-    )
-    layout = ArtifactLayout.from_training_spec(spec)
-    for source in layout.legacy_paths.values():
-        if source is not None:
-            source.parent.mkdir(parents=True, exist_ok=True)
-            source.write_bytes(b"artifact")
-
-    materialize_canonical_artifacts(layout)
-
-    assert layout.policy_final.is_file()
-    assert layout.metadata.is_file()
-    assert layout.episodes.is_file()
-    assert layout.evaluations.is_file()
     assert layout.metrics_final.is_file()
 
 

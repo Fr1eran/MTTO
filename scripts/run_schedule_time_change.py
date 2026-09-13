@@ -6,7 +6,7 @@ import os
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -16,6 +16,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 
 from contracts.environment import EpisodeInfo, EpisodeOutcome
 from contracts.evaluation import EvaluationArtifact
+from contracts.training import RunMetadata
 from model.ocs import SafeGuardUtility
 from rl.env_factory import make_env
 from rl.evaluation import (
@@ -28,40 +29,79 @@ from rl.evaluation import (
 from rl.experiment_utils import (
     DEFAULT_DEVICE,
     RL_FINAL_MODEL_FILENAME,
-    apply_rl_curve_plot_style,
     load_run_metadata,
     reward_config_parameters,
-    resolve_reward_preset,
-    reward_preset_names,
 )
 from rl.reward_calculator import (
     PUNCTUALITY_POTENTIAL_SCALE,
     PUNCTUALITY_POTENTIAL_SIGMA_S,
     RewardConfig,
 )
+from scripts.run_method_ablation import (
+    DEFAULT_SEEDS as METHOD_ABLATION_SEEDS,
+    METHOD_ABLATION_MANIFEST_FILENAME,
+    validate_method_ablation_manifest,
+)
+from utils.ablation import ManifestStore
 from utils.io_utils import (
     format_float_token,
     load_evaluation_artifact,
 )
-from utils.plot_utils import apply_sci_figure_layout, save_sci_figure
-from utils.policy_selection import load_selected_policy_dir
+from utils.plot_utils import (
+    VIS_ACTUAL_PURPLE,
+    VIS_DP_BLACK,
+    VIS_HARD_LIMIT_RED,
+    VIS_PROPOSED_ORANGE,
+    apply_sci_curve_style,
+    apply_sci_figure_layout,
+    apply_sci_grid,
+    save_sci_figure,
+)
 from utils.scenario import build_safeguard_utility, build_scenario
 
-DEFAULT_EVALUATE_LOAD_DIR = "output/optimal/rl/final/"
-DEFAULT_OUTPUT_DIR = "output/optimal/rl/schedule_time_change_eval/"
+DEFAULT_OUTPUT_DIR = "output/paper_experiment/04_schedule_time_change"
 SUMMARY_FILENAME = "schedule_time_change_summary.json"
-DEFAULT_FIGURE_FILENAME = "schedule_time_change_comparison.png"
+DEFAULT_FIGURE_FILENAME = "schedule_time_change_comparison.pdf"
 DEFAULT_DELTA_TIMES_S = (0.0, 30.0, -30.0)
+DEFAULT_CHANGE_DISTANCE_M = 8_000.0
+FULL_METHOD_VARIANT_ID = "ppo_pprs_dspl"
+CANDIDATE_SOURCES: tuple[Literal["best", "final"], ...] = ("best", "final")
+SUMMARY_ARTIFACT_TYPE = "schedule_time_change_selection"
+SUMMARY_SCHEMA_VERSION = 1
+RANK_KEY_FIELDS = (
+    "feasible_case_count",
+    "safe_case_count",
+    "success_case_count",
+    "precise_case_count",
+    "punctual_case_count",
+    "negative_safety_violation_count",
+    "minimum_safety_margin_mps",
+    "negative_max_stop_error_m",
+    "negative_max_abs_time_error_s",
+    "negative_mean_stop_error_m",
+    "negative_mean_abs_time_error_s",
+    "negative_mean_energy_j",
+)
 
 
 def _reward_config_from_metadata(snapshot: object) -> RewardConfig:
     values = asdict(snapshot)  # type: ignore[arg-type]
     scale = float(values.pop("punctuality_potential_scale"))
     sigma_s = float(values.pop("punctuality_potential_sigma_s"))
+    potential_formula = values.pop("potential_transition_formula", None)
+    terminal_next_potential = values.pop("terminal_next_potential", None)
     if scale != PUNCTUALITY_POTENTIAL_SCALE or sigma_s != PUNCTUALITY_POTENTIAL_SIGMA_S:
         raise ValueError(
             "selected policy uses retired punctuality-potential parameters; "
-            "the fixed DSPDL protocol requires K=5 and sigma=20 s"
+            "the fixed DSPL protocol requires K=5 and sigma=20 s"
+        )
+    if potential_formula not in {None, "gamma_phi_next_minus_phi_previous"}:
+        raise ValueError(
+            "selected policy uses an unsupported potential-shaping transition formula"
+        )
+    if terminal_next_potential not in {None, "observed_next_state"}:
+        raise ValueError(
+            "selected policy uses an unsupported terminal potential policy"
         )
     return RewardConfig(**values)
 
@@ -91,6 +131,11 @@ class ScheduleChangeRunResult:
     final_position_m: float
     final_speed_mps: float
     episode_steps: int
+    min_safety_margin_mps: float
+    mean_safety_margin_mps: float
+    safety_violation_count: int
+    safe: bool
+    feasible: bool
     schedule_change_triggered: bool
     schedule_change_step: int | None
     schedule_change_position_m: float | None
@@ -104,11 +149,31 @@ class ScheduleChangeRunResult:
         return payload
 
 
+@dataclass(frozen=True)
+class ScheduleChangeCandidate:
+    candidate_id: str
+    run_id: str
+    seed: int
+    source: Literal["best", "final"]
+    model_dir: Path
+    metadata: RunMetadata
+
+
+@dataclass(frozen=True)
+class CandidateEvaluation:
+    candidate: ScheduleChangeCandidate
+    candidate_dir: Path
+    results: tuple[ScheduleChangeRunResult, ...]
+    rank_key: tuple[float, ...]
+
+
 def parse_delta_times(value: str) -> tuple[float, ...]:
     parts = [part.strip() for part in value.split(",")]
     deltas = tuple(float(part) for part in parts if part)
     if not deltas:
         raise argparse.ArgumentTypeError("delta list must not be empty")
+    if len(deltas) != len(set(deltas)):
+        raise argparse.ArgumentTypeError("delta list must not contain duplicates")
     return deltas
 
 
@@ -160,27 +225,86 @@ def should_trigger_schedule_change(
 
 def resolve_schedule_change_experiment_dir(load_dir: str | os.PathLike[str]) -> Path:
     root = Path(load_dir)
-    direct_summary = root / SUMMARY_FILENAME
-    if direct_summary.is_file():
-        return root
-
-    if not root.is_dir():
-        raise FileNotFoundError(f"Schedule-change result directory not found: {root}")
-
-    candidates = sorted(
-        (
-            path
-            for path in root.iterdir()
-            if path.is_dir() and (path / SUMMARY_FILENAME).is_file()
-        ),
-        key=lambda path: (path.stat().st_mtime, str(path)),
-        reverse=True,
-    )
-    if not candidates:
+    if not (root / SUMMARY_FILENAME).is_file():
         raise FileNotFoundError(
-            f"Could not find '{SUMMARY_FILENAME}' in '{root}' or its subdirectories"
+            f"Could not find '{SUMMARY_FILENAME}' directly in '{root}'"
         )
-    return candidates[0]
+    return root
+
+
+def load_schedule_change_candidates(
+    method_ablation_dir: str | os.PathLike[str],
+) -> tuple[ScheduleChangeCandidate, ...]:
+    root = Path(method_ablation_dir)
+    manifest = ManifestStore(
+        root,
+        matrix_id="method",
+        filename=METHOD_ABLATION_MANIFEST_FILENAME,
+    ).load()
+    validate_method_ablation_manifest(manifest)
+
+    candidates: list[ScheduleChangeCandidate] = []
+    for run in manifest.runs:
+        if run.variant_id != FULL_METHOD_VARIANT_ID:
+            continue
+        for source in CANDIDATE_SOURCES:
+            policy_path = Path(run.artifacts.path_for(f"policy_{source}"))
+            metadata_path = Path(
+                run.artifacts.path_for(
+                    "metadata_best" if source == "best" else "metadata"
+                )
+            )
+            if not policy_path.is_file():
+                raise FileNotFoundError(f"Candidate policy not found: {policy_path}")
+            if not metadata_path.is_file():
+                raise FileNotFoundError(
+                    f"Candidate metadata not found: {metadata_path}"
+                )
+            model_dir = policy_path.parent
+            candidates.append(
+                ScheduleChangeCandidate(
+                    candidate_id=f"{run.run_id}__{source}",
+                    run_id=run.run_id,
+                    seed=run.seed,
+                    source=source,
+                    model_dir=model_dir,
+                    metadata=load_run_metadata(model_dir),
+                )
+            )
+
+    expected_count = len(METHOD_ABLATION_SEEDS) * len(CANDIDATE_SOURCES)
+    if len(candidates) != expected_count:
+        raise ValueError(
+            f"schedule-time evaluation requires {expected_count} complete-method "
+            f"best/final candidates; found {len(candidates)}"
+        )
+    _validate_candidate_metadata(candidates)
+    return tuple(candidates)
+
+
+def _candidate_protocol(metadata: RunMetadata) -> tuple[object, ...]:
+    reward_config = _reward_config_from_metadata(metadata.reward_config)
+    return (
+        metadata.schedule_time_s,
+        metadata.step_distance,
+        metadata.reward_discount,
+        metadata.reward_preset_name,
+        reward_config_parameters(reward_config),
+    )
+
+
+def _validate_candidate_metadata(
+    candidates: list[ScheduleChangeCandidate],
+) -> None:
+    expected = _candidate_protocol(candidates[0].metadata)
+    if candidates[0].metadata.reward_preset_name != "basic_safety_punctuality":
+        raise ValueError("complete-method candidates must use the PPRS reward preset")
+    for candidate in candidates[1:]:
+        if _candidate_protocol(candidate.metadata) != expected:
+            raise ValueError(
+                "schedule-time candidates use inconsistent training metadata: "
+                f"{candidate.candidate_id}"
+            )
 
 
 def load_schedule_change_summary(
@@ -190,7 +314,30 @@ def load_schedule_change_summary(
     if not summary_path.is_file():
         raise FileNotFoundError(f"Summary file not found: {summary_path}")
     with summary_path.open("r", encoding="utf-8") as file_obj:
-        return json.load(file_obj)
+        payload = json.load(file_obj)
+    if payload.get("artifact_type") != SUMMARY_ARTIFACT_TYPE:
+        raise ValueError("Schedule-change summary has an unsupported artifact type")
+    if payload.get("schema_version") != SUMMARY_SCHEMA_VERSION:
+        raise ValueError("Schedule-change summary has an unsupported schema version")
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list) or len(candidates) != len(
+        METHOD_ABLATION_SEEDS
+    ) * len(CANDIDATE_SOURCES):
+        raise ValueError("Schedule-change summary must contain all ten candidates")
+    if any(not isinstance(candidate, dict) for candidate in candidates):
+        raise ValueError("Schedule-change summary candidates must be JSON objects")
+    if payload.get("candidate_count") != len(candidates):
+        raise ValueError("Schedule-change summary candidate count is inconsistent")
+    selected = payload.get("selected")
+    selected_id = selected.get("candidate_id") if isinstance(selected, dict) else None
+    first_candidate = candidates[0]
+    assert isinstance(first_candidate, dict)
+    if selected_id != first_candidate.get("candidate_id"):
+        raise ValueError("Schedule-change summary selected candidate is inconsistent")
+    cases = payload.get("cases")
+    if not isinstance(cases, list) or not cases:
+        raise ValueError("Schedule-change summary must contain selected cases")
+    return payload
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -204,49 +351,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Run batch evaluation with an in-run schedule-time change.",
     )
     _ = evaluate_parser.add_argument(
-        "--load-dir",
-        type=str,
-        default=DEFAULT_EVALUATE_LOAD_DIR,
-        help="PPO model directory.",
-    )
-    _ = evaluate_parser.add_argument(
-        "--selection-file",
+        "--method-ablation-dir",
         type=Path,
-        default=None,
-        help="Use the final policy directory recorded by selected_policy.json.",
+        required=True,
+        help="Completed method-ablation result directory containing manifest.json.",
     )
     _ = evaluate_parser.add_argument(
         "--output-dir",
-        type=str,
-        default=DEFAULT_OUTPUT_DIR,
-        help="Root directory for schedule-time-change evaluation outputs.",
-    )
-    _ = evaluate_parser.add_argument(
-        "--reward-discount",
-        type=float,
-        default=None,
-        help="Evaluation environment discount factor.",
-    )
-    _ = evaluate_parser.add_argument(
-        "--schedule-time-s",
-        type=float,
-        default=None,
-        help="Initial schedule time; falls back to run metadata.",
-    )
-    _ = evaluate_parser.add_argument(
-        "--step-distance",
-        "--max-step-distance",
-        dest="step_distance",
-        type=float,
-        default=None,
-        help="Maximum simulation step distance.",
-    )
-    _ = evaluate_parser.add_argument(
-        "--reward-preset",
-        type=str,
-        choices=tuple(reward_preset_names()),
-        default=None,
-        help="Reward preset; falls back to run metadata.",
+        type=Path,
+        required=True,
+        help="New YYYYMMDD_NN result directory; existing paths are rejected.",
     )
     _ = evaluate_parser.add_argument(
         "--device",
@@ -263,7 +377,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     _ = evaluate_parser.add_argument(
         "--change-distance-m",
         type=float,
-        default=800.0,
+        default=DEFAULT_CHANGE_DISTANCE_M,
         help="Track position at which the schedule time changes.",
     )
     _ = evaluate_parser.add_argument(
@@ -285,9 +399,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     _ = show_parser.add_argument(
         "--load-dir",
-        type=str,
-        default=DEFAULT_OUTPUT_DIR,
-        help="Saved result directory or root containing timestamped result dirs.",
+        type=Path,
+        required=True,
+        help="Exact YYYYMMDD_NN result directory containing the root summary.",
     )
     _ = show_parser.add_argument(
         "--save-figure",
@@ -300,12 +414,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Display the comparison figure window.",
-    )
-    _ = show_parser.add_argument(
-        "--figure-name",
-        type=str,
-        default=DEFAULT_FIGURE_FILENAME,
-        help="Figure filename used when --save-figure is enabled.",
     )
     _ = show_parser.add_argument(
         "--factor",
@@ -322,12 +430,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _make_experiment_dir(output_dir: str | os.PathLike[str]) -> Path:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    experiment_dir = Path(output_dir) / timestamp
-    suffix = 1
-    while experiment_dir.exists():
-        experiment_dir = Path(output_dir) / f"{timestamp}_{suffix:02d}"
-        suffix += 1
+    experiment_dir = Path(output_dir)
     experiment_dir.mkdir(parents=True, exist_ok=False)
     return experiment_dir
 
@@ -377,6 +480,8 @@ def _run_one_case(
     target_position_m = float(train_service.target_position)
     trajectory_position_seq: list[float] = [start_position_m]
     trajectory_speed_seq: list[float] = [0.0]
+    safety_margins: list[float] = []
+    safety_violation_positions_m: list[float] = []
 
     obs = venv_eval.reset()
     episode_over = False
@@ -433,6 +538,10 @@ def _run_one_case(
             current_speed_mps = episode_info.speed_mps
             trajectory_position_seq.append(current_position_m)
             trajectory_speed_seq.append(current_speed_mps)
+            safety_margin_mps = float(last_info["safety_margin_mps"])
+            safety_margins.append(safety_margin_mps)
+            if safety_margin_mps < 0.0:
+                safety_violation_positions_m.append(current_position_m)
 
             if (not episode_over) and should_trigger_schedule_change(
                 previous_position_m=previous_position_m,
@@ -486,6 +595,8 @@ def _run_one_case(
     comfort_tav = float(episode_info.comfort_tav)
     comfort_er_pct = float(episode_info.comfort_er_pct)
     comfort_rms = float(episode_info.comfort_rms)
+    min_safety_margin_mps = min(safety_margins) if safety_margins else 0.0
+    mean_safety_margin_mps = float(np.mean(safety_margins)) if safety_margins else 0.0
 
     evaluation_result = PolicyEvaluationResult(
         success=success,
@@ -511,14 +622,21 @@ def _run_one_case(
         episode_steps=episode_steps,
         trajectory_pos_m=np.asarray(trajectory_position_seq, dtype=np.float32),
         trajectory_speed_mps=np.asarray(trajectory_speed_seq, dtype=np.float32),
+        min_safety_margin_mps=min_safety_margin_mps,
+        mean_safety_margin_mps=mean_safety_margin_mps,
+        safety_violation_positions_m=np.asarray(
+            safety_violation_positions_m, dtype=np.float32
+        ),
     )
-    npz_path = experiment_dir / f"trajectory_{case.token}.npz"
+    case_dir = experiment_dir / case.token
+    case_dir.mkdir(parents=True, exist_ok=False)
+    npz_path = case_dir / "trajectory.npz"
     saved_npz_path, saved_json_path = save_policy_evaluation_curve(
         evaluation_result,
         str(npz_path),
         extra_metrics={
             "trajectory_source": "schedule_time_change",
-            "evaluation_load_dir": load_dir,
+            "evaluation_model_dir": os.path.relpath(load_dir, case_dir),
             "reward_preset_name": reward_preset_name,
             "initial_schedule_time_s": float(schedule_time_s),
             "final_schedule_time_s": target_time_s,
@@ -534,6 +652,7 @@ def _run_one_case(
             "reward_discount": float(reward_discount),
             "deterministic": bool(deterministic),
         },
+        metrics_path=str(case_dir / "metrics.json"),
     )
 
     return ScheduleChangeRunResult(
@@ -553,160 +672,301 @@ def _run_one_case(
         final_position_m=final_position_m,
         final_speed_mps=final_speed_mps,
         episode_steps=episode_steps,
+        min_safety_margin_mps=evaluation_result.min_safety_margin_mps,
+        mean_safety_margin_mps=evaluation_result.mean_safety_margin_mps,
+        safety_violation_count=evaluation_result.safety_violation_count,
+        safe=evaluation_result.safe,
+        feasible=evaluation_result.feasible,
         schedule_change_triggered=bool(change_triggered),
         schedule_change_step=change_step,
         schedule_change_position_m=change_position_m,
         schedule_change_speed_mps=change_speed_mps,
-        trajectory_npz=os.path.basename(saved_npz_path),
-        trajectory_metrics_json=os.path.basename(saved_json_path),
+        trajectory_npz=os.path.relpath(saved_npz_path, experiment_dir),
+        trajectory_metrics_json=os.path.relpath(saved_json_path, experiment_dir),
     )
 
 
-def _write_summary(
+def summarize_candidate_results(
+    results: tuple[ScheduleChangeRunResult, ...],
+) -> dict[str, float | int]:
+    if not results:
+        raise ValueError("candidate evaluation must contain at least one case")
+    return {
+        "case_count": len(results),
+        "feasible_case_count": sum(result.feasible for result in results),
+        "safe_case_count": sum(result.safe for result in results),
+        "success_case_count": sum(result.success for result in results),
+        "precise_case_count": sum(result.precise_arrival for result in results),
+        "punctual_case_count": sum(result.punctual_arrival for result in results),
+        "safety_violation_count": sum(
+            result.safety_violation_count for result in results
+        ),
+        "minimum_safety_margin_mps": min(
+            result.min_safety_margin_mps for result in results
+        ),
+        "max_stop_error_m": max(result.stop_error_m for result in results),
+        "max_abs_time_error_s": max(result.abs_time_error_s for result in results),
+        "mean_stop_error_m": float(
+            np.mean([result.stop_error_m for result in results])
+        ),
+        "mean_abs_time_error_s": float(
+            np.mean([result.abs_time_error_s for result in results])
+        ),
+        "mean_energy_j": float(np.mean([result.total_energy_j for result in results])),
+        "mean_energy_kj": float(
+            np.mean([result.total_energy_kj for result in results])
+        ),
+        "mean_total_reward": float(
+            np.mean([result.total_reward for result in results])
+        ),
+    }
+
+
+def build_candidate_rank_key(
+    results: tuple[ScheduleChangeRunResult, ...],
+) -> tuple[float, ...]:
+    aggregate = summarize_candidate_results(results)
+    return (
+        float(aggregate["feasible_case_count"]),
+        float(aggregate["safe_case_count"]),
+        float(aggregate["success_case_count"]),
+        float(aggregate["precise_case_count"]),
+        float(aggregate["punctual_case_count"]),
+        -float(aggregate["safety_violation_count"]),
+        float(aggregate["minimum_safety_margin_mps"]),
+        -float(aggregate["max_stop_error_m"]),
+        -float(aggregate["max_abs_time_error_s"]),
+        -float(aggregate["mean_stop_error_m"]),
+        -float(aggregate["mean_abs_time_error_s"]),
+        -float(aggregate["mean_energy_j"]),
+    )
+
+
+def rank_candidate_evaluations(
+    evaluations: list[CandidateEvaluation],
+) -> list[CandidateEvaluation]:
+    ordered = sorted(
+        evaluations,
+        key=lambda item: (
+            item.candidate.source != "best",
+            item.candidate.run_id,
+        ),
+    )
+    ordered.sort(key=lambda item: item.rank_key, reverse=True)
+    return ordered
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> Path:
+    with path.open("w", encoding="utf-8") as file_obj:
+        json.dump(payload, file_obj, ensure_ascii=False, indent=2)
+        file_obj.write("\n")
+    return path
+
+
+def _candidate_summary(
+    evaluation: CandidateEvaluation,
     *,
     experiment_dir: Path,
-    load_dir: str,
-    output_root: str,
-    schedule_time_s: float,
-    reward_preset_name: str,
-    reward_discount: float,
-    step_distance: float,
     deterministic: bool,
     change_distance_m: float,
-    results: list[ScheduleChangeRunResult],
-    reward_config: RewardConfig,
-    selection_file: str | None,
-) -> Path:
-    summary = {
+) -> dict[str, Any]:
+    candidate = evaluation.candidate
+    metadata = candidate.metadata
+    return {
+        "artifact_type": "schedule_time_change_candidate",
+        "schema_version": SUMMARY_SCHEMA_VERSION,
         "created_at": datetime.now().isoformat(timespec="seconds"),
-        "experiment_dir": str(experiment_dir),
-        "evaluation_load_dir": load_dir,
-        "output_root": output_root,
-        "initial_schedule_time_s": float(schedule_time_s),
-        "reward_preset_name": reward_preset_name,
-        "reward_config": reward_config_parameters(reward_config),
-        "reward_discount": float(reward_discount),
-        "step_distance": float(step_distance),
-        "deterministic": bool(deterministic),
-        "change_distance_m": float(change_distance_m),
-        "selection_file": selection_file,
-        "cases": [result.to_summary_case() for result in results],
+        "candidate_id": candidate.candidate_id,
+        "run_id": candidate.run_id,
+        "seed": candidate.seed,
+        "source": candidate.source,
+        "evaluation_model_dir": os.path.relpath(
+            candidate.model_dir, evaluation.candidate_dir
+        ),
+        "experiment_dir": os.path.relpath(evaluation.candidate_dir, experiment_dir),
+        "initial_schedule_time_s": float(metadata.schedule_time_s),
+        "reward_preset_name": metadata.reward_preset_name,
+        "reward_config": reward_config_parameters(
+            _reward_config_from_metadata(metadata.reward_config)
+        ),
+        "reward_discount": float(metadata.reward_discount),
+        "step_distance": float(metadata.step_distance),
+        "deterministic": deterministic,
+        "change_distance_m": change_distance_m,
+        "rank_key_fields": list(RANK_KEY_FIELDS),
+        "rank_key": list(evaluation.rank_key),
+        "aggregate_metrics": summarize_candidate_results(evaluation.results),
+        "cases": [result.to_summary_case() for result in evaluation.results],
     }
-    summary_path = experiment_dir / SUMMARY_FILENAME
-    with summary_path.open("w", encoding="utf-8") as file_obj:
-        json.dump(summary, file_obj, ensure_ascii=False, indent=2)
-    return summary_path
+
+
+def _root_case_payload(
+    result: ScheduleChangeRunResult,
+    *,
+    candidate_dir: Path,
+    experiment_dir: Path,
+) -> dict[str, Any]:
+    payload = result.to_summary_case()
+    payload["trajectory_npz"] = os.path.relpath(
+        candidate_dir / result.trajectory_npz, experiment_dir
+    )
+    payload["trajectory_metrics_json"] = os.path.relpath(
+        candidate_dir / result.trajectory_metrics_json, experiment_dir
+    )
+    return payload
+
+
+def _write_root_summary(
+    *,
+    experiment_dir: Path,
+    method_ablation_dir: Path,
+    ranked: list[CandidateEvaluation],
+    deterministic: bool,
+    change_distance_m: float,
+) -> Path:
+    selected = ranked[0]
+    metadata = selected.candidate.metadata
+    candidate_payloads = []
+    for rank, evaluation in enumerate(ranked, start=1):
+        candidate_payloads.append(
+            {
+                "rank": rank,
+                "candidate_id": evaluation.candidate.candidate_id,
+                "run_id": evaluation.candidate.run_id,
+                "seed": evaluation.candidate.seed,
+                "source": evaluation.candidate.source,
+                "model_dir": os.path.relpath(
+                    evaluation.candidate.model_dir, experiment_dir
+                ),
+                "summary": os.path.relpath(
+                    evaluation.candidate_dir / SUMMARY_FILENAME, experiment_dir
+                ),
+                "rank_key": list(evaluation.rank_key),
+                "aggregate_metrics": summarize_candidate_results(evaluation.results),
+            }
+        )
+    payload = {
+        "artifact_type": SUMMARY_ARTIFACT_TYPE,
+        "schema_version": SUMMARY_SCHEMA_VERSION,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "experiment_dir": ".",
+        "source_method_ablation_dir": os.path.relpath(
+            method_ablation_dir, experiment_dir
+        ),
+        "candidate_variant_id": FULL_METHOD_VARIANT_ID,
+        "candidate_sources": list(CANDIDATE_SOURCES),
+        "candidate_count": len(ranked),
+        "ranking_rule": (
+            "robust constraint counts, safety severity, worst and mean stop/time "
+            "errors, then mean energy; best source and run_id break exact ties"
+        ),
+        "rank_key_fields": list(RANK_KEY_FIELDS),
+        "selected": candidate_payloads[0],
+        "candidates": candidate_payloads,
+        "initial_schedule_time_s": float(metadata.schedule_time_s),
+        "reward_preset_name": metadata.reward_preset_name,
+        "reward_config": reward_config_parameters(
+            _reward_config_from_metadata(metadata.reward_config)
+        ),
+        "reward_discount": float(metadata.reward_discount),
+        "step_distance": float(metadata.step_distance),
+        "deterministic": deterministic,
+        "change_distance_m": change_distance_m,
+        "cases": [
+            _root_case_payload(
+                result,
+                candidate_dir=selected.candidate_dir,
+                experiment_dir=experiment_dir,
+            )
+            for result in selected.results
+        ],
+    }
+    return _write_json(experiment_dir / SUMMARY_FILENAME, payload)
 
 
 def run_evaluate(args: argparse.Namespace) -> None:
-    load_dir = (
-        str(load_selected_policy_dir(args.selection_file))
-        if args.selection_file is not None
-        else args.load_dir
-    )
-    run_metadata = load_run_metadata(load_dir)
-    schedule_time_s = float(
-        args.schedule_time_s
-        if args.schedule_time_s is not None
-        else run_metadata.schedule_time_s
-    )
-    reward_discount = float(
-        args.reward_discount
-        if args.reward_discount is not None
-        else run_metadata.reward_discount
-    )
-    step_distance = float(
-        args.step_distance
-        if args.step_distance is not None
-        else run_metadata.step_distance
-    )
-    if args.reward_preset is None:
-        reward_preset_name = run_metadata.reward_preset_name
-        reward_config = _reward_config_from_metadata(run_metadata.reward_config)
-    else:
-        reward_preset = resolve_reward_preset(args.reward_preset)
-        reward_preset_name = reward_preset.name
-        reward_config = reward_preset.config
-
-    model_zip_path = os.path.join(load_dir, RL_FINAL_MODEL_FILENAME)
-    cases = [build_schedule_change_case(delta) for delta in args.delta_times_s]
+    method_ablation_dir = Path(args.method_ablation_dir)
+    candidates = load_schedule_change_candidates(method_ablation_dir)
+    cases = tuple(build_schedule_change_case(delta) for delta in args.delta_times_s)
+    first_metadata = candidates[0].metadata
+    reward_config = _reward_config_from_metadata(first_metadata.reward_config)
 
     if args.dry_run:
         print("========== Schedule-Time Change Dry Run ==========")
-        print("  mode:                evaluate")
-        print(f"  load_dir:            {load_dir}")
+        print(f"  method_ablation_dir: {method_ablation_dir}")
         print(f"  output_dir:          {args.output_dir}")
-        print(f"  reward_preset:      {reward_preset_name}")
-        print(f"  reward_config:      {asdict(reward_config)}")
-        print(f"  schedule_time_s:     {schedule_time_s:.2f}")
-        print(f"  reward_discount:     {reward_discount:.4f}")
-        print(f"  step_distance:       {step_distance:.2f}")
+        print(f"  candidate_count:     {len(candidates)}")
+        print(f"  reward_preset:       {first_metadata.reward_preset_name}")
+        print(f"  schedule_time_s:     {first_metadata.schedule_time_s:.2f}")
+        print(f"  reward_discount:     {first_metadata.reward_discount:.4f}")
+        print(f"  step_distance:       {first_metadata.step_distance:.2f}")
         print(f"  change_distance_m:   {args.change_distance_m:.2f}")
         print(f"  delta_times_s:       {args.delta_times_s}")
         print(f"  deterministic:       {args.deterministic}")
-        print(f"  model_zip_path:      {model_zip_path}")
-        print(f"  model_exists:        {os.path.exists(model_zip_path)}")
-        print("  cases:")
-        for case in cases:
-            print(f"    - {case.label}: delta={case.delta_time_s:g}s")
-        print("==================================================")
+        print("  candidates:")
+        for candidate in candidates:
+            print(f"    - {candidate.candidate_id}: model_dir={candidate.model_dir}")
         return
 
-    if not os.path.exists(model_zip_path):
-        raise FileNotFoundError(f"Model file not found: {model_zip_path}")
-
     experiment_dir = _make_experiment_dir(args.output_dir)
-    model = PPO.load(model_zip_path, device=args.device)
-
-    results: list[ScheduleChangeRunResult] = []
-    for case in cases:
-        result = _run_one_case(
-            model=model,
-            load_dir=load_dir,
-            experiment_dir=experiment_dir,
-            case=case,
-            schedule_time_s=schedule_time_s,
-            reward_discount=reward_discount,
-            step_distance=step_distance,
-            reward_preset_name=reward_preset_name,
-            reward_config=reward_config,
-            deterministic=bool(args.deterministic),
-            change_distance_m=float(args.change_distance_m),
+    candidates_root = experiment_dir / "candidates"
+    candidates_root.mkdir()
+    evaluations: list[CandidateEvaluation] = []
+    for candidate in candidates:
+        candidate_dir = candidates_root / candidate.candidate_id
+        candidate_dir.mkdir()
+        model = PPO.load(
+            candidate.model_dir / RL_FINAL_MODEL_FILENAME,
+            device=args.device,
         )
-        results.append(result)
+        results = tuple(
+            _run_one_case(
+                model=model,
+                load_dir=str(candidate.model_dir),
+                experiment_dir=candidate_dir,
+                case=case,
+                schedule_time_s=float(candidate.metadata.schedule_time_s),
+                reward_discount=float(candidate.metadata.reward_discount),
+                step_distance=float(candidate.metadata.step_distance),
+                reward_preset_name=candidate.metadata.reward_preset_name,
+                reward_config=reward_config,
+                deterministic=bool(args.deterministic),
+                change_distance_m=float(args.change_distance_m),
+            )
+            for case in cases
+        )
+        evaluation = CandidateEvaluation(
+            candidate=candidate,
+            candidate_dir=candidate_dir,
+            results=results,
+            rank_key=build_candidate_rank_key(results),
+        )
+        evaluations.append(evaluation)
+        _write_json(
+            candidate_dir / SUMMARY_FILENAME,
+            _candidate_summary(
+                evaluation,
+                experiment_dir=experiment_dir,
+                deterministic=bool(args.deterministic),
+                change_distance_m=float(args.change_distance_m),
+            ),
+        )
 
-    summary_path = _write_summary(
+    ranked = rank_candidate_evaluations(evaluations)
+    summary_path = _write_root_summary(
         experiment_dir=experiment_dir,
-        load_dir=load_dir,
-        output_root=args.output_dir,
-        schedule_time_s=schedule_time_s,
-        reward_preset_name=reward_preset_name,
-        reward_discount=reward_discount,
-        step_distance=step_distance,
+        method_ablation_dir=method_ablation_dir,
+        ranked=ranked,
         deterministic=bool(args.deterministic),
         change_distance_m=float(args.change_distance_m),
-        results=results,
-        reward_config=reward_config,
-        selection_file=(
-            str(args.selection_file) if args.selection_file is not None else None
-        ),
     )
-
+    selected = ranked[0]
     print("========== Schedule-Time Change Evaluation ==========")
-    print(f"  experiment_dir: {experiment_dir}")
-    print(f"  summary_json:   {summary_path}")
-    for result in results:
-        print(
-            f"  {result.case.label:<10} "
-            + f"success={result.success} "
-            + f"precise={result.precise_arrival} "
-            + f"punctual={result.punctual_arrival} "
-            + f"target={result.final_schedule_time_s:.2f}s "
-            + f"actual={result.total_time_s:.2f}s "
-            + f"error={result.time_error_s:.2f}s "
-            + f"abs_error={result.abs_time_error_s:.2f}s "
-            + f"energy={result.total_energy_kj:.2f}kJ"
-        )
+    print(f"  experiment_dir:      {experiment_dir}")
+    print(f"  summary_json:        {summary_path}")
+    print(f"  evaluated_candidates:{len(ranked)}")
+    print(f"  selected_candidate:  {selected.candidate.candidate_id}")
+    print(f"  selected_rank_key:   {selected.rank_key}")
     print("=====================================================")
 
 
@@ -760,10 +1020,10 @@ def _case_sort_key(item: tuple[dict[str, Any], EvaluationArtifact]):
 
 def _style_for_delta(delta_time_s: float) -> dict[str, Any]:
     if delta_time_s == 0.0:
-        return {"color": "#333333", "linestyle": "-", "linewidth": 1.7}
+        return {"color": VIS_DP_BLACK, "linestyle": "-", "linewidth": 1.7}
     if delta_time_s > 0.0:
-        return {"color": "#E69F00", "linestyle": "-", "linewidth": 1.5}
-    return {"color": "#7B61A8", "linestyle": "--", "linewidth": 1.5}
+        return {"color": VIS_PROPOSED_ORANGE, "linestyle": "-", "linewidth": 1.5}
+    return {"color": VIS_ACTUAL_PURPLE, "linestyle": "--", "linewidth": 1.5}
 
 
 def _add_schedule_change_legend(
@@ -787,10 +1047,10 @@ def _add_schedule_change_legend(
         labels,
         loc="upper center",
         bbox_to_anchor=(0.5, 0.995),
-        ncol=len(handles),
+        ncol=4,
         frameon=False,
-        handlelength=2.4,
-        columnspacing=1.2,
+        handlelength=2.0,
+        columnspacing=0.8,
     )
 
 
@@ -800,7 +1060,6 @@ def plot_schedule_change_result(
     summary: dict[str, Any],
     save_figure: bool,
     show: bool,
-    figure_name: str,
     factor: float,
 ) -> str | None:
     loaded_cases = sorted(
@@ -809,7 +1068,7 @@ def plot_schedule_change_result(
     )
     safeguard = build_safeguard_utility(factor=factor)
 
-    apply_rl_curve_plot_style()
+    apply_sci_curve_style()
     fig, ax = plt.subplots()
     safeguard.render(ax=ax, layers=SafeGuardUtility.DANGER_VIEW_LAYERS)
 
@@ -822,7 +1081,11 @@ def plot_schedule_change_result(
     for case_payload, artifact in loaded_cases:
         case = case_payload.get("case")
         delta = float(case.get("delta_time_s", 0.0)) if isinstance(case, dict) else 0.0
-        label = str(case.get("label", f"{delta:g}s")) if isinstance(case, dict) else ""
+        if delta == 0.0:
+            label = "Original"
+        else:
+            sign = "+" if delta > 0.0 else "−"
+            label = f"{sign}{abs(delta):g} s"
         pos_arr = artifact.trajectory.position_m
         speed_arr = artifact.trajectory.speed_mps
         speed_kmh = np.asarray(speed_arr, dtype=np.float64) * 3.6
@@ -859,7 +1122,7 @@ def plot_schedule_change_result(
             [trigger_speed],
             marker="*",
             s=80,
-            color="#C44E52",
+            color=VIS_HARD_LIMIT_RED,
             zorder=8,
         )
         trigger_legend_handle = Line2D(
@@ -867,7 +1130,7 @@ def plot_schedule_change_result(
             [],
             marker="*",
             markersize=9,
-            color="#C44E52",
+            color=VIS_HARD_LIMIT_RED,
             linestyle="None",
         )
 
@@ -884,7 +1147,7 @@ def plot_schedule_change_result(
 
     _ = ax.set_xlabel("Position (m)")
     _ = ax.set_ylabel("Speed (km/h)")
-    ax.grid(True, alpha=0.35)
+    apply_sci_grid(ax)
     _add_schedule_change_legend(
         fig,
         case_handles=case_handles,
@@ -893,18 +1156,18 @@ def plot_schedule_change_result(
     )
     apply_sci_figure_layout(
         fig,
-        columns=1,
-        height_in=2.65,
-        left=0.16,
-        bottom=0.20,
-        top=0.82,
+        columns=2,
+        height_in=4.2,
+        left=0.09,
+        right=0.97,
+        bottom=0.14,
+        top=0.84,
     )
 
     saved_path: str | None = None
     if save_figure:
-        figure_path = experiment_dir / figure_name
-        _ = save_sci_figure(fig, figure_path)
-        saved_path = str(figure_path)
+        figure_path = experiment_dir / DEFAULT_FIGURE_FILENAME
+        saved_path = str(save_sci_figure(fig, figure_path))
     if show:
         plt.show()
     else:
@@ -921,7 +1184,6 @@ def run_show(args: argparse.Namespace) -> None:
         summary=summary,
         save_figure=bool(args.save_figure),
         show=bool(args.show),
-        figure_name=args.figure_name,
         factor=float(args.factor),
     )
 

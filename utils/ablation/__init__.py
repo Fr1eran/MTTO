@@ -6,7 +6,6 @@ from .artifacts import (
     canonical_training_run_complete,
     load_npz_arrays,
     manifest_run_complete,
-    materialize_canonical_artifacts,
     training_budget_complete,
 )
 from .manifest import (
@@ -43,6 +42,7 @@ from .runner import (
 from .statistics import (
     aggregate_indexed_series,
     aggregate_matrix,
+    aggregate_step_binned_series,
     align_exact,
     smooth_episode_curve,
 )
@@ -67,6 +67,7 @@ __all__ = [
     "MetricStats",
     "aggregate_indexed_series",
     "aggregate_matrix",
+    "aggregate_step_binned_series",
     "align_exact",
     "build_manifest_payload",
     "manifest_matrix_config",
@@ -76,7 +77,6 @@ __all__ = [
     "execute_matrix",
     "load_npz_arrays",
     "manifest_run_complete",
-    "materialize_canonical_artifacts",
     "training_budget_complete",
     "smooth_episode_curve",
     "SeedValues",

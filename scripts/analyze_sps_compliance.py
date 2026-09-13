@@ -19,15 +19,13 @@ from dp.experiment_utils import (
 from model.ocs import SPS, SafeGuardUtility
 from rl.experiment_utils import (
     DEFAULT_SCHEDULE_TIME_S,
-    RL_DEFAULT_SEARCH_DIR,
-    RL_TRAJECTORY_SOURCE_CHOICES,
-    apply_rl_curve_plot_style,
     load_rl_curve_artifact,
     resolve_rl_curve_artifact,
 )
-from utils.policy_selection import load_selected_policy_dir
+from utils.plot_utils import apply_sci_curve_style, apply_sci_grid, save_sci_figure
 from utils.scenario import build_safeguard_utility, build_scenario
 from utils.trajectory import OptimizedCurveArtifact, recover_time_axis_from_trajectory
+from utils.type_utils import as_float
 
 _OUTPUT_MODE_TEXT = "text"
 _OUTPUT_MODE_PLOT = "plot"
@@ -45,6 +43,11 @@ _VALID_ANALYSIS_MODES = (_ANALYSIS_MODE_SINGLE, _ANALYSIS_MODE_COMPARE)
 _TRAJECTORY_KIND_DP = "dp"
 _TRAJECTORY_KIND_RL = "rl"
 _VALID_TRAJECTORY_KINDS = (_TRAJECTORY_KIND_DP, _TRAJECTORY_KIND_RL)
+COMPARE_FIGURE_FILENAME = "dp_rl_sps_compliance.pdf"
+SINGLE_FIGURE_FILENAMES = {
+    _TRAJECTORY_KIND_DP: "dp_sps_compliance.pdf",
+    _TRAJECTORY_KIND_RL: "rl_sps_compliance.pdf",
+}
 
 _EVENT_REQUEST_START = "REQUEST_START"
 _EVENT_STEP_COMPLETE = "STEP_COMPLETE"
@@ -111,12 +114,6 @@ class SPSComplianceResult:
         }
 
 
-def _metric_as_float(value: object) -> float | None:
-    if isinstance(value, (int, float, np.integer, np.floating)):
-        return float(value)
-    return None
-
-
 def _resolve_target_schedule_time(
     *,
     dp_metrics: dict[str, object] | None = None,
@@ -128,17 +125,17 @@ def _resolve_target_schedule_time(
         return float(schedule_time_s_override)
 
     if single_metrics is not None:
-        single_target_time_s = _metric_as_float(single_metrics.get("target_time_s"))
+        single_target_time_s = as_float(single_metrics.get("target_time_s"))
         if single_target_time_s is not None and single_target_time_s > 0.0:
             return single_target_time_s
 
     if rl_metrics is not None:
-        rl_target_time_s = _metric_as_float(rl_metrics.get("target_time_s"))
+        rl_target_time_s = as_float(rl_metrics.get("target_time_s"))
         if rl_target_time_s is not None and rl_target_time_s > 0.0:
             return rl_target_time_s
 
     if dp_metrics is not None:
-        dp_target_time_s = _metric_as_float(dp_metrics.get("target_time_s"))
+        dp_target_time_s = as_float(dp_metrics.get("target_time_s"))
         if dp_target_time_s is not None and dp_target_time_s > 0.0:
             return dp_target_time_s
 
@@ -149,15 +146,15 @@ def _resolve_single_curve_artifact(
     *,
     trajectory_kind: str,
     dp_curve_dir: str,
-    rl_curve_dir: str,
-    trajectory_source: str,
+    rl_model_dir: str | None,
 ) -> OptimizedCurveArtifact:
     if trajectory_kind == _TRAJECTORY_KIND_DP:
         return resolve_dp_curve_artifact(curve_dir=dp_curve_dir)
     if trajectory_kind == _TRAJECTORY_KIND_RL:
+        if rl_model_dir is None:
+            raise ValueError("--rl-model-dir is required for RL analysis")
         return resolve_rl_curve_artifact(
-            curve_dir=rl_curve_dir,
-            trajectory_source=trajectory_source,
+            curve_dir=rl_model_dir,
         )
     choices = ", ".join(_VALID_TRAJECTORY_KINDS)
     raise ValueError(f"Unknown trajectory kind '{trajectory_kind}'. Choices: {choices}")
@@ -166,13 +163,11 @@ def _resolve_single_curve_artifact(
 def _resolve_curve_artifacts(
     *,
     dp_curve_dir: str,
-    rl_curve_dir: str,
-    trajectory_source: str,
+    rl_model_dir: str,
 ) -> tuple[OptimizedCurveArtifact, OptimizedCurveArtifact]:
     dp_artifact = resolve_dp_curve_artifact(curve_dir=dp_curve_dir)
     rl_artifact = resolve_rl_curve_artifact(
-        curve_dir=rl_curve_dir,
-        trajectory_source=trajectory_source,
+        curve_dir=rl_model_dir,
     )
     return dp_artifact, rl_artifact
 
@@ -230,21 +225,9 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         help="Directory used to recursively search DP trajectory artifacts.",
     )
     _ = parser.add_argument(
-        "--rl-curve-dir",
-        default=RL_DEFAULT_SEARCH_DIR,
-        help="Directory used to recursively search RL trajectory artifacts.",
-    )
-    _ = parser.add_argument(
-        "--selection-file",
-        type=Path,
+        "--rl-model-dir",
         default=None,
-        help="Use the final RL policy directory recorded by selected_policy.json.",
-    )
-    _ = parser.add_argument(
-        "--trajectory-source",
-        choices=RL_TRAJECTORY_SOURCE_CHOICES,
-        default="best",
-        help="RL trajectory source: best, best_rollouts, final.",
+        help="Explicit model directory containing trajectory.npz and metrics.json.",
     )
     _ = parser.add_argument(
         "--analysis-mode",
@@ -310,10 +293,10 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         help="Safeguard factor used for rendering and replay boundaries.",
     )
     _ = parser.add_argument(
-        "--output-file",
+        "--output-dir",
         type=Path,
         default=None,
-        help="Optional path to save the generated figure.",
+        help="Optional directory for the fixed SPS compliance PDF.",
     )
     _ = parser.add_argument(
         "--no-show",
@@ -354,6 +337,12 @@ def _validate_cli_args(
         and args.trajectory_kind is not None
     ):
         parser.error("--trajectory-kind is only valid when --analysis-mode=single")
+    needs_rl = args.analysis_mode == _ANALYSIS_MODE_COMPARE or (
+        args.analysis_mode == _ANALYSIS_MODE_SINGLE
+        and args.trajectory_kind == _TRAJECTORY_KIND_RL
+    )
+    if needs_rl and args.rl_model_dir is None:
+        parser.error("--rl-model-dir is required for RL analysis")
 
 
 def replay_sps_compliance(
@@ -694,10 +683,10 @@ def _plot_sps_main_figure(
     annotation_mode: str,
     max_text_annotations: int,
     safeguard: SafeGuardUtility | None,
-    output_file: Path | None = None,
+    output_dir: Path | None = None,
     no_show: bool = False,
 ) -> None:
-    apply_rl_curve_plot_style()
+    apply_sci_curve_style()
     fig, ax = plt.subplots(figsize=(10, 6))
 
     if not no_safeguard:
@@ -745,15 +734,14 @@ def _plot_sps_main_figure(
     _ = ax.set_title("DP/RL SPS compliance (speed-position)")
     _ = ax.set_xlabel("Position (m)")
     _ = ax.set_ylabel("Speed (km/h)")
-    ax.grid(True, alpha=0.3)
+    apply_sci_grid(ax)
     _deduplicate_legend(ax)
 
     fig.tight_layout()
 
-    if output_file is not None:
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(output_file, dpi=300.0, bbox_inches="tight")
-        print(f"Saved figure to: {output_file}")
+    if output_dir is not None:
+        saved_path = save_sci_figure(fig, output_dir / COMPARE_FIGURE_FILENAME)
+        print(f"Saved figure to: {saved_path}")
 
     if not no_show:
         plt.show()
@@ -770,10 +758,10 @@ def _plot_sps_single_figure(
     annotation_mode: str,
     max_text_annotations: int,
     safeguard: SafeGuardUtility | None,
-    output_file: Path | None = None,
+    output_dir: Path | None = None,
     no_show: bool = False,
 ) -> None:
-    apply_rl_curve_plot_style()
+    apply_sci_curve_style()
     fig, ax = plt.subplots(figsize=(10, 6))
 
     if not no_safeguard:
@@ -812,15 +800,16 @@ def _plot_sps_single_figure(
     _ = ax.set_title(f"{marker_label} SPS compliance (speed-position)")
     _ = ax.set_xlabel("Position (m)")
     _ = ax.set_ylabel("Speed (km/h)")
-    ax.grid(True, alpha=0.3)
+    apply_sci_grid(ax)
     _deduplicate_legend(ax)
 
     fig.tight_layout()
 
-    if output_file is not None:
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(output_file, dpi=300.0, bbox_inches="tight")
-        print(f"Saved figure to: {output_file}")
+    if output_dir is not None:
+        saved_path = save_sci_figure(
+            fig, output_dir / SINGLE_FIGURE_FILENAMES[trajectory_kind]
+        )
+        print(f"Saved figure to: {saved_path}")
 
     if not no_show:
         plt.show()
@@ -830,7 +819,6 @@ def _build_json_payload(
     *,
     schedule_time_s: float,
     step_delay_s: float,
-    trajectory_source: str,
     dp_artifact: OptimizedCurveArtifact,
     rl_artifact: OptimizedCurveArtifact,
     dp_result: SPSComplianceResult,
@@ -839,7 +827,6 @@ def _build_json_payload(
     return {
         "schedule_time_s": schedule_time_s,
         "step_delay_s": step_delay_s,
-        "trajectory_source": trajectory_source,
         "artifacts": {
             "dp": {
                 "npz_path": dp_artifact.npz_path,
@@ -863,14 +850,12 @@ def _build_single_json_payload(
     step_delay_s: float,
     analysis_mode: str,
     trajectory_kind: str,
-    trajectory_source: str,
     artifact: OptimizedCurveArtifact,
     result: SPSComplianceResult,
 ) -> dict[str, object]:
     return {
         "analysis_mode": analysis_mode,
         "trajectory_kind": trajectory_kind,
-        "trajectory_source": trajectory_source,
         "schedule_time_s": schedule_time_s,
         "step_delay_s": step_delay_s,
         "artifact": {
@@ -884,12 +869,6 @@ def _build_single_json_payload(
 def main() -> None:
     parser = _build_cli_parser()
     args = parser.parse_args()
-    if args.selection_file is not None:
-        try:
-            args.rl_curve_dir = str(load_selected_policy_dir(args.selection_file))
-        except (FileNotFoundError, ValueError) as exc:
-            parser.error(str(exc))
-
     if args.step_delay_s <= 0.0:
         parser.error("--step-delay-s must be positive")
     if args.boundary_eps < 0.0:
@@ -907,8 +886,7 @@ def main() -> None:
         try:
             dp_artifact, rl_artifact = _resolve_curve_artifacts(
                 dp_curve_dir=args.dp_curve_dir,
-                rl_curve_dir=args.rl_curve_dir,
-                trajectory_source=args.trajectory_source,
+                rl_model_dir=args.rl_model_dir,
             )
         except FileNotFoundError as exc:
             parser.error(str(exc))
@@ -963,7 +941,6 @@ def main() -> None:
             payload = _build_json_payload(
                 schedule_time_s=schedule_time_s,
                 step_delay_s=args.step_delay_s,
-                trajectory_source=args.trajectory_source,
                 dp_artifact=dp_artifact,
                 rl_artifact=rl_artifact,
                 dp_result=dp_result,
@@ -991,7 +968,7 @@ def main() -> None:
                 annotation_mode=args.event_annotation,
                 max_text_annotations=args.max_text_annotations,
                 safeguard=safeguard_utility,
-                output_file=args.output_file,
+                output_dir=args.output_dir,
                 no_show=args.no_show,
             )
         return
@@ -1001,8 +978,7 @@ def main() -> None:
         artifact = _resolve_single_curve_artifact(
             trajectory_kind=trajectory_kind,
             dp_curve_dir=args.dp_curve_dir,
-            rl_curve_dir=args.rl_curve_dir,
-            trajectory_source=args.trajectory_source,
+            rl_model_dir=args.rl_model_dir,
         )
     except FileNotFoundError as exc:
         parser.error(str(exc))
@@ -1047,7 +1023,6 @@ def main() -> None:
             step_delay_s=args.step_delay_s,
             analysis_mode=args.analysis_mode,
             trajectory_kind=trajectory_kind,
-            trajectory_source=args.trajectory_source,
             artifact=artifact,
             result=result,
         )
@@ -1071,7 +1046,7 @@ def main() -> None:
             annotation_mode=args.event_annotation,
             max_text_annotations=args.max_text_annotations,
             safeguard=safeguard_utility,
-            output_file=args.output_file,
+            output_dir=args.output_dir,
             no_show=args.no_show,
         )
 

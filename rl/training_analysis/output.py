@@ -25,7 +25,7 @@ BEST_EVAL_DISPLAY_METRICS = (
 
 STAT_NAMES = ("mean", "p05", "p95", "min", "max", "slope", "cv")
 
-DSPDL_DIAG_KEYS = (
+DSPL_DIAG_KEYS = (
     "converged",
     "alpha",
     "current_to_target_kl",
@@ -329,14 +329,14 @@ def _render_evaluation_trend(trajectory_eval: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _render_dspdl_distribution(curriculum: dict[str, Any]) -> list[str]:
-    lines = ["## DSPDL Distribution", ""]
+def _render_dspl_distribution(curriculum: dict[str, Any]) -> list[str]:
+    lines = ["## DSPL Distribution", ""]
     if not curriculum.get("available"):
-        lines.append("- unavailable: no DSPDL distribution KL logged")
+        lines.append("- unavailable: no DSPL distribution KL logged")
         return lines
 
     diagnostics = curriculum.get("diagnostics", {})
-    for key in DSPDL_DIAG_KEYS:
+    for key in DSPL_DIAG_KEYS:
         if key in diagnostics:
             entry = diagnostics[key]
             lines.append(
@@ -424,7 +424,7 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
             reward_analysis, top_activity, strong_negative_pairs, bar_width
         ),
         _render_evaluation_trend(payload.get("trajectory_evaluation_metrics", {})),
-        _render_dspdl_distribution(payload.get("curriculum_distribution_metrics", {})),
+        _render_dspl_distribution(payload.get("curriculum_distribution_metrics", {})),
         _render_safety_truncation(
             payload.get("safety_truncation_position_metrics", {})
         ),

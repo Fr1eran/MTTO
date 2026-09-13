@@ -7,15 +7,12 @@ from numpy.typing import NDArray
 
 from contracts.evaluation import EvaluationMetrics
 from rl.experiment_utils import (
-    RL_DEFAULT_SEARCH_DIR as _RL_DEFAULT_SEARCH_DIR,
-    RL_TRAJECTORY_SOURCE_CHOICES as _RL_TRAJECTORY_SOURCE_CHOICES,
-    apply_rl_curve_plot_style,
     get_rl_trajectory_status_text,
     load_rl_curve_artifact,
     render_rl_curve_on_axes,
     resolve_rl_curve_artifact,
 )
-from utils.plot_utils import apply_sci_figure_layout
+from utils.plot_utils import apply_sci_curve_style, apply_sci_figure_layout
 
 
 def _print_metrics(metrics: EvaluationMetrics | Mapping[str, object]) -> None:
@@ -46,6 +43,9 @@ def _print_metrics(metrics: EvaluationMetrics | Mapping[str, object]) -> None:
         "success",
         "precise_arrival",
         "punctual_arrival",
+        "safety_violation_count",
+        "safe",
+        "feasible",
         "selection_rule",
         "strict_stop_error_limit_m",
         "strict_time_error_limit_s",
@@ -62,15 +62,9 @@ def _print_metrics(metrics: EvaluationMetrics | Mapping[str, object]) -> None:
 def _build_cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="加载并显示已保存的强化学习轨迹结果。")
     _ = parser.add_argument(
-        "--curve-dir",
-        default=_RL_DEFAULT_SEARCH_DIR,
-        help="用于搜索强化学习轨迹相关产物的路径",
-    )
-    _ = parser.add_argument(
-        "--trajectory-source",
-        choices=_RL_TRAJECTORY_SOURCE_CHOICES,
-        default="best",
-        help="选择加载哪条保存的轨迹: 'best' 'best_rollouts' 'final'",
+        "--model-dir",
+        required=True,
+        help="包含 trajectory.npz、metrics.json 和 metadata.json 的模型目录",
     )
     _ = parser.add_argument(
         "--no-safeguard",
@@ -101,7 +95,7 @@ def plot_rl_curve(
     no_safeguard: bool,
     factor: float,
 ) -> None:
-    apply_rl_curve_plot_style()
+    apply_sci_curve_style()
     fig, ax = plt.subplots()
     render_rl_curve_on_axes(
         ax=ax,
@@ -122,10 +116,7 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        artifact = resolve_rl_curve_artifact(
-            curve_dir=args.curve_dir,
-            trajectory_source=args.trajectory_source,
-        )
+        artifact = resolve_rl_curve_artifact(curve_dir=args.model_dir)
     except FileNotFoundError as exc:
         parser.error(str(exc))
 

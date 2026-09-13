@@ -40,11 +40,17 @@ from .artifacts import (
 )
 from .manifest import ManifestStore, build_manifest_payload, manifest_runs, status_map
 from .models import ArtifactLayout, CurveAggregate, FinalMetricAggregate, MetricStats
-from .statistics import aggregate_indexed_series, aggregate_matrix, align_exact
+from .statistics import (
+    aggregate_indexed_series,
+    aggregate_matrix,
+    aggregate_step_binned_series,
+    align_exact,
+    smooth_episode_curve,
+)
 
-type ValueTransform = Literal["identity", "abs", "j_to_kj", "bool"]
+type ValueTransform = Literal["identity", "abs", "j_to_kj", "bool", "ratio_to_pct"]
 type CurveSource = Literal["episode", "evaluation"]
-type AlignmentMode = Literal["exact_range", "exact_union", "indexed"]
+type AlignmentMode = Literal["exact_range", "exact_union", "indexed", "step_bins"]
 
 
 @dataclass(frozen=True)
@@ -115,6 +121,8 @@ class CurveMetricSpec:
     smooth: bool = False
     success_only: bool = False
     alignment: AlignmentMode = "exact_union"
+    bin_width: int | None = None
+    axis_max: int | None = None
 
 
 @dataclass(frozen=True)
@@ -215,6 +223,8 @@ def _transform(values: object, transform: ValueTransform) -> np.ndarray:
         return array / 1000.0
     if transform == "bool":
         return array.astype(np.float64)
+    if transform == "ratio_to_pct":
+        return array * 100.0
     return array
 
 
@@ -326,6 +336,7 @@ class AblationDriver:
             "rollout_steps_per_update",
             "training_episodes",
             "evaluation_interval_rollouts",
+            "evaluation_interval_episodes",
             "device",
         ):
             if hasattr(args, name):
@@ -431,7 +442,9 @@ class AblationDriver:
                     repeat_index=run.repeat_index,
                     seed=run.seed,
                     experiment_tag=run.experiment_tag,
-                    artifacts=ArtifactRefs.from_mapping(artifact_paths(run.artifacts)),
+                    artifacts=ArtifactRefs.from_mapping(
+                        artifact_paths(run.artifacts, relative_to=args.output_root)
+                    ),
                     status=status.status,
                     error_message=status.error_message,
                     training_budget=status.training_budget,
@@ -443,7 +456,7 @@ class AblationDriver:
             training_signature=self.training_signature(args),
             runs=records,
             schema_version=self.spec.schema_version,
-        ).with_output_root(str(args.output_root))
+        ).with_output_root(".")
 
     def manifest_store(self, output_root: str | os.PathLike[str]) -> ManifestStore:
         return ManifestStore(
@@ -483,6 +496,16 @@ class AblationDriver:
                 run.artifacts,
                 expected_effective_episodes=(
                     run.training_spec.run_metadata.training_budget.effective_training_episodes
+                    if run.training_spec.run_metadata.training_budget is not None
+                    else None
+                ),
+                expected_training_timesteps=(
+                    run.training_spec.run_metadata.training_budget.derived_total_timesteps
+                    if run.training_spec.run_metadata.training_budget is not None
+                    else None
+                ),
+                expected_training_rollouts=(
+                    run.training_spec.run_metadata.training_budget.training_rollouts
                     if run.training_spec.run_metadata.training_budget is not None
                     else None
                 ),
@@ -588,13 +611,9 @@ class AblationDriver:
                                 f"{metric.name} and {metric.axis} have different shapes"
                             )
                         if metric.smooth:
-                            if data.size < smoothing_window:
-                                raise ValueError(
-                                    f"fewer than {smoothing_window} complete episodes"
-                                )
-                            kernel = np.ones(smoothing_window) / smoothing_window
-                            data = np.convolve(data, kernel, mode="valid")
-                            axis = axis[smoothing_window - 1 :]
+                            axis, data = smooth_episode_curve(
+                                axis, data, window=smoothing_window
+                            )
                         values[metric.name] = (axis, data)
                     run_series.append(values)
                 except (OSError, KeyError, TypeError, ValueError) as exc:
@@ -607,6 +626,16 @@ class AblationDriver:
                 series = [run[metric.name] for run in run_series]
                 if metric.alignment == "indexed":
                     reference, mean, std, counts = aggregate_indexed_series(series)
+                elif metric.alignment == "step_bins":
+                    if metric.bin_width is None or metric.axis_max is None:
+                        raise ValueError(
+                            f"{metric.name} step_bins requires bin_width and axis_max"
+                        )
+                    reference, mean, std, counts = aggregate_step_binned_series(
+                        series,
+                        bin_width=metric.bin_width,
+                        axis_max=metric.axis_max,
+                    )
                 else:
                     if metric.alignment == "exact_range":
                         first = int(min(x[0] for x, _ in series))
@@ -644,7 +673,7 @@ class AblationDriver:
             if (
                 entry.status == "completed"
                 and entry.artifacts.metrics_best is not None
-                and Path(entry.artifacts.metrics_best).is_file()
+                and Path(entry.artifacts.path_for("metrics_best")).is_file()
             ):
                 return "best"
         return "final"
@@ -679,7 +708,7 @@ class AblationDriver:
                         Path(entry.artifacts.path_for(artifact_name))
                     )
                     successes.append(float(metrics.success))
-                    assessment = assess_constraints(metrics.to_display_mapping())
+                    assessment = assess_constraints(metrics)
                     for metric in self.spec.final.metrics:
                         value = _transform(
                             [getattr(metrics, metric.value)], metric.transform
@@ -812,8 +841,7 @@ def execute_matrix(
                 training_budget
             ):
                 raise RuntimeError(
-                    "completed-episode training budget was not reached "
-                    f"for run_id={run_id}"
+                    f"training budget was not reached for run_id={run_id}"
                 )
         except Exception as exc:
             statuses[run_id] = ManifestStatusUpdate(

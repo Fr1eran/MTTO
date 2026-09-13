@@ -335,10 +335,10 @@ def test_curriculum_distribution_metrics_accepts_critic_signals():
     assert unavailable["available"] is False
 
     series_map = {
-        "dspdl/alpha": _make_series("dspdl/alpha", [0.05, 0.04, 0.03]),
-        "dspdl/converged": _make_series("dspdl/converged", [0.0, 0.0, 1.0]),
-        "dspdl/current_to_target_kl": _make_series(
-            "dspdl/current_to_target_kl", [2.0, 1.0, 0.1]
+        "dspl/alpha": _make_series("dspl/alpha", [0.05, 0.04, 0.03]),
+        "dspl/converged": _make_series("dspl/converged", [0.0, 0.0, 1.0]),
+        "dspl/current_to_target_kl": _make_series(
+            "dspl/current_to_target_kl", [2.0, 1.0, 0.1]
         ),
     }
     metrics = compute_curriculum_distribution_metrics(series_map)
@@ -352,13 +352,13 @@ def test_markdown_report_renders_empirical_kl_with_numeric_values(
     tmp_path: Path,
 ) -> None:
     series_map = {
-        "dspdl/current_to_target_kl": _make_series(
-            "dspdl/current_to_target_kl", [2.0, 1.0, 0.5]
+        "dspl/current_to_target_kl": _make_series(
+            "dspl/current_to_target_kl", [2.0, 1.0, 0.5]
         ),
-        "dspdl/empirical_to_target_kl": _make_series(
-            "dspdl/empirical_to_target_kl", [1.8, 0.9, 0.4]
+        "dspl/empirical_to_target_kl": _make_series(
+            "dspl/empirical_to_target_kl", [1.8, 0.9, 0.4]
         ),
-        "dspdl/update_kl": _make_series("dspdl/update_kl", [0.05, 0.02, 0.01]),
+        "dspl/update_kl": _make_series("dspl/update_kl", [0.05, 0.02, 0.01]),
     }
     curriculum = compute_curriculum_distribution_metrics(series_map)
     payload = build_analysis_payload(
@@ -917,7 +917,7 @@ def test_train_rl_cli_rejects_removed_fixed_reverse_profile() -> None:
 
 def test_train_rl_curriculum_requires_existing_reference_directory() -> None:
     parser = build_train_rl_arg_parser()
-    args = parser.parse_args(["--curriculum-profile", "dspdl"])
+    args = parser.parse_args(["--curriculum-profile", "dspl"])
     with pytest.raises(ValueError, match="reference_curve_dir is required"):
         _ = resolve_training_run_spec(args)
 
@@ -1017,8 +1017,8 @@ def test_training_defaults_to_a_completed_episode_budget() -> None:
         )
     )
 
-    assert spec.training_episodes == 7000
-    assert spec.run_metadata["training_budget"]["effective_training_episodes"] == 7000
+    assert spec.training_episodes == 5000
+    assert spec.run_metadata["training_budget"]["effective_training_episodes"] == 5000
 
 
 def test_tune_mode_enables_safety_truncation_histogram() -> None:

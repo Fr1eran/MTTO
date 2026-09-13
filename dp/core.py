@@ -442,9 +442,7 @@ class VariableSpacingDPOptimizer:
         upper_curve_speed.flags.writeable = False
         self.upper_curve_pos: NDArray[np.float64] = upper_curve_pos
         self.upper_curve_speed: NDArray[np.float64] = upper_curve_speed
-        speed_limits = np.asarray(
-            self.safeguard_utility.speed_limits, dtype=np.float64
-        )
+        speed_limits = np.asarray(self.safeguard_utility.speed_limits, dtype=np.float64)
         if speed_limits.size == 0 or not np.all(np.isfinite(speed_limits)):
             raise ValueError("safeguard speed limits must be finite and non-empty")
         self.speed_grid_upper_mps: float = min(
@@ -802,12 +800,7 @@ class VariableSpacingDPOptimizer:
     def _build_speed_states(self) -> NDArray[np.float64]:
         """Build a stable grid bounded by the reachable route speed."""
         state_count = (
-            int(
-                math.floor(
-                    self.speed_grid_upper_mps / self.delta_speed + 1e-12
-                )
-            )
-            + 1
+            int(math.floor(self.speed_grid_upper_mps / self.delta_speed + 1e-12)) + 1
         )
         speed_states = np.arange(state_count, dtype=np.float64) * self.delta_speed
         speed_states = speed_states[
@@ -998,9 +991,7 @@ class VariableSpacingDPOptimizer:
         self._hash_value(hasher, "cache_target_speed", _CACHE_ENDPOINT_SPEED_MPS)
         self._hash_value(hasher, "start_position", float(start_position))
         self._hash_value(hasher, "target_position", float(target_position))
-        self._hash_value(
-            hasher, "speed_grid_upper_mps", self.speed_grid_upper_mps
-        )
+        self._hash_value(hasher, "speed_grid_upper_mps", self.speed_grid_upper_mps)
         self._hash_value(hasher, "delta_speed", self.delta_speed)
         self._hash_value(hasher, "stage_division", self.stage_division)
         self._hash_value(hasher, "sub_stage_count", self.sub_stage_count)

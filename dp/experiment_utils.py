@@ -12,7 +12,7 @@ from model.ocs.train_service import TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
 from utils.io_utils import load_curve_with_cum_time_and_metrics, save_curve_and_metrics
-from utils.scenario import build_safeguard_utility
+from utils.plot_utils import render_trajectory_on_axes
 from utils.trajectory import (
     OptimizedCurveArtifact,
     compute_comfort_metrics_from_trajectory,
@@ -32,12 +32,6 @@ __all__ = [
 
 DP_CURVE_FILENAME = "optimized_speed_curve.npz"
 DP_DEFAULT_SEARCH_DIR = "output/optimal/dp"
-
-
-def _metric_as_float(value: object) -> float | None:
-    if isinstance(value, (int, float, np.integer, np.floating)):
-        return float(value)
-    return None
 
 
 def _find_latest_named_file(*, search_dir: str, file_name: str) -> Path:
@@ -238,6 +232,7 @@ def render_dp_curve_on_axes(
     curve_color: str = "tab:red",
     curve_label: str | None = None,
     safeguard: SafeGuardUtility | None = None,
+    render_endpoints: bool = True,
 ) -> None:
     """在给定的 matplotlib Axes 上渲染 DP 速度曲线及安全防护边界。
 
@@ -251,54 +246,17 @@ def render_dp_curve_on_axes(
         curve_color: 曲线颜色，默认 "tab:red"。
         curve_label: 图例标签，None 时使用 "DP optimized speed curve"。
         safeguard: 预构建的 SafeGuardUtility，None 时按 factor 构建。
+        render_endpoints: 是否绘制起点与终点散点标记。
     """
-    if not no_safeguard:
-        resolved_safeguard = (
-            safeguard if safeguard is not None else build_safeguard_utility(factor)
-        )
-        resolved_safeguard.render(ax=ax, layers=SafeGuardUtility.DANGER_VIEW_LAYERS)
-
-    ax.plot(
-        pos_arr,
-        speed_arr * 3.6,
-        color=curve_color,
-        alpha=0.85,
-        linewidth=1.5,
-        label=curve_label or "DP optimized speed curve",
+    render_trajectory_on_axes(
+        ax=ax,
+        pos_arr=pos_arr,
+        speed_arr=speed_arr,
+        metrics=metrics,
+        no_safeguard=no_safeguard,
+        factor=factor,
+        curve_color=curve_color,
+        curve_label=curve_label or "DP optimized speed curve",
+        safeguard=safeguard,
+        render_endpoints=render_endpoints,
     )
-
-    start_position = _metric_as_float(metrics.get("start_position_m"))
-    target_position = _metric_as_float(metrics.get("target_position_m"))
-
-    if start_position is not None:
-        ax.scatter(
-            start_position,
-            0.0,
-            marker="o",
-            color="green",
-            s=40,
-            alpha=0.85,
-            label="start",
-            zorder=5,
-            edgecolors="black",
-            linewidths=0.8,
-        )
-    if target_position is not None:
-        ax.scatter(
-            target_position,
-            0.0,
-            marker="o",
-            color="red",
-            s=40,
-            alpha=0.85,
-            label="end",
-            zorder=5,
-            edgecolors="black",
-            linewidths=0.8,
-        )
-
-    ax.set_xlabel("Position (m)")
-    ax.set_ylabel("Speed (km/h)")
-    ax.set_xlim((0.0, 30000.0))
-    ax.set_ylim((0.0, 500.0))
-    ax.grid(True, alpha=0.3)

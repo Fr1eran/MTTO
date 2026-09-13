@@ -1,13 +1,13 @@
 import numpy as np
 import pytest
 
-from rl.dspdl_distribution import DSPDLDistributionSolver
+from rl.dspl_distribution import DSPLDistributionSolver
 
 
 def test_distribution_solver_is_feasible_and_stops_on_tolerance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    solver = DSPDLDistributionSolver(relative_entropy_bound=0.02)
+    solver = DSPLDistributionSolver(relative_entropy_bound=0.02)
     current = np.asarray([0.3, 0.3, 0.2, 0.2], dtype=np.float64)
     target = np.asarray([0.95, 0.02, 0.02, 0.01], dtype=np.float64)
     original = solver._distribution_at_dual
@@ -31,7 +31,7 @@ def test_distribution_solver_is_feasible_and_stops_on_tolerance(
 
 
 def test_equal_warmup_values_skip_dual_search(monkeypatch: pytest.MonkeyPatch) -> None:
-    solver = DSPDLDistributionSolver(relative_entropy_bound=0.02)
+    solver = DSPLDistributionSolver(relative_entropy_bound=0.02)
     current = np.asarray([0.6, 0.4], dtype=np.float64)
     monkeypatch.setattr(
         solver,

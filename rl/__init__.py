@@ -1,13 +1,13 @@
 from .context_pool import Context, ContextPool, ContextPoolBuilder, ReferenceTrajectory
 from .context_sampler import ContextSampler, CurriculumDistributionState
-from .dspdl import (
-    DSPDLCallback,
-    DSPDLStatisticsHub,
-    DSPDLStatisticsSnapshot,
-    dspdl_protocol_parameters,
-)
 from .dp_trajectory_reader import DPTrajectoryReader
-from .dspdl_distribution import DSPDLDistributionSolver
+from .dspl import (
+    DSPLCallback,
+    DSPLStatisticsHub,
+    DSPLStatisticsSnapshot,
+    dspl_protocol_parameters,
+)
+from .dspl_distribution import DSPLDistributionSolver
 from .observation_builder import ObservationBuilder
 from .operational_state import OperationalState, OperationalTransition, ViolationCode
 from .operational_stepper import OperationalStepper
@@ -20,6 +20,7 @@ from .reward_calculator import (
     RewardBreakdown,
     RewardCalculator,
     RewardConfig,
+    punctuality_potential_from_error,
 )
 
 __all__ = [
@@ -28,17 +29,18 @@ __all__ = [
     "ContextPoolBuilder",
     "ContextSampler",
     "CurriculumDistributionState",
-    "DSPDLCallback",
-    "DSPDLStatisticsHub",
-    "DSPDLStatisticsSnapshot",
+    "DSPLCallback",
+    "DSPLStatisticsHub",
+    "DSPLStatisticsSnapshot",
     "DEFAULT_COMFORT_REWARD_SCALE",
     "DEFAULT_ENERGY_REWARD_SCALE",
     "DEFAULT_SURVIVAL_REWARD_SCALE",
     "PUNCTUALITY_POTENTIAL_SCALE",
     "PUNCTUALITY_POTENTIAL_SIGMA_S",
+    "punctuality_potential_from_error",
     "DPTrajectoryReader",
-    "DSPDLDistributionSolver",
-    "dspdl_protocol_parameters",
+    "DSPLDistributionSolver",
+    "dspl_protocol_parameters",
     "ObservationBuilder",
     "OperationalState",
     "OperationalStepper",

@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 from typing import cast
 
@@ -67,13 +66,9 @@ def _write_dp_artifact(run_dir: Path) -> tuple[Path, Path]:
     return curve_path, metrics_path
 
 
-def _write_rl_artifact(run_dir: Path, *, file_name: str) -> tuple[Path, Path]:
-    curve_path = run_dir / file_name
-    metrics_name = {
-        "best_trajectory.npz": "metrics_best.json",
-        "final_trajectory.npz": "metrics_final.json",
-    }.get(file_name, f"{curve_path.stem}_metrics.json")
-    metrics_path = run_dir / metrics_name
+def _write_rl_artifact(run_dir: Path) -> tuple[Path, Path]:
+    curve_path = run_dir / "trajectory.npz"
+    metrics_path = run_dir / "metrics.json"
     np.savez_compressed(
         curve_path,
         pos_m=np.asarray([0.0, 1.0], dtype=np.float32),
@@ -88,8 +83,7 @@ def test_analyze_sps_compliance_cli_defaults() -> None:
     args = parser.parse_args([])
 
     assert args.dp_curve_dir == "output/optimal/dp"
-    assert args.rl_curve_dir == "output/optimal/rl"
-    assert args.trajectory_source == "best"
+    assert args.rl_model_dir is None
     assert args.analysis_mode == "compare"
     assert args.trajectory_kind is None
     assert args.output_mode == "text+plot"
@@ -101,6 +95,8 @@ def test_analyze_sps_compliance_cli_accepts_marker_only_and_json() -> None:
     parser = _build_cli_parser()
     args = parser.parse_args(
         [
+            "--rl-model-dir",
+            "output/model",
             "--output-mode",
             "json",
             "--event-annotation",
@@ -123,6 +119,8 @@ def test_analyze_sps_compliance_cli_accepts_single_mode_and_kind() -> None:
             "single",
             "--trajectory-kind",
             "rl",
+            "--rl-model-dir",
+            "output/model",
         ]
     )
     _validate_cli_args(parser, args)
@@ -187,11 +185,11 @@ def test_resolve_target_schedule_time_single_metrics_takes_effect() -> None:
     ) == pytest.approx(450.0)
 
 
-def test_resolve_curve_artifacts_loads_latest_dp_and_latest_rl_best(
+def test_resolve_curve_artifacts_uses_explicit_rl_model_directory(
     tmp_path: Path,
 ) -> None:
     dp_root = tmp_path / "dp_runs"
-    rl_root = tmp_path / "rl_runs"
+    rl_dir = tmp_path / "rl_model"
 
     old_dp_dir = dp_root / "old"
     new_dp_dir = dp_root / "new"
@@ -200,57 +198,40 @@ def test_resolve_curve_artifacts_loads_latest_dp_and_latest_rl_best(
     old_dp_curve, _ = _write_dp_artifact(old_dp_dir)
     new_dp_curve, new_dp_metrics = _write_dp_artifact(new_dp_dir)
 
-    old_rl_dir = (
-        rl_root / "430p0_100p0__basic_safety" / "best_rollouts"
-    )
-    new_rl_dir = rl_root / "430p0_100p0__basic" / "best_rollouts"
-    old_rl_dir.mkdir(parents=True)
-    new_rl_dir.mkdir(parents=True)
-    old_rl_curve, _ = _write_rl_artifact(old_rl_dir, file_name="best_trajectory.npz")
-    new_rl_curve, new_rl_metrics = _write_rl_artifact(
-        new_rl_dir,
-        file_name="best_trajectory.npz",
-    )
-
-    os.utime(old_dp_curve, (1, 1))
-    os.utime(new_dp_curve, (2, 2))
-    os.utime(old_rl_curve, (1, 1))
-    os.utime(new_rl_curve, (2, 2))
+    rl_dir.mkdir(parents=True)
+    rl_curve, rl_metrics = _write_rl_artifact(rl_dir)
 
     dp_artifact, rl_artifact = _resolve_curve_artifacts(
         dp_curve_dir=str(dp_root),
-        rl_curve_dir=str(rl_root),
-        trajectory_source="best",
+        rl_model_dir=str(rl_dir),
     )
 
     assert dp_artifact.npz_path == str(new_dp_curve)
     assert dp_artifact.metrics_path == str(new_dp_metrics)
-    assert rl_artifact.npz_path == str(new_rl_curve)
-    assert rl_artifact.metrics_path == str(new_rl_metrics)
+    assert rl_artifact.npz_path == str(rl_curve)
+    assert rl_artifact.metrics_path == str(rl_metrics)
 
 
 def test_resolve_single_curve_artifact_by_kind(tmp_path: Path) -> None:
     dp_root = tmp_path / "dp_runs"
-    rl_root = tmp_path / "rl_runs"
+    rl_root = tmp_path / "rl_model"
     dp_dir = dp_root / "run"
-    rl_dir = rl_root / "430p0_100p0__basic_safety" / "best_rollouts"
+    rl_dir = rl_root
     dp_dir.mkdir(parents=True)
     rl_dir.mkdir(parents=True)
 
     dp_curve, dp_metrics = _write_dp_artifact(dp_dir)
-    rl_curve, rl_metrics = _write_rl_artifact(rl_dir, file_name="best_trajectory.npz")
+    rl_curve, rl_metrics = _write_rl_artifact(rl_dir)
 
     dp_artifact = _resolve_single_curve_artifact(
         trajectory_kind="dp",
         dp_curve_dir=str(dp_root),
-        rl_curve_dir=str(rl_root),
-        trajectory_source="best_rollouts",
+        rl_model_dir=str(rl_root),
     )
     rl_artifact = _resolve_single_curve_artifact(
         trajectory_kind="rl",
         dp_curve_dir=str(dp_root),
-        rl_curve_dir=str(rl_root),
-        trajectory_source="best_rollouts",
+        rl_model_dir=str(rl_root),
     )
 
     assert dp_artifact.npz_path == str(dp_curve)

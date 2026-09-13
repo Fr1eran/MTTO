@@ -1,10 +1,10 @@
-"""Train and display the PPO/PBRS/DSPDL ablation matrix."""
+"""Train and display the PPO/PPRS/DSPL ablation matrix."""
 
 from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import dataclass
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -14,7 +14,6 @@ import numpy as np
 from contracts.ablation import AblationManifest
 from rl.experiment_statistics import assess_constraints
 from rl.experiment_utils import (
-    DSPDL_ALGORITHM_ID,
     DEFAULT_DEVICE,
     DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
     DEFAULT_NUM_ENVS,
@@ -22,19 +21,13 @@ from rl.experiment_utils import (
     DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
     DEFAULT_SCHEDULE_TIME_S,
     DEFAULT_STEP_DISTANCE,
-    DEFAULT_TRAINING_EPISODES,
-    add_panel_label,
-    apply_rl_curve_plot_style,
+    DSPL_ALGORITHM_ID,
+    dspl_protocol_parameters,
     evaluate_final_training_run,
-    dspdl_protocol_parameters,
-    reward_config_parameters,
+    learning_rate_schedule_parameters,
     resolve_reward_preset,
+    reward_config_parameters,
     train_single_experiment,
-)
-from rl.operational_state import ViolationCode
-from rl.training_analysis.collect import (
-    extract_complete_episode_sequence,
-    load_reward_diagnostics_artifact,
 )
 from utils.ablation import (
     AblationDriver,
@@ -52,22 +45,89 @@ from utils.ablation import (
     SeedValues,
     VariantPayloads,
     VariantSpec,
-    aggregate_matrix,
     manifest_run_complete,
-    manifest_runs,
 )
 from utils.ablation.plotting import save_ablation_figure
 from utils.io_utils import load_evaluation_metrics
-from utils.plot_utils import apply_sci_figure_layout
+from utils.plot_utils import (
+    SCI_BAND_ALPHA,
+    SCI_LINE_WIDTH,
+    SCI_SERIES_LINE_STYLES,
+    VIS_DSPL_MAGENTA,
+    VIS_PPO_GRAY,
+    VIS_PROPOSED_ORANGE,
+    VIS_SAFE_BLUE,
+    add_panel_label,
+    apply_sci_curve_style,
+    apply_sci_figure_layout,
+    apply_sci_grid,
+)
 
 METHOD_ABLATION_MANIFEST_FILENAME = "manifest.json"
 MANIFEST_VERSION = 1
-PROTOCOL_VERSION = 3
-DEFAULT_OUTPUT_ROOT = "output/paper_experiment/02_method_ablation_pbrs_x_dspdl_v3"
+PROTOCOL_VERSION = 9
+DEFAULT_OUTPUT_ROOT = "output/paper_experiment/02_method_ablation"
 DEFAULT_SELECTION_FILENAME = "selected_policy.json"
+METHOD_FIGURE_FILENAMES = (
+    "method_learning_curves.pdf",
+    "safety_learning_process.pdf",
+    "evaluation_success_rate.pdf",
+)
 DEFAULT_SEEDS = (11, 131, 239, 359, 443)
-DEFAULT_EPISODE_SMOOTHING_WINDOW = 100
-SAFETY_EPISODE_BIN_WIDTH = 500
+METHOD_TRAINING_ROLLOUTS = 400
+METHOD_TRAINING_STEPS = METHOD_TRAINING_ROLLOUTS * DEFAULT_ROLLOUT_STEPS_PER_UPDATE
+EVALUATION_SMOOTHING_WINDOW = 5
+_METHOD_COLORS = {
+    "ppo": VIS_PPO_GRAY,
+    "ppo_pprs": VIS_SAFE_BLUE,
+    "ppo_dspl": VIS_DSPL_MAGENTA,
+    "ppo_pprs_dspl": VIS_PROPOSED_ORANGE,
+}
+_METHOD_STYLE_BY_ID = {
+    method_id: {"color": _METHOD_COLORS[method_id], **SCI_SERIES_LINE_STYLES[index]}
+    for index, method_id in enumerate(_METHOD_COLORS)
+}
+
+
+def _plot_method_curve(
+    axis: plt.Axes,
+    aggregate: CurveAggregate,
+    key: str,
+    *,
+    label: str | None = None,
+) -> None:
+    style = _METHOD_STYLE_BY_ID[aggregate.variant_id]
+    x_values = aggregate.axis_for(key)
+    axis.plot(
+        x_values,
+        aggregate.means[key],
+        color=style["color"],
+        linestyle=style["linestyle"],
+        marker=style["marker"],
+        markevery=2,
+        markersize=3.0,
+        markerfacecolor="white",
+        markeredgewidth=0.7,
+        linewidth=(
+            SCI_LINE_WIDTH + 0.4
+            if aggregate.variant_id == "ppo_pprs_dspl"
+            else SCI_LINE_WIDTH
+        ),
+        label=aggregate.label if label is None else label,
+    )
+    axis.fill_between(
+        x_values,
+        aggregate.means[key] - aggregate.stds[key],
+        aggregate.means[key] + aggregate.stds[key],
+        color=style["color"],
+        alpha=SCI_BAND_ALPHA,
+        linewidth=0,
+        where=np.isfinite(aggregate.means[key]) & np.isfinite(aggregate.stds[key]),
+    )
+
+
+def _format_transition_axis(axis: plt.Axes) -> None:
+    axis.ticklabel_format(axis="x", style="sci", scilimits=(6, 6), useMathText=True)
 
 
 def _method(
@@ -87,8 +147,8 @@ def _method(
             "reward_preset": reward_preset,
             "curriculum_profile": curriculum_profile,
             "color": color,
-            "pbrs_enabled": reward_preset == "basic_safety_punctuality",
-            "curriculum_enabled": curriculum_profile == "dspdl",
+            "pprs_enabled": reward_preset == "basic_safety_punctuality",
+            "curriculum_enabled": curriculum_profile == "dspl",
             "reward_config": reward_config_parameters(
                 resolve_reward_preset(reward_preset).config
             ),
@@ -106,24 +166,24 @@ def _method(
 METHODS = (
     _method("ppo", "PPO", "basic", "none", "#0072B2"),
     _method(
-        "ppo_pbrs",
-        "PPO+PBRS",
+        "ppo_pprs",
+        "PPO+PPRS",
         "basic_safety_punctuality",
         "none",
         "#E69F00",
     ),
     _method(
-        "ppo_dspdl",
-        "PPO+DSPDL",
+        "ppo_dspl",
+        "PPO+DSPL",
         "basic",
-        "dspdl",
+        "dspl",
         "#CC79A7",
     ),
     _method(
-        "ppo_pbrs_dspdl",
-        "PPO+PBRS+DSPDL",
+        "ppo_pprs_dspl",
+        "PPO+PPRS+DSPL",
         "basic_safety_punctuality",
-        "dspdl",
+        "dspl",
         "#009E73",
     ),
 )
@@ -136,22 +196,12 @@ SPEC = AblationSpec(
     variants=METHODS,
     seeds=DEFAULT_SEEDS,
     cli=CLIConfig(
-        description="Run PPO/PBRS/DSPDL ablation experiments.",
+        description="Run PPO/PPRS/DSPL ablation experiments.",
         train_help="Train all methods and collect data.",
         show_help="Aggregate and plot method-ablation data.",
         train_arguments=(
             ArgumentSpec(("--output-root",), {"default": DEFAULT_OUTPUT_ROOT}),
             ArgumentSpec(("--reference-curve-dir",), {"required": True}),
-            ArgumentSpec(
-                ("--training-episodes",),
-                {
-                    "type": int,
-                    "default": DEFAULT_TRAINING_EPISODES,
-                    "help": (
-                        "Global completed training episodes for every ablation run."
-                    ),
-                },
-            ),
             ArgumentSpec(
                 ("--schedule-time-s",),
                 {"type": float, "default": DEFAULT_SCHEDULE_TIME_S},
@@ -166,12 +216,11 @@ SPEC = AblationSpec(
             ),
             ArgumentSpec(("--num-envs",), {"type": int, "default": DEFAULT_NUM_ENVS}),
             ArgumentSpec(
-                ("--rollout-steps-per-update",),
-                {"type": int, "default": DEFAULT_ROLLOUT_STEPS_PER_UPDATE},
-            ),
-            ArgumentSpec(
                 ("--evaluation-interval-rollouts",),
-                {"type": int, "default": DEFAULT_EVALUATION_INTERVAL_ROLLOUTS},
+                {
+                    "type": int,
+                    "default": DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
+                },
             ),
             ArgumentSpec(("--device",), {"default": DEFAULT_DEVICE}),
             ArgumentSpec(
@@ -201,8 +250,14 @@ SPEC = AblationSpec(
         ),
         show_arguments=(
             ArgumentSpec(("--output-root",), {"default": DEFAULT_OUTPUT_ROOT}),
-            ArgumentSpec(("--output-file",), {"type": Path, "default": None}),
-            ArgumentSpec(("--safety-output-file",), {"type": Path, "default": None}),
+            ArgumentSpec(
+                ("--figure-output-dir",),
+                {
+                    "type": Path,
+                    "default": None,
+                    "help": "Directory for the three fixed-name method figures.",
+                },
+            ),
             ArgumentSpec(
                 ("--selection-output-file",),
                 {
@@ -214,18 +269,6 @@ SPEC = AblationSpec(
                     ),
                 },
             ),
-            ArgumentSpec(
-                ("--episode-smoothing-window",),
-                {
-                    "type": int,
-                    "default": DEFAULT_EPISODE_SMOOTHING_WINDOW,
-                    "help": (
-                        "Trailing moving-average window in completed training "
-                        "episodes (default: 100)."
-                    ),
-                },
-            ),
-            ArgumentSpec(("--dpi",), {"type": float, "default": 300.0}),
             ArgumentSpec(("--no-show",), {"action": "store_true"}),
             ArgumentSpec(
                 ("--dry-run",),
@@ -243,62 +286,100 @@ SPEC = AblationSpec(
     },
     training_signature={
         "protocol_version": PROTOCOL_VERSION,
-        "curriculum_algorithm_id": DSPDL_ALGORITHM_ID,
-        "dspdl_protocol": dspdl_protocol_parameters(),
-        "training_episodes": ArgRef("training_episodes", int),
+        "curriculum_algorithm_id": DSPL_ALGORITHM_ID,
+        "dspl_protocol": dspl_protocol_parameters(),
+        "budget_mode": "environment_steps",
+        "training_rollouts": METHOD_TRAINING_ROLLOUTS,
+        "training_steps": METHOD_TRAINING_STEPS,
+        "learning_rate_schedule": learning_rate_schedule_parameters(
+            "environment_steps"
+        ),
         "schedule_time_s": ArgRef("schedule_time_s", float),
         "step_distance": ArgRef("step_distance", float),
         "reward_discount": ArgRef("reward_discount", float),
         "num_envs": ArgRef("num_envs", int),
-        "rollout_steps_per_update": ArgRef("rollout_steps_per_update", int),
-        "evaluation_interval_rollouts": ArgRef(
-            "evaluation_interval_rollouts", lambda value: max(1, int(value))
-        ),
+        "rollout_steps_per_update": DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
+        "evaluation_interval_rollouts": ArgRef("evaluation_interval_rollouts", int),
         "device": ArgRef("device", str),
+        "enable_best_evaluation_artifacts": True,
     },
     training_overrides={
-        "evaluation_interval_rollouts": ArgRef(
-            "evaluation_interval_rollouts", lambda value: max(1, int(value))
-        )
+        "budget_mode": "environment_steps",
+        "training_rollouts": METHOD_TRAINING_ROLLOUTS,
+        "training_episodes": None,
+        "num_envs": ArgRef("num_envs", int),
+        "rollout_steps_per_update": DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
+        "enable_best_evaluation_artifacts": True,
+        "evaluation_interval_rollouts": ArgRef("evaluation_interval_rollouts", int),
     },
     curve=CurveAggregationSpec(
-        episode_reader="sequence",
+        episode_reader="series",
         metrics=(
             CurveMetricSpec(
-                "ep_reward", "episode", "total_reward", "episode_number", smooth=True
+                "ep_reward",
+                "evaluation",
+                "total_reward",
+                "training_steps",
+                smooth=True,
+                alignment="exact_union",
             ),
             CurveMetricSpec(
-                "ep_len", "episode", "length", "episode_number", smooth=True
+                "ep_len",
+                "evaluation",
+                "episode_steps",
+                "training_steps",
+                smooth=True,
+                alignment="exact_union",
             ),
             CurveMetricSpec(
                 "stop_error_m",
                 "evaluation",
                 "stop_error_m",
-                "completed_training_episodes",
-                alignment="indexed",
+                "training_steps",
+                transform="abs",
+                smooth=True,
+                alignment="exact_union",
             ),
             CurveMetricSpec(
                 "abs_time_error_s",
                 "evaluation",
                 "time_error_s",
-                "completed_training_episodes",
+                "training_steps",
                 transform="abs",
-                alignment="indexed",
+                smooth=True,
+                alignment="exact_union",
+            ),
+            CurveMetricSpec(
+                "success_rate",
+                "evaluation",
+                "success",
+                "training_steps",
+                transform="bool",
+                smooth=True,
+                alignment="exact_union",
+            ),
+            CurveMetricSpec(
+                "safe_rate",
+                "evaluation",
+                "safe",
+                "training_steps",
+                transform="bool",
+                smooth=True,
+                alignment="exact_union",
             ),
         ),
         primary_metric="ep_reward",
-        x_name="episode_number",
-        default_smoothing_window=DEFAULT_EPISODE_SMOOTHING_WINDOW,
+        x_name="training_steps",
+        default_smoothing_window=EVALUATION_SMOOTHING_WINDOW,
     ),
     final=FinalAggregationSpec(
         metrics=(
             FinalMetricSpec("stop_error_m", "stop_error_m"),
             FinalMetricSpec("abs_time_error_s", "time_error_s", transform="abs"),
-            FinalMetricSpec(
-                "total_energy_kj", "total_energy_kj", feasible_only=True
-            ),
+            FinalMetricSpec("total_energy_kj", "total_energy_kj", feasible_only=True),
             FinalMetricSpec("comfort_tav", "comfort_tav"),
-        )
+        ),
+        source="best",
     ),
     run_label_template="method={name} seed={seed} output={output_dir}",
     schema_version=MANIFEST_VERSION,
@@ -317,49 +398,49 @@ build_curve_aggregates = DRIVER.build_curve_aggregates
 build_final_aggregates = DRIVER.build_final_aggregates
 
 
-@dataclass(frozen=True)
-class SafetyLearningAggregate:
-    method: VariantSpec
-    episode_bin_edges: np.ndarray
-    episode_bin_centers: np.ndarray
-    mean_violation_rate: np.ndarray
-    std_violation_rate: np.ndarray
-    valid_seed_counts: np.ndarray
-
-
-def _plot_learning_curves(aggregates: list[CurveAggregate]) -> plt.Figure | None:
+def _plot_learning_curves(
+    aggregates: list[CurveAggregate],
+) -> plt.Figure | None:
     if not aggregates:
         return None
-    apply_rl_curve_plot_style()
+    apply_sci_curve_style()
     fig, axes = plt.subplots(2, 2)
-    panels = (
-        ("ep_reward", "Mean episode reward", "(a)"),
-        ("ep_len", "Mean episode length", "(b)"),
-        ("stop_error_m", "Mean absolute stop error (m)", "(c)"),
-        ("abs_time_error_s", "Mean absolute time error (s)", "(d)"),
-    )
-    for axis, (key, ylabel, panel) in zip(axes.flat, panels, strict=True):
+    for axis, key, ylabel, panel in (
+        (axes[0, 0], "ep_reward", "Mean evaluation reward", "(a)"),
+        (axes[0, 1], "ep_len", "Mean evaluation episode length", "(b)"),
+        (axes[1, 0], "stop_error_m", "Mean absolute stop error (m)", "(c)"),
+        (
+            axes[1, 1],
+            "abs_time_error_s",
+            "Mean absolute time error (s)",
+            "(d)",
+        ),
+    ):
         for aggregate in aggregates:
-            x_values = aggregate.axis_for(key)
-            axis.plot(
-                x_values,
-                aggregate.means[key],
-                color=aggregate.color,
-                label=aggregate.label,
-            )
-            axis.fill_between(
-                x_values,
-                aggregate.means[key] - aggregate.stds[key],
-                aggregate.means[key] + aggregate.stds[key],
-                color=aggregate.color,
-                alpha=0.16,
-            )
-        axis.set_xlabel(
-            "Completed training episodes"
-        )
+            _plot_method_curve(axis, aggregate, key)
+        axis.set_xlabel("Environment transitions")
         axis.set_ylabel(ylabel)
-        axis.grid(True, alpha=0.3)
+        axis.set_xlim(left=0, right=METHOD_TRAINING_STEPS)
+        _format_transition_axis(axis)
+        if key in {"ep_len", "stop_error_m", "abs_time_error_s"}:
+            axis.set_ylim(bottom=0)
+        apply_sci_grid(axis)
         add_panel_label(ax=axis, label=panel)
+    axes[0, 1].axhline(
+        972,
+        color="#666666",
+        linestyle=(0, (3, 2)),
+        linewidth=0.9,
+        zorder=0,
+    )
+    inset = axes[1, 0].inset_axes((0.53, 0.49, 0.43, 0.43))
+    for aggregate in aggregates:
+        _plot_method_curve(inset, aggregate, "stop_error_m", label="_nolegend_")
+    inset.set_xlim(0.75 * METHOD_TRAINING_STEPS, METHOD_TRAINING_STEPS)
+    inset.set_ylim(0, 150)
+    apply_sci_grid(inset)
+    inset.tick_params(labelsize=6)
+    _format_transition_axis(inset)
     handles, labels = axes[0, 0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", ncol=4, frameon=False)
     apply_sci_figure_layout(
@@ -375,94 +456,116 @@ def _plot_learning_curves(aggregates: list[CurveAggregate]) -> plt.Figure | None
     return fig
 
 
-def build_safety_learning_aggregates(
-    manifest: AblationManifest | dict[str, object],
-) -> tuple[list[SafetyLearningAggregate], list[str]]:
-    aggregates: list[SafetyLearningAggregate] = []
-    warnings: list[str] = []
-    for method in METHODS:
-        runs: list[np.ndarray] = []
-        legacy_run_count = 0
-        for run in manifest_runs(manifest):
-            if run.variant_id != method.id or run.status != "completed":
-                continue
-            try:
-                artifact = load_reward_diagnostics_artifact(
-                    Path(run.artifacts.path_for("episodes"))
-                )
-                episodes = extract_complete_episode_sequence(artifact)
-                if episodes.episode_number.size == 0:
-                    raise ValueError("reward diagnostics contains no complete episodes")
-                if np.any(episodes.violation_code < 0):
-                    legacy_run_count += 1
-                    continue
-                runs.append(
-                    np.isin(
-                        episodes.violation_code,
-                        [int(ViolationCode.SPEED_LOW), int(ViolationCode.SPEED_HIGH)],
-                    ).astype(np.float64)
-                )
-            except (OSError, KeyError, ValueError) as exc:
-                warnings.append(
-                    f"Skipped {method.label} training safety history: {exc}"
-                )
-        if legacy_run_count:
-            warnings.append(
-                f"Skipped {legacy_run_count} {method.label} training safety run(s): "
-                "reward diagnostics lack per-episode violation codes; rerun training "
-                "to create schema-v3 artifacts"
-            )
-        if not runs:
-            continue
-        max_episodes = max(run.size for run in runs)
-        bin_count = (max_episodes - 1) // SAFETY_EPISODE_BIN_WIDTH + 1
-        edges = np.arange(bin_count + 1, dtype=float) * SAFETY_EPISODE_BIN_WIDTH
-        rates = np.full((len(runs), bin_count), np.nan)
-        for row, violations in enumerate(runs):
-            bins = np.arange(violations.size) // SAFETY_EPISODE_BIN_WIDTH
-            for column in np.unique(bins):
-                rates[row, column] = np.mean(violations[bins == column])
-        mean, std, counts = aggregate_matrix(rates)
-        aggregates.append(
-            SafetyLearningAggregate(
-                method, edges, (edges[:-1] + edges[1:]) / 2, mean, std, counts
-            )
-        )
-    return aggregates, warnings
-
-
-def _plot_safety_learning_process(
-    aggregates: list[SafetyLearningAggregate],
+def _plot_evaluation_success_rate(
+    aggregates: list[CurveAggregate],
 ) -> plt.Figure | None:
     if not aggregates:
         return None
-    apply_rl_curve_plot_style()
+    apply_sci_curve_style()
     fig, axis = plt.subplots()
-    for marker, aggregate in zip(("o", "s", "^", "D"), aggregates, strict=False):
+    for aggregate in aggregates:
+        style = _METHOD_STYLE_BY_ID[aggregate.variant_id]
         axis.plot(
-            aggregate.episode_bin_centers,
-            aggregate.mean_violation_rate,
-            color=aggregate.method.color,
-            marker=marker,
-            markersize=4.0,
-            label=aggregate.method.label,
+            aggregate.axis_for("success_rate"),
+            aggregate.means["success_rate"],
+            color=style["color"],
+            linestyle=style["linestyle"],
+            marker=style["marker"],
+            markevery=2,
+            markersize=3.0,
+            markerfacecolor="white",
+            markeredgewidth=0.7,
+            linewidth=(
+                SCI_LINE_WIDTH + 0.4
+                if aggregate.variant_id == "ppo_pprs_dspl"
+                else SCI_LINE_WIDTH
+            ),
+            label=aggregate.label,
         )
         axis.fill_between(
-            aggregate.episode_bin_centers,
-            np.clip(aggregate.mean_violation_rate - aggregate.std_violation_rate, 0, 1),
-            np.clip(aggregate.mean_violation_rate + aggregate.std_violation_rate, 0, 1),
-            where=np.isfinite(aggregate.std_violation_rate),
-            color=aggregate.method.color,
-            alpha=0.18,
+            aggregate.axis_for("success_rate"),
+            np.clip(
+                aggregate.means["success_rate"] - aggregate.stds["success_rate"],
+                0,
+                1,
+            ),
+            np.clip(
+                aggregate.means["success_rate"] + aggregate.stds["success_rate"],
+                0,
+                1,
+            ),
+            color=style["color"],
+            alpha=SCI_BAND_ALPHA,
             linewidth=0,
         )
     axis.set(
-        xlabel="Completed training episodes",
-        ylabel="Training safety violation rate",
-        xlim=(0, max(item.episode_bin_edges[-1] for item in aggregates)),
+        xlabel="Environment transitions",
+        ylabel="Evaluation success rate",
+        xlim=(0, METHOD_TRAINING_STEPS),
         ylim=(-0.03, 1.03),
     )
-    axis.grid(True, alpha=0.3)
+    _format_transition_axis(axis)
+    apply_sci_grid(axis)
+    handles, labels = axis.get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        ncol=4,
+        frameon=False,
+        bbox_to_anchor=(0.5, 1),
+    )
+    apply_sci_figure_layout(
+        fig, columns=2, height_in=3.1, left=0.11, bottom=0.18, top=0.84
+    )
+    return fig
+
+
+def _plot_safety_learning_process(
+    aggregates: list[CurveAggregate],
+) -> plt.Figure | None:
+    if not aggregates:
+        return None
+    apply_sci_curve_style()
+    fig, axis = plt.subplots()
+    for aggregate in aggregates:
+        style = _METHOD_STYLE_BY_ID[aggregate.variant_id]
+        violation_mean = 1.0 - aggregate.means["safe_rate"]
+        violation_std = aggregate.stds["safe_rate"]
+        x_values = aggregate.axis_for("safe_rate")
+        axis.plot(
+            x_values,
+            violation_mean,
+            color=style["color"],
+            linestyle=style["linestyle"],
+            marker=style["marker"],
+            markevery=2,
+            markersize=3.0,
+            markerfacecolor="white",
+            markeredgewidth=0.7,
+            linewidth=(
+                SCI_LINE_WIDTH + 0.4
+                if aggregate.variant_id == "ppo_pprs_dspl"
+                else SCI_LINE_WIDTH
+            ),
+            label=aggregate.label,
+        )
+        axis.fill_between(
+            x_values,
+            np.clip(violation_mean - violation_std, 0, 1),
+            np.clip(violation_mean + violation_std, 0, 1),
+            color=style["color"],
+            alpha=SCI_BAND_ALPHA,
+            linewidth=0,
+        )
+    axis.set(
+        xlabel="Environment transitions",
+        ylabel="Evaluation safety violation rate",
+        xlim=(0, METHOD_TRAINING_STEPS),
+        ylim=(-0.03, 1.03),
+    )
+    _format_transition_axis(axis)
+    apply_sci_grid(axis)
     handles, labels = axis.get_legend_handles_labels()
     fig.legend(
         handles,
@@ -487,7 +590,7 @@ def _print_final_table(aggregates: list[FinalMetricAggregate]) -> None:
         "total_energy_kj",
         "comfort_tav",
     )
-    print("Final-policy evaluation summary (mean±std):")
+    print("Best-evaluation summary (mean±std):")
     print(" | ".join(columns))
     for aggregate in aggregates:
         cells = [aggregate.label or aggregate.variant_id]
@@ -503,16 +606,16 @@ def _print_final_table(aggregates: list[FinalMetricAggregate]) -> None:
 
 
 def _print_constraint_table(manifest: AblationManifest) -> None:
-    print("Final-policy constraint rates:")
+    print("Best-evaluation constraint rates:")
     print("method | success | precise | punctual | safe | feasible | n")
     for method in METHODS:
         assessments = []
         for run in manifest.runs:
             if run.variant_id == method.id:
                 metrics = load_evaluation_metrics(
-                    Path(run.artifacts.path_for("metrics_final"))
+                    Path(run.artifacts.path_for("metrics_best"))
                 )
-                assessments.append(assess_constraints(metrics.to_display_mapping()))
+                assessments.append(assess_constraints(metrics))
         n = len(assessments)
         fields = (
             "success",
@@ -532,11 +635,11 @@ def _print_constraint_table(manifest: AblationManifest) -> None:
         )
 
 
-def _validate_analysis_manifest(manifest: AblationManifest) -> None:
+def validate_method_ablation_manifest(manifest: AblationManifest) -> None:
     if manifest.matrix_config.get("protocol_version") != PROTOCOL_VERSION:
         raise ValueError(
-            "method-ablation manifest uses an obsolete protocol; rerun in the "
-            "DSPDL v3 output directory"
+            "method-ablation manifest uses an obsolete protocol; rerun it in a "
+            "new YYYYMMDD_NN experiment directory"
         )
     expected_variants = [dict(method.manifest) for method in METHODS]
     if manifest.matrix_config.get("variants") != expected_variants:
@@ -546,12 +649,37 @@ def _validate_analysis_manifest(manifest: AblationManifest) -> None:
     if manifest.matrix_config.get("seeds") != list(DEFAULT_SEEDS):
         raise ValueError("method-ablation manifest seed matrix is incompatible")
     if (
-        manifest.training_signature.get("curriculum_algorithm_id")
-        != DSPDL_ALGORITHM_ID
-        or manifest.training_signature.get("dspdl_protocol")
-        != dspdl_protocol_parameters()
+        manifest.training_signature.get("curriculum_algorithm_id") != DSPL_ALGORITHM_ID
+        or manifest.training_signature.get("dspl_protocol")
+        != dspl_protocol_parameters()
     ):
-        raise ValueError("method-ablation DSPDL protocol is incompatible")
+        raise ValueError("method-ablation DSPL protocol is incompatible")
+    expected_training = {
+        "budget_mode": "environment_steps",
+        "training_rollouts": METHOD_TRAINING_ROLLOUTS,
+        "training_steps": METHOD_TRAINING_STEPS,
+        "rollout_steps_per_update": DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
+        "learning_rate_schedule": learning_rate_schedule_parameters(
+            "environment_steps"
+        ),
+    }
+    for key, value in expected_training.items():
+        if manifest.training_signature.get(key) != value:
+            raise ValueError(
+                f"method-ablation training signature {key} is incompatible"
+            )
+    num_envs = manifest.training_signature.get("num_envs")
+    if (
+        not isinstance(num_envs, int)
+        or num_envs <= 0
+        or DEFAULT_ROLLOUT_STEPS_PER_UPDATE % num_envs != 0
+    ):
+        raise ValueError("method-ablation num_envs is incompatible")
+    evaluation_interval = manifest.training_signature.get(
+        "evaluation_interval_rollouts"
+    )
+    if not isinstance(evaluation_interval, int) or evaluation_interval <= 0:
+        raise ValueError("method-ablation evaluation_interval_rollouts is incompatible")
     expected = {
         f"method__{method.id}__seed{seed:04d}__r{index + 1:02d}"
         for method in METHODS
@@ -572,38 +700,20 @@ def _validate_analysis_manifest(manifest: AblationManifest) -> None:
         )
 
 
-def _selection_rank(metrics: object) -> tuple[float, ...]:
-    metric_map = metrics.to_display_mapping()  # type: ignore[attr-defined]
-    assessment = assess_constraints(metric_map)
-    energy = float(metric_map["total_energy_kj"])
-    if assessment.feasible:
-        return (1.0, -energy, 0.0, 0.0, 0.0, 0.0, 0.0)
-    return (
-        0.0,
-        float(assessment.safe and assessment.success),
-        float(assessment.precise_arrival),
-        -abs(float(metric_map["stop_error_m"])),
-        float(assessment.punctual_arrival),
-        -abs(float(metric_map["time_error_s"])),
-        -energy,
-    )
-
-
 def build_policy_selection(manifest: AblationManifest) -> dict[str, object]:
     candidates: list[dict[str, object]] = []
     for run in manifest.runs:
-        if run.variant_id != "ppo_pbrs_dspdl":
+        if run.variant_id != "ppo_pprs_dspl":
             continue
-        metrics = load_evaluation_metrics(Path(run.artifacts.path_for("metrics_final")))
-        metric_map = metrics.to_display_mapping()
-        assessment = assess_constraints(metric_map)
+        metrics = load_evaluation_metrics(Path(run.artifacts.path_for("metrics_best")))
+        assessment = assess_constraints(metrics)
         candidates.append(
             {
                 "run_id": run.run_id,
                 "variant_id": run.variant_id,
                 "seed": run.seed,
                 "repeat_index": run.repeat_index,
-                "rank_key": list(_selection_rank(metrics)),
+                "rank_key": list(metrics.selection_comparison_key),
                 "assessment": assessment.to_dict(),
                 "metrics": {
                     "stop_error_m": abs(float(metrics.stop_error_m)),
@@ -611,18 +721,18 @@ def build_policy_selection(manifest: AblationManifest) -> dict[str, object]:
                     "total_energy_kj": float(metrics.total_energy_kj),
                     "comfort_tav": float(metrics.comfort_tav),
                 },
-                "policy_dir": str(Path(run.artifacts.path_for("metrics_final")).parent),
+                "model_dir": str(Path(run.artifacts.path_for("metrics_best")).parent),
                 "artifacts": {
-                    "policy_final": run.artifacts.path_for("policy_final"),
-                    "metrics_final": run.artifacts.path_for("metrics_final"),
-                    "metadata": run.artifacts.path_for("metadata"),
+                    "policy_best": run.artifacts.path_for("policy_best"),
+                    "trajectory_best": run.artifacts.path_for("trajectory_best"),
+                    "metrics_best": run.artifacts.path_for("metrics_best"),
+                    "metadata": run.artifacts.path_for("metadata_best"),
                 },
             }
         )
     if len(candidates) != len(DEFAULT_SEEDS):
         raise ValueError(
-            "policy selection requires all five final policies from "
-            "ppo_pbrs_dspdl"
+            "policy selection requires all five PPO+PPRS+DSPL best policies"
         )
     best_key = max(tuple(item["rank_key"]) for item in candidates)  # type: ignore[arg-type]
     selected = min(
@@ -644,13 +754,32 @@ def build_policy_selection(manifest: AblationManifest) -> dict[str, object]:
             "otherwise safe success, precision, stop error, punctuality, absolute "
             "time error, and energy; run_id breaks exact ties"
         ),
-        "candidate_variant_id": "ppo_pbrs_dspdl",
+        "candidate_variant_id": "ppo_pprs_dspl",
         "selected": selected,
         "candidates": sorted(candidates, key=lambda item: str(item["run_id"])),
     }
 
 
 def save_policy_selection(payload: dict[str, object], output_path: Path) -> Path:
+    payload = json.loads(json.dumps(payload))
+    source_manifest = payload.get("source_manifest")
+    if isinstance(source_manifest, str):
+        payload["source_manifest"] = os.path.relpath(
+            source_manifest, output_path.parent
+        )
+    for key in ("selected", "candidates"):
+        items = payload[key] if key == "candidates" else [payload[key]]
+        assert isinstance(items, list)
+        for item in items:
+            assert isinstance(item, dict)
+            model_dir = Path(str(item["model_dir"]))
+            item["model_dir"] = os.path.relpath(model_dir, output_path.parent)
+            artifacts = item.get("artifacts")
+            if isinstance(artifacts, dict):
+                for name, value in artifacts.items():
+                    artifacts[name] = os.path.relpath(
+                        Path(str(value)), output_path.parent
+                    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -659,6 +788,13 @@ def save_policy_selection(payload: dict[str, object], output_path: Path) -> Path
 
 
 def run_train(args: argparse.Namespace) -> int:
+    if args.num_envs <= 0 or DEFAULT_ROLLOUT_STEPS_PER_UPDATE % args.num_envs != 0:
+        raise SystemExit(
+            "--num-envs must be a positive divisor of "
+            f"{DEFAULT_ROLLOUT_STEPS_PER_UPDATE}"
+        )
+    if args.evaluation_interval_rollouts <= 0:
+        raise SystemExit("--evaluation-interval-rollouts must be positive")
     DRIVER.train_experiment = train_single_experiment
     DRIVER.evaluate_experiment = evaluate_final_training_run
     return DRIVER.run_train(args)
@@ -667,17 +803,12 @@ def run_train(args: argparse.Namespace) -> int:
 def run_show(args: argparse.Namespace) -> int:
     manifest = DRIVER.load_manifest(args.output_root)
     try:
-        _validate_analysis_manifest(manifest)
+        validate_method_ablation_manifest(manifest)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
-    if args.episode_smoothing_window < 1:
-        raise SystemExit("--episode-smoothing-window must be >= 1")
-    curves, curve_warnings = DRIVER.build_curve_aggregates(
-        manifest, episode_smoothing_window=args.episode_smoothing_window
-    )
-    safety, safety_warnings = build_safety_learning_aggregates(manifest)
+    curves, curve_warnings = DRIVER.build_curve_aggregates(manifest)
     finals, final_warnings = DRIVER.build_final_aggregates(manifest)
-    warnings = [*curve_warnings, *safety_warnings, *final_warnings]
+    warnings = [*curve_warnings, *final_warnings]
     if warnings:
         raise SystemExit(
             "Method-ablation analysis inputs are invalid:\n" + "\n".join(warnings)
@@ -685,26 +816,46 @@ def run_show(args: argparse.Namespace) -> int:
     expected_count = len(METHODS)
     if (
         len(curves) != expected_count
-        or len(safety) != expected_count
         or len(finals) != expected_count
         or any(item.valid_run_count != len(DEFAULT_SEEDS) for item in curves)
         or any(item.valid_run_count != len(DEFAULT_SEEDS) for item in finals)
     ):
         raise SystemExit("Method-ablation analysis refused a partial aggregation")
+    interval = int(manifest.training_signature["evaluation_interval_rollouts"])
+    expected_steps = (
+        np.arange(interval, METHOD_TRAINING_ROLLOUTS, interval, dtype=np.int64)
+        * DEFAULT_ROLLOUT_STEPS_PER_UPDATE
+    ).astype(np.float64)
+    for aggregate in curves:
+        for metric in (
+            "ep_reward",
+            "ep_len",
+            "stop_error_m",
+            "abs_time_error_s",
+            "success_rate",
+            "safe_rate",
+        ):
+            stats = aggregate.metrics[metric]
+            if (
+                not np.array_equal(aggregate.axis_for(metric), expected_steps)
+                or not np.all(stats.count == len(DEFAULT_SEEDS))
+                or not np.all(np.isfinite(stats.mean))
+                or not np.all(np.isfinite(stats.std))
+            ):
+                raise SystemExit(
+                    f"Method-ablation {metric} has missing or invalid evaluations"
+                )
     _print_final_table(finals)
     _print_constraint_table(manifest)
     selection = build_policy_selection(manifest)
     selected = selection["selected"]
     assert isinstance(selected, dict)
     print(
-        "Selected final policy: "
+        "Selected best-evaluation policy: "
         f"run_id={selected['run_id']} seed={selected['seed']} "
-        f"directory={selected['policy_dir']}"
+        f"directory={selected['model_dir']}"
     )
-    print(
-        f"Episode smoothing: trailing window={args.episode_smoothing_window} "
-        "completed episodes."
-    )
+    print("Learning curves use all periodic independent evaluations.")
     if args.dry_run:
         return 0
     selection_path = args.selection_output_file or (
@@ -713,9 +864,16 @@ def run_show(args: argparse.Namespace) -> int:
     save_policy_selection(selection, selection_path)
     print(f"Saved policy selection to: {selection_path}")
     curve_figure = _plot_learning_curves(curves)
-    safety_figure = _plot_safety_learning_process(safety)
-    save_ablation_figure(curve_figure, args.output_file, dpi=args.dpi)
-    save_ablation_figure(safety_figure, args.safety_output_file, dpi=args.dpi)
+    safety_figure = _plot_safety_learning_process(curves)
+    success_figure = _plot_evaluation_success_rate(curves)
+    if args.figure_output_dir is not None:
+        for figure, filename in zip(
+            (curve_figure, safety_figure, success_figure),
+            METHOD_FIGURE_FILENAMES,
+            strict=True,
+        ):
+            saved_path = save_ablation_figure(figure, args.figure_output_dir / filename)
+            print(f"Saved figure to: {saved_path}")
     if not args.no_show:
         plt.show()
     return 0

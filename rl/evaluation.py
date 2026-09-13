@@ -7,7 +7,16 @@ import numpy as np
 from numpy.typing import NDArray
 
 from contracts.common import JSONValue, as_json_value
-from contracts.evaluation import EvaluationArtifact, EvaluationMetrics, TrajectoryData
+from contracts.evaluation import (
+    EvaluationArtifact,
+    EvaluationMetrics,
+    TrajectoryData,
+    is_feasible_evaluation,
+    is_precise_evaluation,
+    is_punctual_evaluation,
+    is_safe_evaluation,
+    is_successful_evaluation,
+)
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
@@ -18,18 +27,30 @@ from rl.operational_stepper import OperationalStepper
 from rl.reward_calculator import RewardCalculator, RewardConfig
 from utils.io_utils import save_evaluation_artifact
 
-BEST_TRAJECTORY_SELECTION_RULE = "arrival_precise_punctual_energy_else_reward"
+BEST_TRAJECTORY_SELECTION_RULE = "strict_feasible_energy_then_constraint_fallback"
 BEST_TRAJECTORY_SELECTION_RULE_DESCRIPTION = (
-    "Any successful arrival (terminated=True and truncated=False) outranks "
-    "any non-arrival "
-    "evaluation. "
-    "Among non-arrivals, higher total_reward wins. Among successful arrivals, "
-    "precise arrival wins first; if neither trajectory is precise, lower "
-    "stop_error_m wins. Punctual arrival wins next; if neither trajectory is "
-    "punctual, lower abs(time_error_s) wins. Punctual arrival requires "
-    "abs(time_error_s) < TrainService.max_arr_time_error_s. Lower total_energy_j "
-    "wins only after those task-completion levels."
+    "Strictly feasible evaluations (safe, successful, precise and punctual) "
+    "outrank all infeasible evaluations; lower energy wins among feasible "
+    "evaluations. Otherwise compare safe success, precision, stop error, "
+    "punctuality, absolute time error and energy in that order."
 )
+
+
+def calculate_route_completion_ratio(
+    *, start_position_m: float, target_position_m: float, final_position_m: float
+) -> float:
+    """Return clipped net progress along the route's running direction."""
+    route_delta = float(target_position_m) - float(start_position_m)
+    if not np.isfinite(route_delta) or route_delta == 0.0:
+        raise ValueError("start and target positions must define a finite route")
+    progress = (
+        (float(final_position_m) - float(start_position_m))
+        * np.sign(route_delta)
+        / abs(route_delta)
+    )
+    if not np.isfinite(progress):
+        raise ValueError("final_position_m must be finite")
+    return float(np.clip(progress, 0.0, 1.0))
 
 
 @dataclass(frozen=True, init=False)
@@ -153,6 +174,26 @@ class PolicyEvaluationResult:
         """Presentation conversion; Joules remain the canonical field."""
         return self.total_energy_j / 1000.0
 
+    @property
+    def safety_violation_count(self) -> int:
+        return int(self.safety_violation_positions_m.size)
+
+    @property
+    def safe(self) -> bool:
+        return is_safe_evaluation(
+            min_safety_margin_mps=self.min_safety_margin_mps,
+            safety_violation_count=self.safety_violation_count,
+        )
+
+    @property
+    def feasible(self) -> bool:
+        return is_feasible_evaluation(
+            success=self.success,
+            precise_arrival=self.precise_arrival,
+            punctual_arrival=self.punctual_arrival,
+            safe=self.safe,
+        )
+
     def to_evaluation_metrics(
         self,
         *,
@@ -189,6 +230,9 @@ class PolicyEvaluationResult:
             episode_steps=int(self.episode_steps),
             min_safety_margin_mps=float(self.min_safety_margin_mps),
             mean_safety_margin_mps=float(self.mean_safety_margin_mps),
+            safety_violation_count=self.safety_violation_count,
+            safe=self.safe,
+            feasible=self.feasible,
             strict_stop_error_limit_m=float(self.strict_stop_error_limit_m),
             strict_time_error_limit_s=float(self.strict_time_error_limit_s),
             selection_comparison_key=build_policy_evaluation_comparison_key(self),
@@ -251,7 +295,7 @@ def is_successful_arrival(
     truncated: bool,
 ) -> bool:
     """Return the environment's authoritative task-completion result."""
-    return bool(terminated and not truncated)
+    return is_successful_evaluation(terminated=terminated, truncated=truncated)
 
 
 def is_precise_arrival(
@@ -260,7 +304,11 @@ def is_precise_arrival(
     stop_error_m: float,
     train_service: TrainService,
 ) -> bool:
-    return bool(success and float(stop_error_m) <= float(train_service.max_stop_error))
+    return is_precise_evaluation(
+        success=success,
+        stop_error_m=stop_error_m,
+        stop_error_limit_m=float(train_service.max_stop_error),
+    )
 
 
 def is_punctual_arrival(
@@ -269,9 +317,10 @@ def is_punctual_arrival(
     time_error_s: float,
     train_service: TrainService,
 ) -> bool:
-    return bool(
-        precise_arrival
-        and abs(float(time_error_s)) < float(train_service.max_arr_time_error_s)
+    return is_punctual_evaluation(
+        precise_arrival=precise_arrival,
+        time_error_s=time_error_s,
+        time_error_limit_s=float(train_service.max_arr_time_error_s),
     )
 
 
@@ -543,6 +592,9 @@ def save_policy_evaluation_curve(
         "episode_steps",
         "min_safety_margin_mps",
         "mean_safety_margin_mps",
+        "safety_violation_count",
+        "safe",
+        "feasible",
         "strict_stop_error_limit_m",
         "strict_time_error_limit_s",
         "selection_comparison_key",
@@ -601,8 +653,8 @@ def evaluate_and_save_final_policy(
     """Evaluate a final policy once and persist its canonical final artifacts.
 
     The caller owns the environment lifecycle.  ``output_path`` should normally
-    be ``<final_output_dir>/final_trajectory.npz``; metrics are emitted next to
-    it as ``metrics_final.json``.
+    be ``<model_dir>/trajectory.npz``; metrics are emitted next to it as
+    ``metrics.json``.
     """
     result = evaluate_policy_once(model, env, deterministic=deterministic)
     extra_metrics = dict(metadata or {})
@@ -624,50 +676,21 @@ def evaluate_and_save_final_policy(
 def build_policy_evaluation_comparison_key(
     result: PolicyEvaluationResult,
 ) -> tuple[float, ...]:
-    if not result.success:
-        return (0.0, float(result.total_reward))
-
+    safe = result.safe
     precise_arrival = bool(result.precise_arrival)
     punctual_arrival = bool(result.punctual_arrival)
-    stop_component = 0.0 if precise_arrival else -float(result.stop_error_m)
-    time_component = 0.0 if punctual_arrival else -abs(float(result.time_error_s))
-
+    feasible = result.feasible
+    if feasible:
+        return (1.0, -float(result.total_energy_j), 0.0, 0.0, 0.0, 0.0, 0.0)
     return (
-        1.0,
+        0.0,
+        1.0 if safe and result.success else 0.0,
         1.0 if precise_arrival else 0.0,
-        stop_component,
+        -abs(float(result.stop_error_m)),
         1.0 if punctual_arrival else 0.0,
-        time_component,
+        -abs(float(result.time_error_s)),
         -float(result.total_energy_j),
     )
-
-
-def _best_update_reason_for_successes(
-    candidate: PolicyEvaluationResult,
-    previous: PolicyEvaluationResult,
-) -> str | None:
-    if candidate.precise_arrival and not previous.precise_arrival:
-        return "precise_arrival_reached"
-    if (
-        not candidate.precise_arrival
-        and not previous.precise_arrival
-        and float(candidate.stop_error_m) < float(previous.stop_error_m)
-    ):
-        return "lower_stop_error_before_precise_arrival"
-
-    if candidate.punctual_arrival and not previous.punctual_arrival:
-        return "punctual_arrival_reached"
-    if (
-        not candidate.punctual_arrival
-        and not previous.punctual_arrival
-        and abs(float(candidate.time_error_s)) < abs(float(previous.time_error_s))
-    ):
-        return "lower_time_error_before_punctual_arrival"
-
-    if float(candidate.total_energy_j) < float(previous.total_energy_j):
-        return "lower_energy_after_arrival_requirements"
-
-    return None
 
 
 def describe_best_update_reason(
@@ -682,11 +705,12 @@ def describe_best_update_reason(
     ) <= build_policy_evaluation_comparison_key(previous):
         return None
 
+    candidate_key = build_policy_evaluation_comparison_key(candidate)
+    previous_key = build_policy_evaluation_comparison_key(previous)
+    if candidate_key[0] > previous_key[0]:
+        return "strict_feasibility_reached"
+    if candidate_key[0] == previous_key[0] == 1.0:
+        return "lower_energy_among_feasible"
     if candidate.success and not previous.success:
-        return "success_replaces_reward_fallback"
-    if not candidate.success and not previous.success:
-        return "higher_total_reward_without_success"
-    if candidate.success and previous.success:
-        return _best_update_reason_for_successes(candidate, previous)
-
-    return None
+        return "safe_success_reached"
+    return "better_constraint_fallback"

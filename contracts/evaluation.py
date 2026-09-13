@@ -17,9 +17,60 @@ from .common import (
 )
 
 EVALUATION_METRICS_ARTIFACT_TYPE = "rl_evaluation_metrics"
-EVALUATION_METRICS_SCHEMA_VERSION = 1
+EVALUATION_METRICS_SCHEMA_VERSION = 2
 EVALUATION_HISTORY_ARTIFACT_TYPE = "rl_evaluation_history"
-EVALUATION_HISTORY_SCHEMA_VERSION = 1
+EVALUATION_HISTORY_SCHEMA_VERSION = 3
+SAFETY_MARGIN_EPS_MPS = 1e-6
+
+
+def is_successful_evaluation(*, terminated: bool, truncated: bool) -> bool:
+    """Return whether an evaluation ended in normal task completion."""
+    return bool(terminated and not truncated)
+
+
+def is_precise_evaluation(
+    *, success: bool, stop_error_m: float, stop_error_limit_m: float
+) -> bool:
+    """Return the canonical stopping-accuracy status (inclusive limit)."""
+    if stop_error_limit_m < 0.0:
+        raise ValueError("stop_error_limit_m must be non-negative")
+    return bool(success and abs(float(stop_error_m)) <= stop_error_limit_m)
+
+
+def is_punctual_evaluation(
+    *, precise_arrival: bool, time_error_s: float, time_error_limit_s: float
+) -> bool:
+    """Return the canonical punctuality status (exclusive limit)."""
+    if time_error_limit_s < 0.0:
+        raise ValueError("time_error_limit_s must be non-negative")
+    return bool(precise_arrival and abs(float(time_error_s)) < time_error_limit_s)
+
+
+def is_safe_evaluation(
+    *,
+    min_safety_margin_mps: float,
+    safety_violation_count: int,
+    safety_margin_eps_mps: float = SAFETY_MARGIN_EPS_MPS,
+) -> bool:
+    """Return the canonical safety status for one evaluated trajectory."""
+    if safety_violation_count < 0:
+        raise ValueError("safety_violation_count must be non-negative")
+    if safety_margin_eps_mps < 0.0:
+        raise ValueError("safety_margin_eps_mps must be non-negative")
+    return bool(
+        min_safety_margin_mps >= -safety_margin_eps_mps and safety_violation_count == 0
+    )
+
+
+def is_feasible_evaluation(
+    *,
+    success: bool,
+    precise_arrival: bool,
+    punctual_arrival: bool,
+    safe: bool,
+) -> bool:
+    """Return the canonical strict-feasibility status."""
+    return bool(success and precise_arrival and punctual_arrival and safe)
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +98,9 @@ class EvaluationMetrics(Mapping[str, object]):
     episode_steps: int = field(metadata={"minimum": 0})
     min_safety_margin_mps: float
     mean_safety_margin_mps: float
+    safety_violation_count: int = field(metadata={"minimum": 0})
+    safe: bool
+    feasible: bool
     strict_stop_error_limit_m: float
     strict_time_error_limit_s: float
     selection_comparison_key: tuple[float, ...] = field(metadata={"non_empty": True})
@@ -59,6 +113,46 @@ class EvaluationMetrics(Mapping[str, object]):
     def __post_init__(self) -> None:
         if self.episode_steps < 0:
             raise ValueError("episode_steps must be non-negative")
+        if self.safety_violation_count < 0:
+            raise ValueError("safety_violation_count must be non-negative")
+        expected_success = is_successful_evaluation(
+            terminated=self.terminated,
+            truncated=self.truncated,
+        )
+        if self.success != expected_success:
+            raise ValueError("success does not match the canonical completion rule")
+        expected_precise = is_precise_evaluation(
+            success=self.success,
+            stop_error_m=self.stop_error_m,
+            stop_error_limit_m=self.strict_stop_error_limit_m,
+        )
+        if self.precise_arrival != expected_precise:
+            raise ValueError(
+                "precise_arrival does not match the canonical stopping rule"
+            )
+        expected_punctual = is_punctual_evaluation(
+            precise_arrival=self.precise_arrival,
+            time_error_s=self.time_error_s,
+            time_error_limit_s=self.strict_time_error_limit_s,
+        )
+        if self.punctual_arrival != expected_punctual:
+            raise ValueError(
+                "punctual_arrival does not match the canonical punctuality rule"
+            )
+        expected_safe = is_safe_evaluation(
+            min_safety_margin_mps=self.min_safety_margin_mps,
+            safety_violation_count=self.safety_violation_count,
+        )
+        if self.safe != expected_safe:
+            raise ValueError("safe does not match the canonical safety rule")
+        expected_feasible = is_feasible_evaluation(
+            success=self.success,
+            precise_arrival=self.precise_arrival,
+            punctual_arrival=self.punctual_arrival,
+            safe=self.safe,
+        )
+        if self.feasible != expected_feasible:
+            raise ValueError("feasible does not match the canonical constraint rule")
         if not self.selection_comparison_key:
             raise ValueError("selection_comparison_key must not be empty")
         if self.num_timesteps is not None and self.num_timesteps < 0:
@@ -161,11 +255,14 @@ class EvaluationHistory:
     total_reward: NDArray[np.float64]
     episode_steps: NDArray[np.int64]
     success: NDArray[np.bool_]
+    safe: NDArray[np.bool_]
     stop_error_m: NDArray[np.float64]
     time_error_s: NDArray[np.float64]
     total_energy_j: NDArray[np.float64]
     comfort_tav: NDArray[np.float64]
     completed_training_episodes: NDArray[np.int64]
+    scheduled_completed_training_episodes: NDArray[np.int64]
+    route_completion_ratio: NDArray[np.float64]
     safety_violation_positions_m: NDArray[np.float64]
     safety_violation_position_offsets: NDArray[np.int64]
 
@@ -176,11 +273,14 @@ class EvaluationHistory:
             ("total_reward", np.dtype(np.float64)),
             ("episode_steps", np.dtype(np.int64)),
             ("success", np.dtype(np.bool_)),
+            ("safe", np.dtype(np.bool_)),
             ("stop_error_m", np.dtype(np.float64)),
             ("time_error_s", np.dtype(np.float64)),
             ("total_energy_j", np.dtype(np.float64)),
             ("comfort_tav", np.dtype(np.float64)),
             ("completed_training_episodes", np.dtype(np.int64)),
+            ("scheduled_completed_training_episodes", np.dtype(np.int64)),
+            ("route_completion_ratio", np.dtype(np.float64)),
             ("safety_violation_positions_m", np.dtype(np.float64)),
             ("safety_violation_position_offsets", np.dtype(np.int64)),
         )
@@ -196,15 +296,28 @@ class EvaluationHistory:
             self.total_reward,
             self.episode_steps,
             self.success,
+            self.safe,
             self.stop_error_m,
             self.time_error_s,
             self.total_energy_j,
             self.comfort_tav,
             self.completed_training_episodes,
+            self.scheduled_completed_training_episodes,
+            self.route_completion_ratio,
         )
         lengths = {item.size for item in series}
         if len(lengths) != 1:
             raise ValueError("evaluation history series must have equal lengths")
+        if np.any(self.scheduled_completed_training_episodes < 0):
+            raise ValueError(
+                "scheduled_completed_training_episodes must be non-negative"
+            )
+        if np.any(self.completed_training_episodes < 0):
+            raise ValueError("completed_training_episodes must be non-negative")
+        if not np.all(np.isfinite(self.route_completion_ratio)) or np.any(
+            (self.route_completion_ratio < 0.0) | (self.route_completion_ratio > 1.0)
+        ):
+            raise ValueError("route_completion_ratio must be finite and within [0, 1]")
         offset_count = np.asarray(self.safety_violation_position_offsets).size
         if offset_count != self.training_steps.size + 1:
             raise ValueError(
@@ -234,12 +347,19 @@ class EvaluationHistory:
             "total_reward": np.asarray(self.total_reward, dtype=np.float64),
             "episode_steps": np.asarray(self.episode_steps, dtype=np.int64),
             "success": np.asarray(self.success, dtype=np.bool_),
+            "safe": np.asarray(self.safe, dtype=np.bool_),
             "stop_error_m": np.asarray(self.stop_error_m, dtype=np.float64),
             "time_error_s": np.asarray(self.time_error_s, dtype=np.float64),
             "total_energy_j": np.asarray(self.total_energy_j, dtype=np.float64),
             "comfort_tav": np.asarray(self.comfort_tav, dtype=np.float64),
             "completed_training_episodes": np.asarray(
                 self.completed_training_episodes, dtype=np.int64
+            ),
+            "scheduled_completed_training_episodes": np.asarray(
+                self.scheduled_completed_training_episodes, dtype=np.int64
+            ),
+            "route_completion_ratio": np.asarray(
+                self.route_completion_ratio, dtype=np.float64
             ),
             "safety_violation_positions_m": np.asarray(
                 self.safety_violation_positions_m, dtype=np.float64
@@ -259,11 +379,14 @@ class EvaluationHistory:
             "total_reward",
             "episode_steps",
             "success",
+            "safe",
             "stop_error_m",
             "time_error_s",
             "total_energy_j",
             "comfort_tav",
             "completed_training_episodes",
+            "scheduled_completed_training_episodes",
+            "route_completion_ratio",
             "safety_violation_positions_m",
             "safety_violation_position_offsets",
         }
@@ -295,12 +418,19 @@ class EvaluationHistory:
             total_reward=np.asarray(data["total_reward"], dtype=np.float64),
             episode_steps=np.asarray(data["episode_steps"], dtype=np.int64),
             success=np.asarray(data["success"], dtype=np.bool_),
+            safe=np.asarray(data["safe"], dtype=np.bool_),
             stop_error_m=np.asarray(data["stop_error_m"], dtype=np.float64),
             time_error_s=np.asarray(data["time_error_s"], dtype=np.float64),
             total_energy_j=np.asarray(data["total_energy_j"], dtype=np.float64),
             comfort_tav=np.asarray(data["comfort_tav"], dtype=np.float64),
             completed_training_episodes=np.asarray(
                 data["completed_training_episodes"], dtype=np.int64
+            ),
+            scheduled_completed_training_episodes=np.asarray(
+                data["scheduled_completed_training_episodes"], dtype=np.int64
+            ),
+            route_completion_ratio=np.asarray(
+                data["route_completion_ratio"], dtype=np.float64
             ),
             safety_violation_positions_m=np.asarray(
                 data["safety_violation_positions_m"], dtype=np.float64
@@ -317,3 +447,10 @@ class EvaluationArtifact:
 
     metrics: EvaluationMetrics
     trajectory: TrajectoryData
+
+    def __post_init__(self) -> None:
+        violation_count = int(self.trajectory.safety_violation_positions_m.size)
+        if self.metrics.safety_violation_count != violation_count:
+            raise ValueError(
+                "metrics safety_violation_count does not match trajectory violations"
+            )

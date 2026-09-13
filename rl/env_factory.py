@@ -6,7 +6,7 @@ from model.track import TrackInfo
 from model.vehicle import VehicleInfo
 from rl.context_pool import ContextPool
 from rl.context_sampler import ContextSampler, CurriculumDistributionState
-from rl.dspdl import DSPDLStatisticsHub
+from rl.dspl import DSPLStatisticsHub
 from rl.mtto_env import MTTOEnv
 from rl.operational_stepper import OperationalStepper
 from rl.reward_calculator import RewardConfig
@@ -30,16 +30,15 @@ def make_env(
     initial_context_distribution: NDArray[np.floating] | list[float] | None = None,
     curriculum_distribution_state: CurriculumDistributionState | None = None,
     context_sampling_seed: int | None = None,
-    dspdl_statistics_hub: DSPDLStatisticsHub | None = None,
+    dspl_statistics_hub: DSPLStatisticsHub | None = None,
     curriculum_env_rank: int | None = None,
     enable_safety_truncation_tracking: bool = False,
     reward_diagnostics_worker_rank: int | None = None,
     reward_diagnostics_rollout_capacity: int | None = None,
 ):
-    if (dspdl_statistics_hub is None) != (curriculum_env_rank is None):
+    if (dspl_statistics_hub is None) != (curriculum_env_rank is None):
         raise ValueError(
-            "DSPDL statistics hub and curriculum environment rank "
-            "must be set together"
+            "DSPL statistics hub and curriculum environment rank must be set together"
         )
     if (reward_diagnostics_worker_rank is None) != (
         reward_diagnostics_rollout_capacity is None
@@ -63,16 +62,16 @@ def make_env(
             seed=context_sampling_seed,
         )
         if (
-            dspdl_statistics_hub is not None
-            and dspdl_statistics_hub.context_count != context_pool.context_count
+            dspl_statistics_hub is not None
+            and dspl_statistics_hub.context_count != context_pool.context_count
         ):
             raise ValueError(
-                "critic statistics hub context count must match the context pool"
+                "DSPL statistics hub context count must match the context pool"
             )
     elif (
         initial_context_distribution is not None
         or curriculum_distribution_state is not None
-        or dspdl_statistics_hub is not None
+        or dspl_statistics_hub is not None
     ):
         raise ValueError("curriculum components require context_pool")
     env = MTTOEnv(
@@ -88,7 +87,7 @@ def make_env(
         reward_config=reward_config,
         stepper=stepper,
         context_sampler=context_sampler,
-        dspdl_statistics_hub=dspdl_statistics_hub,
+        dspl_statistics_hub=dspl_statistics_hub,
         curriculum_env_rank=curriculum_env_rank,
         safety_truncation_buffer=(
             SafetyTruncationBuffer() if enable_safety_truncation_tracking else None

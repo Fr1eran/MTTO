@@ -117,9 +117,10 @@ def test_show_potential_function_cli_defaults() -> None:
     parser = show_potential_function._build_cli_parser()
     args = parser.parse_args([])
 
-    assert args.plot_type == "stopping-heatmap"
-    assert args.output_file is None
+    assert args.plot_type == "safety-punctuality"
+    assert args.output_dir is None
     assert args.minimal is False
+    assert args.schedule_time_s == pytest.approx(465.0)
 
 
 @pytest.mark.parametrize("plot_type", show_potential_function.PLOT_TYPE_CHOICES)
@@ -128,6 +129,24 @@ def test_show_potential_function_cli_accepts_plot_type(plot_type: str) -> None:
     args = parser.parse_args(["--plot-type", plot_type])
 
     assert args.plot_type == plot_type
+
+
+@pytest.mark.parametrize(
+    "plot_type",
+    (
+        "punctuality-slack",
+        "safety-position",
+        "stopping-heatmap",
+        "stopping-slices",
+        "guidance-wide",
+    ),
+)
+def test_show_potential_function_cli_rejects_retired_plot_types(
+    plot_type: str,
+) -> None:
+    parser = show_potential_function._build_cli_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--plot-type", plot_type])
 
 
 def test_show_potential_function_cli_accepts_minimal_flags() -> None:
@@ -140,15 +159,22 @@ def test_show_potential_function_cli_accepts_minimal_flags() -> None:
     assert args_no_minimal.minimal is False
 
 
+def test_show_potential_function_cli_rejects_output_filename() -> None:
+    parser = show_potential_function._build_cli_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--output-file", "figure.pdf"])
+
+
 def test_main_dispatches_selected_plot_type(monkeypatch: pytest.MonkeyPatch) -> None:
     called: dict[str, object] = {}
 
-    def _fake_resolve_plotter(plot_type: str, *, minimal: bool):
+    def _fake_resolve_plotter(plot_type: str, *, minimal: bool, schedule_time_s: float):
         called["plot_type"] = plot_type
         called["minimal"] = minimal
+        called["schedule_time_s"] = schedule_time_s
         return lambda: _FakeFigure()
 
-    monkeypatch.setattr(show_potential_function, "_apply_plot_style", lambda: None)
+    monkeypatch.setattr(show_potential_function, "apply_sci_curve_style", lambda: None)
     monkeypatch.setattr(
         show_potential_function,
         "_resolve_plotter",
@@ -157,11 +183,15 @@ def test_main_dispatches_selected_plot_type(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(show_potential_function.plt, "show", lambda: None)
 
     exit_code = show_potential_function.main(
-        ["--plot-type", "safety-position", "--minimal"]
+        ["--plot-type", "safety-punctuality", "--minimal"]
     )
 
     assert exit_code == 0
-    assert called == {"plot_type": "safety-position", "minimal": True}
+    assert called == {
+        "plot_type": "safety-punctuality",
+        "minimal": True,
+        "schedule_time_s": 465.0,
+    }
 
 
 def test_main_saves_figure_and_creates_parent_dir(
@@ -169,15 +199,16 @@ def test_main_saves_figure_and_creates_parent_dir(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     figure = _FakeFigure()
-    output_file = tmp_path / "nested" / "potential.png"
+    output_dir = tmp_path / "nested"
+    expected_output = output_dir / "punctuality_potential.pdf"
 
     def _fake_resolve_plotter(
-        _plot_type: str, *, minimal: bool
+        _plot_type: str, *, minimal: bool, schedule_time_s: float
     ) -> Callable[[], object]:
-        del minimal
+        del minimal, schedule_time_s
         return lambda: figure
 
-    monkeypatch.setattr(show_potential_function, "_apply_plot_style", lambda: None)
+    monkeypatch.setattr(show_potential_function, "apply_sci_curve_style", lambda: None)
     monkeypatch.setattr(
         show_potential_function,
         "_resolve_plotter",
@@ -188,22 +219,20 @@ def test_main_saves_figure_and_creates_parent_dir(
     exit_code = show_potential_function.main(
         [
             "--plot-type",
-            "stopping-slices",
-            "--output-file",
-            str(output_file),
+            "punctuality",
+            "--output-dir",
+            str(output_dir),
         ]
     )
 
     assert exit_code == 0
-    assert output_file.parent.is_dir()
-    assert figure.saved_paths == [output_file]
+    assert output_dir.is_dir()
+    assert figure.saved_paths == [expected_output]
     assert figure.savefig_calls[0]["kwargs"] == {
         "transparent": True,
         "facecolor": "none",
         "edgecolor": "none",
-        "dpi": 300.0,
-        "bbox_inches": "tight",
-        "pad_inches": 0.02,
+        "dpi": 1200.0,
     }
 
 
@@ -213,12 +242,12 @@ def test_main_does_not_save_when_save_flag_is_disabled(
     figure = _FakeFigure()
 
     def _fake_resolve_plotter(
-        _plot_type: str, *, minimal: bool
+        _plot_type: str, *, minimal: bool, schedule_time_s: float
     ) -> Callable[[], object]:
-        del minimal
+        del minimal, schedule_time_s
         return lambda: figure
 
-    monkeypatch.setattr(show_potential_function, "_apply_plot_style", lambda: None)
+    monkeypatch.setattr(show_potential_function, "apply_sci_curve_style", lambda: None)
     monkeypatch.setattr(
         show_potential_function,
         "_resolve_plotter",
@@ -230,36 +259,6 @@ def test_main_does_not_save_when_save_flag_is_disabled(
 
     assert exit_code == 0
     assert figure.saved_paths == []
-
-
-def test_plot_stopping_potential_slices_minimal_keeps_axis_and_hides_annotations() -> (
-    None
-):
-    fig = show_potential_function.plot_stopping_potential_slices(minimal=True)
-    ax_left, ax_right = fig.axes
-
-    assert getattr(fig, "_suptitle", None) is None
-    assert ax_left.axison is True
-    assert ax_right.axison is True
-    assert len(ax_left.lines) == 1
-    assert len(ax_right.lines) == 1
-    assert [text.get_text() for text in ax_left.texts] == ["(a)"]
-    assert [text.get_text() for text in ax_right.texts] == ["(b)"]
-    show_potential_function.plt.close(fig)
-
-
-def test_plot_stopping_potential_slices_default_keeps_annotations() -> None:
-    fig = show_potential_function.plot_stopping_potential_slices(minimal=False)
-    ax_left, ax_right = fig.axes
-
-    assert getattr(fig, "_suptitle", None) is None
-    assert ax_left.axison is True
-    assert ax_right.axison is True
-    assert len(ax_left.lines) == 4
-    assert len(ax_right.lines) == 3
-    assert ax_left.get_title() == ""
-    assert ax_right.get_title() == ""
-    show_potential_function.plt.close(fig)
 
 
 def test_plot_safety_speed_minimal_keeps_upper_and_lower_bounds(
@@ -277,71 +276,21 @@ def test_plot_safety_speed_minimal_keeps_upper_and_lower_bounds(
     show_potential_function.plt.close(fig)
 
 
-def test_safety_speed_asymmetric_v3_is_position_decoupled() -> None:
+def test_safety_speed_asymmetric_v3_is_non_positive() -> None:
     speed = np.asarray([8.0, 15.0, 24.0], dtype=np.float64)
     min_speed = np.asarray([5.0, 5.0, 5.0], dtype=np.float64)
     max_speed = np.asarray([25.0, 25.0, 25.0], dtype=np.float64)
 
-    near_target = show_potential_function._potential_safety_speed(
-        np.asarray([990.0, 995.0, 1000.0], dtype=np.float64),
+    potential = show_potential_function._potential_safety_speed(
         speed,
         min_speed,
         max_speed,
-        1000.0,
-    )
-    far_target = show_potential_function._potential_safety_speed(
-        np.asarray([0.0, 100.0, 200.0], dtype=np.float64),
-        speed,
-        min_speed,
-        max_speed,
-        30000.0,
     )
 
-    np.testing.assert_allclose(near_target, far_target)
-    assert np.all(near_target <= 0.0)
+    assert np.all(potential <= 0.0)
 
 
-def test_plot_safety_position_minimal_keeps_upper_and_lower_bounds(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _patch_compact_linspace(monkeypatch)
-    _patch_mock_safeguard_curves(monkeypatch)
-
-    fig = show_potential_function.plot_safety_potential_heatmap_position(minimal=True)
-    ax = fig.axes[0]
-
-    assert ax.axison is True
-    assert len(ax.lines) == 2
-    assert len(fig.axes) == 1
-    show_potential_function.plt.close(fig)
-
-
-def test_plot_stopping_heatmap_2d_minimal_skips_colorbar(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _patch_compact_linspace(monkeypatch)
-    _patch_mock_safeguard_curves(monkeypatch)
-
-    fig_minimal = show_potential_function.plot_stopping_potential_heatmap(
-        view_mode="2d",
-        minimal=True,
-    )
-    fig_default = show_potential_function.plot_stopping_potential_heatmap(
-        view_mode="2d",
-        minimal=False,
-    )
-
-    assert len(fig_minimal.axes) == 1
-    assert len(fig_default.axes) == 2
-    assert len(fig_minimal.axes[0].lines) == 3
-    assert len(fig_default.axes[0].lines) == 3
-    assert len(fig_default.legends) == 1
-
-    show_potential_function.plt.close(fig_minimal)
-    show_potential_function.plt.close(fig_default)
-
-
-def test_safety_speed_single_plot_matches_guidance_wide_style(
+def test_safety_speed_single_plot_has_boundary_legend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_compact_linspace(monkeypatch)
@@ -361,57 +310,13 @@ def test_safety_speed_single_plot_matches_guidance_wide_style(
     show_potential_function.plt.close(fig)
 
 
-def test_plot_guidance_potentials_wide_uses_shared_final_stop_domain(
+def test_safety_potential_field_masks_values_outside_both_speed_bounds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_compact_linspace(monkeypatch)
     _patch_mock_safeguard_curves(monkeypatch)
 
-    fig = show_potential_function.plot_guidance_potentials_wide(minimal=False)
-    ax_safety, ax_stopping, *_colorbars = fig.axes
-
-    assert len(fig.axes) == 4
-    np.testing.assert_allclose(ax_safety.get_xlim(), ax_stopping.get_xlim())
-    np.testing.assert_allclose(ax_safety.get_ylim(), ax_stopping.get_ylim())
-    assert len(ax_safety.lines) == 2
-    assert len(ax_stopping.lines) == 3
-    assert [text.get_text() for text in fig.texts] == []
-    assert [text.get_text() for text in ax_safety.texts] == ["(a)"]
-    assert [text.get_text() for text in ax_stopping.texts] == ["(b)"]
-    assert len(fig.legends) == 1
-    assert [text.get_text() for text in fig.legends[0].get_texts()] == [
-        r"$v_{\min}(x)$",
-        r"$v_{\max}(x)$",
-        "Target position",
-    ]
-    safety_colorbar_axis, stopping_colorbar_axis = fig.axes[2:]
-    assert safety_colorbar_axis.get_xlabel() == ""
-    assert stopping_colorbar_axis.get_xlabel() == ""
-    assert safety_colorbar_axis.get_position().x0 > ax_safety.get_position().x1
-    assert stopping_colorbar_axis.get_position().x0 > ax_stopping.get_position().x1
-    show_potential_function.plt.close(fig)
-
-
-def test_plot_guidance_potentials_wide_minimal_hides_colorbars(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _patch_compact_linspace(monkeypatch)
-    _patch_mock_safeguard_curves(monkeypatch)
-
-    fig = show_potential_function.plot_guidance_potentials_wide(minimal=True)
-
-    assert len(fig.axes) == 2
-    assert all(axis.axison for axis in fig.axes)
-    show_potential_function.plt.close(fig)
-
-
-def test_final_stop_field_masks_values_outside_both_speed_bounds(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _patch_compact_linspace(monkeypatch)
-    _patch_mock_safeguard_curves(monkeypatch)
-
-    field = show_potential_function._build_seventh_auxiliary_stop_field()
+    field = show_potential_function._build_safety_potential_field()
 
     assert np.all(
         field.speed_grid_mps[field.feasible_mask]
@@ -423,40 +328,6 @@ def test_final_stop_field_masks_values_outside_both_speed_bounds(
     )
     assert np.any(field.speed_grid_mps < field.min_speed_grid_mps)
     assert np.any(field.speed_grid_mps > field.max_speed_grid_mps)
-
-
-def test_stopping_potential_is_symmetric_and_uses_state_local_speed_limit() -> None:
-    pos = np.asarray([1600.0, -1400.0, 100.0, 100.0], dtype=np.float64)
-    speed = np.asarray([0.0, 0.0, 10.0, 10.0], dtype=np.float64)
-    potential = show_potential_function._potential_stopping(
-        pos,
-        speed,
-        target_pos=100.0,
-        max_speed_mps=np.asarray([20.0, 20.0, 10.0, 100.0], dtype=np.float64),
-    )
-
-    assert potential[0] == pytest.approx(-(1.0 - np.exp(-1.0)))
-    assert potential[1] == pytest.approx(potential[0])
-    assert potential[3] > potential[2]
-
-
-def test_stopping_potential_clips_the_exponential_at_exp_minus_two() -> None:
-    potential = show_potential_function._potential_stopping(
-        np.asarray([100.0, 1600.0, 3100.0, 4600.0]),
-        np.zeros(4),
-        target_pos=100.0,
-        max_speed_mps=20.0,
-    )
-
-    np.testing.assert_allclose(
-        potential,
-        [
-            0.0,
-            -(1.0 - np.exp(-1.0)),
-            -(1.0 - np.exp(-2.0)),
-            -(1.0 - np.exp(-2.0)),
-        ],
-    )
 
 
 def test_apply_minimal_axis_style_keeps_3d_axis_on() -> None:
@@ -478,3 +349,76 @@ def test_apply_transparent_background_sets_figure_and_axes_transparent() -> None
     assert fig.patch.get_alpha() == 0.0
     assert ax.patch.get_alpha() == 0.0
     show_potential_function.plt.close(fig)
+
+
+def test_punctuality_field_uses_full_route_and_canonical_potential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_compact_linspace(monkeypatch)
+    field = show_potential_function._build_punctuality_potential_field()
+
+    assert field.position_m[0] == pytest.approx(135.0)
+    assert field.position_m[-1] == pytest.approx(29270.046)
+    np.testing.assert_allclose(
+        field.potential,
+        show_potential_function.punctuality_potential_from_error(
+            field.redundant_time_grid_s - field.reference_slack_s[np.newaxis, :]
+        ),
+    )
+    assert np.max(field.potential) <= 0.0
+    assert (
+        np.min(field.potential) >= -show_potential_function.PUNCTUALITY_POTENTIAL_SCALE
+    )
+
+
+def test_punctuality_single_and_safety_combined_have_sci_widths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_compact_linspace(monkeypatch)
+    _patch_mock_safeguard_curves(monkeypatch)
+
+    single = show_potential_function.plot_punctuality_potential(minimal=False)
+    combined = show_potential_function.plot_safety_punctuality_potentials(minimal=False)
+
+    assert single.get_size_inches()[0] == pytest.approx(85.0 / 25.4)
+    assert combined.get_size_inches()[0] == pytest.approx(170.0 / 25.4)
+    assert len(single.axes) == 2
+    assert len(combined.axes) == 4
+    assert [text.get_text() for text in combined.axes[0].texts] == ["(a)"]
+    assert [text.get_text() for text in combined.axes[1].texts] == ["(b)"]
+    assert combined.axes[0].get_ylabel() == "Speed (km/h)"
+    assert combined.axes[2].get_title() == ""
+    assert combined.axes[3].get_title() == ""
+    assert combined.axes[1].get_ylabel() == "Redundant operation time (s)"
+    safety_mesh = combined.axes[0].collections[0]
+    punctuality_mesh = combined.axes[1].collections[0]
+    assert safety_mesh.cmap.name == "mtto_safety_penalty"
+    assert punctuality_mesh.cmap.name == "mtto_punctuality_penalty"
+    assert sum(safety_mesh.cmap(1.0)[:3]) > sum(safety_mesh.cmap(0.0)[:3])
+    assert sum(punctuality_mesh.cmap(1.0)[:3]) > sum(punctuality_mesh.cmap(0.0)[:3])
+    assert combined.axes[0].lines[0].get_color() == "tab:blue"
+    assert combined.axes[0].lines[1].get_color() == "tab:red"
+    assert len(combined.axes[0].lines[0].get_path_effects()) == 0
+    assert len(combined.axes[0].lines[1].get_path_effects()) == 0
+    assert combined.axes[1].lines[0].get_color() == "black"
+    assert combined.axes[1].lines[0].get_linestyle() == "--"
+    show_potential_function.plt.close(single)
+    show_potential_function.plt.close(combined)
+
+
+@pytest.mark.parametrize(
+    ("columns", "expected_width_mm"),
+    ((1, 85.0), (2, 170.0)),
+)
+def test_sci_figure_size_uses_requested_physical_width(
+    columns: int, expected_width_mm: float
+) -> None:
+    from utils.plot_utils import sci_figure_size
+
+    width, height = sci_figure_size(
+        columns=columns,
+        height_in=2.75,  # type: ignore[arg-type]
+    )
+
+    assert width == pytest.approx(expected_width_mm / 25.4)
+    assert height == pytest.approx(2.75)

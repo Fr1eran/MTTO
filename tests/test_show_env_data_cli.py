@@ -20,10 +20,17 @@ def test_show_env_data_cli_defaults():
     with patch("sys.argv", ["show_env_data"]):
         args = parse_args()
     assert args.view == "overview"
-    assert args.output_file is None
-    assert args.dpi == pytest.approx(300.0)
-    assert args.pad_inches == pytest.approx(0.02)
+    assert args.output_dir is None
+    assert not hasattr(args, "dpi")
+    assert not hasattr(args, "pad_inches")
     assert args.no_show is False
+
+
+@pytest.mark.parametrize("option", ["--dpi", "--pad-inches", "--output-file"])
+def test_show_env_data_cli_rejects_removed_export_options(option: str):
+    with patch("sys.argv", ["show_env_data", option, "300"]):
+        with pytest.raises(SystemExit):
+            _ = parse_args()
 
 
 @pytest.mark.parametrize(
@@ -86,30 +93,26 @@ def test_save_compact_figures_single_and_multi(tmp_path: Path):
 
     # 单图保存
     figs_single = create_figures("full-curves", data)
-    out_single = tmp_path / "single" / "full_curve_plot.png"
+    out_single = tmp_path / "single"
     saved_single = save_compact_figures(
         figs_single,
         out_single,
-        dpi=100.0,
-        pad_inches=0.01,
     )
     assert len(saved_single) == 1
-    assert saved_single[0] == out_single
-    assert out_single.is_file()
+    assert saved_single[0] == out_single / "env_full_curves.pdf"
+    assert (out_single / "env_full_curves.pdf").is_file()
 
     # 多图保存
     figs_multi = create_figures("all", data)
-    out_multi = tmp_path / "multi" / "env_bundle.png"
+    out_multi = tmp_path / "multi"
     saved_multi = save_compact_figures(
         figs_multi,
         out_multi,
-        dpi=100.0,
-        pad_inches=0.01,
     )
     assert len(saved_multi) == 3
-    assert (tmp_path / "multi" / "env_bundle_overview.png").is_file()
-    assert (tmp_path / "multi" / "env_bundle_full_curves.png").is_file()
-    assert (tmp_path / "multi" / "env_bundle_danger_region.png").is_file()
+    assert (out_multi / "env_overview.pdf").is_file()
+    assert (out_multi / "env_full_curves.pdf").is_file()
+    assert (out_multi / "env_danger_region.pdf").is_file()
 
     for fig in figs_single.values():
         plt.close(fig)
@@ -118,18 +121,18 @@ def test_save_compact_figures_single_and_multi(tmp_path: Path):
 
 
 def test_main_cli_execution_no_show(tmp_path: Path):
-    output_png = tmp_path / "cli_test.png"
+    output_dir = tmp_path / "cli_test"
     with patch(
         "sys.argv",
         [
             "show_env_data",
             "--view",
             "full-curves",
-            "--output-file",
-            str(output_png),
+            "--output-dir",
+            str(output_dir),
             "--no-show",
         ],
     ):
         main()
 
-    assert output_png.is_file()
+    assert (output_dir / "env_full_curves.pdf").is_file()

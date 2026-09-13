@@ -222,9 +222,7 @@ def _run_optimization(*, cli_args: argparse.Namespace, output_dir: str) -> int:
                     else None
                 ),
                 "stage_division": cli_args.stage_division,
-                "dp_upper_speed_envelope_version": (
-                    DP_UPPER_SPEED_ENVELOPE_VERSION
-                ),
+                "dp_upper_speed_envelope_version": (DP_UPPER_SPEED_ENVELOPE_VERSION),
                 **comfort_metrics,
             },
         )

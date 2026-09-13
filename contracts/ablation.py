@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields, replace
+from pathlib import Path
 from typing import ClassVar, Literal
 
 from .common import (
@@ -26,7 +27,9 @@ class ArtifactRefs(MappingView):
     """Named paths referenced by one ablation run."""
 
     policy_final: str | None = field(default=None, metadata={"non_empty": True})
+    policy_best: str | None = field(default=None, metadata={"non_empty": True})
     metadata: str | None = field(default=None, metadata={"non_empty": True})
+    metadata_best: str | None = field(default=None, metadata={"non_empty": True})
     episodes: str | None = field(default=None, metadata={"non_empty": True})
     evaluations: str | None = field(default=None, metadata={"non_empty": True})
     trajectory_final: str | None = field(default=None, metadata={"non_empty": True})
@@ -35,13 +38,16 @@ class ArtifactRefs(MappingView):
     metrics_best: str | None = field(default=None, metadata={"non_empty": True})
     safety_diagnostics: str | None = field(default=None, metadata={"non_empty": True})
     extensions: JSONMapping = field(default_factory=dict)
+    base_dir: str | None = field(default=None, repr=False, compare=False)
 
     def to_mapping(self) -> JSONMapping:
-        return to_dict(
+        payload = to_dict(
             self,
             compact=True,
             omit_empty=frozenset({"extensions"}),
         )
+        payload.pop("base_dir", None)
+        return payload
 
     @classmethod
     def from_mapping(
@@ -50,13 +56,16 @@ class ArtifactRefs(MappingView):
         return from_dict(cls, payload, context=context)
 
     def path_for(self, name: str) -> str:
-        names = {item.name for item in fields(self)} - {"extensions"}
+        names = {item.name for item in fields(self)} - {"extensions", "base_dir"}
         if name not in names:
             raise KeyError(f"Unknown artifact reference {name!r}")
         value = getattr(self, name)
         if value is None:
             raise KeyError(f"Artifact reference {name!r} is not present")
-        return value
+        path = Path(value)
+        if not path.is_absolute() and self.base_dir is not None:
+            path = Path(self.base_dir) / path
+        return str(path)
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,33 +194,3 @@ class AblationManifest(MappingView):
         if len(run_ids) != len(set(run_ids)):
             raise ContractError(f"{context}.runs contains duplicate run_id values")
         return manifest
-
-
-def build_manifest(
-    *,
-    matrix_id: str,
-    matrix_config: JSONMapping,
-    training_signature: JSONMapping,
-    runs: tuple[AblationRunRecord, ...],
-    output_root: str | None = None,
-) -> AblationManifest:
-    return AblationManifest(
-        matrix_id=matrix_id,
-        matrix_config=matrix_config,
-        training_signature=training_signature,
-        runs=runs,
-        output_root=output_root,
-    )
-
-
-def status_map(
-    manifest: AblationManifest,
-) -> dict[str, ManifestStatusUpdate]:
-    return {
-        run.run_id: ManifestStatusUpdate(
-            status=run.status,
-            error_message=run.error_message,
-            training_budget=run.training_budget,
-        )
-        for run in manifest.runs
-    }

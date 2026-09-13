@@ -15,14 +15,14 @@ from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
 from rl.context_sampler import ContextSampler
-from rl.dspdl import DSPDLStatisticsHub
+from rl.dspl import DSPLStatisticsHub
 from rl.observation_builder import ObservationBuilder
 from rl.operational_state import OperationalState
 from rl.operational_stepper import OperationalStepper
 from rl.reward_calculator import RewardCalculator, RewardConfig
 from rl.reward_diagnostics import RewardDiagnosticsAccumulator, RewardDiagnosticsBatch
 from rl.safety_statistics import SafetyTruncationBatch, SafetyTruncationBuffer
-from utils.plot_utils import sci_figure_size, set_chinese_font
+from utils.plot_utils import apply_sci_grid, sci_figure_size, set_chinese_font
 
 
 @final
@@ -46,22 +46,22 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         reward_config: RewardConfig | None = None,
         stepper: OperationalStepper | None = None,
         context_sampler: ContextSampler | None = None,
-        dspdl_statistics_hub: DSPDLStatisticsHub | None = None,
+        dspl_statistics_hub: DSPLStatisticsHub | None = None,
         curriculum_env_rank: int | None = None,
         safety_truncation_buffer: SafetyTruncationBuffer | None = None,
         reward_diagnostics_accumulator: RewardDiagnosticsAccumulator | None = None,
     ) -> None:
         super().__init__()
-        if (dspdl_statistics_hub is None) != (curriculum_env_rank is None):
+        if (dspl_statistics_hub is None) != (curriculum_env_rank is None):
             raise ValueError(
-                "DSPDL statistics hub and curriculum environment rank "
+                "DSPL statistics hub and curriculum environment rank "
                 "must be set together"
             )
-        if dspdl_statistics_hub is not None:
+        if dspl_statistics_hub is not None:
             if context_sampler is None:
-                raise ValueError("DSPDL statistics require a context sampler")
+                raise ValueError("DSPL statistics require a context sampler")
             assert curriculum_env_rank is not None
-            if not 0 <= int(curriculum_env_rank) < dspdl_statistics_hub.num_envs:
+            if not 0 <= int(curriculum_env_rank) < dspl_statistics_hub.num_envs:
                 raise IndexError("curriculum_env_rank is outside the statistics hub")
         self.vehicle: VehicleInfo = vehicle
         self.track: TrackInfo = track
@@ -112,7 +112,7 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         )
         self.reward_config: RewardConfig = self.reward_calculator.reward_config
         self.context_sampler = context_sampler
-        self.dspdl_statistics_hub = dspdl_statistics_hub
+        self.dspl_statistics_hub = dspl_statistics_hub
         self.curriculum_env_rank = (
             int(curriculum_env_rank) if curriculum_env_rank is not None else None
         )
@@ -213,11 +213,11 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
             self.state = context.initial_state
             context_index = context.context_index
         self._current_context_index = context_index
-        if self.dspdl_statistics_hub is not None:
+        if self.dspl_statistics_hub is not None:
             assert self.curriculum_env_rank is not None
             assert sampler is not None
             assert context_index is not None
-            self.dspdl_statistics_hub.begin_episode(
+            self.dspl_statistics_hub.begin_episode(
                 env_rank=self.curriculum_env_rank,
                 context_index=context_index,
                 distribution_version=sampler.version,
@@ -248,9 +248,9 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
             terminated=bool(transition.terminated),
             truncated=bool(transition.truncated),
         )
-        if self.dspdl_statistics_hub is not None:
+        if self.dspl_statistics_hub is not None:
             assert self.curriculum_env_rank is not None
-            self.dspdl_statistics_hub.record_transition(
+            self.dspl_statistics_hub.record_transition(
                 self.curriculum_env_rank,
                 reward.total - reward.punctuality_shaping,
                 done=bool(transition.terminated or transition.truncated),
@@ -287,6 +287,12 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
             info = {
                 "episode": self.episode_info.to_mapping(),
                 "outcome": self.outcome.to_mapping(),
+                "safety_margin_mps": min(
+                    transition.next_state.max_speed_mps
+                    - transition.next_state.speed_mps,
+                    transition.next_state.speed_mps
+                    - transition.next_state.min_speed_mps,
+                ),
             }
         if self.reward_config.enable_potential_punctuality and (
             transition.terminated or transition.truncated
@@ -366,7 +372,7 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         (self.vehicle_dot,) = self.ax.plot([], [], "g*", markersize=8, label="列车")
         (self.traj_line,) = self.ax.plot([], [], "b-", lw=2, label="轨迹")
         _ = self.ax.legend()
-        self.ax.grid(True, alpha=0.3)
+        apply_sci_grid(self.ax)
 
     def _update_figure_data(self) -> None:
         assert self.vehicle_dot is not None

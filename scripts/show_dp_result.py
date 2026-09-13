@@ -14,9 +14,12 @@ from dp.experiment_utils import (
     render_dp_curve_on_axes,
 )
 from model.common import min_operation_time
-from utils.plot_utils import set_global_plot_style
+from utils.plot_utils import apply_sci_grid, save_sci_figure, set_global_plot_style
 from utils.scenario import build_scenario
 from utils.trajectory import OptimizedCurveArtifact
+from utils.type_utils import as_float
+
+FIGURE_FILENAME = "dp_result.pdf"
 
 
 def _resolve_curve_and_metrics_paths(curve_dir: str) -> tuple[str, str]:
@@ -68,15 +71,8 @@ def _print_metrics(metrics: dict[str, object]) -> None:
             print(f"  {key}: {metrics[key]}")
 
 
-def _metric_as_float(metrics: dict[str, object], key: str) -> float | None:
-    value = metrics.get(key)
-    if isinstance(value, (int, float, np.integer, np.floating)):
-        return float(value)
-    return None
-
-
 def _require_metric_float(metrics: dict[str, object], key: str) -> float:
-    value = _metric_as_float(metrics, key)
+    value = as_float(metrics.get(key))
     if value is None:
         raise ValueError(f"DP metrics must contain numeric '{key}'")
     return value
@@ -138,10 +134,10 @@ def _build_dp_redundant_operation_time_arr(
         safeguard_utility.gamma,
     )
 
-    target_position = _metric_as_float(metrics, "target_position_m")
+    target_position = as_float(metrics.get("target_position_m"))
     if target_position is None:
         target_position = train_service.target_position
-    target_speed = _metric_as_float(metrics, "target_speed_mps")
+    target_speed = as_float(metrics.get("target_speed_mps"))
     if target_speed is None:
         target_speed = 0.0
 
@@ -179,7 +175,7 @@ def _render_redundant_operation_time_on_axes(
     )
     _ = ax.set_xlabel("Position (m)")
     _ = ax.set_ylabel("Redundant operation time (s)")
-    _ = ax.grid(True, alpha=0.3)
+    apply_sci_grid(ax)
     _ = ax.legend(loc="best")
 
 
@@ -204,10 +200,10 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         help="Safeguard factor used for rendering when safeguard is enabled.",
     )
     _ = parser.add_argument(
-        "--output-file",
+        "--output-dir",
         type=Path,
         default=None,
-        help="Optional path to save the generated figure.",
+        help=f"Optional figure directory; saves {FIGURE_FILENAME}.",
     )
     _ = parser.add_argument(
         "--no-show",
@@ -249,13 +245,12 @@ def main() -> None:
 
     _ = set_global_plot_style(
         font_preset="sci",
-        preferred_font="Calibri",
+        preferred_font="Arial",
         title_font_size=8.0,
         axis_label_font_size=8.0,
         tick_font_size=8.0,
         legend_font_size=8.0,
         figure_dpi=150.0,
-        savefig_dpi=300.0,
     )
 
     fig, (ax_speed, ax_redundant) = plt.subplots(
@@ -304,10 +299,9 @@ def main() -> None:
 
     fig.tight_layout()
 
-    if args.output_file is not None:
-        args.output_file.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(args.output_file, dpi=300.0, bbox_inches="tight")
-        print(f"Saved figure to: {args.output_file}")
+    if args.output_dir is not None:
+        saved_path = save_sci_figure(fig, args.output_dir / FIGURE_FILENAME)
+        print(f"Saved figure to: {saved_path}")
 
     if not args.no_show:
         plt.show()

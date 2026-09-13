@@ -43,8 +43,8 @@ class OperationalStepper:
         self.direction: int = (
             1 if train_service.start_position < train_service.target_position else -1
         )
-        # The final transition is available to complete the task.  A
-        # non-terminal transition at this boundary is truncated in advance().
+        # Nominal transition count retained for budgets, normalization, and
+        # DSPL context sizing. It is not a runtime truncation boundary.
         self.required_episode_steps: int = math.ceil(
             self.whole_distance_m / self.step_distance_m
         )
@@ -180,7 +180,7 @@ class OperationalStepper:
             )
         return self._initial_min_operation_time_s
 
-    def _build_state(
+    def build_state(
         self,
         *,
         position_m: float,
@@ -191,6 +191,7 @@ class OperationalStepper:
         step_count: int,
         sps_state: SPSState,
     ) -> OperationalState:
+        """Materialize a complete state from explicit trajectory-related values."""
         slope = float(
             get_slope_scalar_numba(
                 position_m, self.track.slopes, self.track.slope_intervals
@@ -217,7 +218,7 @@ class OperationalStepper:
         )
 
     def reset(self) -> OperationalState:
-        return self._build_state(
+        return self.build_state(
             position_m=self.train_service.start_position,
             speed_mps=0.0,
             acceleration_mps2=0.0,
@@ -228,7 +229,7 @@ class OperationalStepper:
         )
 
     def refresh_schedule_time(self, state: OperationalState) -> OperationalState:
-        return self._build_state(
+        return self.build_state(
             position_m=state.position_m,
             speed_mps=state.speed_mps,
             acceleration_mps2=state.acceleration_mps2,
@@ -247,23 +248,28 @@ class OperationalStepper:
     ) -> OperationalTransition:
         """Advance one constant-acceleration transition.
 
-        ``requested_distance_m`` is primarily intended for replaying a
-        reference trajectory whose final segment is shorter than the regular
-        RL control step. Normal environment interaction leaves it as ``None``
-        and therefore preserves the configured fixed-step behaviour.
+        Normal interaction uses the configured control distance except for the
+        final transition, which is shortened to the remaining route distance.
+        ``requested_distance_m`` supports explicit shorter diagnostic steps.
         """
+        remaining_distance_m = self.direction * (
+            self.train_service.target_position - state.position_m
+        )
+        if remaining_distance_m <= 0.0:
+            raise ValueError("cannot advance a state at or beyond the task target")
         if requested_distance_m is None:
-            step_distance_m = self.step_distance_m
+            step_distance_m = min(self.step_distance_m, remaining_distance_m)
         else:
             step_distance_m = float(requested_distance_m)
             if (
                 not math.isfinite(step_distance_m)
                 or step_distance_m <= 0.0
                 or step_distance_m > self.step_distance_m
+                or step_distance_m > remaining_distance_m
             ):
                 raise ValueError(
                     "requested_distance_m must be finite, positive, and no greater "
-                    + "than step_distance_m"
+                    "than the configured step or remaining task distance"
                 )
         next_speed, distance, duration = calc_transition_from_acc_scalar_numba(
             state.speed_mps, float(acceleration_mps2), step_distance_m
@@ -287,7 +293,7 @@ class OperationalStepper:
             speed_mps=next_speed,
             time_s=operation_time,
         )
-        next_state = self._build_state(
+        next_state = self.build_state(
             position_m=position,
             speed_mps=next_speed,
             acceleration_mps2=float(acceleration_mps2),
@@ -296,18 +302,16 @@ class OperationalStepper:
             step_count=state.step_count + 1,
             sps_state=sps_state,
         )
-        stopped = math.isclose(next_state.speed_mps, 0.0, abs_tol=0.01)
-        terminated = stopped and next_state.stop_error_m <= 9.0
+        stopped = abs(next_state.speed_mps) <= 0.01
+        within_stop_tolerance = (
+            next_state.stop_error_m <= self.train_service.max_stop_error * 30
+        )
+        reached_target = next_state.stop_error_m <= 1e-6
+        terminated = stopped and within_stop_tolerance
         low = next_state.speed_mps < next_state.min_speed_mps
         high = next_state.speed_mps > next_state.max_speed_mps
-        # On the last permitted transition successful completion takes
-        # precedence, so Gymnasium never sees termination and truncation
-        # together.
-        step_limit = (
-            not terminated and next_state.step_count >= self.required_episode_steps
-        )
-        failed_stop = stopped and not terminated
-        truncated = not terminated and (low or high or step_limit or failed_stop)
+        failed_stop = (stopped and not terminated) or (reached_target and not stopped)
+        truncated = not terminated and (low or high or failed_stop)
         if terminated:
             code = ViolationCode.ONGOING
         elif failed_stop:
@@ -316,8 +320,6 @@ class OperationalStepper:
             code = ViolationCode.SPEED_LOW
         elif high:
             code = ViolationCode.SPEED_HIGH
-        elif step_limit:
-            code = ViolationCode.STEP_LIMIT
         else:
             code = ViolationCode.ONGOING
         return OperationalTransition(

@@ -135,6 +135,7 @@ def build_step_snapshots(
             }
         )
 
+
 def align_tags_to_reference_steps(
     series_map: dict[str, ScalarSeries],
     tags: list[str],

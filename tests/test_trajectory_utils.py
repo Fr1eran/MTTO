@@ -1,7 +1,14 @@
 import numpy as np
 import pytest
 
-from utils.trajectory import recover_time_axis_from_trajectory, smooth_trajectory
+from model.common import ECC
+from model.track import TrackInfo
+from model.vehicle import VehicleInfo
+from utils.trajectory import (
+    compute_cumulative_energy_from_trajectory,
+    recover_time_axis_from_trajectory,
+    smooth_trajectory,
+)
 
 
 def test_smooth_trajectory_returns_expected_length_and_endpoints() -> None:
@@ -132,3 +139,98 @@ def test_recover_time_axis_from_trajectory_validates_tolerances() -> None:
 
     with pytest.raises(ValueError, match=">= 0"):
         _ = recover_time_axis_from_trajectory(pos, speed, speed_tolerance=-1.0)
+
+
+@pytest.fixture
+def dummy_physics_models():
+    track = TrackInfo(
+        slopes=np.asarray([0.0], dtype=np.float64),
+        slope_intervals=np.asarray([0.0, 1000.0], dtype=np.float64),
+        speed_limits=np.asarray([100.0], dtype=np.float64),
+        speed_limit_intervals=np.asarray([0.0, 1000.0], dtype=np.float64),
+    )
+    vehicle = VehicleInfo(mass=317.5, numoftrainsets=5, length=128.5)
+    ecc = ECC(
+        R_m=0.2796,
+        L_d=0.0002,
+        R_k=50.0,
+        L_k=0.000142,
+        Tau=0.258,
+        Psi_fd=3.9629,
+        k_c=0.8,
+    )
+    return ecc, vehicle, track
+
+
+def test_compute_cumulative_energy_short_trajectory(dummy_physics_models) -> None:
+    ecc, vehicle, track = dummy_physics_models
+    pos = np.asarray([10.0], dtype=np.float64)
+    speed = np.asarray([5.0], dtype=np.float64)
+
+    cum_e = compute_cumulative_energy_from_trajectory(
+        pos, speed, vehicle=vehicle, track=track, ecc=ecc
+    )
+    assert cum_e.shape == (1,)
+    assert cum_e[0] == pytest.approx(0.0)
+
+
+def test_compute_cumulative_energy_constant_speed(dummy_physics_models) -> None:
+    ecc, vehicle, track = dummy_physics_models
+    pos = np.asarray([0.0, 100.0, 200.0], dtype=np.float64)
+    speed = np.asarray([20.0, 20.0, 20.0], dtype=np.float64)
+
+    cum_e = compute_cumulative_energy_from_trajectory(
+        pos, speed, vehicle=vehicle, track=track, ecc=ecc
+    )
+    assert cum_e.shape == (3,)
+    assert cum_e[0] == pytest.approx(0.0)
+    assert cum_e[1] > 0.0
+    assert cum_e[2] > cum_e[1]
+
+
+def test_compute_cumulative_energy_stationary_zero_displacement(
+    dummy_physics_models,
+) -> None:
+    ecc, vehicle, track = dummy_physics_models
+    pos = np.asarray([50.0, 50.0], dtype=np.float64)
+    speed = np.asarray([0.0, 0.0], dtype=np.float64)
+
+    cum_e = compute_cumulative_energy_from_trajectory(
+        pos, speed, vehicle=vehicle, track=track, ecc=ecc
+    )
+    assert cum_e.shape == (2,)
+    assert cum_e[0] == pytest.approx(0.0)
+    assert cum_e[1] == pytest.approx(0.0)
+
+
+def test_compute_cumulative_energy_raises_on_invalid_operation_time(
+    dummy_physics_models,
+) -> None:
+    ecc, vehicle, track = dummy_physics_models
+    # Negative displacement while speed increases yields negative time
+    # in uniform acc model
+    pos = np.asarray([100.0, 0.0], dtype=np.float64)
+    speed = np.asarray([10.0, 20.0], dtype=np.float64)
+
+    with pytest.raises(ValueError, match="Invalid operation time"):
+        _ = compute_cumulative_energy_from_trajectory(
+            pos, speed, vehicle=vehicle, track=track, ecc=ecc
+        )
+
+
+def test_compute_cumulative_energy_raises_on_ecc_failure(
+    dummy_physics_models, monkeypatch
+) -> None:
+    ecc, vehicle, track = dummy_physics_models
+    pos = np.asarray([0.0, 50.0], dtype=np.float64)
+    speed = np.asarray([10.0, 10.0], dtype=np.float64)
+
+    def mock_calc_energy(*args, **kwargs):
+        raise ValueError("Simulated physics calculation crash")
+
+    monkeypatch.setattr(ecc, "calc_energy", mock_calc_energy)
+
+    with pytest.raises(RuntimeError, match="Energy calculation failed at segment 0"):
+        _ = compute_cumulative_energy_from_trajectory(
+            pos, speed, vehicle=vehicle, track=track, ecc=ecc
+        )

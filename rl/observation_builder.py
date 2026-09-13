@@ -43,6 +43,7 @@ class ObservationBuilder:
             get_upper_speed_or_zero
         )
         (
+            self._lookahead_travelled_m,
             self._lookahead_avg_slope_by_step,
             self._lookahead_avg_upper_speed_by_step,
         ) = self._build_lookahead_feature_cache()
@@ -91,7 +92,7 @@ class ObservationBuilder:
             -1.0,
             min(
                 1.0,
-                self.get_lookahead_avg_slope(state.step_count)
+                self.get_lookahead_avg_slope(state.position_m)
                 / self.vehicle.max_slope_capacity,
             ),
         )
@@ -99,7 +100,7 @@ class ObservationBuilder:
             -1.0,
             min(
                 1.0,
-                self.get_lookahead_avg_upper_speed(state.step_count)
+                self.get_lookahead_avg_upper_speed(state.position_m)
                 / self.vehicle.max_speed,
             ),
         )
@@ -144,7 +145,7 @@ class ObservationBuilder:
 
     def _build_lookahead_feature_cache(
         self,
-    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
         offsets = np.linspace(
             self.step_distance_m,
             self.lookahead_distance_m,
@@ -152,47 +153,56 @@ class ObservationBuilder:
             dtype=np.float64,
         )
         node_count = int(math.ceil(self.whole_distance_m / self.step_distance_m)) + 1
-        slope_cache = np.empty(node_count, dtype=np.float64)
-        upper_speed_cache = np.empty(node_count, dtype=np.float64)
+        travelled_m = np.minimum(
+            np.arange(node_count, dtype=np.float64) * self.step_distance_m,
+            self.whole_distance_m,
+        )
+        travelled_m[-1] = self.whole_distance_m
+        slope_cache = np.empty(travelled_m.size, dtype=np.float64)
+        upper_speed_cache = np.empty(travelled_m.size, dtype=np.float64)
         start_position_m = float(self.train_service.start_position)
-        for step_index in range(node_count):
-            position_m = (
-                start_position_m
-                + self.direction * step_index * self.step_distance_m
-            )
-            slope_cache[step_index] = sum(
-                get_slope_scalar_numba(
-                    position_m + self.direction * float(offset),
-                    self.track.slopes,
-                    self.track.slope_intervals,
+        for step_index, travelled in enumerate(travelled_m):
+            position_m = start_position_m + self.direction * float(travelled)
+            slope_cache[step_index] = (
+                sum(
+                    get_slope_scalar_numba(
+                        position_m + self.direction * float(offset),
+                        self.track.slopes,
+                        self.track.slope_intervals,
+                    )
+                    for offset in offsets
                 )
-                for offset in offsets
-            ) / offsets.size
-            upper_speed_cache[step_index] = sum(
-                self._get_upper_speed_or_zero(
-                    position_m + self.direction * float(offset)
-                )
-                for offset in offsets
-            ) / offsets.size
-        slope_cache.flags.writeable = False
-        upper_speed_cache.flags.writeable = False
-        return slope_cache, upper_speed_cache
-
-    def _validate_lookahead_step_index(self, step_index: int) -> int:
-        if not isinstance(step_index, (int, np.integer)):
-            raise TypeError("step_index must be an integer")
-        index = int(step_index)
-        if not 0 <= index < self._lookahead_avg_slope_by_step.size:
-            raise IndexError(
-                f"step index {index} is outside cached lookahead range "
-                + f"[0, {self._lookahead_avg_slope_by_step.size - 1}]"
+                / offsets.size
             )
-        return index
+            upper_speed_cache[step_index] = (
+                sum(
+                    self._get_upper_speed_or_zero(
+                        position_m + self.direction * float(offset)
+                    )
+                    for offset in offsets
+                )
+                / offsets.size
+            )
+        for values in (travelled_m, slope_cache, upper_speed_cache):
+            values.flags.writeable = False
+        return travelled_m, slope_cache, upper_speed_cache
 
-    def get_lookahead_avg_slope(self, step_index: int) -> float:
-        index = self._validate_lookahead_step_index(step_index)
-        return float(self._lookahead_avg_slope_by_step[index])
+    def _lookahead_at_position(
+        self, position_m: float, values: NDArray[np.float64]
+    ) -> float:
+        travelled_m = self.direction * (
+            float(position_m) - float(self.train_service.start_position)
+        )
+        if not 0.0 <= travelled_m <= self.whole_distance_m:
+            raise ValueError("position_m is outside the task route")
+        return float(np.interp(travelled_m, self._lookahead_travelled_m, values))
 
-    def get_lookahead_avg_upper_speed(self, step_index: int) -> float:
-        index = self._validate_lookahead_step_index(step_index)
-        return float(self._lookahead_avg_upper_speed_by_step[index])
+    def get_lookahead_avg_slope(self, position_m: float) -> float:
+        return self._lookahead_at_position(
+            position_m, self._lookahead_avg_slope_by_step
+        )
+
+    def get_lookahead_avg_upper_speed(self, position_m: float) -> float:
+        return self._lookahead_at_position(
+            position_m, self._lookahead_avg_upper_speed_by_step
+        )

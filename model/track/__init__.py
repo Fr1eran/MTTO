@@ -1,7 +1,6 @@
 from .track import (
     TrackInfo,
     get_next_slope_and_distance,
-    get_next_speed_limit_and_distance,
     get_slope,
     get_slope_array_numba,
     get_slope_scalar_numba,
@@ -13,7 +12,6 @@ from .track import (
 __all__ = [
     "TrackInfo",
     "get_next_slope_and_distance",
-    "get_next_speed_limit_and_distance",
     "get_slope",
     "get_slope_scalar_numba",
     "get_slope_array_numba",

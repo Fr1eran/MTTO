@@ -1,4 +1,4 @@
-"""Versioned sampling from an immutable DSPDL context pool."""
+"""Versioned sampling from an immutable DSPL context pool."""
 
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ class CurriculumDistributionState:
 
 
 class ContextSampler:
-    """Own one environment's versioned DSPDL context distribution."""
+    """Own one environment's versioned DSPL context distribution."""
 
     def __init__(
         self,

@@ -6,11 +6,12 @@ import json
 from collections.abc import Mapping
 from pathlib import Path
 
-PAPER_POLICY_SELECTION_PROTOCOL_VERSION = 2
+PAPER_POLICY_SELECTION_PROTOCOL_VERSION = 5
+SUPPORTED_POLICY_SELECTION_PROTOCOL_VERSIONS = (5,)
 
 
 def load_selected_policy_dir(selection_file: str | Path) -> Path:
-    """Return the selected final-policy directory from a validated JSON artifact."""
+    """Return the selected policy directory from a validated JSON artifact."""
     path = Path(selection_file)
     if not path.is_file():
         raise FileNotFoundError(f"Policy selection file not found: {path}")
@@ -24,14 +25,17 @@ def load_selected_policy_dir(selection_file: str | Path) -> Path:
         raise ValueError("Unsupported policy selection artifact_type")
     if payload.get("schema_version") != 1:
         raise ValueError("Unsupported policy selection schema_version")
-    if payload.get("protocol_version") != PAPER_POLICY_SELECTION_PROTOCOL_VERSION:
+    if (
+        payload.get("protocol_version")
+        not in SUPPORTED_POLICY_SELECTION_PROTOCOL_VERSIONS
+    ):
         raise ValueError("Unsupported policy selection protocol_version")
     selected = payload.get("selected")
     if not isinstance(selected, Mapping):
         raise ValueError("Policy selection is missing selected candidate")
-    raw_dir = selected.get("policy_dir")
+    raw_dir = selected.get("model_dir")
     if not isinstance(raw_dir, str) or not raw_dir:
-        raise ValueError("Selected candidate is missing policy_dir")
+        raise ValueError("Selected candidate is missing model_dir")
     policy_dir = Path(raw_dir)
     if not policy_dir.is_absolute():
         policy_dir = (path.parent / policy_dir).resolve()

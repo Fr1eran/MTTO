@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 import scripts.run_step_distance_ablation as step_distance_ablation
-from contracts.evaluation import EvaluationMetrics
+from contracts.evaluation import EvaluationHistory, EvaluationMetrics
 from rl.reward_diagnostics import REWARD_DIAGNOSTICS_SCHEMA_VERSION, REWARD_NAMES
 
 
@@ -42,10 +42,12 @@ def _write_episodes(path: Path, rewards: list[float]) -> None:
 
 def _write_metrics(path: Path, *, value: float = 1.0) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    precise_arrival = value <= 0.3
+    punctual_arrival = precise_arrival and abs(2.0 * value) < 10.0
     metrics = EvaluationMetrics(
         success=True,
-        precise_arrival=True,
-        punctual_arrival=True,
+        precise_arrival=precise_arrival,
+        punctual_arrival=punctual_arrival,
         total_reward=2.0,
         total_time_s=440.0 - 2.0 * value,
         target_time_s=440.0,
@@ -64,11 +66,43 @@ def _write_metrics(path: Path, *, value: float = 1.0) -> None:
         episode_steps=10,
         min_safety_margin_mps=0.0,
         mean_safety_margin_mps=0.0,
+        safety_violation_count=0,
+        safe=True,
+        feasible=punctual_arrival,
         strict_stop_error_limit_m=0.3,
         strict_time_error_limit_s=10.0,
-        selection_comparison_key=(1.0, 1.0, 0.0, 1.0, 0.0, -9_000.0),
+        selection_comparison_key=(
+            (1.0, -9_000.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            if punctual_arrival
+            else (0.0, 1.0, 0.0, -value, 0.0, -2.0 * value, -9_000.0)
+        ),
     )
     path.write_text(json.dumps(metrics.to_mapping()), encoding="utf-8")
+
+
+def _write_evaluations(path: Path, returns: list[float]) -> None:
+    values = np.asarray(returns, dtype=np.float64)
+    count = values.size
+    scheduled = np.arange(1, count + 1, dtype=np.int64) * 100
+    history = EvaluationHistory(
+        training_steps=scheduled * 10,
+        rollout_indices=np.arange(1, count + 1, dtype=np.int64),
+        total_reward=values,
+        episode_steps=np.full(count, 10, dtype=np.int64),
+        success=values >= 4.0,
+        safe=np.ones(count, dtype=np.bool_),
+        stop_error_m=np.zeros(count, dtype=np.float64),
+        time_error_s=np.zeros(count, dtype=np.float64),
+        total_energy_j=np.full(count, 9_000.0),
+        comfort_tav=np.full(count, 0.2),
+        completed_training_episodes=scheduled + 3,
+        scheduled_completed_training_episodes=scheduled,
+        route_completion_ratio=np.clip(values / 10.0, 0.0, 1.0),
+        safety_violation_positions_m=np.empty(0, dtype=np.float64),
+        safety_violation_position_offsets=np.zeros(count + 1, dtype=np.int64),
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(path, **history.to_npz_mapping())
 
 
 def _entry(
@@ -79,9 +113,15 @@ def _entry(
 ) -> dict[str, object]:
     final_dir = tmp_path / f"run_{distance:g}_{repeat_index}" / "final"
     episodes = final_dir / "episodes.npz"
-    metrics = final_dir / "metrics_final.json"
+    metrics = final_dir / "metrics.json"
+    best_dir = final_dir.parent / "best"
+    best_metrics = best_dir / "metrics.json"
     _write_episodes(episodes, rewards)
+    _write_evaluations(final_dir / "evaluations.npz", rewards)
     _write_metrics(metrics, value=float(repeat_index + 1))
+    _write_metrics(best_metrics, value=float(repeat_index + 1))
+    (best_dir / "policy.zip").write_bytes(b"policy")
+    (best_dir / "trajectory.npz").write_bytes(b"trajectory")
     return {
         "run_id": (
             f"step_distance__ds{distance:g}__seed{repeat_index + 1:04d}__"
@@ -94,11 +134,15 @@ def _entry(
         "seed": repeat_index + 1,
         "experiment_tag": f"ds{distance:g}__r{repeat_index + 1:02d}",
         "artifacts": {
-            "policy_final": str(final_dir / "policy_final.zip"),
-            "metadata": str(final_dir.parent / "metadata.json"),
+            "policy_final": str(final_dir / "policy.zip"),
+            "policy_best": str(best_dir / "policy.zip"),
+            "metadata": str(final_dir / "metadata.json"),
+            "metadata_best": str(best_dir / "metadata.json"),
             "episodes": str(episodes),
             "evaluations": str(final_dir / "evaluations.npz"),
             "metrics_final": str(metrics),
+            "metrics_best": str(best_metrics),
+            "trajectory_best": str(best_dir / "trajectory.npz"),
             "safety_diagnostics": str(final_dir / "safety_diagnostics.npz"),
         },
         "status": "completed",
@@ -127,6 +171,8 @@ def test_run_matrix_expands_default_distances_and_seeds() -> None:
     )
     runs = step_distance_ablation.resolve_step_distance_run_matrix(args)
 
+    assert args.output_root == "output/paper_experiment/01_step_distance"
+
     run_entries = step_distance_ablation.resolve_step_distance_run_matrix(args)
     first = run_entries[0]
     other_distance = run_entries[len(step_distance_ablation.DEFAULT_SEEDS)]
@@ -137,12 +183,15 @@ def test_run_matrix_expands_default_distances_and_seeds() -> None:
     )
     assert first.training_run_spec.enable_monitor is True
     assert first.training_run_spec.enable_auto_analysis is False
-    assert first.training_run_spec.curriculum_profile == "dspdl"
+    assert first.training_run_spec.curriculum_profile == "dspl"
     assert first.training_run_spec.reference_curve_dir == "."
-    assert first.training_run_spec.enable_best_evaluation_artifacts is False
-    assert first.training_run_spec.evaluation_interval_rollouts == 12
-    assert first.training_run_spec.run_metadata["evaluation_interval_rollouts"] == 12
+    assert first.training_run_spec.enable_best_evaluation_artifacts is True
+    assert first.training_run_spec.evaluation_interval_rollouts is None
+    assert first.training_run_spec.evaluation_interval_episodes == 100
+    assert first.training_run_spec.run_metadata["evaluation_interval_episodes"] == 100
+    assert "evaluation_interval_rollouts" not in first.training_run_spec.run_metadata
     assert first.training_run_spec.evaluation_deterministic is True
+    assert first.training_run_spec.training_episodes == 4_000
 
     assert (
         first.training_run_spec.reward_discount
@@ -155,6 +204,28 @@ def test_run_matrix_expands_default_distances_and_seeds() -> None:
     assert runs[0].run_id == "step_distance__ds10p0__seed0011__r01"
     assert runs[0].evaluation_history_path.endswith("evaluations.npz")
     assert runs[0].training_run_spec.evaluation_history_path.endswith("evaluations.npz")
+
+
+def test_train_cli_rejects_removed_rollout_evaluation_interval() -> None:
+    parser = step_distance_ablation.build_arg_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "train",
+                "--reference-curve-dir",
+                ".",
+                "--evaluation-interval-rollouts",
+                "12",
+            ]
+        )
+
+
+@pytest.mark.parametrize("option", ["--dpi", "--pad-inches", "--output-file"])
+def test_show_cli_rejects_removed_export_options(option: str) -> None:
+    with pytest.raises(SystemExit):
+        _ = step_distance_ablation.build_arg_parser().parse_args(
+            ["show", option, "300"]
+        )
 
 
 def test_manifest_round_trip_uses_one_new_schema_file(tmp_path: Path) -> None:
@@ -177,17 +248,21 @@ def test_manifest_round_trip_uses_one_new_schema_file(tmp_path: Path) -> None:
     step_distance_ablation._validate_manifest_compatibility(loaded, args)
     assert loaded["schema_version"] == 1
     assert loaded["matrix_id"] == "step_distance"
-    assert loaded["matrix_config"]["protocol_version"] == 3
+    assert loaded["matrix_config"]["protocol_version"] == 10
+    assert loaded["training_signature"]["training_episodes"] == 4_000
+    assert loaded["training_signature"]["evaluation_interval_episodes"] == 100
+    assert "evaluation_interval_rollouts" not in loaded["training_signature"]
     assert (
-        loaded["matrix_config"]["reward_config"]["punctuality_potential_scale"]
-        == 5.0
+        loaded["matrix_config"]["reward_config"]["punctuality_potential_scale"] == 5.0
     )
     assert (
-        loaded["matrix_config"]["dspdl_protocol"]["context_value_estimator"]
+        loaded["matrix_config"]["dspl_protocol"]["context_value_estimator"]
         == "importance_weighted_samples"
     )
+    assert loaded["matrix_config"]["dspl_protocol"]["target_kl_stop"] == 0.02
+    assert loaded["matrix_config"]["dspl_protocol"]["target_uniform_mass"] == 0.1
     assert loaded["runs"][0]["artifacts"]["policy_final"].endswith(  # type: ignore[index]
-        "policy_final.zip"
+        "policy.zip"
     )
 
 
@@ -205,10 +280,40 @@ def test_curve_aggregation_aligns_by_completed_episode_number(tmp_path: Path) ->
     assert warnings == []
     assert [aggregate.variant_id for aggregate in aggregates] == ["50p0", "100p0"]
     aggregate = aggregates[0]
-    np.testing.assert_allclose(aggregate.x, [1.0, 2.0, 3.0])
-    np.testing.assert_allclose(aggregate.means["ep_reward"], [1.5, 3.5, 5.0])
-    np.testing.assert_allclose(aggregate.means["ep_len"], [10.0, 10.0, 10.0])
-    np.testing.assert_array_equal(aggregate.metrics["ep_reward"].count, [2, 2, 1])
+    np.testing.assert_allclose(aggregate.x, [100.0, 200.0, 300.0])
+    np.testing.assert_allclose(
+        aggregate.means["trip_completion_pct"], [15.0, 35.0, 50.0]
+    )
+    np.testing.assert_allclose(
+        aggregate.means["evaluation_episode_return"], [1.5, 3.5, 5.0]
+    )
+    np.testing.assert_array_equal(
+        aggregate.metrics["evaluation_episode_return"].count, [2, 2, 1]
+    )
+
+
+def test_curve_aggregation_keeps_warmup_episodes(tmp_path: Path) -> None:
+    entries = [_entry(tmp_path, 50.0, 0, [1.0, 3.0, 8.0])]
+
+    aggregates, warnings = step_distance_ablation.build_curve_aggregates(
+        _manifest(entries), episode_smoothing_window=100
+    )
+
+    assert warnings == []
+    np.testing.assert_allclose(aggregates[0].x, [100.0, 200.0, 300.0])
+    np.testing.assert_allclose(
+        aggregates[0].means["evaluation_episode_return"], [1.0, 2.0, 4.0]
+    )
+    figure = step_distance_ablation.plot_curve_aggregates(aggregates, show=False)
+    assert figure is not None
+    assert all(axis.get_xlim() == pytest.approx((0.0, 4000.0)) for axis in figure.axes)
+    assert figure.axes[0].get_ylim() == pytest.approx((0.0, 100.0))
+    assert len(figure.axes[0].collections) == 1
+    assert len(figure.axes[1].collections) == 1
+    assert figure.axes[0].lines[0].get_color() == "#0072B2"
+    assert figure.axes[0].lines[0].get_linestyle() == ":"
+    assert figure.axes[0].lines[0].get_marker() == "^"
+    figure.clear()
 
 
 def test_metric_aggregation_uses_sample_std_and_explicit_best_artifacts(
@@ -225,7 +330,7 @@ def test_metric_aggregation_uses_sample_std_and_explicit_best_artifacts(
 
     manifest = _manifest([first, second])
     manifest["matrix_config"]["step_distances"] = [50.0]  # type: ignore[index]
-    assert step_distance_ablation.resolve_metric_source(manifest) == "final"
+    assert step_distance_ablation.resolve_metric_source(manifest) == "best"
     aggregates, warnings = step_distance_ablation.build_metric_aggregates(
         manifest, metric_source="best"
     )

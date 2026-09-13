@@ -43,6 +43,9 @@ def _metrics() -> EvaluationMetrics:
         episode_steps=42,
         min_safety_margin_mps=0.5,
         mean_safety_margin_mps=1.2,
+        safety_violation_count=0,
+        safe=True,
+        feasible=True,
         strict_stop_error_limit_m=0.3,
         strict_time_error_limit_s=10.0,
         selection_comparison_key=(1.0, 1.0, 0.0, 1.0, 0.0, -12_000.0),
@@ -79,6 +82,9 @@ def test_evaluation_metrics_persist_joules_and_reject_flat_legacy_fields() -> No
         "episode_steps",
         "min_safety_margin_mps",
         "mean_safety_margin_mps",
+        "safety_violation_count",
+        "safe",
+        "feasible",
         "strict_stop_error_limit_m",
         "strict_time_error_limit_s",
         "selection_comparison_key",
@@ -91,6 +97,9 @@ def test_evaluation_metrics_persist_joules_and_reject_flat_legacy_fields() -> No
 
     with pytest.raises(ContractError, match="unknown fields"):
         EvaluationMetrics.from_mapping({**payload, "total_energy_kj": 12.0})
+
+    with pytest.raises(ContractError, match="schema_version"):
+        EvaluationMetrics.from_mapping({**payload, "schema_version": 1})
 
 
 def test_episode_info_round_trips_intermediate_stopping_point_sentinel() -> None:
@@ -139,7 +148,7 @@ def test_run_metadata_and_nested_budget_have_one_strict_parser() -> None:
             profile_name="none",
             enabled=False,
             value_source=None,
-            dspdl_protocol=None,
+            dspl_protocol=None,
             reference_curve_dir=None,
             reference_curve_artifact_path=None,
             reference_curve_metrics_path=None,
@@ -161,6 +170,7 @@ def test_run_metadata_and_nested_budget_have_one_strict_parser() -> None:
     )
     payload = metadata.to_mapping()
 
+    assert payload["schema_version"] == 5
     assert list(payload) == [
         "artifact_type",
         "schema_version",
@@ -178,6 +188,19 @@ def test_run_metadata_and_nested_budget_have_one_strict_parser() -> None:
         "training_budget",
     ]
     assert RunMetadata.from_mapping(payload) == metadata
+    with pytest.raises(ContractError, match="schema_version"):
+        RunMetadata.from_mapping({**payload, "schema_version": 3})
+    with pytest.raises(ContractError, match="unknown fields"):
+        RunMetadata.from_mapping(
+            {
+                **payload,
+                "curriculum": {
+                    **payload["curriculum"],
+                    "original_context_count": 972,
+                    "context_count_limit": 67,
+                },
+            }
+        )
     with pytest.raises(ContractError, match="unknown fields"):
         RunMetadata.from_mapping(
             {
@@ -186,6 +209,15 @@ def test_run_metadata_and_nested_budget_have_one_strict_parser() -> None:
                     **payload["training_budget"],
                     "unexpected": True,
                 },
+            }
+        )
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        RunMetadata.from_mapping(
+            {
+                **payload,
+                "evaluation_interval_rollouts": 12,
+                "evaluation_interval_episodes": 100,
             }
         )
 
@@ -198,11 +230,11 @@ def test_manifest_round_trip_and_status_update_are_typed() -> None:
         repeat_index=0,
         seed=11,
         artifacts=ArtifactRefs(
-            policy_final="run/final/policy_final.zip",
+            policy_final="run/final/policy.zip",
             episodes="run/final/episodes.npz",
             evaluations="run/final/evaluations.npz",
-            trajectory_final="run/final/final_trajectory.npz",
-            metrics_final="run/final/metrics_final.json",
+            trajectory_final="run/final/trajectory.npz",
+            metrics_final="run/final/metrics.json",
         ),
         status="pending",
     )
@@ -248,11 +280,14 @@ def test_evaluation_history_round_trip_rejects_unknown_arrays() -> None:
         total_reward=np.asarray([2.0]),
         episode_steps=np.asarray([10], dtype=np.int64),
         success=np.asarray([True]),
+        safe=np.asarray([False]),
         stop_error_m=np.asarray([0.1]),
         time_error_s=np.asarray([-1.0]),
         total_energy_j=np.asarray([2_000.0]),
         comfort_tav=np.asarray([0.2]),
         completed_training_episodes=np.asarray([8], dtype=np.int64),
+        scheduled_completed_training_episodes=np.asarray([8], dtype=np.int64),
+        route_completion_ratio=np.asarray([0.75]),
         safety_violation_positions_m=np.asarray([50.0]),
         safety_violation_position_offsets=np.asarray([0, 1], dtype=np.int64),
     )
@@ -261,6 +296,13 @@ def test_evaluation_history_round_trip_rejects_unknown_arrays() -> None:
 
     np.testing.assert_array_equal(restored.training_steps, history.training_steps)
     np.testing.assert_array_equal(restored.total_energy_j, history.total_energy_j)
+    np.testing.assert_array_equal(
+        restored.scheduled_completed_training_episodes,
+        history.scheduled_completed_training_episodes,
+    )
+    np.testing.assert_array_equal(
+        restored.route_completion_ratio, history.route_completion_ratio
+    )
     np.testing.assert_array_equal(
         restored.safety_violation_position_offsets,
         history.safety_violation_position_offsets,
@@ -277,11 +319,11 @@ def test_typed_evaluation_io_has_exact_npz_schema_and_namespaced_extensions(
         trajectory=TrajectoryData(
             position_m=np.asarray([0.0, 100.0]),
             speed_mps=np.asarray([5.0, 0.0]),
-            safety_violation_positions_m=np.asarray([50.0]),
+            safety_violation_positions_m=np.asarray([], dtype=np.float64),
         ),
     )
-    trajectory_path = tmp_path / "final_trajectory.npz"
-    metrics_path = tmp_path / "metrics_final.json"
+    trajectory_path = tmp_path / "trajectory.npz"
+    metrics_path = tmp_path / "metrics.json"
 
     save_evaluation_artifact(
         artifact,
@@ -317,4 +359,16 @@ def test_typed_evaluation_io_has_exact_npz_schema_and_namespaced_extensions(
             str(trajectory_path),
             str(metrics_path),
             use_metrics_cache=False,
+        )
+
+
+def test_evaluation_artifact_rejects_mismatched_safety_violation_count() -> None:
+    with pytest.raises(ValueError, match="does not match trajectory violations"):
+        EvaluationArtifact(
+            metrics=_metrics(),
+            trajectory=TrajectoryData(
+                position_m=np.asarray([0.0, 100.0]),
+                speed_mps=np.asarray([5.0, 0.0]),
+                safety_violation_positions_m=np.asarray([50.0]),
+            ),
         )

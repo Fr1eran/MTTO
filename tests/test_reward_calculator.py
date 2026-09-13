@@ -1,5 +1,6 @@
 from dataclasses import replace
 
+import numpy as np
 import pytest
 
 from model.ocs import SPSState, TrainService
@@ -12,6 +13,7 @@ from rl.reward_calculator import (
     PUNCTUALITY_POTENTIAL_SIGMA_S,
     RewardCalculator,
     RewardConfig,
+    punctuality_potential_from_error,
 )
 
 
@@ -67,7 +69,10 @@ def punctuality_calculator(calculator: RewardCalculator) -> RewardCalculator:
         whole_distance_m=100,
         max_energy_consumption_kj=100,
         gamma=0.9,
-        reward_config=RewardConfig(enable_potential_punctuality=True),
+        reward_config=RewardConfig(
+            enable_potential_safety=False,
+            enable_potential_punctuality=True,
+        ),
         initial_min_operation_time_s=10,
     )
 
@@ -97,7 +102,7 @@ def test_global_linear_slack_reference(punctuality_calculator):
 
 @pytest.mark.parametrize("code", list(ViolationCode))
 @pytest.mark.parametrize("length", [1, 3, 7])
-def test_punctuality_pbrs_telescopes_on_every_task_end(
+def test_punctuality_shaping_keeps_terminal_next_potential(
     punctuality_calculator, code, length
 ):
     calc = punctuality_calculator
@@ -129,7 +134,9 @@ def test_punctuality_pbrs_telescopes_on_every_task_end(
                 breakdown.truncation + breakdown.punctuality_shaping
             )
         state = next_state
-    assert total == pytest.approx(-initial_phi)
+    assert total == pytest.approx(
+        -initial_phi + calc.gamma**length * calc.potential_punctuality(state)
+    )
 
 
 def test_external_sampling_cut_keeps_next_potential(punctuality_calculator):
@@ -154,6 +161,20 @@ def test_punctuality_potential_is_bounded_and_can_be_disabled(punctuality_calcul
     assert PUNCTUALITY_POTENTIAL_SIGMA_S == 20.0
     calc.reward_config = replace(calc.reward_config, enable_potential_punctuality=False)
     assert calc.potential_punctuality(state) == 0
+
+
+def test_canonical_punctuality_error_potential_is_symmetric_and_bounded() -> None:
+    errors = np.asarray([-1e200, -20.0, 0.0, 20.0, 1e200])
+    potential = punctuality_potential_from_error(errors)
+
+    assert isinstance(potential, np.ndarray)
+    np.testing.assert_allclose(potential, potential[::-1])
+    assert potential[2] == pytest.approx(0.0)
+    assert np.all(potential <= 0.0)
+    assert np.all(potential >= -PUNCTUALITY_POTENTIAL_SCALE)
+    assert punctuality_potential_from_error(20.0) == pytest.approx(
+        -PUNCTUALITY_POTENTIAL_SCALE / 2.0
+    )
 
 
 def test_dense_reward_includes_energy_comfort_and_survival(
@@ -192,7 +213,7 @@ def test_terminal_punctuality_is_rewarded_only_on_termination(
     assert on_time_reward.terminal_punctuality > late_reward.terminal_punctuality
 
 
-def test_truncation_excludes_all_other_reward_components(
+def test_truncation_keeps_potential_shaping_but_excludes_dense_objectives(
     calculator: RewardCalculator,
 ) -> None:
     previous = _state()
@@ -211,11 +232,17 @@ def test_truncation_excludes_all_other_reward_components(
         )
     )
     assert reward.truncation == pytest.approx(-8.20)
-    assert reward.total == reward.truncation
+    assert reward.total == pytest.approx(reward.truncation + reward.safety)
     assert reward.energy == reward.comfort == reward.survival == 0.0
 
 
-def test_safety_potential_uses_v3_pbrs_difference(calculator: RewardCalculator) -> None:
+@pytest.mark.parametrize(
+    ("terminated", "truncated"),
+    [(False, False), (True, False), (False, True)],
+)
+def test_safety_potential_uses_discounted_potential_difference(
+    calculator: RewardCalculator, terminated: bool, truncated: bool
+) -> None:
     previous = _state(speed=80.0, min_speed=10.0, max_speed=100.0)
     current = _state(position=1.0, speed=95.0, min_speed=10.0, max_speed=100.0)
     transition = OperationalTransition(
@@ -225,8 +252,8 @@ def test_safety_potential_uses_v3_pbrs_difference(calculator: RewardCalculator) 
         1.0,
         1.0,
         0.0,
-        False,
-        False,
+        terminated,
+        truncated,
         ViolationCode.ONGOING,
     )
     reward = calculator.calculate(transition)

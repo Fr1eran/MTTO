@@ -42,8 +42,8 @@ MTTO/
 │   ├── callbacks.py        #   训练回调（TensorBoard 日志 & 最优轨迹评估）
 │   ├── context_pool.py     #   DP 参考轨迹与不可变上下文池构建
 │   ├── context_sampler.py  #   持有版本化分布的上下文采样器
-│   ├── dspdl.py            #   DSPDL 共享统计与课程回调
-│   ├── dspdl_distribution.py      # DSPDL 通用分布求解器
+│   ├── dspl.py            #   DSPL 共享统计与课程回调
+│   ├── dspl_distribution.py      # DSPL 通用分布求解器
 │   ├── env_factory.py      #   环境工厂
 │   ├── evaluation.py       #   评估辅助
 │   ├── experiment_utils.py #   reward preset、运行元数据、输出命名
@@ -85,6 +85,13 @@ MTTO/
 
 RL 工作流脚本 `train_rl`、`evaluate_rl`、`run_schedule_time_change evaluate`、`analyze_training_data` 和 `show_rl_result` 统一支持 `--dry-run`，用于预览有效配置、路径解析结果或展示计划，而不执行训练、评估、分析或绘图。
 
+论文全套仿真的固定参数、执行顺序、中断恢复和产物验收见
+[完整仿真实验指导](output/完整仿真实验指导.md)。论文产物按
+`00_figures`、`01_step_distance`、`02_method_ablation`、
+`03_multiobjective`、`04_schedule_time_change` 分类，每批使用统一的
+`YYYYMMDD_NN` 子目录。步长 v10、方法 v9、训练元数据 schema v5 和严格评估
+schema v2 不与旧结果混用。
+
 ---
 
 ## 脚本详解
@@ -117,19 +124,22 @@ manifest 也不会用于恢复。需要断点恢复时显式使用 `--resume`；
 `--force-new`，旧 manifest 会先备份。resume 只跳过状态为 `completed` 且 canonical 产物
 完整的运行，失败、中断或产物不完整的运行会从头重跑。
 
-#### DSPDL 课程学习
+#### DSPL 课程学习
 
-主训练入口默认使用 `--curriculum-profile dspdl`。课程启用时仍需通过
+主训练入口默认使用 `--curriculum-profile dspl`。课程启用时仍需通过
 `--reference-curve-dir <dp-output-dir>` 提供与任务匹配的 DP 参考轨迹；显式指定
 `--curriculum-profile none` 可关闭课程。旧任务完成度课程的输出目录和 manifest 仅作为
 历史材料保存，不会被当前脚本自动迁移或续跑。
 
-父进程读取 `ReferenceTrajectory`，由 `ContextPoolBuilder` 对 DP 轨迹采样并重建为只读
-`ContextPool`，再将同一逻辑任务池交给所有训练环境。每个训练环境只创建轻量的
-`ContextSampler`，不会重复读取或重建 DP 轨迹。
+父进程读取 `ReferenceTrajectory`，由 `ContextPoolBuilder` 校验 DP 来源轨迹，并只回放
+停车点步进状态、能耗等轨迹相关状态。context 位置按池大小直接均匀划分完整线路，包含
+任务起点且排除终点，不构造或依赖 RL 步长网格；速度、累计时间和加速度从来源轨迹分段
+线性插值得到，再通过公共 `OperationalStepper.build_state()` 构造完整状态。池大小为
+`floor(rollout_steps_per_update / max_episode_steps * update_interval * 2)` 且至少为 1。
+同一逻辑任务池交给所有训练环境，每个环境只创建轻量的 `ContextSampler`。
 
-DSPDL 只对当前课程更新窗口中实际采样的唯一上下文计算 PPO
-`predict_values()`，并按论文 Eq. (5) 构造 DSPDL 系数：
+DSPL 只对当前课程更新窗口中实际采样的唯一上下文计算 PPO
+`predict_values()`，并按论文 Eq. (5) 构造 DSPL 系数：
 
 $$
 g(c)=\frac{n_c}{Kp_i(c)}V_\theta(c)\quad(n_c>0),\qquad g(c)=0\quad(n_c=0),
@@ -140,32 +150,31 @@ $p_i(c)$ 是该窗口对应的课程分布。环境按原始奖励累计
 $G=\sum_{t=0}^{T-1}\gamma^t r_t$ 用于课程强度和价值校准诊断，
 不执行 ZPD 转换、奖励缩放或 VecNormalize。
 
-训练时可在 TensorBoard 查看 DSPDL 的 `dspdl/alpha`、KL、采样与校准诊断。
-协议固定为 `zeta=4`、相对熵约束 `0.01`、每 4 个 rollout 更新且 warmup 4 次，
-不提供运行时调参或替代估计器入口。
+训练时可在 TensorBoard 查看 DSPL 的 `dspl/alpha`、KL、采样与校准诊断。
+协议固定为 `zeta=4`、相对熵约束 `0.01`、目标 KL 停止阈值 `0.02`、目标分布
+均匀质量 `0.1`、每 4 个 rollout 更新且 warmup 4 次。Context 密度常数根据消融结果
+固化为 `2`，标准 30 m 任务使用 67 个节点；不提供运行时调参或替代估计器入口。
 
 #### 奖励配置与实验标识
 
-默认奖励预设为 `basic_safety_punctuality`：在 `basic_safety` 上加入线性剩余裕度准点
-PBRS。无需 DP 参考即可启用该奖励；启用课程时仍按课程要求提供 DP 数据。若要复现
+默认奖励预设为 `basic_safety_punctuality`，对应本文的物理先验奖励塑形
+（Physics-Prior Reward Shaping, PPRS）：组合速度安全势与线性剩余裕度准点势。
+无需 DP 参考即可启用该奖励；启用课程时仍按课程要求提供 DP 数据。若要复现
 不含准点势函数的旧设置，可显式传入 `--reward-preset basic_safety`。
 
 令 `q` 为沿运行方向计算并裁剪到 `[0,1]` 的剩余距离比例，`b0` 为全程静止起点的
 计划时间减最短运行时间，参考裕度为 `b_ref=b0*q`。课程中途起点沿用全程参考线。
-实际裕度与参考的差为 `e`，势函数为 `Phi=-K*e²/(sigma²+e²)`，新增奖励为
-`gamma*Phi(next)-Phi(previous)`。参数固定为 `K=5`、`sigma=20 s`，不提供运行时覆盖。
-负初始裕度保留符号；势函数不替代原终端准点评分。
-
-新预设在内部任务结束（包括失败和步数上限）将准点终端势归零，并关闭该结束状态的
-时间限制 bootstrap。PPO rollout 边界不归零；外部采样时间限制保留 bootstrap。
-DSPDL 使用 `V_shaped+Phi(start)`，课程回报统计剔除新增准点塑形分量，
-保持原奖励比较口径。旧安全 PBRS 的边界行为保持不变。
+实际裕度与参考的差为 `e`，势函数为 `Phi=-K*e²/(sigma²+e²)`。安全势与准点势
+在普通转移、成功终止、违规截断和外部采样边界均统一计算为
+`gamma*Phi(next)-Phi(previous)`，不将任务终止后的下一状态势显式归零。准点参数固定为
+`K=5`、`sigma=20 s`，不提供运行时覆盖；负初始裕度保留符号，势函数不替代原终端
+准点评分。
 计划时间变化后以新计划更新全程参考线，不从变化点重锚；变更接口本身不发奖励，
 不对跨外部计划变更的整段回报宣称固定任务策略不变性。
 
 ```bash
 python -m scripts.train_rl --reward-preset basic_safety_punctuality --curriculum-profile none
-python -m scripts.show_potential_function --plot-type punctuality-slack --no-show --output-file output/punctuality_slack.png
+python -m scripts.show_potential_function --plot-type punctuality --no-show --output-dir output
 ```
 
 诊断中新增 `punctuality_shaping` 分量，诊断 schema 为 4，读取旧版 2/3 时该分量补零。
@@ -180,21 +189,23 @@ python -m scripts.show_potential_function --plot-type punctuality-slack --no-sho
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `--curriculum-profile` | `str` | `dspdl` | `none`、`dspdl` |
+| `--curriculum-profile` | `str` | `dspl` | `none`、`dspl` |
 | `--reference-curve-dir` | `str` | `None` | 启用课程时必填，指向与任务匹配的 DP 轨迹目录 |
 
-`basic` 固定包含 `energy + comfort`，`basic_safety` 在此基础上启用安全 PBRS；
-默认的 `basic_safety_punctuality` 进一步启用准点 PBRS。训练和评估均直接使用原始
-奖励尺度，停站精度和准点终端评分函数保持不变。
+`basic` 固定包含 `energy + comfort`，`basic_safety` 在此基础上启用安全势函数塑形；
+默认的 `basic_safety_punctuality` 将安全势与准点势作为完整 PPRS 模块统一启用。
+训练和评估均直接使用原始奖励尺度，停站精度和准点终端评分函数保持不变。
 
 #### PPO 超参数
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `--reward-discount` | `float` | `0.995` | 回报折扣因子 γ |
-| `--rollout-steps-per-update` | `int` | `2048` | 每次更新的 rollout 总步数 |
+| `--reward-discount` | `float` | `0.998` | 回报折扣因子 γ |
+| `--rollout-steps-per-update` | `int` | `8192` | 每次更新的 rollout 总步数 |
 | `--n-steps-per-env` | `int` | 自动推导 | 每个环境的步数（优先级高于 `--rollout-steps-per-update`） |
-| `--training-episodes` | `int` | `7000` | 全局完成训练回合数；按环境数取整并自动推导 PPO 环境步上限 |
+| `--budget-mode` | `str` | `completed_episodes` | 训练预算模式：`completed_episodes` 或 `environment_steps` |
+| `--training-episodes` | `int` | 模式默认 `5000` | 完成回合预算；仅用于 `completed_episodes` |
+| `--training-rollouts` | `int` | `None` | PPO rollout 总数；`environment_steps` 模式必填 |
 | `--device` | `str` | `cpu` | 运行设备：`cpu` / `cuda` |
 
 #### 日志与分析
@@ -212,7 +223,7 @@ python -m scripts.show_potential_function --plot-type punctuality-slack --no-sho
 | `--enable-safety-truncation-histogram` | `bool` | tune 模式启用 | 按 rollout 汇总安全截断位置并保存直方图 |
 | `--dry-run` | `bool` | `False` | 仅解析有效训练配置、输出路径和运行元数据预览，不创建环境或启动训练 |
 
-每次训练会写入版本化 `metadata.json`，并在 `final/` 下生成 `episodes.npz`。该二进制产物保存完整 episode 奖励分量累计值及 rollout 级 transition 充分统计量；奖励占比与相关性由训练后分析模块计算，不再写入 TensorBoard event。
+每次训练在 `final/` 写入 `policy.zip`、`metadata.json` 和 `episodes.npz`；最终独立评估再写入 `trajectory.npz` 与 `metrics.json`。`metadata.json` 的 `training_budget.mode` 记录预算模式，顶层不重复写入 `budget_mode`。该二进制产物保存完整 episode 奖励分量累计值及 rollout 级 transition 充分统计量。
 
 #### Best-Eval（训练期最优轨迹评估）
 
@@ -220,24 +231,57 @@ python -m scripts.show_potential_function --plot-type punctuality-slack --no-sho
 |------|------|--------|------|
 | `--enable-best-evaluation-artifacts` | `bool` | 取决于 run-mode | 启用训练期最优模型与轨迹产物 |
 | `--evaluation-interval-rollouts` | `int` | `12` | 每完成指定数量的 PPO rollouts 执行一次评估 |
+| `--evaluation-interval-episodes` | `int` | `None` | 每跨过指定数量的完成训练回合执行一次评估；与 rollout 间隔互斥 |
 | `--evaluation-deterministic` | `bool` | `True` | 是否使用确定性策略推理 |
 | `--evaluation-history-path` | `str` | `None` | 可选的完整评估历史 NPZ 输出路径 |
 
-评估仅在 rollout 边界触发，不再在每个训练 step 中检查，也不再支持按完成 episode 数调度。评估历史使用 `rollout_indices` 与 `training_steps` 同时标记评估时点；最优轨迹 metrics 使用 `evaluation_rollout_index`。
+评估仅在 rollout 边界触发，不在每个训练 step 中执行。通用训练入口支持按 rollout
+或按完成回合两种互斥调度；按回合调度在阈值被跨过后的下一次 `_on_rollout_start`
+触发，因此实际回合数会有小幅 rollout 边界超调。评估历史同时记录规则目标回合数、
+实际完成回合数、环境 transition 数与 rollout 序号；最优轨迹 metrics 使用
+`evaluation_rollout_index`。
 
-成功判定使用 `TrainService.max_stop_error` 与 `TrainService.max_arr_time_error_s`：
-- `stop_error_m <= max_stop_error`
-- `abs(time_error_s) < max_arr_time_error_s`，默认准点阈值为 `10.0s`
+环境成功终止要求速度绝对值不超过 `0.01 m/s`，且
+`stop_error_m <= max_stop_error * 30`（默认 `max_stop_error=0.3 m`，即 9 m）。
+评估中的 `precise_arrival` 仍要求 `stop_error_m <= max_stop_error`，默认 0.3 m；
+因此 success rate 与 precise-arrival rate 是不同指标。准点还要求
+`abs(time_error_s) < max_arr_time_error_s`，默认阈值为 `10.0 s`。
+
+安全判定统一为 `min_safety_margin_mps >= -1e-6` 且
+`safety_violation_count == 0`；严格可行性要求成功、精确停站、准点和安全同时成立。
+评估指标使用严格 schema v2，并显式保存 `safety_violation_count`、`safe` 与
+`feasible`，不再从缺失字段的旧指标中重建选择键或安全状态。
 
 Best-eval 排序规则：
-- 一旦出现成功轨迹，所有成功轨迹都优先于所有未成功轨迹
-- 在成功轨迹之间，优先比较总能耗，越小越优
-- 如果当前还没有成功轨迹，才回退到按总 reward 比较
-- 停站误差与绝对时间误差仅作为稳定 tie-break
+- 严格可行（安全、成功、精确停站且准点）轨迹优先于所有不可行轨迹
+- 严格可行轨迹之间优先选择总能耗更低者
+- 尚无严格可行轨迹时，依次按安全成功、停站精度、准点性和能耗回退
 
-每次刷新最优时，在实验目录下的 `best_rollouts/` 中保存模型、`best_trajectory.npz` 与版本化 `metrics_best.json`。
+每次刷新最优时，在实验目录下的 `best/` 中保存一套可独立加载的 `policy.zip`、`trajectory.npz`、`metrics.json` 与 `metadata.json`。环境步预算的最后一个 rollout 不参与周期评估；训练完成后仍对 `final/` 策略做一次独立评估。
 
-论文方法消融将 PBRS 作为安全势函数与准点势函数的整体开关，不拆分两个分量。
+论文方法消融将 PPRS 作为安全势函数与准点势函数的整体开关，不拆分两个分量。
+步长消融对 10、30、50、100 m 和 5 个种子统一使用 4000 个完成回合，因而比较的是
+相同完整物理行程次数；每 100 个完成回合调度一次独立评估，周期点为 100–3900，
+4000 终点留给训练后的 `final` 独立评估。步长主图仅使用周期评估：行程完成率按运行
+方向的起终位置净进度计算并截断到 0–100%，回报为独立评估 rollout 的总回报；失败、
+截断和低完成率样本均保留。每个种子先做 5 个评估点的尾随平均（前 4 点扩展窗口），
+再在相同规则目标回合数上跨 5 个种子计算均值与样本标准差带。旧步长协议结果不迁移或
+混入新输出目录。
+
+固定 30 m 步长后的方法消融以 400 个 rollout（3,276,800 个环境状态转移）作为预算，
+使用 `output/optimal/dp/465p0_0p1_uni10p0` 作为 DSPL/context 来源轨迹，RL 环境步长
+仍为 30 m。实验继续使用原有 rollout 评估调度，并按环境步退火学习率和展示主学习曲线。
+方法消融的所有学习曲线都来自周期性独立评估。每个种子的完整评估序列先做 5 点尾随滑动平均（起始段使用已有点），再跨 5 个种子计算均值与样本标准差带；失败评估也保留在停站误差、时间误差、回报、长度、成功率和安全率中。
+
+```bash
+# 预览方法消融矩阵
+uv run python -m scripts.run_method_ablation train \
+  --reference-curve-dir output/optimal/dp/465p0_0p1_uni10p0 --dry-run
+
+# 正式方法消融
+uv run python -m scripts.run_method_ablation train \
+  --reference-curve-dir output/optimal/dp/465p0_0p1_uni10p0
+```
 
 #### 训练后自动分析
 
@@ -256,160 +300,153 @@ Best-eval 排序规则：
 ```bash
 # 默认调优训练
 python -m scripts.train_rl --run-mode tune \
-  --curriculum-profile dspdl \
+  --curriculum-profile dspl \
   --reference-curve-dir output/optimal/dp/465p0_0p1_uni30p0
 
 # 高效复现（关闭日志，不进行 best model 评估，仅得到最终训练模型）
 python -m scripts.train_rl --run-mode reproduce \
-  --curriculum-profile dspdl \
+  --curriculum-profile dspl \
   --reference-curve-dir output/optimal/dp/465p0_0p1_uni30p0
 
 # 关闭高频回调，保留基础监控 + best-eval
 python -m scripts.train_rl --run-mode monitor_best \
-  --curriculum-profile dspdl \
+  --curriculum-profile dspl \
   --reference-curve-dir output/optimal/dp/465p0_0p1_uni30p0
 
-# 使用安全 PBRS 预设，并附加实验标签
+# 使用安全势函数预设，并附加实验标签
 python -m scripts.train_rl --run-mode monitor_best --reward-preset basic_safety --experiment-tag exp_a \
-  --curriculum-profile dspdl \
+  --curriculum-profile dspl \
   --reference-curve-dir output/optimal/dp/465p0_0p1_uni30p0
 
 # 仅预览 monitor_best 训练配置与输出路径
 python -m scripts.train_rl --run-mode monitor_best --reward-preset basic_safety \
-  --curriculum-profile dspdl \
+  --curriculum-profile dspl \
   --reference-curve-dir output/optimal/dp/465p0_0p1_uni30p0 --dry-run
 
 # 低开销训练，仅保留 best-eval
 python -m scripts.train_rl --run-mode best_only \
-  --curriculum-profile dspdl \
+  --curriculum-profile dspl \
   --reference-curve-dir output/optimal/dp/465p0_0p1_uni30p0
 
 # 430s tune，每 12 个 rollouts 触发一次 best-eval
-python -m scripts.train_rl --output-root output/optimal/rl/ --schedule-time-s 430.0 --step-distance 100.0 --curriculum-profile dspdl --reference-curve-dir output/optimal/dp/ --run-mode tune --training-episodes 7000 --num-envs 8 --evaluation-interval-rollouts 12 --evaluation-deterministic --device cpu
+python -m scripts.train_rl --output-root output/optimal/rl/ --schedule-time-s 430.0 --step-distance 100.0 --curriculum-profile dspl --reference-curve-dir output/optimal/dp/ --run-mode tune --training-episodes 5000 --num-envs 8 --evaluation-interval-rollouts 12 --evaluation-deterministic --device cpu
 
 # 430s monitor_best，每 6 个 rollouts 评估一次
-python -m scripts.train_rl --output-root output/optimal/rl/safety_speed/ --schedule-time-s 430.0 --step-distance 100.0 --curriculum-profile dspdl --reference-curve-dir output/optimal/dp/ --run-mode monitor_best --training-episodes 7000 --num-envs 8 --evaluation-interval-rollouts 6 --evaluation-deterministic --device cpu
+python -m scripts.train_rl --output-root output/optimal/rl/safety_speed/ --schedule-time-s 430.0 --step-distance 100.0 --curriculum-profile dspl --reference-curve-dir output/optimal/dp/ --run-mode monitor_best --training-episodes 5000 --num-envs 8 --evaluation-interval-rollouts 6 --evaluation-deterministic --device cpu
 ```
 
 ---
 
 ### RL 评估 · `evaluate_rl`
 
-加载训练好的 PPO 模型，在单环境中执行评估 rollout，可选录制视频。若 `--load-dir` 所在实验目录存在 `metadata.json`，评估会优先复用其中的 `schedule_time_s`、`reward_discount`、`step_distance` 与 `reward_preset`；只有在显式传参时才覆盖这些值。
+加载用户明确指定的 PPO 模型目录，在单环境中执行评估 rollout，可选录制视频。目录必须直接包含 `policy.zip` 与 `metadata.json`，脚本不会搜索或推断 `best` / `final`。
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `--load-dir` | `str` | `output/optimal/rl/final/` | PPO 模型所在目录 |
-| `--reward-discount` | `float` | 从 `run_metadata.json` 读取，否则 `0.995` | 折扣因子（重建环境用） |
-| `--schedule-time-s` | `float` | 从 `run_metadata.json` 读取，否则 `430.0` | 规划运行时间 |
-| `--step-distance` | `float` | 从 `run_metadata.json` 读取，否则 `30.0` | 环境固定空间控制步长 (m) |
-| `--reward-preset` | `str` | 从 `run_metadata.json` 读取，否则 `basic_safety` | 评估所使用的原始尺度奖励预设 |
+| `--model-dir` | `str` | 必填 | 直接包含 `policy.zip` 与 `metadata.json` 的模型目录 |
+| `--reward-discount` | `float` | 从 `metadata.json` 读取 | 折扣因子（重建环境用） |
+| `--schedule-time-s` | `float` | 从 `metadata.json` 读取 | 规划运行时间 |
+| `--step-distance` | `float` | 从 `metadata.json` 读取 | 环境固定空间控制步长 (m) |
+| `--reward-preset` | `str` | 从 `metadata.json` 读取 | 评估所使用的原始尺度奖励预设 |
 | `--device` | `str` | `cpu` | 推理设备 |
 | `--deterministic` | `bool` | `True` | 是否使用确定性策略 |
 | `--record-video` | `bool` | `False` | 是否录制评估视频 |
 | `--save-trajectory` | `bool` | `True` | 是否保存轨迹 NPZ 与指标 JSON |
 | `--video-folder` | `str` | `mtto_eval_video` | 视频输出目录 |
-| `--output-dir` | `str` | `None` | 轨迹文件输出目录（默认回退到 `--load-dir`） |
+| `--output-dir` | `str` | `None` | 轨迹文件输出目录（默认使用 `--model-dir`） |
 | `--video-length` | `int` | `10000` | 最大录制步数 |
 | `--video-trigger-step` | `int` | `0` | 视频录制触发步数 |
 | `--dry-run` | `bool` | `False` | 仅解析有效评估配置、训练元数据回填结果与输入输出路径，不加载模型或运行 rollout |
 
-评估成功后可保存 `final_trajectory.npz` 与版本化 `metrics_final.json`。最终轨迹指标会显式写入 `trajectory_source=final`，并与训练期的最优轨迹共用同一套 selection metadata 结构。评估指标统一以 J 保存能耗，kJ 仅用于展示换算。
+评估成功后保存统一命名的 `trajectory.npz` 与 `metrics.json`。评估元数据中的模型目录使用相对输出目录的路径。
 
 ```bash
-# 默认评估
-python -m scripts.evaluate_rl
-
 # 录制视频
-python -m scripts.evaluate_rl --record-video
+python -m scripts.evaluate_rl --model-dir output/optimal/rl/.../final/ --record-video
 
 # 指定模型目录与设备
 python -m scripts.evaluate_rl \
-    --load-dir output/optimal/rl/.../final/ \
+    --model-dir output/optimal/rl/.../final/ \
     --device cuda
 
 # 覆盖训练元数据中的 reward preset 与时间参数
 python -m scripts.evaluate_rl \
-    --load-dir output/optimal/rl/.../final/ \
+    --model-dir output/optimal/rl/.../final/ \
     --reward-preset basic_safety \
     --schedule-time-s 430.0
 
 # 仅预览有效评估配置
-python -m scripts.evaluate_rl --load-dir output/optimal/rl/.../final/ --dry-run
+python -m scripts.evaluate_rl --model-dir output/optimal/rl/.../final/ --dry-run
 ```
 
 ---
 
 ### RL 中途计划时间突变实验 · `run_schedule_time_change`
 
-批量评估同一 PPO 策略在“运行途中计划运行时间突然变化”场景下的响应，并展示多条速度曲线对比。脚本包含两个子命令：
-
-- `evaluate`：加载模型，按多组时间变化量执行 rollout，并保存轨迹与指标。
-- `show`：加载已保存的突变实验结果，绘制速度-距离对比图与安全防护背景。
-
-实验 4 默认批量运行 `Original`、`Plus 30s`、`Minus 30s` 三种情形。其中 `Original` 不触发计划时间变化，其余情形会在列车首次跨过 `--change-distance-m` 指定位置时调用环境的 `change_schedule_time()`。
+从一次完整的方法消融中读取 5 个 `PPO+PPRS+DSPL` 种子的 `best/`
+和 `final/`，对 10 个候选分别运行计划时间突变评估。根 summary 根据跨工况的
+严格可行性、安全、完成、停站/准点误差和能耗选出最稳健候选；`show` 只绘制该候选。
+默认工况为 `Original`、`Plus 30s`、`Minus 30s`。
 
 #### `evaluate` 参数
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `--load-dir` | `str` | `output/optimal/rl/final/` | PPO 模型所在目录 |
-| `--output-dir` | `str` | `output/optimal/rl/schedule_time_change_eval/` | 突变实验输出根目录；每次运行会创建时间戳子目录 |
-| `--reward-discount` | `float` | 从 `run_metadata.json` 读取，否则 `0.995` | 折扣因子（重建环境用） |
-| `--schedule-time-s` | `float` | 从 `run_metadata.json` 读取，否则 `430.0` | 突变前的初始规划运行时间 |
-| `--step-distance` | `float` | 从 `run_metadata.json` 读取，否则 `30.0` | 环境固定空间控制步长 (m) |
-| `--reward-preset` | `str` | 从 `run_metadata.json` 读取，否则 `basic_safety` | 评估所使用的原始尺度奖励预设 |
+| `--method-ablation-dir` | `str` | 必填 | 完整方法消融的 `YYYYMMDD_NN` 目录 |
+| `--output-dir` | `str` | 必填 | 新的时间突变 `YYYYMMDD_NN` 目录；已存在时拒绝覆盖 |
 | `--device` | `str` | `cpu` | 推理设备 |
 | `--deterministic` | `bool` | `True` | 是否使用确定性策略 |
-| `--change-distance-m` | `float` | `800.0` | 触发计划时间变化的位置 (m) |
+| `--change-distance-m` | `float` | `8000.0` | 触发计划时间变化的位置 (m)，即线路 8 km 处 |
 | `--delta-times-s` | `str` | `0,30,-30` | 逗号分隔的计划时间变化量；新计划时间为 `schedule_time_s + delta` |
 | `--dry-run` | `bool` | `False` | 仅解析配置与路径，不加载模型或运行 rollout |
 
-`evaluate` 模式会在输出目录中保存：
+`evaluate` 不接受奖励、步长、折扣或初始计划时间覆盖，并会在输出目录中保存：
 
-- `trajectory_{case}.npz`
-- `trajectory_{case}_metrics.json`
-- `schedule_time_change_summary.json`
+- `candidates/<run_id>__<best|final>/<case>/trajectory.npz`
+- `candidates/<run_id>__<best|final>/<case>/metrics.json`
+- 每个候选的 `schedule_time_change_summary.json`
+- 根 `schedule_time_change_summary.json`
 
 #### `show` 参数
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `--load-dir` | `str` | `output/optimal/rl/schedule_time_change_eval/` | 突变实验结果目录；可指向根目录或单次时间戳实验目录 |
+| `--load-dir` | `str` | 必填 | 直接包含根 summary 的 `YYYYMMDD_NN` 结果目录 |
 | `--save-figure` | `bool` | `True` | 是否保存对比图 |
 | `--show` | `bool` | `True` | 是否弹出图窗 |
-| `--figure-name` | `str` | `schedule_time_change_comparison.png` | 保存图像文件名 |
 | `--factor` | `float` | `0.99` | 绘制安全防护背景时使用的安全系数 |
 
-当 `--load-dir` 指向输出根目录时，`show` 会自动选择其中最新的时间戳实验目录；当它已经指向单次实验目录时，会直接加载该目录下的 `schedule_time_change_summary.json` 与轨迹文件。
+启用 `--save-figure` 时，图像固定保存为该实验目录下的
+`schedule_time_change_comparison.pdf`，不接受文件名或扩展名覆盖。
 
 ```bash
 # 仅预览将要运行的突变实验矩阵
-python -m scripts.run_schedule_time_change evaluate --dry-run
-
-# 使用训练得到的 final 模型运行默认三组突变实验
 python -m scripts.run_schedule_time_change evaluate \
-    --load-dir output/optimal/rl/.../final/ \
-    --change-distance-m 800.0
+    --method-ablation-dir output/paper_experiment/02_method_ablation/20260910_01 \
+    --output-dir output/paper_experiment/04_schedule_time_change/20260910_01 \
+    --dry-run
+
+# 评估完整方法的 10 个 best/final 候选
+python -m scripts.run_schedule_time_change evaluate \
+    --method-ablation-dir output/paper_experiment/02_method_ablation/20260910_01 \
+    --output-dir output/paper_experiment/04_schedule_time_change/20260910_01 \
+    --change-distance-m 8000.0
 
 # 自定义突变位置和时间变化组合
 python -m scripts.run_schedule_time_change evaluate \
-    --load-dir output/optimal/rl/.../final/ \
+    --method-ablation-dir output/paper_experiment/02_method_ablation/20260910_01 \
+    --output-dir output/paper_experiment/04_schedule_time_change/20260910_02 \
     --change-distance-m 12000.0 \
     --delta-times-s 0,-5,5,-15,15
 
-# 展示最新一次突变实验结果，并保存对比图
+# 展示指定批次的最优候选，并保存对比图
 python -m scripts.run_schedule_time_change show \
-    --load-dir output/optimal/rl/schedule_time_change_eval/
+    --load-dir output/paper_experiment/04_schedule_time_change/20260910_01
 
 # 只保存图像，不弹出图窗
 python -m scripts.run_schedule_time_change show \
-    --load-dir output/optimal/rl/schedule_time_change_eval/ \
+    --load-dir output/paper_experiment/04_schedule_time_change/20260910_01 \
     --no-show
-
-# 展示某一次具体实验目录
-python -m scripts.run_schedule_time_change show \
-    --load-dir output/optimal/rl/schedule_time_change_eval/20260101_120000
 ```
 
 ---
@@ -582,24 +619,20 @@ python -m scripts.show_dp_result --no-safeguard
 
 ### RL 结果可视化 · `show_rl_result`
 
-加载已保存的 RL 单条轨迹及指标，叠加防护曲线背景渲染。该入口统一支持：
-- 训练期间按 rollout 周期评估得到的 `best_rollouts`
-- 训练结束后单独评估得到的 `final`
+加载用户明确指定的模型目录中的 RL 单条轨迹及指标，叠加防护曲线背景渲染。模型目录可以是一次训练的 `best/` 或 `final/`，并须直接包含统一命名的产物。
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `--curve-dir` | `str` | `output/optimal/rl` | RL 输出根目录或任一实验子目录 |
-| `--trajectory-source` | `str` | `best` | 轨迹来源：`best` / `best_rollouts` / `final` |
+| `--model-dir` | `str` | 必填 | 直接包含 `trajectory.npz`、`metrics.json` 和 `metadata.json` 的目录 |
 | `--no-safeguard` | `flag` | — | 不绘制防护曲线背景 |
 | `--factor` | `float` | `0.99` | 防护曲线渲染因子 |
 | `--dry-run` | `bool` | `False` | 仅解析将加载的轨迹产物与 metrics 路径，不读取数据或显示图窗 |
 
 ```bash
-python -m scripts.show_rl_result
-python -m scripts.show_rl_result --curve-dir output/optimal/rl --trajectory-source best_rollouts
-python -m scripts.show_rl_result --curve-dir output/optimal/rl --trajectory-source final
-python -m scripts.show_rl_result --curve-dir output/optimal/rl --trajectory-source final --dry-run
-python -m scripts.show_rl_result --no-safeguard
+python -m scripts.show_rl_result --model-dir output/optimal/rl/.../best/
+python -m scripts.show_rl_result --model-dir output/optimal/rl/.../final/
+python -m scripts.show_rl_result --model-dir output/optimal/rl/.../final/ --dry-run
+python -m scripts.show_rl_result --model-dir output/optimal/rl/.../best/ --no-safeguard
 ```
 
 ---
@@ -613,35 +646,25 @@ python -m scripts.show_rl_result --no-safeguard
 
 终端会以统一评价口径输出时间误差、停站误差、总能耗和 `comfort_tav` 的三基线对比表。实际运行曲线默认读取 `output/real_operation/aligned_real_operation_curve.npz`；首次使用前请先运行 `python -m scripts.transform_real_operation_curve`。
 
-该脚本默认行为：
-- DP 轨迹从 `output/optimal/dp` 递归搜索最新 `optimized_speed_curve.npz`
-- RL 轨迹从 `output/optimal/rl` 递归搜索，默认 `trajectory_source=best`
-- 实际运行轨迹从 `output/real_operation/aligned_real_operation_curve.npz` 读取
+DP 轨迹仍从给定目录解析；RL 轨迹只从用户明确指定的模型目录读取。
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `--dp-curve-dir` | `str` | `output/optimal/dp` | DP 输出根目录，递归搜索最新曲线产物 |
-| `--rl-curve-dir` | `str` | `output/optimal/rl` | RL 输出根目录，递归搜索匹配轨迹产物 |
+| `--rl-model-dir` | `str` | 必填 | 直接包含 RL 统一轨迹产物的模型目录 |
 | `--real-curve` | `str` | `output/real_operation/aligned_real_operation_curve.npz` | 重标定后的实际运行曲线 NPZ |
-| `--trajectory-source` | `str` | `best` | RL 轨迹来源：`best` / `best_rollouts` / `final` |
 | `--no-safeguard` | `flag` | — | 速度图不渲染 safeguard 背景 |
 | `--factor` | `float` | `0.99` | safeguard 背景渲染因子 |
 
 ```bash
-# 默认：自动选择最新 DP、RL(best) 与实际运行轨迹，显示三联图和终端对比表
-python -m scripts.compare_speed_profiles
-
-# 指定 RL 轨迹来源为最终评估轨迹
-python -m scripts.compare_speed_profiles --trajectory-source final
-
-# 指定 DP/RL 搜索目录与实际运行曲线
+# 指定 DP 目录、RL 模型目录与实际运行曲线
 python -m scripts.compare_speed_profiles \
     --dp-curve-dir output/optimal/dp \
-    --rl-curve-dir output/optimal/rl \
+    --rl-model-dir output/optimal/rl/.../best/ \
     --real-curve output/real_operation/aligned_real_operation_curve.npz
 
 # 关闭 safeguard 背景并调整渲染因子
-python -m scripts.compare_speed_profiles --no-safeguard --factor 0.97
+python -m scripts.compare_speed_profiles --rl-model-dir output/optimal/rl/.../best/ --no-safeguard --factor 0.97
 ```
 
 ---
@@ -661,8 +684,7 @@ python -m scripts.compare_speed_profiles --no-safeguard --factor 0.97
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `--dp-curve-dir` | `str` | `output/optimal/dp` | DP 输出根目录，递归搜索最新曲线产物 |
-| `--rl-curve-dir` | `str` | `output/optimal/rl` | RL 输出根目录，递归搜索匹配轨迹产物 |
-| `--trajectory-source` | `str` | `best` | RL 轨迹来源：`best` / `best_rollouts` / `final` |
+| `--rl-model-dir` | `str` | RL 模式必填 | 直接包含 RL 统一轨迹产物的模型目录 |
 | `--schedule-time-s` | `float` | `None` | 可选覆盖场景构建使用的计划运行时间 |
 | `--step-delay-s` | `float` | `2.0` | SPS 回放中的步进平均时延 `T_s` |
 | `--boundary-eps` | `float` | `1e-6` | 边界违规判定数值容差 |
@@ -674,23 +696,24 @@ python -m scripts.compare_speed_profiles --no-safeguard --factor 0.97
 | `--factor` | `float` | `0.99` | safeguard 渲染与回放边界使用的因子 |
 
 ```bash
-# 默认：文本摘要 + 主图（含事件 marker）
-python -m scripts.analyze_sps_compliance
+# 默认比较模式：文本摘要 + 主图（含事件 marker）
+python -m scripts.analyze_sps_compliance --rl-model-dir output/optimal/rl/.../best/
 
 # 仅输出文本
-python -m scripts.analyze_sps_compliance --output-mode text
+python -m scripts.analyze_sps_compliance --rl-model-dir output/optimal/rl/.../best/ --output-mode text
 
 # 输出 JSON 并写入文件
 python -m scripts.analyze_sps_compliance \
+    --rl-model-dir output/optimal/rl/.../best/ \
     --output-mode json \
     --json-output-path output/optimal/sps_compliance_report.json
 
 # 主图启用 marker-only（不显示文本注释）
-python -m scripts.analyze_sps_compliance --event-annotation marker-only
+python -m scripts.analyze_sps_compliance --rl-model-dir output/optimal/rl/.../best/ --event-annotation marker-only
 
-# 指定 RL 轨迹来源与 SPS 时延参数
+# 指定 RL 模型目录与 SPS 时延参数
 python -m scripts.analyze_sps_compliance \
-    --trajectory-source final \
+    --rl-model-dir output/optimal/rl/.../final/ \
     --step-delay-s 2.0
 ```
 
@@ -715,7 +738,7 @@ python -m scripts.show_env_data --view full-curves
 python -m scripts.show_env_data --view danger-region
 
 # 保存为图片且不弹出交互窗口
-python -m scripts.show_env_data --view overview --output-file output/figures/env_overview.png --no-show
+python -m scripts.show_env_data --view overview --output-dir output/figures --no-show
 ```
 
 ---
@@ -770,10 +793,25 @@ python -m scripts.show_real_operation_data
 
 ### 势函数展示 · `show_potential_function`
 
-可视化安全势函数（Safety Speed / Safety Position / Safety Speed Adaptive），用于 RL reward shaping。
+可视化训练奖励实际使用的安全势函数和准点势函数。单面板图采用 85 mm 的
+SCI 单栏宽度，多面板联合图采用 170 mm 的双栏宽度。所有静态图按固定物理尺寸
+保存为 PDF，嵌入栅格元素使用 1200 DPI。用户只指定 `--output-dir`，文件名和
+`.pdf` 扩展名由脚本根据图类型固定。
+项目图片的英文与数学字形统一优先使用 Arial；Arial 不可用时回退到
+Liberation Sans 等兼容无衬线字体，并以 TrueType 形式嵌入 PDF；中文字形使用
+Noto Sans CJK 无衬线回退。
+脚本仅保留运行时实际使用的速度安全势与准点势，不再提供位置安全势或停站势。
 
 ```bash
-python -m scripts.show_potential_function
+# 完整线路上的位置–冗余运行时间准点势热图
+python -m scripts.show_potential_function --plot-type punctuality
+
+# 安全势与准点势双栏并排展示
+python -m scripts.show_potential_function --plot-type safety-punctuality
+
+# 覆盖准点势使用的计划运行时间
+python -m scripts.show_potential_function \
+  --plot-type punctuality --schedule-time-s 465
 ```
 
 ---
@@ -796,7 +834,7 @@ python -m scripts.show_score_function --plot stopping
 python -m scripts.show_score_function --plot punctuality
 
 # 保存为图片且不弹出交互窗口
-python -m scripts.show_score_function --plot combined --output-file output/figures/score_functions.png --no-show
+python -m scripts.show_score_function --plot combined --output-dir output/figures --no-show
 ```
 
 ---

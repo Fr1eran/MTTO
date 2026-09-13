@@ -181,9 +181,7 @@ class SafeGuardCurves:
                 numoftrainsets=numoftrainsets,
                 dec_mode=dec_mode,
             )
-            curve_list.append(
-                np.stack([pos_arr, speed_arr], axis=0, dtype=np.float64)
-            )
+            curve_list.append(np.stack([pos_arr, speed_arr], axis=0, dtype=np.float64))
         return curve_list
 
     def _calculate_curves_backward_without_truncate(
@@ -227,9 +225,7 @@ class SafeGuardCurves:
                 numoftrainsets=numoftrainsets,
                 dec_mode=dec_mode,
             )
-            curve_list.append(
-                np.stack([pos_arr, speed_arr], axis=0, dtype=np.float64)
-            )
+            curve_list.append(np.stack([pos_arr, speed_arr], axis=0, dtype=np.float64))
         return curve_list
 
     def _get_deccelerate_for_min_curves(

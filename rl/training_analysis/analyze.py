@@ -402,18 +402,18 @@ def compute_trajectory_evaluation_metrics(
 def compute_curriculum_distribution_metrics(
     series_map: dict[str, ScalarSeries],
 ) -> dict[str, Any]:
-    """Analyze DSPDL distribution and value-estimation diagnostics."""
+    """Analyze DSPL distribution and value-estimation diagnostics."""
     diagnostic_tags = {
-        "converged": "dspdl/converged",
-        "alpha": "dspdl/alpha",
-        "current_to_target_kl": "dspdl/current_to_target_kl",
-        "empirical_to_target_kl": "dspdl/empirical_to_target_kl",
-        "update_kl": "dspdl/update_kl",
-        "value_return_mae": "dspdl/value_return_mae",
-        "value_return_pearson": "dspdl/value_return_pearson",
-        "importance_weight_ess": "dspdl/importance_weight_ess",
-        "importance_weight_ess_ratio": "dspdl/importance_weight_ess_ratio",
-        "importance_weight_max_to_mean": "dspdl/importance_weight_max_to_mean",
+        "converged": "dspl/converged",
+        "alpha": "dspl/alpha",
+        "current_to_target_kl": "dspl/current_to_target_kl",
+        "empirical_to_target_kl": "dspl/empirical_to_target_kl",
+        "update_kl": "dspl/update_kl",
+        "value_return_mae": "dspl/value_return_mae",
+        "value_return_pearson": "dspl/value_return_pearson",
+        "importance_weight_ess": "dspl/importance_weight_ess",
+        "importance_weight_ess_ratio": "dspl/importance_weight_ess_ratio",
+        "importance_weight_max_to_mean": "dspl/importance_weight_max_to_mean",
     }
     diagnostics: dict[str, dict[str, float]] = {}
     for name, tag in diagnostic_tags.items():
@@ -429,7 +429,7 @@ def compute_curriculum_distribution_metrics(
     if not diagnostics:
         return {
             "available": False,
-            "reason": "no DSPDL distribution diagnostics were logged",
+            "reason": "no DSPL distribution diagnostics were logged",
         }
     result: dict[str, Any] = {
         "available": True,

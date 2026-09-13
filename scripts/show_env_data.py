@@ -17,11 +17,20 @@ from utils.data_loader import (
     load_stations,
 )
 from utils.plot_utils import (
-    SCI_EXPORT_PAD_INCHES,
+    VIS_ACCEL_CREAM,
+    VIS_ASA_MINT,
+    VIS_STATION_LAVENDER,
     apply_sci_figure_layout,
+    apply_sci_grid,
     save_sci_figure,
     set_global_plot_style,
 )
+
+FIGURE_FILENAMES = {
+    "overview": "env_overview.pdf",
+    "full_curves": "env_full_curves.pdf",
+    "danger_region": "env_danger_region.pdf",
+}
 
 
 @dataclass
@@ -55,24 +64,12 @@ def parse_args():
         ),
     )
     _ = parser.add_argument(
-        "--output-file",
+        "--output-dir",
         type=Path,
         help=(
-            "Path for saving a compact paper-ready figure. "
-            "If omitted, only show the figure."
+            "Directory for fixed-name paper-ready PDFs. If omitted, only show "
+            "the figure."
         ),
-    )
-    _ = parser.add_argument(
-        "--dpi",
-        type=float,
-        default=300.0,
-        help="DPI used when saving the figure.",
-    )
-    _ = parser.add_argument(
-        "--pad-inches",
-        type=float,
-        default=SCI_EXPORT_PAD_INCHES,
-        help="Padding around the tight saved figure.",
     )
     _ = parser.add_argument(
         "--no-show",
@@ -85,13 +82,12 @@ def parse_args():
 def set_plot_style():
     _ = set_global_plot_style(
         font_preset="sci",
-        preferred_font="Times New Roman",
+        preferred_font="Arial",
         title_font_size=8.0,
         axis_label_font_size=8.0,
         tick_font_size=8.0,
         legend_font_size=8.0,
         figure_dpi=150.0,
-        savefig_dpi=300.0,
     )
 
 
@@ -162,31 +158,55 @@ def _draw_infrastructure_hlines(
         y=np.zeros_like(aps),
         xmin=aps,
         xmax=dps,
-        colors="green",
+        colors="#333333",
+        linewidth=9,
+        alpha=0.75,
+    )
+    ax.hlines(
+        y=np.zeros_like(aps),
+        xmin=aps,
+        xmax=dps,
+        colors=VIS_ASA_MINT,
         linestyles="solid",
-        linewidth=8,
+        linewidth=7,
         label="Auxiliary stopping area",
-        alpha=0.7,
+        alpha=1.0,
     )
     ax.hlines(
         y=np.zeros(2),
         xmin=data.stations_cor[0, :],
         xmax=data.stations_cor[1, :],
-        colors="blue",
+        colors="#333333",
+        linewidth=9,
+        alpha=0.75,
+    )
+    ax.hlines(
+        y=np.zeros(2),
+        xmin=data.stations_cor[0, :],
+        xmax=data.stations_cor[1, :],
+        colors=VIS_STATION_LAVENDER,
         linestyles="solid",
-        linewidth=8,
+        linewidth=7,
         label="Station",
-        alpha=0.5,
+        alpha=1.0,
     )
     ax.hlines(
         y=np.zeros(2),
         xmin=data.acceleration_zone_start,
         xmax=data.acceleration_zone_end,
-        colors="yellow",
+        colors="#333333",
+        linewidth=9,
+        alpha=0.75,
+    )
+    ax.hlines(
+        y=np.zeros(2),
+        xmin=data.acceleration_zone_start,
+        xmax=data.acceleration_zone_end,
+        colors=VIS_ACCEL_CREAM,
         linestyles="solid",
-        linewidth=8,
+        linewidth=7,
         label="Acceleration zone",
-        alpha=0.5,
+        alpha=1.0,
     )
 
 
@@ -240,8 +260,11 @@ def create_overview_figure(data: TrackEnvironmentData) -> Figure:
         loc="lower center",
         bbox_to_anchor=(0.5, 1.0),
         ncol=4,
+        frameon=False,
+        columnspacing=1.0,
+        handlelength=2.1,
     )
-    ax1.grid(True, alpha=0.3)
+    apply_sci_grid(ax1)
 
     # 绘制轨道坡度
     ax2.stairs(
@@ -258,7 +281,7 @@ def create_overview_figure(data: TrackEnvironmentData) -> Figure:
     ax2.set_xlabel("Position (m)")
     ax2.set_ylabel("Slope (‰)")
     ax2.legend()
-    ax2.grid(True, alpha=0.3)
+    apply_sci_grid(ax2)
     _ = ax1.text(
         0.02,
         0.98,
@@ -295,7 +318,7 @@ def create_full_curves_figure(data: TrackEnvironmentData) -> Figure:
     ax.set_xlabel("Position (m)")
     ax.set_ylabel("Speed (km/h)")
     ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=4)
-    ax.grid(True, alpha=0.3)
+    apply_sci_grid(ax)
 
     return fig
 
@@ -312,14 +335,12 @@ def create_danger_region_figure(data: TrackEnvironmentData) -> Figure:
     ax.set_xlabel("Position (m)")
     ax.set_ylabel("Speed (km/h)")
     ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=3)
-    ax.grid(True, alpha=0.3)
+    apply_sci_grid(ax)
 
     return fig
 
 
-def create_figures(
-    view_mode: str, data: TrackEnvironmentData
-) -> dict[str, Figure]:
+def create_figures(view_mode: str, data: TrackEnvironmentData) -> dict[str, Figure]:
     """根据 view_mode 构建并返回对应的 Figure 字典。"""
     if view_mode == "overview":
         return {"overview": create_overview_figure(data)}
@@ -338,25 +359,11 @@ def create_figures(
 
 def save_compact_figures(
     figures: dict[str, Figure],
-    output_file: Path,
-    dpi: float,
-    pad_inches: float,
+    output_dir: Path,
 ) -> list[Path]:
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    suffix = output_file.suffix if output_file.suffix else ".png"
     saved_paths: list[Path] = []
-
-    if len(figures) == 1:
-        single_fig = next(iter(figures.values()))
-        target_path = output_file.with_suffix(suffix)
-        _ = save_sci_figure(single_fig, target_path, dpi=dpi, pad_inches=pad_inches)
-        saved_paths.append(target_path)
-    else:
-        base_stem = output_file.stem
-        for key, fig in figures.items():
-            target_path = output_file.parent / f"{base_stem}_{key}{suffix}"
-            _ = save_sci_figure(fig, target_path, dpi=dpi, pad_inches=pad_inches)
-            saved_paths.append(target_path)
+    for key, fig in figures.items():
+        saved_paths.append(save_sci_figure(fig, output_dir / FIGURE_FILENAMES[key]))
 
     return saved_paths
 
@@ -367,13 +374,8 @@ def main():
     data = load_track_environment_data()
     figures = create_figures(args.view, data)
 
-    if args.output_file is not None:
-        saved_files = save_compact_figures(
-            figures,
-            args.output_file,
-            dpi=args.dpi,
-            pad_inches=args.pad_inches,
-        )
+    if args.output_dir is not None:
+        saved_files = save_compact_figures(figures, args.output_dir)
         for saved_file in saved_files:
             print(f"Saved figure to {saved_file}")
 

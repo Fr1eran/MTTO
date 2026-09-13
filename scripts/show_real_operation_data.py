@@ -22,7 +22,7 @@ from utils.data_loader import (
     load_stations_goal_positions,
     resolve_project_path,
 )
-from utils.plot_utils import apply_sci_figure_layout, set_chinese_font
+from utils.plot_utils import apply_sci_figure_layout, apply_sci_grid, set_chinese_font
 from utils.scenario import build_safeguard_utility
 
 ALIGNED_CURVE_REQUIRED_KEYS = ("position_m", "speed_mps", "acc_mps2", "time_s")
@@ -134,7 +134,7 @@ def main() -> None:
     _format_meter_axis_as_km(ax1)
     _ = ax1.set_ylabel(r"速度($km/h$)")
     _ = ax1.set_title("龙阳路到浦东国际机场重标定后实际运行速度-里程曲线")
-    ax1.grid(True, alpha=0.3)
+    apply_sci_grid(ax1)
     _ = ax1.legend()
 
     fig2, ax2 = plt.subplots()
@@ -147,7 +147,7 @@ def main() -> None:
     _format_meter_axis_as_km(ax2)
     _ = ax2.set_ylabel(r"加速度($m/s^2$)")
     _ = ax2.set_title("龙阳路到浦东国际机场重标定后实际加速度-里程曲线")
-    ax2.grid(True, alpha=0.3)
+    apply_sci_grid(ax2)
     _ = ax2.legend()
 
     track = build_track()
@@ -197,7 +197,7 @@ def main() -> None:
     _format_meter_axis_as_km(ax3)
     _ = ax3.set_ylabel(r"能耗($kJ$)")
     _ = ax3.legend()
-    ax3.grid(True, alpha=0.3)
+    apply_sci_grid(ax3)
     _ = ax3.set_title("龙阳路到浦东国际机场重标定后实际能耗-里程曲线")
 
     for fig in (fig1, fig2, fig3):

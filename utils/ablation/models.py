@@ -76,15 +76,13 @@ class FinalMetricAggregate:
 
 @dataclass(frozen=True)
 class ArtifactLayout:
-    """Canonical artifact names for one RL run.
-
-    ``legacy_paths`` is retained only for the explicit, opt-in migration
-    helper.  Production training and aggregation never depend on it.
-    """
+    """Canonical artifact names for one RL run."""
 
     run_root: Path
     policy_final: Path
+    policy_best: Path | None
     metadata: Path
+    metadata_best: Path | None
     episodes: Path
     evaluations: Path
     trajectory_final: Path
@@ -92,7 +90,6 @@ class ArtifactLayout:
     metrics_final: Path
     metrics_best: Path | None
     safety_diagnostics: Path
-    legacy_paths: Mapping[str, Path | None] = field(default_factory=dict)
 
     @classmethod
     def from_training_spec(cls, spec: Any) -> ArtifactLayout:
@@ -102,46 +99,21 @@ class ArtifactLayout:
         best_dir_raw = getattr(spec, "best_eval_output_dir", None)
         best_enabled = bool(getattr(spec, "enable_best_evaluation_artifacts", False))
         best_dir = Path(best_dir_raw) if best_enabled and best_dir_raw else None
-        evaluation_history_raw = getattr(spec, "evaluation_history_path", None)
         return cls(
             run_root=output_dir,
-            policy_final=final_dir / "policy_final.zip",
-            metadata=output_dir / "metadata.json",
+            policy_final=final_dir / "policy.zip",
+            policy_best=(best_dir / "policy.zip" if best_dir is not None else None),
+            metadata=final_dir / "metadata.json",
+            metadata_best=(
+                best_dir / "metadata.json" if best_dir is not None else None
+            ),
             episodes=final_dir / "episodes.npz",
             evaluations=final_dir / "evaluations.npz",
-            trajectory_final=final_dir / "final_trajectory.npz",
+            trajectory_final=final_dir / "trajectory.npz",
             trajectory_best=(
-                best_dir / "best_trajectory.npz" if best_dir is not None else None
+                best_dir / "trajectory.npz" if best_dir is not None else None
             ),
-            metrics_final=final_dir / "metrics_final.json",
-            metrics_best=(
-                best_dir / "metrics_best.json" if best_dir is not None else None
-            ),
+            metrics_final=final_dir / "metrics.json",
+            metrics_best=(best_dir / "metrics.json" if best_dir is not None else None),
             safety_diagnostics=final_dir / "safety_diagnostics.npz",
-            legacy_paths={
-                "policy_final": _path_or_none(
-                    getattr(spec, "final_model_save_path", None)
-                ),
-                "metadata": _path_or_none(getattr(spec, "run_metadata_path", None)),
-                "episodes": _path_or_none(
-                    getattr(spec, "reward_diagnostics_path", None)
-                ),
-                "evaluations": _path_or_none(evaluation_history_raw),
-                "metrics_final": final_dir / "final_trajectory_metrics.json",
-                "metrics_best": (
-                    best_dir / "best_trajectory_metrics.json"
-                    if best_dir is not None
-                    else None
-                ),
-                "safety_diagnostics": (
-                    final_dir / "safety_truncation_position_histogram.npz"
-                ),
-            },
         )
-
-
-def _path_or_none(value: object) -> Path | None:
-    if value is None:
-        return None
-    path = Path(str(value))
-    return path if str(path) else None

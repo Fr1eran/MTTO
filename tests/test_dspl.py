@@ -7,13 +7,16 @@ import torch as th
 from stable_baselines3.common.base_class import BaseAlgorithm
 
 from rl.context_pool import Context, ContextPool
-from rl.dspdl import (
-    DSPDL_ALPHA_WARMUP_UPDATES,
-    DSPDLCallback,
-    DSPDLStatisticsHub,
-    DSPDL_UPDATE_INTERVAL_ROLLOUTS,
-    DSPDL_ZETA,
-    dspdl_protocol_parameters,
+from rl.dspl import (
+    DSPL_ALPHA_WARMUP_UPDATES,
+    DSPL_TARGET_KL_STOP,
+    DSPL_TARGET_UNIFORM_MASS,
+    DSPL_UPDATE_INTERVAL_ROLLOUTS,
+    DSPL_ZETA,
+    DSPLCallback,
+    DSPLStatisticsHub,
+    dspl_context_count_limit,
+    dspl_protocol_parameters,
 )
 from rl.operational_state import OperationalState
 
@@ -59,9 +62,9 @@ def _callback(
     *,
     num_envs: int = 1,
     potentials: np.ndarray | None = None,
-) -> tuple[DSPDLCallback, DSPDLStatisticsHub, _Policy]:
-    hub = DSPDLStatisticsHub(context_count=4, num_envs=num_envs, gamma=0.9)
-    callback = DSPDLCallback(
+) -> tuple[DSPLCallback, DSPLStatisticsHub, _Policy]:
+    hub = DSPLStatisticsHub(context_count=4, num_envs=num_envs, gamma=0.9)
+    callback = DSPLCallback(
         context_pool=_context_pool(),
         context_observations=np.asarray(
             [[4.0, 0.0], [3.0, 0.0], [2.0, 0.0], [1.0, 0.0]],
@@ -81,7 +84,7 @@ def _callback(
 
 
 def test_statistics_hub_accumulates_raw_discounted_returns() -> None:
-    hub = DSPDLStatisticsHub(context_count=3, num_envs=1, gamma=0.9)
+    hub = DSPLStatisticsHub(context_count=3, num_envs=1, gamma=0.9)
     hub.begin_episode(env_rank=0, context_index=1, distribution_version=0)
     hub.record_transition(0, 1.0, done=False)
     hub.record_transition(0, 2.0, done=True)
@@ -109,7 +112,7 @@ def test_curriculum_compensates_initial_potential_before_weighting():
 
 
 def test_statistics_hub_seals_incomplete_episodes_at_rollout_boundaries() -> None:
-    hub = DSPDLStatisticsHub(context_count=2, num_envs=2, gamma=0.5)
+    hub = DSPLStatisticsHub(context_count=2, num_envs=2, gamma=0.5)
     for rank, reward in enumerate((2.0, 4.0)):
         hub.begin_episode(
             env_rank=rank,
@@ -126,7 +129,7 @@ def test_statistics_hub_seals_incomplete_episodes_at_rollout_boundaries() -> Non
 
 
 def test_statistics_version_switch_invalidates_active_old_episode() -> None:
-    hub = DSPDLStatisticsHub(context_count=2, num_envs=1, gamma=0.9)
+    hub = DSPLStatisticsHub(context_count=2, num_envs=1, gamma=0.9)
     hub.begin_episode(env_rank=0, context_index=0, distribution_version=0)
     hub.validate_version_update(1)
     hub.commit_version(1)
@@ -165,9 +168,9 @@ def test_importance_weighted_coefficients_match_eq5_and_only_evaluate_samples() 
     np.testing.assert_allclose(predictions, [4.0, 3.0])
     np.testing.assert_allclose(coefficients, [32.0 / 3.0, 4.0, 0.0, 0.0])
     assert policy.value_batch_sizes == [2]
-    assert recorded["dspdl/importance_weight_ess"] == pytest.approx(1.8)
-    assert recorded["dspdl/importance_weight_ess_ratio"] == pytest.approx(0.9)
-    assert recorded["dspdl/importance_weight_max_to_mean"] == pytest.approx(4 / 3)
+    assert recorded["dspl/importance_weight_ess"] == pytest.approx(1.8)
+    assert recorded["dspl/importance_weight_ess_ratio"] == pytest.approx(0.9)
+    assert recorded["dspl/importance_weight_max_to_mean"] == pytest.approx(4 / 3)
 
 
 def test_importance_weighted_coefficients_reject_nonpositive_sample_probability() -> (
@@ -191,7 +194,7 @@ def test_initial_distribution_is_uniform_and_target_remains_start_peaked() -> No
     )
     np.testing.assert_allclose(
         callback.target_context_distribution,
-        [0.95 + 0.05 / 4, 0.05 / 4, 0.05 / 4, 0.05 / 4],
+        [0.9 + 0.1 / 4, 0.1 / 4, 0.1 / 4, 0.1 / 4],
     )
 
 
@@ -199,7 +202,7 @@ def test_post_warmup_alpha_uses_mean_raw_return(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     callback, hub, _ = _callback()
-    callback._context_update_count = DSPDL_ALPHA_WARMUP_UPDATES
+    callback._context_update_count = DSPL_ALPHA_WARMUP_UPDATES
     hub.begin_episode(env_rank=0, context_index=0, distribution_version=0)
     hub.record_transition(0, 2.0, done=False)
     hub.finish_rollout(version=0)
@@ -216,14 +219,14 @@ def test_post_warmup_alpha_uses_mean_raw_return(
     )
     callback._maybe_update_curriculum()
 
-    assert captured == pytest.approx([DSPDL_ZETA * 2.0 / target_kl])
+    assert captured == pytest.approx([DSPL_ZETA * 2.0 / target_kl])
 
 
 def test_alpha_uses_rollout_returns_without_waiting_for_episode_completion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     callback, hub, _ = _callback()
-    callback._context_update_count = DSPDL_ALPHA_WARMUP_UPDATES
+    callback._context_update_count = DSPL_ALPHA_WARMUP_UPDATES
     hub.begin_episode(env_rank=0, context_index=0, distribution_version=0)
     hub.record_transition(0, 3.0, done=False)
     hub.finish_rollout(version=0)
@@ -244,7 +247,7 @@ def test_alpha_clips_negative_rollout_return_mean_to_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     callback, hub, _ = _callback()
-    callback._context_update_count = DSPDL_ALPHA_WARMUP_UPDATES
+    callback._context_update_count = DSPL_ALPHA_WARMUP_UPDATES
     hub.begin_episode(env_rank=0, context_index=0, distribution_version=0)
     hub.record_transition(0, -2.0, done=False)
     hub.finish_rollout(version=0)
@@ -283,7 +286,7 @@ def test_fixed_interval_attempts_course_update_after_four_rollouts(
 
     callback._on_rollout_start()
     assert attempts == []
-    for _ in range(DSPDL_UPDATE_INTERVAL_ROLLOUTS):
+    for _ in range(DSPL_UPDATE_INTERVAL_ROLLOUTS):
         callback._on_rollout_end()
         callback._on_rollout_start()
 
@@ -291,11 +294,59 @@ def test_fixed_interval_attempts_course_update_after_four_rollouts(
 
 
 def test_protocol_parameters_are_fixed_and_returned_as_a_copy() -> None:
-    first = dspdl_protocol_parameters()
+    first = dspl_protocol_parameters()
     first["zeta"] = 99
-    second = dspdl_protocol_parameters()
-    assert second["zeta"] == DSPDL_ZETA
-    assert second["update_interval_rollouts"] == DSPDL_UPDATE_INTERVAL_ROLLOUTS
+    second = dspl_protocol_parameters()
+    assert second["zeta"] == DSPL_ZETA
+    assert second["update_interval_rollouts"] == DSPL_UPDATE_INTERVAL_ROLLOUTS
+    assert second["target_kl_stop"] == 0.02
+    assert second["target_uniform_mass"] == 0.1
+    assert "context_coverage_constant" not in second
+    assert "context_count_formula" not in second
+
+
+@pytest.mark.parametrize(
+    ("rollout_steps", "episode_steps", "expected"),
+    [
+        (8192, 972, 67),
+        (8, 1000, 1),
+        (100, 10, 80),
+    ],
+)
+def test_context_count_limit_scales_with_curriculum_sampling_budget(
+    rollout_steps: int,
+    episode_steps: int,
+    expected: int,
+) -> None:
+    assert (
+        dspl_context_count_limit(
+            rollout_steps_per_update=rollout_steps,
+            max_episode_steps=episode_steps,
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("rollout_steps", "episode_steps"), [(0, 10), (10, 0), (-1, 10), (10, -1)]
+)
+def test_context_count_limit_rejects_nonpositive_inputs(
+    rollout_steps: int, episode_steps: int
+) -> None:
+    with pytest.raises(ValueError):
+        dspl_context_count_limit(
+            rollout_steps_per_update=rollout_steps,
+            max_episode_steps=episode_steps,
+        )
+
+
+def test_target_distribution_uses_new_uniform_mass_and_kl_stop() -> None:
+    callback, _, _ = _callback()
+    expected = np.full(4, DSPL_TARGET_UNIFORM_MASS / 4)
+    expected[0] += 1.0 - DSPL_TARGET_UNIFORM_MASS
+
+    np.testing.assert_allclose(callback.target_context_distribution, expected)
+    assert DSPL_TARGET_KL_STOP == 0.02
 
 
 def test_distribution_update_is_atomic_and_convergence_disables_statistics(
@@ -353,7 +404,7 @@ def test_active_episode_survives_unchanged_distribution_clear_and_calibrates(
 
 
 def test_clear_consumed_rebuilds_active_episode_counts_for_multiple_workers() -> None:
-    hub = DSPDLStatisticsHub(context_count=4, num_envs=3, gamma=0.9)
+    hub = DSPLStatisticsHub(context_count=4, num_envs=3, gamma=0.9)
     # Two workers on context 2, one worker on context 1
     hub.begin_episode(env_rank=0, context_index=2, distribution_version=0)
     hub.begin_episode(env_rank=1, context_index=2, distribution_version=0)
@@ -379,7 +430,7 @@ def test_clear_consumed_rebuilds_active_episode_counts_for_multiple_workers() ->
 
 
 def test_committed_version_change_excludes_old_version_active_episodes() -> None:
-    hub = DSPDLStatisticsHub(context_count=3, num_envs=2, gamma=0.9)
+    hub = DSPLStatisticsHub(context_count=3, num_envs=2, gamma=0.9)
     hub.begin_episode(env_rank=0, context_index=1, distribution_version=0)
     hub.begin_episode(env_rank=1, context_index=2, distribution_version=0)
     hub.record_transition(0, 1.0, done=False)
