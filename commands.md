@@ -9,16 +9,14 @@ export MPLCONFIGDIR=/tmp/mtto-mpl-cache
 export PYTHONPATH=.
 ```
 
-命令统一通过 `uv run` 使用项目虚拟环境。常规 DSPL 命令假定对应的
-DP 参考轨迹位于 `output/optimal/dp/465p0_0p1_uni30p0/`；如果实际目录不同，
-只需替换 `--reference-curve-dir` 后的路径。步长消融和方法消融使用 10 m
-参考曲线 `output/optimal/dp/465p0_0p1_uni10p0/`；方法消融的 RL 环境步长仍为 30 m，
-仅 DSPL/context 的来源轨迹改用 10 m DP。
+命令统一通过 `uv run` 使用项目虚拟环境。核心强化学习方法统一命名为
+Physics-Informed Reward Shaping（PIRS），内部标识为 `ppo_pirs`。奖励预设
+包含 `basic`（能耗+舒适度）、`basic_safety`（+安全势函数）、`basic_punctuality`（+准点势函数）
+和 `basic_safety_punctuality`（完整 PIRS 奖励，默认预设）。
 
-主训练入口和通用训练参数默认使用 `dspl`（DSPL）。课程 profile 启用时
-仍必须显式提供与任务匹配的 DP 参考目录；消融或基线实验可显式指定
-`--curriculum-profile none`。旧任务完成度课程的输出目录和 manifest 只作为历史材料保存，
-不会被当前实验脚本自动迁移或续跑。
+课程学习与 context 采样已移除，训练环境始终从真实线路起点（`self.stepper.reset()`）
+开始。若目标输出目录已存在训练产物，训练入口会抛出 `FileExistsError` 拒绝直接覆盖以保护已有实验成果。
+训练元数据 schema 版本为 6，消融 manifest schema 版本为 2。
 
 ## 环境准备
 
@@ -73,10 +71,7 @@ uv run python -m scripts.show_dp_result \
 先预览默认训练配置，不创建环境、不启动训练：
 
 ```bash
-uv run python -m scripts.train_rl \
-  --curriculum-profile dspl \
-  --reference-curve-dir output/optimal/dp/465p0_0p1_uni30p0/ \
-  --dry-run
+uv run python -m scripts.train_rl --dry-run
 ```
 
 全量调优训练，每 12 个 rollouts 执行一次 best-eval：
@@ -86,8 +81,6 @@ uv run python -m scripts.train_rl \
   --output-root output/optimal/rl/tune/ \
   --schedule-time-s 465.0 \
   --step-distance 30.0 \
-  --curriculum-profile dspl \
-  --reference-curve-dir output/optimal/dp/465p0_0p1_uni30p0/ \
   --run-mode tune \
   --training-episodes 5000 \
   --num-envs 8 \
@@ -104,8 +97,6 @@ uv run python -m scripts.train_rl \
   --output-root output/optimal/rl/monitor_best/ \
   --schedule-time-s 465.0 \
   --step-distance 30.0 \
-  --curriculum-profile dspl \
-  --reference-curve-dir output/optimal/dp/465p0_0p1_uni30p0/ \
   --run-mode monitor_best \
   --training-episodes 5000 \
   --num-envs 8 \
@@ -122,8 +113,6 @@ uv run python -m scripts.train_rl \
   --output-root output/optimal/rl/reproduce/ \
   --schedule-time-s 465.0 \
   --step-distance 30.0 \
-  --curriculum-profile dspl \
-  --reference-curve-dir output/optimal/dp/465p0_0p1_uni30p0/ \
   --run-mode reproduce \
   --training-episodes 5000 \
   --num-envs 8 \
@@ -131,11 +120,11 @@ uv run python -m scripts.train_rl \
   --device cpu
 ```
 
-论文主方法使用 DSPL。`train_rl` 的默认课程配置已经是
-`dspl`，也可以在正式命令中显式写出：
+论文主方法使用完整 PIRS（`basic_safety_punctuality`）。默认预设已经是
+PIRS，也可以在正式命令中显式写出：
 
 ```bash
-  --curriculum-profile dspl
+  --reward-preset basic_safety_punctuality
 ```
 
 使用 CUDA 训练时，将上述命令末尾的 `--device cpu` 改为 `--device cuda`。
@@ -217,10 +206,8 @@ canonical 产物，不会在检查阶段自动复制旧版产物。
 ```bash
 uv run python -m scripts.run_step_distance_ablation train \
   --output-root output/paper_experiment/01_step_distance/20260910_01 \
-  --reference-curve-dir output/optimal/dp/465p0_0p1_uni10p0/ \
   --num-envs 8 \
-  --rollout-steps-per-update 8192 \
-  --evaluation-interval-episodes 100 \
+  --evaluation-interval-rollouts 12 \
   --dry-run
 ```
 
@@ -229,47 +216,64 @@ uv run python -m scripts.run_step_distance_ablation train \
 ```bash
 uv run python -m scripts.run_step_distance_ablation train \
   --output-root output/paper_experiment/01_step_distance/20260910_01 \
+  --schedule-time-s 465 \
   --num-envs 8 \
-  --training-episodes 4000 \
-  --evaluation-interval-episodes 100
+  --evaluation-interval-rollouts 12
 
 uv run python -m scripts.run_step_distance_ablation show \
-  --output-root output/paper_experiment/01_step_distance/20260910_01
+  --output-root output/paper_experiment/01_step_distance/20260910_01 \
+  --figure-output-dir output/paper_experiment/01_step_distance/20260910_01 \
+  --no-show
 ```
 
-步长消融以每个种子相同的 4000 个完整物理行程为预算。按回合阈值触发的评估会等到
-下一次 PPO 更新后的 rollout 起点，因此 `evaluations.npz` 中的实际完成回合数可能略大于
-规则目标；主图按规则目标精确对齐，先在每个种子内做 5 点尾随平均，再跨 5 个种子绘制
-均值与样本标准差带。4000 回合不做周期评估，训练结束后仍执行一次 `final` 独立评估。
+步长消融以每组相同的 400 个 rollout（3,276,800 个环境状态转移）为预算，以完整 PIRS 为基准。每 12 个 rollout 调度一次独立评估，共 33 个周期评估点；主图展示行程完成率和可行率（均值与样本标准差带），性能表汇总各步长 5 个种子 `best/` 轨迹的严格可行率（百分比与分子/分母）及各项指标均值 ± 样本标准差（包含全部 5 个种子），能耗单位为 kWh。指定 `--figure-output-dir` 即可在同目录输出图表、表格与 JSON 摘要。
 
-预览方法消融运行矩阵：
+方法消融的空间步长必须严格使用实验一选定的最优步长（通过 `step_distance_summary.json` 中的 `recommended_step_distance` 动态获得；若四组步长均无可行轨迹则终止方法消融，严禁使用未经消融验证的隐式默认值）：
+
+```bash
+# 动态提取实验一步长消融选定的最优步长（若四组均无可行轨迹则会报错终止）：
+SELECTED_STEP_DISTANCE=$(uv run python -c "import json, sys; d = json.load(open('output/paper_experiment/01_step_distance/20260910_01/step_distance_summary.json')); r = d.get('recommended_step_distance'); sys.exit('错误: 实验一步长消融未产生合格推荐步长，终止方法消融。') if r is None else print(int(r))") || exit 1
+echo "实验一选定步长: ${SELECTED_STEP_DISTANCE} m"
+
+# 必填检查：变量必须已设置且属于候选步长之一，否则立即报错退出，严禁隐式回退
+case "$SELECTED_STEP_DISTANCE" in 10|30|50|100) ;; *) echo "错误: SELECTED_STEP_DISTANCE 未设置或非法 ($SELECTED_STEP_DISTANCE)，必须为 10、30、50 或 100；终止方法消融。"; exit 1 ;; esac
+```
+
+预览方法消融运行矩阵（固定四组：PPO `ppo`、PPO+Safety `ppo_safety`、PPO+Punctuality `ppo_punctuality`、PPO+PIRS `ppo_pirs`；`--step-distance` 必须传入实验一选定步长变量 `${SELECTED_STEP_DISTANCE}`）：
 
 ```bash
 uv run python -m scripts.run_method_ablation train \
   --output-root output/paper_experiment/02_method_ablation/20260910_01 \
-  --reference-curve-dir output/optimal/dp/465p0_0p1_uni10p0/ \
+  --step-distance "${SELECTED_STEP_DISTANCE}" \
   --num-envs 8 \
   --evaluation-interval-rollouts 12 \
   --dry-run
 ```
 
-执行方法消融并展示结果：
+执行方法消融并展示结果（`--step-distance` 必须传入实验一选定步长 `${SELECTED_STEP_DISTANCE}`）：
 
 ```bash
 uv run python -m scripts.run_method_ablation train \
   --output-root output/paper_experiment/02_method_ablation/20260910_01 \
-  --reference-curve-dir output/optimal/dp/465p0_0p1_uni10p0/ \
+  --schedule-time-s 465 \
+  --step-distance "${SELECTED_STEP_DISTANCE}" \
   --num-envs 8 \
   --evaluation-interval-rollouts 12
 
 uv run python -m scripts.run_method_ablation show \
   --output-root output/paper_experiment/02_method_ablation/20260910_01 \
   --figure-output-dir output/paper_experiment/02_method_ablation/20260910_01 \
-  --selection-output-file output/paper_experiment/02_method_ablation/20260910_01/selected_policy.json
+  --table-output-dir output/paper_experiment/02_method_ablation/20260910_01 \
+  --summary-output-file output/paper_experiment/02_method_ablation/20260910_01/method_ablation_summary.json \
+  --no-show
 ```
 
-两类曲线都先在每个种子内做 5 个周期评估点的尾随平滑，再跨
-5 个种子计算均值和样本标准差；失败评估不剔除。
+方法消融输出两张核心图表与两张表格：
+- 图 1（`method_training_curves.pdf`）：训练过程近 12 rollouts 违规率与到达率；
+- 图 2（`method_trajectory_metrics.pdf`）：停站误差、时间误差、能耗（kWh）与舒适度 2×2 子图（含 300–396 rollout 放大图与阈值线）；
+- 表 1（`method_training_table.md`）：四个时期的违规率与到达率；
+- 表 2（`method_performance_table.md`）：各方法 5 种子 `best/` 轨迹严格可行率与各项性能均值 ± 样本标准差；
+- 控制台打印选出的 PPO+PIRS 代表策略路径。
 
 ## 训练分析与性能诊断
 
@@ -329,10 +333,8 @@ uv run python -m scripts.analyze_sps_compliance \
   --json-output-path output/analysis/sps_compliance.json
 ```
 
-`--rl-model-dir` 必须指向直接包含 `policy.zip`、`trajectory.npz`、
-`metrics.json` 和 `metadata.json` 的 `best/` 或 `final/` 目录。方法消融后可从
-`selected_policy.json` 的 `selected.model_dir` 获取代表策略目录；该路径
-相对于选择文件所在目录。
+`--rl-model-dir` 必须由用户直接指定，指向直接包含 `policy.zip`、`trajectory.npz`、
+`metrics.json` 和 `metadata.json` 的 `best/` 或 `final/` 目录。
 
 ## 运行时间突变实验
 

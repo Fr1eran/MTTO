@@ -19,7 +19,7 @@ from .common import (
 EVALUATION_METRICS_ARTIFACT_TYPE = "rl_evaluation_metrics"
 EVALUATION_METRICS_SCHEMA_VERSION = 2
 EVALUATION_HISTORY_ARTIFACT_TYPE = "rl_evaluation_history"
-EVALUATION_HISTORY_SCHEMA_VERSION = 3
+EVALUATION_HISTORY_SCHEMA_VERSION = 4
 SAFETY_MARGIN_EPS_MPS = 1e-6
 
 
@@ -256,6 +256,7 @@ class EvaluationHistory:
     episode_steps: NDArray[np.int64]
     success: NDArray[np.bool_]
     safe: NDArray[np.bool_]
+    feasible: NDArray[np.bool_]
     stop_error_m: NDArray[np.float64]
     time_error_s: NDArray[np.float64]
     total_energy_j: NDArray[np.float64]
@@ -274,6 +275,7 @@ class EvaluationHistory:
             ("episode_steps", np.dtype(np.int64)),
             ("success", np.dtype(np.bool_)),
             ("safe", np.dtype(np.bool_)),
+            ("feasible", np.dtype(np.bool_)),
             ("stop_error_m", np.dtype(np.float64)),
             ("time_error_s", np.dtype(np.float64)),
             ("total_energy_j", np.dtype(np.float64)),
@@ -297,6 +299,7 @@ class EvaluationHistory:
             self.episode_steps,
             self.success,
             self.safe,
+            self.feasible,
             self.stop_error_m,
             self.time_error_s,
             self.total_energy_j,
@@ -348,6 +351,7 @@ class EvaluationHistory:
             "episode_steps": np.asarray(self.episode_steps, dtype=np.int64),
             "success": np.asarray(self.success, dtype=np.bool_),
             "safe": np.asarray(self.safe, dtype=np.bool_),
+            "feasible": np.asarray(self.feasible, dtype=np.bool_),
             "stop_error_m": np.asarray(self.stop_error_m, dtype=np.float64),
             "time_error_s": np.asarray(self.time_error_s, dtype=np.float64),
             "total_energy_j": np.asarray(self.total_energy_j, dtype=np.float64),
@@ -380,6 +384,7 @@ class EvaluationHistory:
             "episode_steps",
             "success",
             "safe",
+            "feasible",
             "stop_error_m",
             "time_error_s",
             "total_energy_j",
@@ -419,6 +424,7 @@ class EvaluationHistory:
             episode_steps=np.asarray(data["episode_steps"], dtype=np.int64),
             success=np.asarray(data["success"], dtype=np.bool_),
             safe=np.asarray(data["safe"], dtype=np.bool_),
+            feasible=np.asarray(data["feasible"], dtype=np.bool_),
             stop_error_m=np.asarray(data["stop_error_m"], dtype=np.float64),
             time_error_s=np.asarray(data["time_error_s"], dtype=np.float64),
             total_energy_j=np.asarray(data["total_energy_j"], dtype=np.float64),

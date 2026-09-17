@@ -98,9 +98,9 @@ def print_operation_summary(
     leviation_energy_consumption: np.ndarray,
 ) -> None:
     total_time_s = float(travel_time_s[-1] - travel_time_s[0])
-    propulsion_energy_kj = float(propulsion_energy_consumption[-1])
-    leviation_energy_kj = float(leviation_energy_consumption[-1])
-    total_energy_kj = propulsion_energy_kj + leviation_energy_kj
+    propulsion_energy_kwh = float(propulsion_energy_consumption[-1]) / 3600.0
+    leviation_energy_kwh = float(leviation_energy_consumption[-1]) / 3600.0
+    total_energy_kwh = propulsion_energy_kwh + leviation_energy_kwh
 
     print("实际运行曲线统计（重标定后位置坐标）:")
     print(f"  样本数: {distance_m.size}")
@@ -109,9 +109,9 @@ def print_operation_summary(
     print(f"  实际运行时间: {total_time_s:.3f} s")
     print(f"  初始速度: {float(speed_mps[0]):.3f} m/s")
     print(f"  终点速度: {float(speed_mps[-1]):.3f} m/s")
-    print(f"  牵引能耗: {propulsion_energy_kj:.3f} kJ")
-    print(f"  悬浮能耗: {leviation_energy_kj:.3f} kJ")
-    print(f"  总能耗: {total_energy_kj:.3f} kJ")
+    print(f"  牵引能耗: {propulsion_energy_kwh:.3f} kWh")
+    print(f"  悬浮能耗: {leviation_energy_kwh:.3f} kWh")
+    print(f"  总能耗: {total_energy_kwh:.3f} kWh")
 
 
 def main() -> None:
@@ -184,18 +184,18 @@ def main() -> None:
     fig3, ax3 = plt.subplots()
     _ = ax3.plot(
         distance_m,
-        propulsion_energy_consumption,
+        propulsion_energy_consumption / 3600.0,
         label="重标定后实际牵引能耗随里程变化曲线",
         color="red",
     )
     _ = ax3.plot(
         distance_m,
-        leviation_energy_consumption,
+        leviation_energy_consumption / 3600.0,
         label="重标定后实际悬浮能耗随里程变化曲线",
         color="green",
     )
     _format_meter_axis_as_km(ax3)
-    _ = ax3.set_ylabel(r"能耗($kJ$)")
+    _ = ax3.set_ylabel(r"能耗($kWh$)")
     _ = ax3.legend()
     apply_sci_grid(ax3)
     _ = ax3.set_title("龙阳路到浦东国际机场重标定后实际能耗-里程曲线")

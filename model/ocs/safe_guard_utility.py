@@ -11,7 +11,7 @@ from numpy.typing import ArrayLike, NDArray
 from utils.curve_geometry import cal_regions, pad_2curve_lists
 from utils.curve_plot import concatenate_curves_with_NaN, draw_regions
 from utils.indexing_utils import get_interval_index, get_interval_index_scalar_numba
-from utils.plot_utils import VIS_DANGER_CORAL, VIS_HARD_LIMIT_RED, VIS_SAFE_BLUE
+from utils.plot_utils import VIS_HARD_LIMIT_RED, VIS_SAFE_BLUE
 
 ScalarNumeric = float | np.floating
 
@@ -555,7 +555,7 @@ class SafeGuardUtility:
         label: str,
         color: str,
         linestyle: str = "solid",
-        alpha: float = 0.7,
+        alpha: float = 1.0,
         linewidth: float = 2.0,
     ) -> None:
         _ = ax.plot(
@@ -956,8 +956,8 @@ class SafeGuardUtility:
                     above_curves_list=self._min_curves_part_list_padded,
                     below_curves_list=self._max_curves_part_list_padded,
                     label="Dangerous speed region",
-                    color=VIS_DANGER_CORAL,
-                    alpha=0.5,
+                    color="#FFBABA",
+                    alpha=1.0,
                 )
             elif layer == "min_curve_part":
                 self._plot_curve(
@@ -1027,5 +1027,5 @@ class SafeGuardUtility:
                     y=self._idp_points_y * speed_scale,
                     color="black",
                     label="Intersecting dangerous point",
-                    linewidths=0.2,
+                    linewidths=0.5,
                 )

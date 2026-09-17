@@ -15,6 +15,7 @@ from utils.ablation import (
     align_exact,
     build_manifest_payload,
     canonical_artifacts_complete,
+    clean_ablation_run,
     execute_matrix,
     smooth_episode_curve,
     training_budget_complete,
@@ -267,6 +268,7 @@ def test_runner_fails_fast_then_resumes_by_run_id(tmp_path: Path) -> None:
         return payload
 
     calls: list[str] = []
+    cleaned: list[str] = []
     fail_first = True
 
     def train(run: _Run) -> object:
@@ -286,11 +288,13 @@ def test_runner_fails_fast_then_resumes_by_run_id(tmp_path: Path) -> None:
         required_artifacts=lambda run: run.result_path.is_file(),
         train_one=train,
         evaluate_one=lambda _run, _trained: None,
+        clean_one=lambda run: cleaned.append(run.run_id),
         resume=False,
         dry_run=False,
     )
     assert result == 1
     assert calls == ["run-1"]
+    assert cleaned == []
     assert store.load()["runs"][0]["status"] == "failed"  # type: ignore[index]
 
     result = execute_matrix(
@@ -301,11 +305,13 @@ def test_runner_fails_fast_then_resumes_by_run_id(tmp_path: Path) -> None:
         required_artifacts=lambda run: run.result_path.is_file(),
         train_one=train,
         evaluate_one=lambda _run, _trained: None,
+        clean_one=lambda run: cleaned.append(run.run_id),
         resume=True,
         dry_run=False,
     )
     assert result == 0
     assert calls == ["run-1", "run-1", "run-2"]
+    assert cleaned == ["run-1", "run-2"]
 
     _ = execute_matrix(
         runs=runs,
@@ -315,10 +321,12 @@ def test_runner_fails_fast_then_resumes_by_run_id(tmp_path: Path) -> None:
         required_artifacts=lambda run: run.result_path.is_file(),
         train_one=train,
         evaluate_one=lambda _run, _trained: None,
+        clean_one=lambda run: cleaned.append(run.run_id),
         resume=True,
         dry_run=False,
     )
     assert calls == ["run-1", "run-1", "run-2"]
+    assert cleaned == ["run-1", "run-2"]
 
 
 def test_runner_refuses_to_overwrite_existing_manifest_without_resume(
@@ -366,6 +374,7 @@ def test_runner_force_new_archives_manifest_and_starts_pending_matrix(
 
     store.save_atomic(build({}))
     original = store.path.read_bytes()
+    cleaned: list[str] = []
 
     result = execute_matrix(
         runs=runs,
@@ -375,12 +384,14 @@ def test_runner_force_new_archives_manifest_and_starts_pending_matrix(
         required_artifacts=lambda run: run.result_path.is_file(),
         train_one=lambda run: run.result_path.write_text("ok", encoding="utf-8"),
         evaluate_one=lambda _run, _trained: None,
+        clean_one=lambda run: cleaned.append(run.run_id),
         resume=False,
         force_new=True,
         dry_run=False,
     )
 
     assert result == 0
+    assert cleaned == ["run-1"]
     archives = list(store.output_root.glob("manifest.json.bak.*"))
     assert len(archives) == 1
     assert archives[0].read_bytes() == original
@@ -412,3 +423,42 @@ def test_runner_validates_existing_manifest_and_run_ids_before_resume(
         )
 
     assert calls == ["validated"]
+
+    # Path safety validation of clean_ablation_run
+    mock_run = SimpleNamespace(
+        training_spec=SimpleNamespace(output_dir=str(tmp_path / "runs" / "test_run"))
+    )
+    (tmp_path / "runs" / "test_run").mkdir(parents=True, exist_ok=True)
+    clean_ablation_run(mock_run, tmp_path)  # type: ignore[arg-type]
+    assert not (tmp_path / "runs" / "test_run").exists()
+
+    other_run = tmp_path / "runs" / "other_run"
+    other_run.mkdir()
+    (other_run / "policy.zip").write_bytes(b"keep")
+    linked_run = tmp_path / "runs" / "linked_run"
+    linked_run.symlink_to(other_run, target_is_directory=True)
+    linked = SimpleNamespace(training_spec=SimpleNamespace(output_dir=str(linked_run)))
+    clean_ablation_run(linked, tmp_path)  # type: ignore[arg-type]
+    assert not linked_run.is_symlink()
+    assert (other_run / "policy.zip").read_bytes() == b"keep"
+
+    linked_parent = tmp_path / "runs" / "linked_parent"
+    linked_parent.symlink_to(other_run, target_is_directory=True)
+    nested = SimpleNamespace(
+        training_spec=SimpleNamespace(output_dir=str(linked_parent / "nested"))
+    )
+    with pytest.raises(ValueError, match="not located under"):
+        clean_ablation_run(nested, tmp_path)  # type: ignore[arg-type]
+    assert linked_parent.is_symlink()
+
+    outside_run = SimpleNamespace(
+        training_spec=SimpleNamespace(output_dir=str(tmp_path / "outside"))
+    )
+    with pytest.raises(ValueError, match="not located under"):
+        clean_ablation_run(outside_run, tmp_path)  # type: ignore[arg-type]
+
+    root_run = SimpleNamespace(
+        training_spec=SimpleNamespace(output_dir=str(tmp_path / "runs"))
+    )
+    with pytest.raises(ValueError, match="cannot be the runs root itself"):
+        clean_ablation_run(root_run, tmp_path)  # type: ignore[arg-type]

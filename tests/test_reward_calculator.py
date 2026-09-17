@@ -1,3 +1,4 @@
+import math
 from dataclasses import replace
 
 import numpy as np
@@ -189,7 +190,10 @@ def test_dense_reward_includes_energy_comfort_and_survival(
     assert reward.energy == pytest.approx(-0.75)
     assert reward.comfort == pytest.approx(-2.0)
     assert reward.survival == pytest.approx(5.0)
-    assert reward.safety == pytest.approx(0.0)
+    distant_upper_potential = -1.0 / (1.0 + math.exp(8.0))
+    assert reward.safety == pytest.approx(
+        (calculator.gamma - 1.0) * distant_upper_potential
+    )
     assert reward.terminal_stopping == 0.0
     assert reward.terminal_punctuality == 0.0
 
@@ -257,16 +261,37 @@ def test_safety_potential_uses_discounted_potential_difference(
         ViolationCode.ONGOING,
     )
     reward = calculator.calculate(transition)
-    expected = calculator.gamma * calculator._potential_safety(
-        speed_mps=current.speed_mps,
-        min_speed_mps=current.min_speed_mps,
-        max_speed_mps=current.max_speed_mps,
-    ) - calculator._potential_safety(
-        speed_mps=previous.speed_mps,
-        min_speed_mps=previous.min_speed_mps,
-        max_speed_mps=previous.max_speed_mps,
+    phi_previous = -0.5 * (
+        2.0 / (1.0 + math.exp(8.0 * 20.0 / 90.0))
+        + 2.0 / (1.0 + math.exp(8.0 * 70.0 / 90.0))
     )
-    assert reward.safety == pytest.approx(expected)
+    phi_current = -0.5 * (
+        2.0 / (1.0 + math.exp(8.0 * 5.0 / 90.0))
+        + 2.0 / (1.0 + math.exp(8.0 * 85.0 / 90.0))
+    )
+    assert reward.safety == pytest.approx(calculator.gamma * phi_current - phi_previous)
+
+    potential = calculator._potential_safety
+    assert potential(
+        speed_mps=15.0, min_speed_mps=10.0, max_speed_mps=20.0
+    ) == pytest.approx(
+        potential(speed_mps=60.0, min_speed_mps=10.0, max_speed_mps=110.0)
+    )
+    assert potential(
+        speed_mps=10.0, min_speed_mps=10.0, max_speed_mps=20.0
+    ) == pytest.approx(-0.5 * (1.0 + 2.0 / (1.0 + math.exp(8.0))))
+    assert potential(
+        speed_mps=10.0, min_speed_mps=0.0, max_speed_mps=10.0
+    ) == pytest.approx(-0.5)
+    assert potential(
+        speed_mps=0.0, min_speed_mps=0.0, max_speed_mps=0.0
+    ) == pytest.approx(-0.5)
+    assert potential(
+        speed_mps=10.25, min_speed_mps=10.0, max_speed_mps=10.5
+    ) == pytest.approx(-2.0 / (1.0 + math.exp(2.0)))
+    assert potential(
+        speed_mps=-1e6, min_speed_mps=10.0, max_speed_mps=20.0
+    ) == pytest.approx(-1.0)
 
 
 def test_terminal_stopping_is_rewarded_only_on_termination(

@@ -25,19 +25,6 @@ BEST_EVAL_DISPLAY_METRICS = (
 
 STAT_NAMES = ("mean", "p05", "p95", "min", "max", "slope", "cv")
 
-DSPL_DIAG_KEYS = (
-    "converged",
-    "alpha",
-    "current_to_target_kl",
-    "empirical_to_target_kl",
-    "update_kl",
-    "value_return_mae",
-    "value_return_pearson",
-    "importance_weight_ess",
-    "importance_weight_ess_ratio",
-    "importance_weight_max_to_mean",
-)
-
 
 def build_analysis_payload(
     *,
@@ -48,7 +35,6 @@ def build_analysis_payload(
     best_eval_metrics: dict[str, Any] | None = None,
     trajectory_evaluation_metrics: dict[str, Any] | None = None,
     reward_component_analysis: dict[str, Any] | None = None,
-    curriculum_distribution_metrics: dict[str, Any] | None = None,
     safety_truncation_position_metrics: dict[str, Any] | None = None,
     step_snapshots: list[dict[str, Any]] | None = None,
     config: dict[str, Any] | None = None,
@@ -66,7 +52,6 @@ def build_analysis_payload(
         "best_eval_metrics": best_eval_metrics or {},
         "trajectory_evaluation_metrics": trajectory_evaluation_metrics or {},
         "reward_component_analysis": reward_component_analysis or {},
-        "curriculum_distribution_metrics": curriculum_distribution_metrics or {},
         "safety_truncation_position_metrics": safety_truncation_position_metrics or {},
         "data_quality": data_quality or {},
         "snapshots": {"by_step": step_snapshots or []},
@@ -329,23 +314,6 @@ def _render_evaluation_trend(trajectory_eval: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _render_dspl_distribution(curriculum: dict[str, Any]) -> list[str]:
-    lines = ["## DSPL Distribution", ""]
-    if not curriculum.get("available"):
-        lines.append("- unavailable: no DSPL distribution KL logged")
-        return lines
-
-    diagnostics = curriculum.get("diagnostics", {})
-    for key in DSPL_DIAG_KEYS:
-        if key in diagnostics:
-            entry = diagnostics[key]
-            lines.append(
-                f"- {key}: final={_format_number(entry.get('final'))}, "
-                f"trend_slope_per_step={_format_number(entry.get('trend_slope_per_step'))}"
-            )
-    return lines
-
-
 def _render_safety_truncation(safety_position: dict[str, Any]) -> list[str]:
     lines = ["## Safety Truncation Positions", ""]
     if not safety_position.get("available"):
@@ -424,7 +392,6 @@ def _generate_markdown_report(payload: dict[str, Any]) -> str:
             reward_analysis, top_activity, strong_negative_pairs, bar_width
         ),
         _render_evaluation_trend(payload.get("trajectory_evaluation_metrics", {})),
-        _render_dspl_distribution(payload.get("curriculum_distribution_metrics", {})),
         _render_safety_truncation(
             payload.get("safety_truncation_position_metrics", {})
         ),
@@ -470,7 +437,6 @@ def write_analysis_outputs(
     prefixes = (
         ("regular", "regular_metrics"),
         ("trajectory_evaluation", "trajectory_evaluation_metrics"),
-        ("curriculum_distribution", "curriculum_distribution_metrics"),
         ("safety_truncation_position", "safety_truncation_position_metrics"),
         ("reward_component", "reward_component_analysis"),
     )

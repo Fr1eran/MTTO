@@ -44,7 +44,7 @@ def test_comparison_figure_uses_one_trajectory_only_shared_legend() -> None:
     legend = figure.legends[0]
     assert [text.get_text() for text in legend.texts] == [
         "DP optimization",
-        "Proposed RL",
+        "Proposed Method",
         "Actual operation",
     ]
     assert [handle.get_color() for handle in legend.legend_handles] == [
@@ -135,22 +135,24 @@ def test_format_comparison_table_contains_only_requested_metrics() -> None:
                 ProfileMetrics(1.25, 0.0, 123.456, 0.123456),
             ),
             (
-                "Proposed RL",
+                "Proposed Method",
                 ProfileMetrics(2.5, 0.25, 120.0, 0.1),
             ),
             (
                 "Actual operation",
-                ProfileMetrics(3.0, 0.5, 130.0, 0.2),
+                ProfileMetrics(3.0, 0.5, 130.0, None),
             ),
         ]
     )
 
     assert "Time error (s)" in table
     assert "Stop error (m)" in table
-    assert "Total energy (kJ)" in table
-    assert "comfort_tav (m/s^2)" in table
+    assert "Total energy (kWh)" in table
+    assert "TAV (m/s²)" in table
     assert "123.456" in table
     assert "0.123456" in table
+    assert "—" in table
+    assert "不可直接比较" in table
 
 
 def test_deduplicate_legend_is_removed() -> None:
@@ -284,3 +286,11 @@ def test_main_uses_comparison_axes_and_scientific_export(
     output_pdf = output_dir / "dp_rl_actual_comparison.pdf"
     assert output_pdf.is_file()
     assert output_pdf.stat().st_size > 0
+    output_table = output_dir / "dp_rl_actual_comparison_table.md"
+    assert output_table.is_file()
+    assert output_table.stat().st_size > 0
+    table_text = output_table.read_text(encoding="utf-8")
+    assert "Proposed Method" in table_text
+    assert "Total energy (kWh)" in table_text
+    assert "TAV (m/s²)" in table_text
+    assert "—" in table_text

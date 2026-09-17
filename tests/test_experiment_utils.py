@@ -11,16 +11,13 @@ from rl.experiment_utils import (
     DEFAULT_NUM_ENVS,
     DEFAULT_REWARD_PRESET_NAME,
     DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
-    DSPL_ALGORITHM_ID,
     RUN_METADATA_FILENAME,
     build_default_training_args,
     build_reward_config,
     build_rl_trajectory_comparison_key,
     build_run_metadata,
-    curriculum_profile_names,
     load_run_metadata,
     render_rl_curve_on_axes,
-    resolve_curriculum_profile_name,
     resolve_output_dir,
     resolve_reward_preset,
     resolve_tb_log_name,
@@ -102,7 +99,6 @@ def test_learning_rate_anneals_by_environment_step_progress() -> None:
 
 def test_environment_step_budget_resolves_to_complete_rollouts() -> None:
     args = build_default_training_args()
-    args.curriculum_profile = "none"
     args.budget_mode = "environment_steps"
     args.training_rollouts = 500
 
@@ -118,87 +114,11 @@ def test_environment_step_budget_resolves_to_complete_rollouts() -> None:
     assert budget.effective_training_episodes is None
 
 
-def test_curriculum_profiles_resolve_with_dspl_default() -> None:
-    assert curriculum_profile_names() == (
-        "none",
-        "dspl",
-    )
-    assert resolve_curriculum_profile_name() == "dspl"
-    assert resolve_curriculum_profile_name("none") == "none"
-    assert resolve_curriculum_profile_name("dspl") == "dspl"
-    with pytest.raises(ValueError, match="Available profiles: none, dspl"):
-        _ = resolve_curriculum_profile_name("dspl_critic")
-    with pytest.raises(ValueError):
-        _ = resolve_curriculum_profile_name("dspl_completion")
-    with pytest.raises(ValueError):
-        _ = resolve_curriculum_profile_name("dspl_completion_bayes")
-
-
-def test_curriculum_profile_scopes_dspl_output_name() -> None:
-    output_dir = resolve_output_dir(
-        output_root="output/optimal/rl",
-        schedule_time_s=430.0,
-        step_distance=30.0,
-        reward_preset_name="basic",
-        curriculum_profile_name="dspl",
-    )
-
-    assert Path(output_dir).name == "430p0_30p0__basic__dspl"
-
-
-def test_dspl_profile_has_distinct_identity_and_no_zpd_transform() -> None:
-    args = build_default_training_args()
-    args.curriculum_profile = "dspl"
-    args.reference_curve_dir = "."
-    spec = resolve_training_run_spec(args)
-
-    curriculum = spec.run_metadata["curriculum"]
-    assert spec.curriculum_profile == "dspl"
-    assert curriculum["value_source"] == "ppo_value_estimate"
-    assert curriculum["algorithm_id"] == DSPL_ALGORITHM_ID
-    config = curriculum["dspl_protocol"]
-    assert config is not None
-    assert config["target_kl_stop"] == 0.02
-    assert config["target_uniform_mass"] == 0.1
-    assert "context_coverage_constant" not in config
-    assert "context_count_formula" not in config
-    assert config["context_sampling"] == "uniform_route_partition_exclude_terminal"
-    assert "initial_gaussian_std_m" not in config
-    assert "initial_peak_remaining_distance_m" not in config
-    assert "initial_uniform_mass" not in config
-    assert "min_completed_episodes" not in config
-    assert "min_completed_episodes_per_env" not in config
-    assert curriculum["alpha_update_protocol"] == {
-        "id": "rollout_discounted_return_eq6_v1",
-        "sample_source": (
-            "all_parallel_ppo_rollout_fragments_since_last_curriculum_update"
-        ),
-        "discounted_return_formula": "sum_t gamma^t r_t",
-        "aggregation": "arithmetic_mean",
-        "formula": (
-            "zeta * max(0, mean_rollout_return) / "
-            "KL(current_distribution || target_distribution)"
-        ),
-        "warmup": "alpha=0 for first alpha_warmup_updates curriculum updates",
-        "negative_mean_policy": "clip_to_zero",
-    }
-    assert curriculum["context_value_estimation_protocol"] == {
-        "id": "sampled_value_eq5_v1",
-        "estimator": "importance_weighted_samples",
-        "value_input": "raw_context_initial_observation",
-        "sampling_unit": "episode_start",
-        "formula": "g(c)=n_c*V(c)/(K*p_i(c)) for sampled c; g(c)=0 otherwise",
-        "distribution_version_policy": (
-            "statistics clear on committed curriculum version update"
-        ),
-    }
-    assert "dspl" in Path(spec.output_dir).name
-
-
-def test_reward_preset_names_include_pprs_component_profiles() -> None:
+def test_reward_preset_names_include_pirs_component_profiles() -> None:
     assert reward_preset_names() == (
         "basic",
         "basic_safety",
+        "basic_punctuality",
         "basic_safety_punctuality",
     )
 
@@ -245,7 +165,7 @@ def test_reward_metadata_contains_no_global_scaling_fields() -> None:
     assert all("normalization" not in key for key in metadata["reward_config"])
 
 
-def test_resolve_output_dir_scopes_default_reward_and_curriculum() -> None:
+def test_resolve_output_dir_scopes_default_reward() -> None:
     output_dir = resolve_output_dir(
         output_root="output/optimal/rl",
         schedule_time_s=430.0,
@@ -253,10 +173,10 @@ def test_resolve_output_dir_scopes_default_reward_and_curriculum() -> None:
         reward_preset_name=DEFAULT_REWARD_PRESET_NAME,
     )
 
-    assert Path(output_dir).name == "430p0_100p0__basic_safety_punctuality__dspl"
+    assert Path(output_dir).name == "430p0_100p0__basic_safety_punctuality"
 
 
-def test_resolve_output_dir_scopes_default_curriculum_and_experiment_tag() -> None:
+def test_resolve_output_dir_scopes_reward_and_experiment_tag() -> None:
     output_dir = resolve_output_dir(
         output_root="output/optimal/rl",
         schedule_time_s=430.0,
@@ -265,7 +185,7 @@ def test_resolve_output_dir_scopes_default_curriculum_and_experiment_tag() -> No
         experiment_tag="Trial A",
     )
 
-    assert Path(output_dir).name == "430p0_100p0__basic__dspl__trial_a"
+    assert Path(output_dir).name == "430p0_100p0__basic__trial_a"
 
 
 def test_resolve_tb_log_name_generates_experiment_scoped_name() -> None:
@@ -279,9 +199,7 @@ def test_resolve_tb_log_name_generates_experiment_scoped_name() -> None:
     )
 
     assert (
-        tb_log_name
-        == "train_log__monitor_best__430p0_100p0__basic_safety_punctuality__"
-        "dspl"
+        tb_log_name == "train_log__monitor_best__430p0_100p0__basic_safety_punctuality"
     )
 
 
@@ -434,7 +352,6 @@ def test_derive_training_budget_rules() -> None:
 
     # 4. resolve_training_run_spec 快照正确传递 training_budget
     args = build_default_training_args()
-    args.curriculum_profile = "none"
     spec = resolve_training_run_spec(args)
     default_effective, default_max_steps, default_timesteps = _derive_training_budget(
         training_episodes=5000,
@@ -473,7 +390,6 @@ def test_train_single_experiment_persists_and_propagates_completed_metadata(
     )
 
     args = build_default_training_args()
-    args.curriculum_profile = "none"
     args.training_episodes = 8
     args.output_root = str(tmp_path / "output")
     spec = resolve_training_run_spec(args)
@@ -506,6 +422,9 @@ def test_train_single_experiment_persists_and_propagates_completed_metadata(
     monkeypatch.setattr("rl.experiment_utils.PPO", FakePPO)
 
     trained_spec = train_single_experiment(args, spec=spec)
+
+    with pytest.raises(FileExistsError, match="already contains training artifacts"):
+        _ = train_single_experiment(args, spec=spec)
 
     # 1. Returned spec has completed budget metadata
     returned_budget = trained_spec.run_metadata.training_budget
@@ -559,7 +478,6 @@ def test_train_single_experiment_uses_environment_step_budget(
     from rl.experiment_utils import train_single_experiment
 
     args = build_default_training_args()
-    args.curriculum_profile = "none"
     args.budget_mode = "environment_steps"
     args.training_rollouts = 2
     args.output_root = str(tmp_path / "output")

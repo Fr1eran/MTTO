@@ -3,22 +3,23 @@
 from __future__ import annotations
 
 import argparse
+import json
 from dataclasses import replace
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.figure import Figure
 
 from contracts.ablation import AblationManifest
-from rl.experiment_statistics import assess_constraints
+from rl.evaluation import calculate_route_completion_ratio
 from rl.experiment_utils import (
     DEFAULT_DEVICE,
+    DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
     DEFAULT_NUM_ENVS,
     DEFAULT_REWARD_DISCOUNT,
     DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
     DEFAULT_SCHEDULE_TIME_S,
-    DSPL_ALGORITHM_ID,
-    dspl_protocol_parameters,
     evaluate_final_training_run,
     learning_rate_schedule_parameters,
     resolve_reward_preset,
@@ -44,9 +45,12 @@ from utils.ablation import (
     manifest_run_complete,
 )
 from utils.ablation.plotting import save_ablation_figure
-from utils.io_utils import format_float_token, load_evaluation_metrics
+from utils.io_utils import (
+    format_float_token,
+    load_evaluation_history,
+    load_evaluation_metrics,
+)
 from utils.plot_utils import (
-    SCI_BAND_ALPHA,
     SCI_LINE_WIDTH,
     SCI_SERIES_LINE_STYLES,
     VIS_ACTUAL_PURPLE,
@@ -57,25 +61,28 @@ from utils.plot_utils import (
     apply_sci_curve_style,
     apply_sci_figure_layout,
     apply_sci_grid,
+    sci_tint_color,
 )
 
 DEFAULT_STEP_DISTANCES = (10.0, 30.0, 50.0, 100.0)
 DEFAULT_SEEDS = (11, 131, 239, 359, 443)
 DEFAULT_OUTPUT_ROOT = "output/paper_experiment/01_step_distance"
-DEFAULT_REFERENCE_CURVE_DIR = "output/optimal/dp/465p0_0p1_uni10p0"
-DEFAULT_EVALUATION_INTERVAL_EPISODES = 100
-DEFAULT_EPISODE_SMOOTHING_WINDOW = 5
-STEP_DISTANCE_TRAINING_EPISODES = 4_000
+DEFAULT_EVALUATION_SMOOTHING_WINDOW = 5
+STEP_DISTANCE_TRAINING_ROLLOUTS = 400
+STEP_DISTANCE_TRAINING_STEPS = (
+    STEP_DISTANCE_TRAINING_ROLLOUTS * DEFAULT_ROLLOUT_STEPS_PER_UPDATE
+)
 STEP_DISTANCE_MANIFEST_FILENAME = "manifest.json"
 STEP_DISTANCE_FIGURE_FILENAME = "step_distance_learning_curves.pdf"
-MANIFEST_VERSION = 1
-PROTOCOL_VERSION = 10
+STEP_DISTANCE_TABLE_FILENAME = "step_distance_table.md"
+STEP_DISTANCE_SUMMARY_FILENAME = "step_distance_summary.json"
+MANIFEST_VERSION = 2
+PROTOCOL_VERSION = 12
 FIXED_REWARD_PRESET = "basic_safety_punctuality"
-FIXED_CURRICULUM_PROFILE = "dspl"
 TRAJECTORY_METRIC_KEYS = (
     "stop_error_m",
     "abs_time_error_s",
-    "total_energy_kj",
+    "total_energy_kwh",
     "comfort_tav",
 )
 _STEP_DISTANCE_COLORS = {
@@ -115,7 +122,7 @@ SPEC = AblationSpec(
     variants=_step_variants(),
     seeds=DEFAULT_SEEDS,
     cli=CLIConfig(
-        description=("Run fixed spatial control-step ablation with PPRS + DSPL."),
+        description=("Run fixed spatial control-step ablation with full PIRS."),
         train_help="Run the ablation matrix.",
         show_help="Plot periodic independent-evaluation learning curves.",
         train_arguments=(
@@ -128,26 +135,6 @@ SPEC = AblationSpec(
                 },
             ),
             ArgumentSpec(
-                ("--reference-curve-dir",),
-                {
-                    "default": DEFAULT_REFERENCE_CURVE_DIR,
-                    "help": (
-                        "Directory containing the matching DP reference trajectory "
-                        "required by DSPL."
-                    ),
-                },
-            ),
-            ArgumentSpec(
-                ("--training-episodes",),
-                {
-                    "type": int,
-                    "default": STEP_DISTANCE_TRAINING_EPISODES,
-                    "help": (
-                        "Global completed training episodes for every ablation run."
-                    ),
-                },
-            ),
-            ArgumentSpec(
                 ("--schedule-time-s",),
                 {"type": float, "default": DEFAULT_SCHEDULE_TIME_S},
             ),
@@ -156,20 +143,6 @@ SPEC = AblationSpec(
                 {"type": float, "default": DEFAULT_REWARD_DISCOUNT},
             ),
             ArgumentSpec(("--num-envs",), {"type": int, "default": DEFAULT_NUM_ENVS}),
-            ArgumentSpec(
-                ("--rollout-steps-per-update",),
-                {"type": int, "default": DEFAULT_ROLLOUT_STEPS_PER_UPDATE},
-            ),
-            ArgumentSpec(
-                ("--evaluation-interval-episodes",),
-                {
-                    "type": int,
-                    "default": DEFAULT_EVALUATION_INTERVAL_EPISODES,
-                    "help": (
-                        "Completed-training-episode interval for periodic evaluation."
-                    ),
-                },
-            ),
             ArgumentSpec(("--device",), {"default": DEFAULT_DEVICE}),
             ArgumentSpec(
                 ("--resume",),
@@ -215,16 +188,17 @@ SPEC = AblationSpec(
                     "type": Path,
                     "default": None,
                     "help": (
-                        "Directory for the fixed-name paper-ready PDF. If omitted, "
-                        "only display the figure."
+                        "Directory for the fixed-name paper-ready PDF, markdown table, "
+                        "and JSON summary. If omitted, only display the figure."
                     ),
                 },
             ),
             ArgumentSpec(
-                ("--episode-smoothing-window",),
+                ("--episode-smoothing-window", "--evaluation-smoothing-window"),
                 {
+                    "dest": "episode_smoothing_window",
                     "type": int,
-                    "default": DEFAULT_EPISODE_SMOOTHING_WINDOW,
+                    "default": DEFAULT_EVALUATION_SMOOTHING_WINDOW,
                     "help": (
                         "Evaluation-point trailing moving-average window with an "
                         "expanding warm-up (default: 5)."
@@ -257,72 +231,74 @@ SPEC = AblationSpec(
         "step_distances": VariantValues("step_distance"),
         "seeds": SeedValues(),
         "reward_preset": FIXED_REWARD_PRESET,
-        "curriculum_profile": FIXED_CURRICULUM_PROFILE,
-        "reference_curve_dir": ArgRef("reference_curve_dir"),
         "reward_config": reward_config_parameters(
             resolve_reward_preset(FIXED_REWARD_PRESET).config
         ),
-        "dspl_protocol": dspl_protocol_parameters(),
     },
     training_signature={
         "protocol_version": PROTOCOL_VERSION,
-        "budget_mode": "completed_episodes",
-        "curriculum_algorithm_id": DSPL_ALGORITHM_ID,
+        "budget_mode": "environment_steps",
+        "training_rollouts": STEP_DISTANCE_TRAINING_ROLLOUTS,
+        "training_steps": STEP_DISTANCE_TRAINING_STEPS,
+        "learning_rate_schedule": learning_rate_schedule_parameters(
+            "environment_steps"
+        ),
         "schedule_time_s": ArgRef("schedule_time_s", float),
         "reward_discount": ArgRef("reward_discount", float),
         "num_envs": ArgRef("num_envs", int),
-        "rollout_steps_per_update": ArgRef("rollout_steps_per_update", int),
+        "rollout_steps_per_update": DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
         "n_steps_per_env": None,
-        "training_episodes": ArgRef("training_episodes", int),
-        "learning_rate_schedule": learning_rate_schedule_parameters(),
+        "evaluation_interval_rollouts": DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
         "device": ArgRef("device", str),
         "enable_monitor": True,
         "enable_auto_analysis": False,
         "enable_best_evaluation_artifacts": True,
-        "evaluation_interval_episodes": ArgRef("evaluation_interval_episodes", int),
         "evaluation_deterministic": True,
     },
     training_overrides={
-        "budget_mode": "completed_episodes",
-        "training_rollouts": None,
+        "budget_mode": "environment_steps",
+        "training_rollouts": STEP_DISTANCE_TRAINING_ROLLOUTS,
+        "training_episodes": None,
         "reward_preset": FIXED_REWARD_PRESET,
-        "curriculum_profile": FIXED_CURRICULUM_PROFILE,
-        "reference_curve_dir": ArgRef("reference_curve_dir"),
         "enable_best_evaluation_artifacts": True,
-        "evaluation_interval_rollouts": None,
-        "evaluation_interval_episodes": ArgRef("evaluation_interval_episodes", int),
+        "rollout_steps_per_update": DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
+        "evaluation_interval_rollouts": DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
+        "evaluation_interval_episodes": None,
         "tensorboard_log_dir": None,
         "tb_log_name": None,
     },
     curve=CurveAggregationSpec(
-        episode_reader="sequence",
+        episode_reader="series",
         metrics=(
             CurveMetricSpec(
-                "trip_completion_pct",
+                "route_completion_ratio",
                 "evaluation",
                 "route_completion_ratio",
-                "scheduled_completed_training_episodes",
-                transform="ratio_to_pct",
+                "training_steps",
+                transform="identity",
                 smooth=True,
+                alignment="exact_union",
             ),
             CurveMetricSpec(
-                "evaluation_episode_return",
+                "feasible_rate",
                 "evaluation",
-                "total_reward",
-                "scheduled_completed_training_episodes",
+                "feasible",
+                "training_steps",
+                transform="bool",
                 smooth=True,
+                alignment="exact_union",
             ),
         ),
-        primary_metric="trip_completion_pct",
-        x_name="scheduled_completed_training_episodes",
-        default_smoothing_window=DEFAULT_EPISODE_SMOOTHING_WINDOW,
+        primary_metric="route_completion_ratio",
+        x_name="training_steps",
+        default_smoothing_window=DEFAULT_EVALUATION_SMOOTHING_WINDOW,
         warn_non_completed=True,
     ),
     final=FinalAggregationSpec(
         metrics=(
             FinalMetricSpec("stop_error_m", "stop_error_m"),
             FinalMetricSpec("abs_time_error_s", "time_error_s", transform="abs"),
-            FinalMetricSpec("total_energy_kj", "total_energy_kj", feasible_only=True),
+            FinalMetricSpec("total_energy_kwh", "total_energy_j", transform="j_to_kwh"),
             FinalMetricSpec("comfort_tav", "comfort_tav"),
         ),
         source="best",
@@ -369,7 +345,7 @@ def build_curve_aggregates(
     manifest: AblationManifest | dict[str, object],
     step_distances: list[float] | None = None,
     *,
-    episode_smoothing_window: int = DEFAULT_EPISODE_SMOOTHING_WINDOW,
+    episode_smoothing_window: int = DEFAULT_EVALUATION_SMOOTHING_WINDOW,
 ) -> tuple[list[CurveAggregate], list[str]]:
     return DRIVER.build_curve_aggregates(
         manifest,
@@ -389,6 +365,10 @@ def build_metric_aggregates(
     )
 
 
+def _format_transition_axis(axis: plt.Axes) -> None:
+    axis.ticklabel_format(axis="x", style="sci", scilimits=(6, 6), useMathText=True)
+
+
 def plot_curve_aggregates(
     aggregates: list[CurveAggregate], *, show: bool = True
 ) -> Figure | None:
@@ -397,22 +377,30 @@ def plot_curve_aggregates(
         return None
     apply_sci_curve_style()
     figure, axes = plt.subplots(nrows=1, ncols=2, squeeze=False)
-    completion_axis, return_axis = axes[0]
-    for axis in (completion_axis, return_axis):
+    completion_axis, feasible_axis = axes[0]
+    for axis in (completion_axis, feasible_axis):
         axis.set_box_aspect(3 / 4)
     for aggregate in aggregates:
         style = _STEP_DISTANCE_STYLES[aggregate.variant_id]
         color = style["color"]
         label = aggregate.label or f"{aggregate.variant_id} m"
         for axis, key in (
-            (completion_axis, "trip_completion_pct"),
-            (return_axis, "evaluation_episode_return"),
+            (completion_axis, "route_completion_ratio"),
+            (feasible_axis, "feasible_rate"),
         ):
             mean, std = aggregate.means[key], aggregate.stds[key]
             x = aggregate.axis_for(key)
+            if key == "feasible_rate":
+                plot_mean = np.clip(mean, 0.0, 1.0)
+                band_lower = np.clip(mean - std, 0.0, 1.0)
+                band_upper = np.clip(mean + std, 0.0, 1.0)
+            else:
+                plot_mean = mean
+                band_lower = mean - std
+                band_upper = mean + std
             axis.plot(
                 x,
-                mean,
+                plot_mean,
                 color=color,
                 linestyle=style["linestyle"],
                 marker=style["marker"],
@@ -429,24 +417,25 @@ def plot_curve_aggregates(
             )
             axis.fill_between(
                 x,
-                mean - std,
-                mean + std,
-                color=color,
-                alpha=SCI_BAND_ALPHA,
+                band_lower,
+                band_upper,
+                color=sci_tint_color(color),
                 linewidth=0,
             )
     completion_axis.set(
-        xlabel="Completed training episodes",
-        ylabel="Policy trip completion (%)",
-        xlim=(0, STEP_DISTANCE_TRAINING_EPISODES),
-        ylim=(0, 100),
+        xlabel="Environment transitions",
+        ylabel="Route completion ratio",
+        xlim=(0, STEP_DISTANCE_TRAINING_STEPS),
+        ylim=(0.0, 1.0),
     )
-    return_axis.set(
-        xlabel="Completed training episodes",
-        ylabel="Evaluation episode return",
-        xlim=(0, STEP_DISTANCE_TRAINING_EPISODES),
+    feasible_axis.set(
+        xlabel="Environment transitions",
+        ylabel="Strict feasibility rate",
+        xlim=(0, STEP_DISTANCE_TRAINING_STEPS),
+        ylim=(-0.03, 1.03),
     )
-    for axis, panel in ((completion_axis, "(a)"), (return_axis, "(b)")):
+    for axis, panel in ((completion_axis, "(a)"), (feasible_axis, "(b)")):
+        _format_transition_axis(axis)
         apply_sci_grid(axis)
         add_panel_label(ax=axis, label=panel)
     handles, labels = completion_axis.get_legend_handles_labels()
@@ -488,7 +477,7 @@ def _print_run_matrix(runs: list[AblationRun]) -> None:
             f"[{index}] step_distance={run.step_distance:g} "
             f"repeat={run.repeat_index + 1} seed={run.seed} "
             f"output_dir={run.training_spec.output_dir} "
-            f"training_episodes={run.training_spec.training_episodes} "
+            f"training_rollouts={run.training_spec.training_rollouts} "
             f"derived_total_timesteps={run.training_spec.total_timesteps}"
         )
 
@@ -499,117 +488,244 @@ def _print_curve_summary(aggregates: list[CurveAggregate]) -> None:
         print("  no valid step-distance curves available.")
         return
     for aggregate in aggregates:
-        episode_end = float(aggregate.x[-1]) if aggregate.x.size else 0.0
+        transition_end = float(aggregate.x[-1]) if aggregate.x.size else 0.0
         print(
             f"  - step_distance={aggregate.label or aggregate.variant_id} "
             f"valid_runs={aggregate.valid_run_count} "
-            f"episode_points={aggregate.x.size} episode_end={episode_end:g}"
+            f"points={aggregate.x.size} transition_end={transition_end:g}"
         )
 
 
-def _print_metric_table(
-    aggregates: list[FinalMetricAggregate], *, metric_source: str
-) -> None:
-    if not aggregates:
-        print(
-            f"{metric_source.title()} trajectory evaluation summary: no valid metrics."
-        )
-        return
-    columns = ["step_distance", *TRAJECTORY_METRIC_KEYS]
-    rows = [
-        [
-            aggregate.label or aggregate.variant_id,
-            *[
-                f"{aggregate.means[key]:.6f}±{aggregate.stds[key]:.6f}"
-                for key in TRAJECTORY_METRIC_KEYS
-            ],
-        ]
-        for aggregate in aggregates
-    ]
-    widths = [
-        max(len(column), *(len(row[index]) for row in rows))
-        for index, column in enumerate(columns)
-    ]
+def build_step_distance_summary_and_table(
+    manifest: AblationManifest,
+) -> tuple[str, dict[str, object], float | None, str]:
+    variant_results: list[dict[str, object]] = []
 
-    def formatted(row: list[str]) -> str:
-        return " | ".join(value.ljust(widths[index]) for index, value in enumerate(row))
-
-    print(f"{metric_source.title()} trajectory evaluation summary (mean±std):")
-    print(formatted(columns))
-    print("-+-".join("-" * width for width in widths))
-    for row in rows:
-        print(formatted(row))
-
-
-def _print_constraint_table(manifest: AblationManifest) -> None:
-    print("Best-evaluation constraint rates:")
-    print("step_distance | success | precise | punctual | safe | feasible | n")
     for variant in _step_variants():
-        assessments = []
-        for run in manifest.runs:
-            if run.variant_id == variant.id:
-                metrics = load_evaluation_metrics(
-                    Path(run.artifacts.path_for("metrics_best"))
-                )
-                assessments.append(assess_constraints(metrics))
-        n = len(assessments)
-        fields = (
-            "success",
-            "precise_arrival",
-            "punctual_arrival",
-            "safe",
-            "feasible",
-        )
-        rates = [
-            sum(bool(getattr(item, field)) for item in assessments) / n
-            for field in fields
+        variant_runs = [
+            run
+            for run in manifest.runs
+            if run.variant_id == variant.id
+            or DRIVER._entry_matches_variant(run, variant)
         ]
-        print(
-            f"{variant.label} | "
-            + " | ".join(f"{value:.3f}" for value in rates)
-            + f" | {n}"
+        if not variant_runs:
+            continue
+        seeds_data: list[dict[str, object]] = []
+        stop_errors: list[float] = []
+        time_errors: list[float] = []
+        energy_kwhs: list[float] = []
+        comforts: list[float] = []
+        route_ratios: list[float] = []
+        feasibles: list[bool] = []
+
+        for run in variant_runs:
+            metrics = load_evaluation_metrics(
+                Path(run.artifacts.path_for("metrics_best"))
+            )
+            meta_path = (
+                Path(run.artifacts.path_for("metadata"))
+                if run.artifacts.metadata
+                else None
+            )
+            metadata = (
+                json.loads(meta_path.read_text(encoding="utf-8"))
+                if meta_path is not None and meta_path.is_file()
+                else {}
+            )
+            training_budget = metadata.get("training_budget", {})
+            completed_episodes = int(
+                training_budget.get("actual_completed_episodes")
+                or training_budget.get("completed_episodes")
+                or 0
+            )
+
+            route_ratio = calculate_route_completion_ratio(
+                start_position_m=metrics.start_position_m,
+                target_position_m=metrics.target_position_m,
+                final_position_m=metrics.final_position_m,
+            )
+            stop_err = abs(float(metrics.stop_error_m))
+            time_err = abs(float(metrics.time_error_s))
+            e_kwh = float(metrics.total_energy_j) / 3_600_000.0
+            comf = float(metrics.comfort_tav)
+            feas = bool(metrics.feasible)
+
+            stop_errors.append(stop_err)
+            time_errors.append(time_err)
+            energy_kwhs.append(e_kwh)
+            comforts.append(comf)
+            route_ratios.append(route_ratio)
+            feasibles.append(feas)
+
+            seeds_data.append(
+                {
+                    "seed": run.seed,
+                    "feasible": feas,
+                    "safe": bool(metrics.safe),
+                    "success": bool(metrics.success),
+                    "completed_training_episodes": completed_episodes,
+                    "route_completion_ratio": route_ratio,
+                    "stop_error_m": stop_err,
+                    "abs_time_error_s": time_err,
+                    "energy_kwh": e_kwh,
+                    "comfort_tav": comf,
+                }
+            )
+
+        feasible_count = sum(feasibles)
+        feasible_rate = feasible_count / len(variant_runs) if variant_runs else 0.0
+        safe_count = sum(d["safe"] for d in seeds_data)
+        success_count = sum(d["success"] for d in seeds_data)
+        mean_route_ratio = float(np.mean(route_ratios)) if route_ratios else 0.0
+
+        # Sample standard deviation (ddof=1) over all trajectories
+        stop_mean = float(np.mean(stop_errors)) if stop_errors else 0.0
+        stop_std = float(np.std(stop_errors, ddof=1)) if len(stop_errors) > 1 else 0.0
+        time_mean = float(np.mean(time_errors)) if time_errors else 0.0
+        time_std = float(np.std(time_errors, ddof=1)) if len(time_errors) > 1 else 0.0
+        energy_mean = float(np.mean(energy_kwhs)) if energy_kwhs else 0.0
+        energy_std = float(np.std(energy_kwhs, ddof=1)) if len(energy_kwhs) > 1 else 0.0
+        comfort_mean = float(np.mean(comforts)) if comforts else 0.0
+        comfort_std = float(np.std(comforts, ddof=1)) if len(comforts) > 1 else 0.0
+
+        feasible_energies = [
+            e for f, e in zip(feasibles, energy_kwhs, strict=True) if f
+        ]
+        mean_feas_energy = (
+            float(np.mean(feasible_energies)) if feasible_energies else None
+        )
+        feasible_comforts = [c for f, c in zip(feasibles, comforts, strict=True) if f]
+        mean_feas_comfort = (
+            float(np.mean(feasible_comforts)) if feasible_comforts else None
         )
 
+        distance = float(variant.manifest["step_distance"])
+        variant_results.append(
+            {
+                "variant_id": variant.id,
+                "label": variant.label,
+                "step_distance": distance,
+                "feasible_count": feasible_count,
+                "feasible_rate": feasible_rate,
+                "safe_count": safe_count,
+                "success_count": success_count,
+                "mean_route_completion_ratio": mean_route_ratio,
+                "mean_feasible_energy_kwh": mean_feas_energy,
+                "mean_feasible_comfort": mean_feas_comfort,
+                "metrics": {
+                    "stop_error_m": {"mean": stop_mean, "std": stop_std},
+                    "abs_time_error_s": {"mean": time_mean, "std": time_std},
+                    "energy_kwh": {"mean": energy_mean, "std": energy_std},
+                    "comfort_tav": {"mean": comfort_mean, "std": comfort_std},
+                },
+                "per_seed": seeds_data,
+            }
+        )
 
-def _print_warnings(warnings: list[str]) -> None:
-    if warnings:
-        print("Warnings:")
-        for warning in warnings:
-            print(f"  - {warning}")
+    # Step selection logic:
+    # 严格可行数最多 → 五条 best/ 轨迹的平均里程完成率最高 → 可行轨迹平均能耗最低 →
+    # 可行轨迹平均舒适度最低 → 较小步长。
+    # 若四组均无可行轨迹，则报告“本轮不能确定合格步长”。
+    if all(item["feasible_count"] == 0 for item in variant_results):
+        recommended_step_distance = None
+        selection_status = "本轮不能确定合格步长"
+    else:
+        sorted_variants = sorted(
+            variant_results,
+            key=lambda item: (
+                -int(item["feasible_count"]),
+                -float(item["mean_route_completion_ratio"]),
+                (
+                    float(item["mean_feasible_energy_kwh"])
+                    if item["mean_feasible_energy_kwh"] is not None
+                    else float("inf")
+                ),
+                (
+                    float(item["mean_feasible_comfort"])
+                    if item["mean_feasible_comfort"] is not None
+                    else float("inf")
+                ),
+                float(item["step_distance"]),
+            ),
+        )
+        recommended_step_distance = float(sorted_variants[0]["step_distance"])
+        selection_status = f"推荐步长: {recommended_step_distance:g} m"
+
+    # Format Markdown table
+    header = (
+        "| 步长 | 严格可行率 | 绝对停站误差 (m) | 绝对到站时间误差 (s) "
+        "| 能耗 (kWh) | TAV (m/s²) |"
+    )
+    separator = "| --- | --- | --- | --- | --- | --- |"
+    rows = [header, separator]
+    for res in variant_results:
+        m = res["metrics"]
+        n_seeds = len(res["per_seed"])
+        feas_str = (
+            f"{res['feasible_rate'] * 100:.1f}% ({res['feasible_count']}/{n_seeds})"
+        )
+        rows.append(
+            f"| {res['label']} | {feas_str} | "
+            f"{m['stop_error_m']['mean']:.4f}±{m['stop_error_m']['std']:.4f} | "
+            f"{m['abs_time_error_s']['mean']:.4f}±{m['abs_time_error_s']['std']:.4f} | "
+            f"{m['energy_kwh']['mean']:.4f}±{m['energy_kwh']['std']:.4f} | "
+            f"{m['comfort_tav']['mean']:.4f}±{m['comfort_tav']['std']:.4f} |"
+        )
+    table_note = (
+        "\n*注：提前失败会影响能耗和误差的解释，须结合严格可行率综合评估。"
+        "TAV（累计加速度变化量）公式为 "
+        r"$\sum_t |a_t - a_{t-1}|$，单位为 $\mathrm{m/s^2}$。*"
+    )
+    markdown_table = "\n".join(rows) + table_note
+
+    summary_payload: dict[str, object] = {
+        "protocol_version": PROTOCOL_VERSION,
+        "matrix_id": "step_distance",
+        "recommended_step_distance": recommended_step_distance,
+        "selection_status": selection_status,
+        "variants": {item["variant_id"]: item for item in variant_results},
+    }
+
+    return markdown_table, summary_payload, recommended_step_distance, selection_status
 
 
 def _validate_analysis_manifest(manifest: AblationManifest) -> None:
     if manifest.matrix_config.get("protocol_version") != PROTOCOL_VERSION:
         raise ValueError(
             "step-distance manifest uses an obsolete protocol; rerun in the "
-            "current protocol-v10 output directory"
+            f"current protocol-v{PROTOCOL_VERSION} output directory"
         )
     expected_config = {
         "step_distances": list(DEFAULT_STEP_DISTANCES),
         "seeds": list(DEFAULT_SEEDS),
         "reward_preset": FIXED_REWARD_PRESET,
-        "curriculum_profile": FIXED_CURRICULUM_PROFILE,
         "reward_config": reward_config_parameters(
             resolve_reward_preset(FIXED_REWARD_PRESET).config
         ),
-        "dspl_protocol": dspl_protocol_parameters(),
     }
     for key, value in expected_config.items():
         if manifest.matrix_config.get(key) != value:
             raise ValueError(f"step-distance manifest {key} is incompatible")
-    if manifest.training_signature.get("curriculum_algorithm_id") != DSPL_ALGORITHM_ID:
-        raise ValueError("step-distance DSPL protocol is incompatible")
+    if manifest.training_signature.get("budget_mode") != "environment_steps":
+        raise ValueError("step-distance training budget_mode must be environment_steps")
     if (
-        manifest.training_signature.get("training_episodes")
-        != STEP_DISTANCE_TRAINING_EPISODES
+        manifest.training_signature.get("training_rollouts")
+        != STEP_DISTANCE_TRAINING_ROLLOUTS
     ):
-        raise ValueError("step-distance training episode budget is incompatible")
+        raise ValueError("step-distance training rollout budget is incompatible")
     if (
-        manifest.training_signature.get("evaluation_interval_episodes")
-        != DEFAULT_EVALUATION_INTERVAL_EPISODES
-        or "evaluation_interval_rollouts" in manifest.training_signature
+        manifest.training_signature.get("training_steps")
+        != STEP_DISTANCE_TRAINING_STEPS
+        or manifest.training_signature.get("rollout_steps_per_update")
+        != DEFAULT_ROLLOUT_STEPS_PER_UPDATE
     ):
-        raise ValueError("step-distance episode evaluation schedule is incompatible")
+        raise ValueError("step-distance rollout size or training steps is incompatible")
+    if (
+        manifest.training_signature.get("evaluation_interval_rollouts")
+        != DEFAULT_EVALUATION_INTERVAL_ROLLOUTS
+        or "evaluation_interval_episodes" in manifest.training_signature
+    ):
+        raise ValueError("step-distance rollout evaluation schedule is incompatible")
     expected = {
         "step_distance__"
         f"ds{format_float_token(distance)}__seed{seed:04d}__r{index + 1:02d}"
@@ -629,6 +745,28 @@ def _validate_analysis_manifest(manifest: AblationManifest) -> None:
             "step-distance analysis requires completed budgets and canonical "
             f"artifacts for every run; invalid={incomplete}"
         )
+    # Strictly verify that every run has exactly 33 periodic evaluation points
+    expected_rollouts = np.arange(
+        DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
+        STEP_DISTANCE_TRAINING_ROLLOUTS,
+        DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
+        dtype=np.int64,
+    )
+    expected_steps = (expected_rollouts * DEFAULT_ROLLOUT_STEPS_PER_UPDATE).astype(
+        np.float64
+    )
+    for run in manifest.runs:
+        history = load_evaluation_history(run.artifacts.path_for("evaluations"))
+        if not np.array_equal(history.rollout_indices, expected_rollouts):
+            raise ValueError(
+                f"Run {run.run_id} periodic evaluation rollout indices do not match "
+                "the 33 canonical evaluation points"
+            )
+        if not np.array_equal(history.training_steps, expected_steps):
+            raise ValueError(
+                f"Run {run.run_id} periodic evaluation training steps do not match "
+                "the 33 canonical evaluation points"
+            )
 
 
 def _run_train_command(args: argparse.Namespace) -> int:
@@ -671,27 +809,71 @@ def _run_show_command(args: argparse.Namespace) -> int:
         or any(item.valid_run_count != len(DEFAULT_SEEDS) for item in metrics)
     ):
         raise SystemExit("Step-distance analysis refused a partial aggregation")
+
+    # Strictly verify 33 points with 5 valid seeds and finite values
+    expected_steps = (
+        np.arange(
+            DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
+            STEP_DISTANCE_TRAINING_ROLLOUTS,
+            DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
+            dtype=np.int64,
+        )
+        * DEFAULT_ROLLOUT_STEPS_PER_UPDATE
+    ).astype(np.float64)
+    for aggregate in curves:
+        for metric in ("route_completion_ratio", "feasible_rate"):
+            stats = aggregate.metrics[metric]
+            if (
+                not np.array_equal(aggregate.axis_for(metric), expected_steps)
+                or not np.all(stats.count == len(DEFAULT_SEEDS))
+                or not np.all(np.isfinite(stats.mean))
+                or not np.all(np.isfinite(stats.std))
+            ):
+                raise SystemExit(
+                    f"Step-distance {metric} has missing or invalid evaluations"
+                )
+
     _print_curve_summary(curves)
     print(
         "Evaluation smoothing: expanding warm-up then trailing "
         f"window={args.episode_smoothing_window} evaluation points."
     )
-    _print_metric_table(metrics, metric_source=metric_source)
-    _print_constraint_table(manifest)
+
+    markdown_table, summary_payload, recommended_distance, selection_status = (
+        build_step_distance_summary_and_table(manifest)
+    )
+    print("\nPaper table (Markdown):")
+    print(markdown_table)
+    print(f"\nStep selection result: {selection_status}")
+
     if args.dry_run:
         print(
-            "Dry run completed: episode-metrics and "
-            f"{metric_source}-trajectory inputs resolved."
+            "Dry run completed: verified 20 runs, 33 evaluation points, "
+            "and previewed outputs without plotting or file writes."
         )
         return 0
-    if not curves:
-        raise SystemExit("No valid periodic-evaluation curves available for plotting.")
+
     figure = plot_curve_aggregates(curves, show=False)
     if figure is None:
         raise SystemExit("No valid periodic-evaluation curves available for plotting.")
+
     if args.figure_output_dir is not None:
-        output_path = save_compact_figure(figure, args.figure_output_dir)
-        print(f"Saved compact figure to {output_path}")
+        out_dir = Path(args.figure_output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        pdf_path = save_compact_figure(figure, out_dir)
+        print(f"Saved figure to: {pdf_path}")
+
+        table_path = out_dir / STEP_DISTANCE_TABLE_FILENAME
+        table_path.write_text(markdown_table, encoding="utf-8")
+        print(f"Saved paper table to: {table_path}")
+
+        summary_path = out_dir / STEP_DISTANCE_SUMMARY_FILENAME
+        summary_path.write_text(
+            json.dumps(summary_payload, indent=2, ensure_ascii=False, allow_nan=False),
+            encoding="utf-8",
+        )
+        print(f"Saved summary JSON to: {summary_path}")
+
     if not args.no_show:
         plt.show()
     return 0

@@ -609,6 +609,10 @@ class EvaluationHistoryArtifactHandler:
                 [event.result.safe for event in self._events],
                 dtype=np.bool_,
             ),
+            feasible=np.asarray(
+                [event.result.feasible for event in self._events],
+                dtype=np.bool_,
+            ),
             stop_error_m=np.asarray(
                 [event.result.stop_error_m for event in self._events], dtype=np.float64
             ),

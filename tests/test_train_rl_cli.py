@@ -1,9 +1,7 @@
 import pytest
 
 from rl.experiment_utils import (
-    DEFAULT_CURRICULUM_PROFILE_NAME,
     DEFAULT_REWARD_PRESET_NAME,
-    dspl_protocol_parameters,
     resolve_training_run_spec,
 )
 from scripts.train_rl import build_cli_parser
@@ -12,14 +10,11 @@ from scripts.train_rl import build_cli_parser
 def test_training_cli_uses_rollout_evaluation_interval() -> None:
     args = build_cli_parser().parse_args([])
 
-    spec = resolve_training_run_spec(
-        build_cli_parser().parse_args(["--curriculum-profile", "none"])
-    )
+    spec = resolve_training_run_spec(build_cli_parser().parse_args([]))
     assert args.evaluation_interval_rollouts is None
     assert spec.evaluation_interval_rollouts == 12
     assert spec.evaluation_interval_episodes is None
-    assert args.curriculum_profile == DEFAULT_CURRICULUM_PROFILE_NAME
-    assert args.curriculum_profile == "dspl"
+    assert not hasattr(args, "curriculum_profile")
     assert args.reward_preset == DEFAULT_REWARD_PRESET_NAME
     assert args.reward_preset == "basic_safety_punctuality"
     assert not hasattr(args, "evaluation_trigger_mode")
@@ -29,8 +24,6 @@ def test_training_cli_uses_rollout_evaluation_interval() -> None:
 def test_training_cli_accepts_episode_evaluation_interval() -> None:
     args = build_cli_parser().parse_args(
         [
-            "--curriculum-profile",
-            "none",
             "--evaluation-interval-episodes",
             "100",
         ]
@@ -48,8 +41,6 @@ def test_training_cli_accepts_environment_step_budget() -> None:
             "environment_steps",
             "--training-rollouts",
             "500",
-            "--curriculum-profile",
-            "none",
         ]
     )
 
@@ -71,7 +62,7 @@ def test_training_cli_accepts_environment_step_budget() -> None:
     ),
 )
 def test_training_budget_modes_reject_the_other_budget_unit(arguments) -> None:
-    args = build_cli_parser().parse_args([*arguments, "--curriculum-profile", "none"])
+    args = build_cli_parser().parse_args(arguments)
     with pytest.raises(ValueError):
         resolve_training_run_spec(args)
 
@@ -92,25 +83,14 @@ def test_training_cli_rejects_survival_reward_scale() -> None:
         _ = build_cli_parser().parse_args(["--survival-reward-scale", "50"])
 
 
-def test_training_cli_rejects_removed_bayesian_profile() -> None:
+def test_training_cli_rejects_removed_curriculum_profile_option() -> None:
     with pytest.raises(SystemExit):
-        _ = build_cli_parser().parse_args(
-            ["--curriculum-profile", "dspl_completion_bayes"]
-        )
+        _ = build_cli_parser().parse_args(["--curriculum-profile", "dspl"])
 
 
 def test_training_cli_rejects_removed_completion_profile_and_option() -> None:
     with pytest.raises(SystemExit):
-        _ = build_cli_parser().parse_args(
-            ["--curriculum-profile", "dspl_completion_nn"]
-        )
-    with pytest.raises(SystemExit):
         _ = build_cli_parser().parse_args(["--completion-alpha-max", "0.05"])
-
-
-def test_training_cli_accepts_dspl_profile() -> None:
-    args = build_cli_parser().parse_args(["--curriculum-profile", "dspl"])
-    assert args.curriculum_profile == "dspl"
 
 
 def test_training_cli_rejects_removed_context_coverage_option() -> None:
@@ -119,7 +99,7 @@ def test_training_cli_rejects_removed_context_coverage_option() -> None:
 
 
 def test_training_cli_uses_fixed_punctuality_potential_parameters() -> None:
-    args = build_cli_parser().parse_args(["--reference-curve-dir", "."])
+    args = build_cli_parser().parse_args([])
     spec = resolve_training_run_spec(args)
     assert spec.reward_config.enable_potential_punctuality
     assert not hasattr(spec.reward_config, "punctuality_potential_scale")
@@ -138,17 +118,12 @@ def test_training_cli_uses_fixed_punctuality_potential_parameters() -> None:
         "--critic-update-interval-rollouts",
         "--critic-alpha-warmup-updates",
         "--critic-context-value-estimator",
+        "--reference-curve-dir",
     ),
 )
 def test_training_cli_rejects_retired_tuning_options(removed_option: str) -> None:
     with pytest.raises(SystemExit):
         _ = build_cli_parser().parse_args([removed_option, "1"])
-
-
-def test_training_metadata_records_fixed_dspl_protocol() -> None:
-    args = build_cli_parser().parse_args(["--reference-curve-dir", "."])
-    spec = resolve_training_run_spec(args)
-    assert spec.run_metadata.curriculum.dspl_protocol == dspl_protocol_parameters()
 
 
 @pytest.mark.parametrize(

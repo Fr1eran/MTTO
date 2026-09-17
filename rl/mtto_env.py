@@ -14,8 +14,6 @@ from contracts.environment import EpisodeInfo, EpisodeOutcome
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo
 from model.vehicle import VehicleInfo
-from rl.context_sampler import ContextSampler
-from rl.dspl import DSPLStatisticsHub
 from rl.observation_builder import ObservationBuilder
 from rl.operational_state import OperationalState
 from rl.operational_stepper import OperationalStepper
@@ -45,24 +43,10 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         use_animation: bool = False,
         reward_config: RewardConfig | None = None,
         stepper: OperationalStepper | None = None,
-        context_sampler: ContextSampler | None = None,
-        dspl_statistics_hub: DSPLStatisticsHub | None = None,
-        curriculum_env_rank: int | None = None,
         safety_truncation_buffer: SafetyTruncationBuffer | None = None,
         reward_diagnostics_accumulator: RewardDiagnosticsAccumulator | None = None,
     ) -> None:
         super().__init__()
-        if (dspl_statistics_hub is None) != (curriculum_env_rank is None):
-            raise ValueError(
-                "DSPL statistics hub and curriculum environment rank "
-                "must be set together"
-            )
-        if dspl_statistics_hub is not None:
-            if context_sampler is None:
-                raise ValueError("DSPL statistics require a context sampler")
-            assert curriculum_env_rank is not None
-            if not 0 <= int(curriculum_env_rank) < dspl_statistics_hub.num_envs:
-                raise IndexError("curriculum_env_rank is outside the statistics hub")
         self.vehicle: VehicleInfo = vehicle
         self.track: TrackInfo = track
         self.safeguard_utility: SafeGuardUtility = safeguard_utility
@@ -111,14 +95,8 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
             ),
         )
         self.reward_config: RewardConfig = self.reward_calculator.reward_config
-        self.context_sampler = context_sampler
-        self.dspl_statistics_hub = dspl_statistics_hub
-        self.curriculum_env_rank = (
-            int(curriculum_env_rank) if curriculum_env_rank is not None else None
-        )
         self.safety_truncation_buffer = safety_truncation_buffer
         self.reward_diagnostics_accumulator = reward_diagnostics_accumulator
-        self._current_context_index: int | None = None
         self.state: OperationalState = self.stepper.reset()
 
         low = np.array([0, 0, -1, -1, -1, -1, 0, 0, -1, -1, 0, 0], dtype=np.float32)
@@ -159,11 +137,6 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         )
         return observation.copy()
 
-    @property
-    def current_context_index(self) -> int | None:
-        """Return the context selected for the current episode, if any."""
-        return self._current_context_index
-
     def drain_safety_truncations(self) -> SafetyTruncationBatch:
         buffer = self.safety_truncation_buffer
         if buffer is None:
@@ -202,26 +175,7 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         options: dict[str, Any] | None = None,
     ) -> tuple[NDArray[np.float32], dict[str, object]]:
         _ = super().reset(seed=seed, options=options)
-        sampler = self.context_sampler
-        context_index: int | None = None
-        if sampler is None:
-            self.state = self.stepper.reset()
-        else:
-            if seed is not None:
-                sampler.reseed(seed)
-            context = sampler.sample()
-            self.state = context.initial_state
-            context_index = context.context_index
-        self._current_context_index = context_index
-        if self.dspl_statistics_hub is not None:
-            assert self.curriculum_env_rank is not None
-            assert sampler is not None
-            assert context_index is not None
-            self.dspl_statistics_hub.begin_episode(
-                env_rank=self.curriculum_env_rank,
-                context_index=context_index,
-                distribution_version=sampler.version,
-            )
+        self.state = self.stepper.reset()
         self.episode_info = None
         self.outcome = EpisodeOutcome(terminated=False, truncated=False)
         self._comfort_tav = self._comfort_sum_sq_delta_acc = 0.0
@@ -248,13 +202,6 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
             terminated=bool(transition.terminated),
             truncated=bool(transition.truncated),
         )
-        if self.dspl_statistics_hub is not None:
-            assert self.curriculum_env_rank is not None
-            self.dspl_statistics_hub.record_transition(
-                self.curriculum_env_rank,
-                reward.total - reward.punctuality_shaping,
-                done=bool(transition.terminated or transition.truncated),
-            )
         if self.safety_truncation_buffer is not None:
             self.safety_truncation_buffer.record(
                 position_m=self.state.position_m,

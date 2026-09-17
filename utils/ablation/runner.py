@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,7 +49,9 @@ from .statistics import (
     smooth_episode_curve,
 )
 
-type ValueTransform = Literal["identity", "abs", "j_to_kj", "bool", "ratio_to_pct"]
+type ValueTransform = Literal[
+    "identity", "abs", "j_to_kj", "j_to_kwh", "bool", "ratio_to_pct"
+]
 type CurveSource = Literal["episode", "evaluation"]
 type AlignmentMode = Literal["exact_range", "exact_union", "indexed", "step_bins"]
 
@@ -221,6 +224,8 @@ def _transform(values: object, transform: ValueTransform) -> np.ndarray:
         return np.abs(array)
     if transform == "j_to_kj":
         return array / 1000.0
+    if transform == "j_to_kwh":
+        return array / 3_600_000.0
     if transform == "bool":
         return array.astype(np.float64)
     if transform == "ratio_to_pct":
@@ -228,8 +233,29 @@ def _transform(values: object, transform: ValueTransform) -> np.ndarray:
     return array
 
 
+def clean_ablation_run(run: AblationRun, output_root: str | os.PathLike[str]) -> None:
+    """Safely remove a run directory strictly located under output_root/runs."""
+    runs_root = (Path(output_root) / "runs").resolve()
+    target_dir = Path(run.training_spec.output_dir).absolute()
+    if target_dir == runs_root:
+        raise ValueError(
+            f"Run directory {target_dir} cannot be the runs root itself: {runs_root}"
+        )
+    if target_dir.parent.resolve() != runs_root:
+        raise ValueError(f"Run directory {target_dir} is not located under {runs_root}")
+    if target_dir.is_symlink():
+        target_dir.unlink()
+    elif target_dir.is_dir():
+        shutil.rmtree(target_dir)
+    elif target_dir.exists():
+        target_dir.unlink()
+
+
 class AblationDriver:
     """Own the common CLI, matrix, manifest, training and aggregation flow."""
+
+    def clean_run(self, run: AblationRun, output_root: str | os.PathLike[str]) -> None:
+        clean_ablation_run(run, output_root)
 
     def __init__(
         self,
@@ -516,6 +542,7 @@ class AblationDriver:
             evaluate_one=lambda _run, training_spec: self.evaluate_experiment(
                 training_spec
             ),
+            clean_one=lambda run: self.clean_run(run, args.output_root),
             validate_existing=lambda manifest: self.validate_manifest(manifest, args),
             resume=bool(getattr(args, "resume", False)),
             force_new=bool(getattr(args, "force_new", False)),
@@ -752,6 +779,7 @@ def execute_matrix(
     required_artifacts: Callable[[Any], bool],
     train_one: Callable[[Any], Any],
     evaluate_one: Callable[[Any, Any], Any],
+    clean_one: Callable[[Any], None] | None = None,
     validate_existing: Callable[[AblationManifest], None] | None = None,
     resume: bool,
     force_new: bool = False,
@@ -794,8 +822,12 @@ def execute_matrix(
                 print_run(run, "DRY")
         return 0
 
-    if force_new and existing_on_disk:
-        store.archive_existing()
+    if force_new:
+        if existing_on_disk:
+            store.archive_existing()
+        if clean_one is not None:
+            for run in runs:
+                clean_one(run)
 
     statuses: dict[str, ManifestStatusUpdate] = (
         status_map(existing) if existing is not None and resume else {}
@@ -816,6 +848,7 @@ def execute_matrix(
         previous = statuses.get(run_id)
         if (
             resume
+            and existing is not None
             and previous is not None
             and previous.status == "completed"
             and required_artifacts(run)
@@ -823,6 +856,9 @@ def execute_matrix(
             if print_run is not None:
                 print_run(run, "SKIP")
             continue
+
+        if resume and existing is not None and clean_one is not None:
+            clean_one(run)
 
         if print_run is not None:
             print_run(run, "RUN")

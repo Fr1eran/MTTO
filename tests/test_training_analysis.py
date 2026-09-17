@@ -16,7 +16,6 @@ from rl.experiment_utils import (
 from rl.reward_diagnostics import REWARD_DIAGNOSTICS_SCHEMA_VERSION, REWARD_NAMES
 from rl.training_analysis.analyze import (
     compute_best_eval_metrics,
-    compute_curriculum_distribution_metrics,
     compute_regular_training_metrics,
     compute_reward_component_analysis,
     compute_safety_truncation_position_metrics,
@@ -328,59 +327,6 @@ def test_trajectory_evaluation_metrics_records_required_trends():
     assert metrics["metrics"]["time_error_s"]["trend_slope_per_step"] < 0.0
     assert metrics["metrics"]["total_energy_j"]["final"] == 200.0
     assert metrics["metrics"]["comfort_rms"]["final"] == 1.0
-
-
-def test_curriculum_distribution_metrics_accepts_critic_signals():
-    unavailable = compute_curriculum_distribution_metrics({})
-    assert unavailable["available"] is False
-
-    series_map = {
-        "dspl/alpha": _make_series("dspl/alpha", [0.05, 0.04, 0.03]),
-        "dspl/converged": _make_series("dspl/converged", [0.0, 0.0, 1.0]),
-        "dspl/current_to_target_kl": _make_series(
-            "dspl/current_to_target_kl", [2.0, 1.0, 0.1]
-        ),
-    }
-    metrics = compute_curriculum_distribution_metrics(series_map)
-    assert metrics["available"] is True
-    assert metrics["diagnostics"]["converged"]["final"] == 1.0
-    assert metrics["diagnostics"]["alpha"]["final"] == pytest.approx(0.03)
-    assert metrics["diagnostics"]["current_to_target_kl"]["final"] == pytest.approx(0.1)
-
-
-def test_markdown_report_renders_empirical_kl_with_numeric_values(
-    tmp_path: Path,
-) -> None:
-    series_map = {
-        "dspl/current_to_target_kl": _make_series(
-            "dspl/current_to_target_kl", [2.0, 1.0, 0.5]
-        ),
-        "dspl/empirical_to_target_kl": _make_series(
-            "dspl/empirical_to_target_kl", [1.8, 0.9, 0.4]
-        ),
-        "dspl/update_kl": _make_series("dspl/update_kl", [0.05, 0.02, 0.01]),
-    }
-    curriculum = compute_curriculum_distribution_metrics(series_map)
-    payload = build_analysis_payload(
-        run_name="empirical_kl_test",
-        run_directory="dummy",
-        available_tags=list(series_map.keys()),
-        regular_metrics={},
-        curriculum_distribution_metrics=curriculum,
-        config={"export_csv": False, "include_snapshots": False},
-    )
-    output_paths = write_analysis_outputs(
-        payload, output_root=tmp_path, run_name="empirical_kl_test"
-    )
-    report = Path(output_paths["markdown_report"]).read_text(encoding="utf-8")
-
-    assert "- empirical_to_target_kl: final=0.4, trend_slope_per_step=-0.7" in report
-    assert "empirical_to_target_kl: final=N/A" not in report
-    assert report.count("- empirical_to_target_kl:") == 1
-    idx_current = report.index("- current_to_target_kl:")
-    idx_empirical = report.index("- empirical_to_target_kl:")
-    idx_update = report.index("- update_kl:")
-    assert idx_current < idx_empirical < idx_update
 
 
 def test_safety_position_metrics_identifies_highest_truncation_count_bin(
@@ -915,13 +861,6 @@ def test_train_rl_cli_rejects_removed_fixed_reverse_profile() -> None:
         _ = parser.parse_args(["--curriculum-profile", "fixed_reverse"])
 
 
-def test_train_rl_curriculum_requires_existing_reference_directory() -> None:
-    parser = build_train_rl_arg_parser()
-    args = parser.parse_args(["--curriculum-profile", "dspl"])
-    with pytest.raises(ValueError, match="reference_curve_dir is required"):
-        _ = resolve_training_run_spec(args)
-
-
 def test_train_rl_cli_accepts_dry_run() -> None:
     parser = build_train_rl_arg_parser()
     args = parser.parse_args(
@@ -959,8 +898,6 @@ def test_resolve_training_run_spec_plans_paths_and_switches() -> None:
             "monitor_best",
             "--reward-preset",
             "basic_safety",
-            "--curriculum-profile",
-            "none",
             "--experiment-tag",
             "batch_a",
             "--dry-run",
@@ -993,8 +930,6 @@ def test_training_episode_budget_rounds_up_to_a_whole_vector_batch() -> None:
             "7001",
             "--num-envs",
             "8",
-            "--curriculum-profile",
-            "none",
             "--dry-run",
         ]
     )
@@ -1012,9 +947,7 @@ def test_training_episode_budget_rounds_up_to_a_whole_vector_batch() -> None:
 
 def test_training_defaults_to_a_completed_episode_budget() -> None:
     spec = resolve_training_run_spec(
-        build_train_rl_arg_parser().parse_args(
-            ["--curriculum-profile", "none", "--dry-run"]
-        )
+        build_train_rl_arg_parser().parse_args(["--dry-run"])
     )
 
     assert spec.training_episodes == 5000
@@ -1023,9 +956,7 @@ def test_training_defaults_to_a_completed_episode_budget() -> None:
 
 def test_tune_mode_enables_safety_truncation_histogram() -> None:
     parser = build_train_rl_arg_parser()
-    args = parser.parse_args(
-        ["--run-mode", "tune", "--curriculum-profile", "none", "--dry-run"]
-    )
+    args = parser.parse_args(["--run-mode", "tune", "--dry-run"])
 
     spec = resolve_training_run_spec(args)
 
@@ -1034,9 +965,7 @@ def test_tune_mode_enables_safety_truncation_histogram() -> None:
 
 def test_multi_environment_training_omits_backend_metadata() -> None:
     parser = build_train_rl_arg_parser()
-    args = parser.parse_args(
-        ["--num-envs", "2", "--curriculum-profile", "none", "--dry-run"]
-    )
+    args = parser.parse_args(["--num-envs", "2", "--dry-run"])
 
     spec = resolve_training_run_spec(args)
 

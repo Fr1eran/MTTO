@@ -37,6 +37,7 @@ from .runner import (
     VariantPayloads,
     VariantSpec,
     VariantValues,
+    clean_ablation_run,
     execute_matrix,
 )
 from .statistics import (
@@ -53,6 +54,7 @@ __all__ = [
     "AblationSpec",
     "ArgRef",
     "ArgumentSpec",
+    "clean_ablation_run",
     "artifact_paths",
     "ArtifactLayout",
     "CurveAggregate",

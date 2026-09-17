@@ -20,8 +20,21 @@ SCI_LINE_WIDTH = 1.6
 SCI_GRID_COLOR = "#D9D9D9"
 SCI_GRID_LINESTYLE = "--"
 SCI_GRID_LINE_WIDTH = 0.6
-SCI_GRID_ALPHA = 0.8
+SCI_GRID_ALPHA = 1.0
 SCI_BAND_ALPHA = 0.1
+
+
+def sci_tint_color(color: str, factor: float = 0.2) -> tuple[float, float, float]:
+    """Blend an RGB color with white to produce an opaque pastel tint.
+
+    Replaces transparent fill bands to prevent PDF transparency objects (/CA, /ca).
+    """
+    import matplotlib.colors as mcolors
+
+    rgb = mcolors.to_rgb(color)
+    return tuple((1.0 - factor) + factor * c for c in rgb)
+
+
 SCI_SERIES_LINE_STYLES: tuple[dict[str, str], ...] = (
     {"linestyle": "-", "marker": "o"},
     {"linestyle": "--", "marker": "s"},
@@ -420,7 +433,7 @@ def render_trajectory_on_axes(
     safeguard: Any = None,
     render_endpoints: bool = True,
     speed_scale: float = 3.6,
-    alpha: float = 0.85,
+    alpha: float = 1.0,
     linewidth: float = 1.5,
     xlim: tuple[float, float] | None = (0.0, 30000.0),
     ylim: tuple[float, float] | None = (0.0, 500.0),
@@ -495,7 +508,7 @@ def render_trajectory_on_axes(
                     marker="o",
                     color="green",
                     s=40,
-                    alpha=0.85,
+                    alpha=1.0,
                     label="start",
                     zorder=5,
                     edgecolors="black",
@@ -508,7 +521,7 @@ def render_trajectory_on_axes(
                     marker="o",
                     color="red",
                     s=40,
-                    alpha=0.85,
+                    alpha=1.0,
                     label="end",
                     zorder=5,
                     edgecolors="black",

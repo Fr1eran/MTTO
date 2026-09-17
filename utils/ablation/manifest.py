@@ -32,7 +32,7 @@ class ManifestStore:
         *,
         matrix_id: str,
         filename: str = "manifest.json",
-        schema_version: int = 1,
+        schema_version: int = ABLATION_MANIFEST_SCHEMA_VERSION,
     ) -> None:
         self.output_root = Path(output_root)
         self.matrix_id = matrix_id

@@ -27,7 +27,6 @@ from .evaluation import (
     is_successful_evaluation,
 )
 from .training import (
-    CurriculumMetadata,
     RewardConfigSnapshot,
     RunMetadata,
     TrainingBudget,
@@ -35,7 +34,6 @@ from .training import (
 
 __all__ = [
     "ContractError",
-    "CurriculumMetadata",
     "ABLATION_MANIFEST_ARTIFACT_TYPE",
     "ABLATION_MANIFEST_SCHEMA_VERSION",
     "AblationManifest",

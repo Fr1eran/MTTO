@@ -49,7 +49,7 @@ _TRAJECTORY_COLORS = (VIS_DP_BLACK, VIS_PROPOSED_ORANGE, VIS_ACTUAL_PURPLE)
 _TRAJECTORY_LINESTYLES = ("-", "--", "-.")
 _TRAJECTORY_LEGEND_LABELS = (
     "DP optimization",
-    "Proposed RL",
+    "Proposed Method",
     "Actual operation",
 )
 
@@ -67,8 +67,12 @@ class SpeedProfile:
 class ProfileMetrics:
     time_error_s: float
     stop_error_m: float
-    total_energy_kj: float
-    comfort_tav: float
+    total_energy_kwh: float
+    comfort_tav: float | None = None
+
+    @property
+    def total_energy_kj(self) -> float:
+        return self.total_energy_kwh * 3600.0
 
 
 def _compute_segment_midpoints(pos_arr: np.ndarray | list[float]) -> np.ndarray:
@@ -220,36 +224,45 @@ def compute_profile_metrics(
         track=track,
         ecc=ecc,
     )
-    comfort_metrics = compute_comfort_metrics_from_trajectory(
-        pos_arr=profile.position_m,
-        speed_arr=profile.speed_mps,
-        max_acc_change=max_acc_change,
-    )
+    total_energy_kwh = float(cumulative_energy_kj[-1]) / 3600.0
+    if profile.label == "Actual operation":
+        comfort_tav = None
+    else:
+        comfort_metrics = compute_comfort_metrics_from_trajectory(
+            pos_arr=profile.position_m,
+            speed_arr=profile.speed_mps,
+            max_acc_change=max_acc_change,
+        )
+        comfort_tav = float(comfort_metrics["comfort_tav"])
+
     total_time_s = float(profile.time_s[-1] - profile.time_s[0])
     return ProfileMetrics(
         time_error_s=abs(total_time_s - target_schedule_time_s),
         stop_error_m=abs(float(profile.position_m[-1]) - profile.target_position_m),
-        total_energy_kj=float(cumulative_energy_kj[-1]),
-        comfort_tav=float(comfort_metrics["comfort_tav"]),
+        total_energy_kwh=total_energy_kwh,
+        comfort_tav=comfort_tav,
     )
 
 
 def format_comparison_table(
     profile_metrics: list[tuple[str, ProfileMetrics]],
 ) -> str:
-    rows = [
-        ("Time error (s)", "time_error_s", ".3f"),
-        ("Stop error (m)", "stop_error_m", ".3f"),
-        ("Total energy (kJ)", "total_energy_kj", ".3f"),
-        ("comfort_tav (m/s^2)", "comfort_tav", ".6f"),
+    def _fmt_tav(m: ProfileMetrics) -> str:
+        return f"{m.comfort_tav:.6f}" if m.comfort_tav is not None else "—"
+
+    rows: list[tuple[str, Any]] = [
+        ("Time error (s)", lambda m: f"{m.time_error_s:.3f}"),
+        ("Stop error (m)", lambda m: f"{m.stop_error_m:.3f}"),
+        ("Total energy (kWh)", lambda m: f"{m.total_energy_kwh:.3f}"),
+        ("TAV (m/s²)", _fmt_tav),
     ]
     headers = ["Metric", *(label for label, _ in profile_metrics)]
     values = [
         [
             title,
-            *(format(getattr(metrics, attr), spec) for _, metrics in profile_metrics),
+            *(formatter(metrics) for _, metrics in profile_metrics),
         ]
-        for title, attr, spec in rows
+        for title, formatter in rows
     ]
     widths = [
         max(len(headers[column]), *(len(row[column]) for row in values))
@@ -269,7 +282,13 @@ def format_comparison_table(
         separator,
         *(render_row(row) for row in values),
     ]
-    return "\n".join(rendered_rows)
+    note = (
+        "\n*注：实际运行加速度计算口径不同"
+        "（由离散运营数据差分估计），与 DP/RL 不可直接比较。"
+        "TAV（累计加速度变化量）公式为 "
+        r"$\sum_t |a_t - a_{t-1}|$，单位为 $\mathrm{m/s^2}$。*"
+    )
+    return "\n".join(rendered_rows) + note
 
 
 def _finalize_comparison_figure(
@@ -347,7 +366,7 @@ def _build_cli_parser() -> argparse.ArgumentParser:
 
 
 def _build_rl_curve_label() -> str:
-    return "RL policy trajectory"
+    return "Proposed Method speed curve"
 
 
 def main() -> None:
@@ -385,7 +404,7 @@ def main() -> None:
             rl_speed, "RL speed", min_length=2, check_finite=True
         )
         rl_profile = SpeedProfile(
-            label="Proposed RL",
+            label="Proposed Method",
             position_m=rl_position_m,
             speed_mps=rl_speed_mps,
             time_s=recover_time_axis_from_trajectory(
@@ -499,7 +518,7 @@ def main() -> None:
             linewidth=1.5,
             label=f"{profile.label} acceleration",
         )
-    ax_acc.axhline(0.0, color="black", linewidth=0.8, linestyle="--", alpha=0.5)
+    ax_acc.axhline(0.0, color="#888888", linewidth=0.8, linestyle="--")
     ax_acc.set_xlabel("")
     ax_acc.set_ylabel(r"Acceleration ($\mathrm{m/s^2}$)")
     ax_acc.text(
@@ -524,14 +543,14 @@ def main() -> None:
         )
         ax_energy.plot(
             profile.position_m,
-            cumulative_energy / 1_000_000.0,
+            cumulative_energy / 3600.0,
             color=color,
             linestyle=linestyle,
             linewidth=1.5,
             label=f"{profile.label} cumulative energy",
         )
     ax_energy.set_xlabel("Position (m)")
-    ax_energy.set_ylabel("Cumulative energy (GJ)")
+    ax_energy.set_ylabel("Cumulative energy (kWh)")
     ax_energy.text(
         0.02,
         0.92,
@@ -546,6 +565,14 @@ def main() -> None:
     if args.output_dir is not None:
         saved_path = save_sci_figure(fig, args.output_dir / FIGURE_FILENAME)
         print(f"Saved comparison figure to: {saved_path}")
+        table_path = args.output_dir / "dp_rl_actual_comparison_table.md"
+        table_path.write_text(
+            "# Trajectory Comparison Table\n\n"
+            + format_comparison_table(metrics_by_label)
+            + "\n",
+            encoding="utf-8",
+        )
+        print(f"Saved comparison table to: {table_path}")
 
     if not args.no_show:
         plt.show()

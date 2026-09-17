@@ -9,7 +9,7 @@ import scripts.run_method_ablation as method_ablation
 from contracts.ablation import AblationManifest
 from contracts.evaluation import EvaluationHistory, EvaluationMetrics
 from rl.reward_diagnostics import REWARD_DIAGNOSTICS_SCHEMA_VERSION, REWARD_NAMES
-from utils.io_utils import load_evaluation_metrics
+from utils.ablation import ManifestStore, artifact_paths
 
 
 def _write_episodes(path: Path, violation_codes: list[int] | None = None) -> None:
@@ -53,6 +53,7 @@ def _write_evaluations(path: Path) -> None:
         episode_steps=np.asarray([10, 9], dtype=np.int64),
         success=np.asarray([False, True], dtype=np.bool_),
         safe=np.asarray([False, True], dtype=np.bool_),
+        feasible=np.asarray([False, True], dtype=np.bool_),
         stop_error_m=np.asarray([4.0, 1.0], dtype=np.float64),
         time_error_s=np.asarray([-12.0, -2.0], dtype=np.float64),
         total_energy_j=np.asarray([10_000.0, 9_000.0], dtype=np.float64),
@@ -66,9 +67,19 @@ def _write_evaluations(path: Path) -> None:
     np.savez(path, **history.to_npz_mapping())
 
 
-def _write_fixed_evaluations(path: Path, *, failed_index: int | None = None) -> None:
+def _write_fixed_evaluations(
+    path: Path,
+    *,
+    failed_index: int | None = None,
+    evaluation_interval: int = 12,
+) -> None:
     steps = (
-        np.arange(12, method_ablation.METHOD_TRAINING_ROLLOUTS, 12, dtype=np.int64)
+        np.arange(
+            evaluation_interval,
+            method_ablation.METHOD_TRAINING_ROLLOUTS,
+            evaluation_interval,
+            dtype=np.int64,
+        )
         * 8192
     )
     success = np.ones(steps.size, dtype=np.bool_)
@@ -77,12 +88,16 @@ def _write_fixed_evaluations(path: Path, *, failed_index: int | None = None) -> 
     history = EvaluationHistory(
         training_steps=steps,
         rollout_indices=np.arange(
-            12, method_ablation.METHOD_TRAINING_ROLLOUTS, 12, dtype=np.int64
+            evaluation_interval,
+            method_ablation.METHOD_TRAINING_ROLLOUTS,
+            evaluation_interval,
+            dtype=np.int64,
         ),
         total_reward=np.arange(steps.size, dtype=np.float64),
         episode_steps=np.full(steps.size, 10, dtype=np.int64),
         success=success,
         safe=success.copy(),
+        feasible=success.copy(),
         stop_error_m=np.arange(1, steps.size + 1, dtype=np.float64),
         time_error_s=-np.arange(1, steps.size + 1, dtype=np.float64),
         total_energy_j=np.full(steps.size, 9_000.0),
@@ -131,8 +146,10 @@ def _write_metrics(path: Path) -> None:
     path.write_text(json.dumps(metrics.to_mapping()), encoding="utf-8")
 
 
-def _entry(tmp_path: Path, method: str, seed: int = 11) -> dict[str, object]:
-    final_dir = tmp_path / f"{method}_{seed}" / "final"
+def _entry(
+    tmp_path: Path, method: str, seed: int = 11, repeat_index: int = 0
+) -> dict[str, object]:
+    final_dir = tmp_path / f"{method}_{seed}_r{repeat_index + 1:02d}" / "final"
     episodes = final_dir / "episodes.npz"
     evaluations = final_dir / "evaluations.npz"
     metrics = final_dir / "metrics.json"
@@ -144,13 +161,26 @@ def _entry(tmp_path: Path, method: str, seed: int = 11) -> dict[str, object]:
     _write_metrics(best_metrics)
     (best_dir / "policy.zip").write_bytes(b"policy")
     (best_dir / "trajectory.npz").write_bytes(b"trajectory")
+    (final_dir / "policy.zip").write_bytes(b"policy")
+    (final_dir / "trajectory.npz").write_bytes(b"trajectory")
+    budget = {
+        "mode": "environment_steps",
+        "target_reached": True,
+        "actual_training_timesteps": 3_276_800,
+        "derived_total_timesteps": 3_276_800,
+        "actual_training_rollouts": 400,
+        "training_rollouts": 400,
+    }
+    metadata = {"training_budget": budget}
+    (best_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    (final_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
     return {
-        "run_id": f"method__{method}__seed{seed:04d}__r01",
+        "run_id": f"method__{method}__seed{seed:04d}__r{repeat_index + 1:02d}",
         "variant_id": method,
         "variant": {"name": method},
-        "repeat_index": 0,
+        "repeat_index": repeat_index,
         "seed": seed,
-        "experiment_tag": f"{method}__r01",
+        "experiment_tag": f"{method}__r{repeat_index + 1:02d}",
         "artifacts": {
             "policy_final": str(final_dir / "policy.zip"),
             "policy_best": str(best_dir / "policy.zip"),
@@ -160,10 +190,12 @@ def _entry(tmp_path: Path, method: str, seed: int = 11) -> dict[str, object]:
             "evaluations": str(evaluations),
             "metrics_final": str(metrics),
             "metrics_best": str(best_metrics),
+            "trajectory_final": str(final_dir / "trajectory.npz"),
             "trajectory_best": str(best_dir / "trajectory.npz"),
             "safety_diagnostics": str(final_dir / "safety_diagnostics.npz"),
         },
         "status": "completed",
+        "training_budget": budget,
     }
 
 
@@ -174,7 +206,6 @@ def _manifest(entries: list[dict[str, object]]) -> dict[str, object]:
         "matrix_config": {
             "variants": [item.__dict__ for item in method_ablation.METHODS],
             "seeds": list(method_ablation.DEFAULT_SEEDS),
-            "reference_curve_dir": ".",
         },
         "training_signature": {},
         "runs": entries,
@@ -182,9 +213,7 @@ def _manifest(entries: list[dict[str, object]]) -> dict[str, object]:
 
 
 def test_matrix_maps_methods_to_expected_training_modes() -> None:
-    args = method_ablation.build_arg_parser().parse_args(
-        ["train", "--reference-curve-dir", "."]
-    )
+    args = method_ablation.build_arg_parser().parse_args(["train"])
     runs = method_ablation.resolve_run_matrix(args)
 
     assert len(runs) == len(method_ablation.METHODS) * len(
@@ -205,20 +234,19 @@ def test_matrix_maps_methods_to_expected_training_modes() -> None:
     assert all(run.spec.num_envs == 8 for run in runs)
     first_by_method = {run.method.name: run for run in runs if run.repeat_index == 0}
     assert first_by_method["ppo"].train_args.reward_preset == "basic"
-    assert first_by_method["ppo"].train_args.curriculum_profile == "none"
+    assert first_by_method["ppo"].method.label == "PPO"
+    assert first_by_method["ppo_safety"].train_args.reward_preset == "basic_safety"
+    assert first_by_method["ppo_safety"].method.label == "PPO+Safety"
     assert (
-        first_by_method["ppo_pprs"].train_args.reward_preset
+        first_by_method["ppo_punctuality"].train_args.reward_preset
+        == "basic_punctuality"
+    )
+    assert first_by_method["ppo_punctuality"].method.label == "PPO+Punctuality"
+    assert (
+        first_by_method["ppo_pirs"].train_args.reward_preset
         == "basic_safety_punctuality"
     )
-    assert first_by_method["ppo_pprs"].method.label == "PPO+PPRS"
-    assert first_by_method["ppo_dspl"].train_args.curriculum_profile == "dspl"
-    assert first_by_method["ppo_dspl"].train_args.reference_curve_dir == "."
-    assert (
-        first_by_method["ppo_pprs_dspl"].train_args.reward_preset
-        == "basic_safety_punctuality"
-    )
-    assert first_by_method["ppo_pprs_dspl"].train_args.curriculum_profile == "dspl"
-    assert first_by_method["ppo_pprs_dspl"].method.label == "PPO+PPRS+DSPL"
+    assert first_by_method["ppo_pirs"].method.label == "PPO+PIRS"
 
 
 @pytest.mark.parametrize("vec_env_type", ("dummy", "subproc"))
@@ -228,8 +256,6 @@ def test_train_cli_rejects_vec_env_type(vec_env_type: str) -> None:
         _ = parser.parse_args(
             [
                 "train",
-                "--reference-curve-dir",
-                ".",
                 "--vec-env-type",
                 vec_env_type,
             ]
@@ -241,8 +267,6 @@ def test_train_cli_rejects_removed_step_evaluation_interval() -> None:
         _ = method_ablation.build_arg_parser().parse_args(
             [
                 "train",
-                "--reference-curve-dir",
-                ".",
                 "--eval-interval-steps",
                 "100000",
             ]
@@ -251,7 +275,13 @@ def test_train_cli_rejects_removed_step_evaluation_interval() -> None:
 
 @pytest.mark.parametrize(
     "option",
-    ["--dpi", "--output-file", "--safety-output-file", "--success-output-file"],
+    [
+        "--dpi",
+        "--output-file",
+        "--safety-output-file",
+        "--success-output-file",
+        "--selection-output-file",
+    ],
 )
 def test_show_cli_rejects_removed_figure_options(option: str) -> None:
     with pytest.raises(SystemExit):
@@ -267,17 +297,13 @@ def test_show_cli_rejects_removed_figure_options(option: str) -> None:
 )
 def test_train_cli_rejects_fixed_protocol_overrides(flag: str, value: str) -> None:
     with pytest.raises(SystemExit):
-        _ = method_ablation.build_arg_parser().parse_args(
-            ["train", "--reference-curve-dir", ".", flag, value]
-        )
+        _ = method_ablation.build_arg_parser().parse_args(["train", flag, value])
 
 
 def test_train_cli_accepts_parallelism_and_evaluation_interval() -> None:
     args = method_ablation.build_arg_parser().parse_args(
         [
             "train",
-            "--reference-curve-dir",
-            ".",
             "--num-envs",
             "4",
             "--evaluation-interval-rollouts",
@@ -288,10 +314,17 @@ def test_train_cli_accepts_parallelism_and_evaluation_interval() -> None:
     assert all(run.spec.num_envs == 4 for run in runs)
     assert all(run.spec.evaluation_interval_rollouts == 10 for run in runs)
 
+    for invalid_interval in (0, 400):
+        invalid_args = method_ablation.build_arg_parser().parse_args(
+            ["train", "--evaluation-interval-rollouts", str(invalid_interval)]
+        )
+        with pytest.raises(SystemExit, match="must be in"):
+            method_ablation.run_train(invalid_args)
+
 
 def test_manifest_round_trip_and_compatibility(tmp_path: Path) -> None:
     args = method_ablation.build_arg_parser().parse_args(
-        ["train", "--reference-curve-dir", ".", "--output-root", str(tmp_path)]
+        ["train", "--output-root", str(tmp_path)]
     )
     runs = method_ablation.resolve_run_matrix(args)
     payload = method_ablation.build_manifest(
@@ -306,18 +339,14 @@ def test_manifest_round_trip_and_compatibility(tmp_path: Path) -> None:
 
     assert loaded.output_root == str(tmp_path)
     assert payload.output_root == "."
-    assert loaded["schema_version"] == 1
+    assert loaded["schema_version"] == 2
     assert loaded["matrix_id"] == "method"
-    assert loaded["matrix_config"]["protocol_version"] == 9
+    assert loaded["matrix_config"]["protocol_version"] == 11
     variants = loaded["matrix_config"]["variants"]
-    assert variants[1]["label"] == "PPO+PPRS"
-    assert variants[3]["label"] == "PPO+PPRS+DSPL"
-    assert (
-        loaded["training_signature"]["dspl_protocol"]["context_value_estimator"]
-        == "importance_weighted_samples"
-    )
-    assert loaded["training_signature"]["dspl_protocol"]["target_kl_stop"] == 0.02
-    assert loaded["training_signature"]["dspl_protocol"]["target_uniform_mass"] == 0.1
+    assert variants[0]["label"] == "PPO"
+    assert variants[1]["label"] == "PPO+Safety"
+    assert variants[2]["label"] == "PPO+Punctuality"
+    assert variants[3]["label"] == "PPO+PIRS"
     assert loaded["training_signature"]["budget_mode"] == "environment_steps"
     assert loaded["training_signature"]["training_rollouts"] == 400
     assert loaded["training_signature"]["training_steps"] == 3_276_800
@@ -379,73 +408,189 @@ def test_periodic_evaluation_aggregation_keeps_failures_and_aligns_axes(
     figure = method_ablation._plot_learning_curves(aggregates)
     assert figure is not None
     assert all(
-        axis.get_xlim() == pytest.approx((0.0, 3_276_800.0)) for axis in figure.axes
+        axis.get_xlim() == pytest.approx((0.0, 3_276_800.0)) for axis in figure.axes[:4]
     )
-    assert [line.get_linestyle() for line in figure.axes[0].lines] == [
+    assert [line.get_linestyle() for line in figure.axes[0].lines[:4]] == [
         "-",
         "--",
         ":",
         "-.",
     ]
-    assert [line.get_marker() for line in figure.axes[0].lines] == ["o", "s", "^", "D"]
-    assert [line.get_color() for line in figure.axes[0].lines] == [
+    assert [line.get_marker() for line in figure.axes[0].lines[:4]] == [
+        "o",
+        "s",
+        "^",
+        "D",
+    ]
+    assert [line.get_color() for line in figure.axes[0].lines[:4]] == [
         "#7F8C8D",
         "#0072B2",
         "#CC79A7",
         "#ED7D31",
     ]
+    assert len(figure.axes[0].lines) == 5
     assert len(figure.axes[1].lines) == 5
     figure.clear()
 
 
-def test_policy_selection_prefers_lowest_energy_strictly_feasible_policy(
+@pytest.mark.parametrize("evaluation_interval", [12, 10])
+def test_run_show_does_not_generate_selection_file(
     tmp_path: Path,
+    evaluation_interval: int,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    metrics_path = tmp_path / "metrics.json"
-    _write_metrics(metrics_path)
-    base = load_evaluation_metrics(metrics_path)
-    high_energy = replace(
-        base,
-        stop_error_m=0.1,
-        time_error_s=-2.0,
-        total_energy_j=10_000.0,
-        min_safety_margin_mps=0.1,
-        selection_comparison_key=(1.0, 1.0, 0.0, 1.0, 0.0, -10_000.0),
+    args = method_ablation.build_arg_parser().parse_args(
+        [
+            "train",
+            "--output-root",
+            str(tmp_path),
+            "--evaluation-interval-rollouts",
+            str(evaluation_interval),
+        ]
     )
-    low_energy = replace(
-        high_energy,
-        total_energy_j=9_000.0,
-        selection_comparison_key=(1.0, 1.0, 0.0, 1.0, 0.0, -9_000.0),
-    )
+    runs = method_ablation.resolve_run_matrix(args)
+    base_manifest = method_ablation.build_manifest(args, runs)
 
-    assert low_energy.selection_comparison_key > high_energy.selection_comparison_key
+    entries = []
+    for run in runs:
+        budget = replace(
+            run.training_spec.run_metadata.training_budget,  # type: ignore[arg-type]
+            target_reached=True,
+            actual_training_timesteps=run.training_spec.run_metadata.training_budget.derived_total_timesteps,  # type: ignore[union-attr]
+            actual_training_rollouts=run.training_spec.run_metadata.training_budget.training_rollouts,  # type: ignore[union-attr]
+        )
+        metadata = run.training_spec.run_metadata.with_updates(training_budget=budget)
+        metadata_json = json.dumps(metadata.to_mapping())
 
+        for art_path in (
+            run.artifacts.policy_final,
+            run.artifacts.policy_best,
+            run.artifacts.trajectory_final,
+            run.artifacts.trajectory_best,
+        ):
+            if art_path:
+                art_path.parent.mkdir(parents=True, exist_ok=True)
+                art_path.write_bytes(b"dummy")
 
-def test_build_policy_selection_populates_rank_key_from_metrics(
-    tmp_path: Path,
-) -> None:
-    entries = [
-        _entry(tmp_path, "ppo_pprs_dspl", seed)
-        for seed in method_ablation.DEFAULT_SEEDS
-    ]
+        run.artifacts.metadata.parent.mkdir(parents=True, exist_ok=True)
+        run.artifacts.metadata.write_text(metadata_json, encoding="utf-8")
+        if run.artifacts.metadata_best:
+            run.artifacts.metadata_best.parent.mkdir(parents=True, exist_ok=True)
+            run.artifacts.metadata_best.write_text(metadata_json, encoding="utf-8")
+
+        _write_episodes(run.artifacts.episodes)
+        _write_fixed_evaluations(
+            run.artifacts.evaluations, evaluation_interval=evaluation_interval
+        )
+        _write_metrics(run.artifacts.metrics_final)
+        if run.artifacts.metrics_best:
+            _write_metrics(run.artifacts.metrics_best)
+
+        entries.append(
+            {
+                "run_id": run.run_id,
+                "variant_id": run.variant.id,
+                "variant": dict(run.variant.manifest),
+                "repeat_index": run.repeat_index,
+                "seed": run.seed,
+                "experiment_tag": run.experiment_tag,
+                "artifacts": artifact_paths(run.artifacts, relative_to=tmp_path),
+                "status": "completed",
+                "training_budget": budget,
+            }
+        )
+
+    manifest_payload = base_manifest.to_mapping()
+    manifest_payload["runs"] = entries
     manifest = AblationManifest.from_mapping(
-        {"artifact_type": AblationManifest.ARTIFACT_TYPE, **_manifest(entries)}
+        {"artifact_type": AblationManifest.ARTIFACT_TYPE, **manifest_payload}
     )
-    selection = method_ablation.build_policy_selection(manifest)
-    assert selection["artifact_type"] == "paper_policy_selection"
-    candidates = selection["candidates"]
-    assert len(candidates) == len(method_ablation.DEFAULT_SEEDS)
-    for c in candidates:
-        assert c["rank_key"] == list((1.0, -9_000.0, 0.0, 0.0, 0.0, 0.0, 0.0))
-        assert c["rank_key"][1] == pytest.approx(-9_000.0)
-    assert selection["selected"]["rank_key"] == list(
-        (1.0, -9_000.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    store = ManifestStore(
+        tmp_path,
+        matrix_id="method",
+        filename=method_ablation.METHOD_ABLATION_MANIFEST_FILENAME,
     )
+    store.save_atomic(manifest)
+
+    fig_dir = tmp_path / "dry_run_figures"
+    table_dir = tmp_path / "dry_run_tables"
+    summary_file = tmp_path / "dry_run_summary" / "summary.json"
+
+    dry_run_result = method_ablation.main(
+        [
+            "show",
+            "--output-root",
+            str(tmp_path),
+            "--figure-output-dir",
+            str(fig_dir),
+            "--table-output-dir",
+            str(table_dir),
+            "--summary-output-file",
+            str(summary_file),
+            "--dry-run",
+            "--no-show",
+        ]
+    )
+    assert dry_run_result == 0
+    expected_points = len(range(evaluation_interval, 400, evaluation_interval))
+    assert f"{expected_points} evaluation points" in capsys.readouterr().out
+    assert not fig_dir.exists()
+    assert not table_dir.exists()
+    assert not summary_file.parent.exists()
+
+    result = method_ablation.main(
+        [
+            "show",
+            "--output-root",
+            str(tmp_path),
+            "--table-output-dir",
+            str(table_dir),
+            "--summary-output-file",
+            str(summary_file),
+            "--no-show",
+        ]
+    )
+    assert result == 0
+    assert not (tmp_path / "selected_policy.json").exists()
+    assert list(tmp_path.glob("**/selected_policy*.json")) == []
+    assert table_dir.is_dir()
+    perf_table = (table_dir / "method_performance_table.md").read_text(encoding="utf-8")
+    assert "严格可行率" in perf_table
+    assert "TAV (m/s²)" in perf_table
+    assert "累计加速度变化量" in perf_table
+    assert summary_file.is_file()
+    summary_data = json.loads(summary_file.read_text(encoding="utf-8"))
+    assert "feasible_summary" in summary_data
+
+
+def test_plot_method_training_curves_includes_late_stage_inset() -> None:
+    steps = np.arange(12, 400, 12) * method_ablation.DEFAULT_ROLLOUT_STEPS_PER_UPDATE
+    dummy_data = {
+        m.id: {
+            "speed_violation_rate_means": np.zeros(len(steps)),
+            "speed_violation_rate_stds": np.zeros(len(steps)),
+            "arrival_ratio_means": np.ones(len(steps)),
+            "arrival_ratio_stds": np.zeros(len(steps)),
+        }
+        for m in method_ablation.METHODS
+    }
+    fig = method_ablation._plot_method_training_curves(dummy_data, steps)
+    assert fig is not None
+    assert len(fig.axes[0].child_axes) == 1
+    inset = fig.axes[0].child_axes[0]
+    assert inset.get_xlim() == pytest.approx(
+        (
+            200 * method_ablation.DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
+            396 * method_ablation.DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
+        )
+    )
+    assert inset.get_ylim() == pytest.approx((0.0, 5.0))
+    method_ablation.plt.close(fig)
 
 
 def test_analysis_rejects_old_method_protocol(tmp_path: Path) -> None:
     args = method_ablation.build_arg_parser().parse_args(
-        ["train", "--reference-curve-dir", ".", "--output-root", str(tmp_path)]
+        ["train", "--output-root", str(tmp_path)]
     )
     manifest = method_ablation.build_manifest(
         args, method_ablation.resolve_run_matrix(args)

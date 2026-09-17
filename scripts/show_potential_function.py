@@ -42,6 +42,7 @@ SAFETY_POTENTIAL_CMAP = LinearSegmentedColormap.from_list(
         (1.00, "#FFFDF9"),
     ],
 )
+SAFETY_POTENTIAL_CMAP.set_bad(color="white", alpha=1.0)
 PUNCTUALITY_POTENTIAL_CMAP = LinearSegmentedColormap.from_list(
     "mtto_punctuality_penalty",
     [
@@ -53,6 +54,7 @@ PUNCTUALITY_POTENTIAL_CMAP = LinearSegmentedColormap.from_list(
         (1.00, "#FFFFFF"),
     ],
 )
+PUNCTUALITY_POTENTIAL_CMAP.set_bad(color="white", alpha=1.0)
 
 
 @dataclass(frozen=True)
@@ -82,44 +84,36 @@ class _PunctualityPotentialField:
     potential: np.ndarray
 
 
-def _smooth_softplus_risk(
-    z: NDArray[np.floating] | float,
-    alpha: float,
+def _potential_safety_speed(
+    speed: NDArray[np.floating] | float,
+    min_speed: NDArray[np.floating] | float,
+    max_speed: NDArray[np.floating] | float,
 ) -> NDArray[np.float64] | float:
-    x = alpha * z
-    return np.where(
-        x > 20.0,
-        z,
-        np.log1p(np.exp(np.minimum(x, 20.0))) / alpha,
+    scale = 0.5
+    steepness = 8.0
+    span = np.maximum(max_speed - min_speed, 1.0)
+
+    upper_exponent = steepness * (max_speed - speed) / span
+    upper_tail = np.exp(-np.abs(upper_exponent))
+    upper_risk = np.where(
+        upper_exponent >= 0.0,
+        2.0 * upper_tail / (1.0 + upper_tail),
+        2.0 / (1.0 + upper_tail),
     )
 
-
-def _potential_safety_speed(
-    speed: NDArray[np.floating],
-    min_speed: NDArray[np.floating],
-    max_speed: NDArray[np.floating],
-) -> NDArray[np.float64]:
-    K_Safety = 1.0
-    speed_band = max_speed - min_speed
-    safety_buffer = np.clip(0.15 * speed_band, 1.0, 5.0)
-
-    alpha = 3.0
-
-    margin_max = max_speed - speed
-    z_max = 1.0 - margin_max / safety_buffer
-    smooth_z_max = _smooth_softplus_risk(z_max, alpha)
-    phi_upper = -(smooth_z_max**2)
-
-    margin_min = speed - min_speed
-    z_min = 1.0 - margin_min / safety_buffer
-    smooth_z_min = _smooth_softplus_risk(z_min, alpha)
-    phi_lower = np.where(
+    lower_exponent = steepness * (speed - min_speed) / span
+    lower_tail = np.exp(-np.abs(lower_exponent))
+    lower_risk = np.where(
         min_speed > 0.0,
-        -(smooth_z_min**2),
+        np.where(
+            lower_exponent >= 0.0,
+            2.0 * lower_tail / (1.0 + lower_tail),
+            2.0 / (1.0 + lower_tail),
+        ),
         0.0,
     )
 
-    return K_Safety * (phi_upper + phi_lower)
+    return -scale * (upper_risk + lower_risk)
 
 
 def interp_with_constant_fill(
@@ -289,7 +283,7 @@ def _draw_punctuality_potential(
         field.redundant_time_grid_s,
         field.potential,
         cmap=PUNCTUALITY_POTENTIAL_CMAP,
-        shading="gouraud",
+        shading="auto",
         vmin=-PUNCTUALITY_POTENTIAL_SCALE,
         vmax=0.0,
         rasterized=True,
@@ -335,21 +329,21 @@ def _apply_minimal_axis_style(ax: Axes) -> None:
 
 
 def _apply_transparent_background(fig: Figure) -> None:
-    """让图窗与所有坐标轴背景透明，便于嵌入论文架构图。"""
-    fig.patch.set_facecolor("none")
-    fig.patch.set_alpha(0.0)
+    """设置不透明纯白背景以符合期刊规范并避免 PDF 产生透明对象。"""
+    fig.patch.set_facecolor("white")
+    fig.patch.set_alpha(1.0)
 
     for ax in fig.axes:
-        ax.set_facecolor("none")
-        ax.patch.set_alpha(0.0)
+        ax.set_facecolor("white")
+        ax.patch.set_alpha(1.0)
 
-        # 3D 坐标轴 pane 默认非透明，需单独处理。
+        # 3D 坐标轴 pane 设置不透明纯白。
         for axis_name in ("xaxis", "yaxis", "zaxis"):
             axis_obj = getattr(ax, axis_name, None)
             pane = getattr(axis_obj, "pane", None)
             if pane is not None:
-                pane.set_facecolor((1.0, 1.0, 1.0, 0.0))
-                pane.set_edgecolor((1.0, 1.0, 1.0, 0.0))
+                pane.set_facecolor((1.0, 1.0, 1.0, 1.0))
+                pane.set_edgecolor((1.0, 1.0, 1.0, 1.0))
 
 
 def plot_safety_potential_heatmap_speed(*, minimal: bool = False) -> Figure:
@@ -554,7 +548,7 @@ def plot_safety_punctuality_potentials(
 
 def _save_compact_figure(figure: Figure, output_dir: Path, *, plot_type: str) -> Path:
     return save_sci_figure(
-        figure, output_dir / FIGURE_FILENAMES[plot_type], transparent=True
+        figure, output_dir / FIGURE_FILENAMES[plot_type], transparent=False
     )
 
 

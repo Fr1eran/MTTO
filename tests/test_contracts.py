@@ -6,7 +6,6 @@ from contracts import (
     AblationRunRecord,
     ArtifactRefs,
     ContractError,
-    CurriculumMetadata,
     EpisodeInfo,
     EvaluationArtifact,
     EvaluationHistory,
@@ -144,18 +143,6 @@ def test_run_metadata_and_nested_budget_have_one_strict_parser() -> None:
             enable_potential_safety=False,
             survival_reward_scale=0.0,
         ),
-        curriculum=CurriculumMetadata(
-            profile_name="none",
-            enabled=False,
-            value_source=None,
-            dspl_protocol=None,
-            reference_curve_dir=None,
-            reference_curve_artifact_path=None,
-            reference_curve_metrics_path=None,
-            rl_step_distance_m=None,
-            context_count=None,
-            initial_curriculum_version=None,
-        ),
         schedule_time_s=440.0,
         step_distance=30.0,
         reward_discount=0.998,
@@ -170,7 +157,7 @@ def test_run_metadata_and_nested_budget_have_one_strict_parser() -> None:
     )
     payload = metadata.to_mapping()
 
-    assert payload["schema_version"] == 5
+    assert payload["schema_version"] == 6
     assert list(payload) == [
         "artifact_type",
         "schema_version",
@@ -179,7 +166,6 @@ def test_run_metadata_and_nested_budget_have_one_strict_parser() -> None:
         "reward_preset_description",
         "potential_shaping_components",
         "reward_config",
-        "curriculum",
         "schedule_time_s",
         "step_distance",
         "reward_discount",
@@ -190,17 +176,6 @@ def test_run_metadata_and_nested_budget_have_one_strict_parser() -> None:
     assert RunMetadata.from_mapping(payload) == metadata
     with pytest.raises(ContractError, match="schema_version"):
         RunMetadata.from_mapping({**payload, "schema_version": 3})
-    with pytest.raises(ContractError, match="unknown fields"):
-        RunMetadata.from_mapping(
-            {
-                **payload,
-                "curriculum": {
-                    **payload["curriculum"],
-                    "original_context_count": 972,
-                    "context_count_limit": 67,
-                },
-            }
-        )
     with pytest.raises(ContractError, match="unknown fields"):
         RunMetadata.from_mapping(
             {
@@ -246,6 +221,7 @@ def test_manifest_round_trip_and_status_update_are_typed() -> None:
     )
 
     payload = manifest.to_mapping()
+    assert payload["schema_version"] == 2
     assert list(payload) == [
         "artifact_type",
         "schema_version",
@@ -281,6 +257,7 @@ def test_evaluation_history_round_trip_rejects_unknown_arrays() -> None:
         episode_steps=np.asarray([10], dtype=np.int64),
         success=np.asarray([True]),
         safe=np.asarray([False]),
+        feasible=np.asarray([False], dtype=np.bool_),
         stop_error_m=np.asarray([0.1]),
         time_error_s=np.asarray([-1.0]),
         total_energy_j=np.asarray([2_000.0]),
@@ -295,6 +272,7 @@ def test_evaluation_history_round_trip_rejects_unknown_arrays() -> None:
     restored = EvaluationHistory.from_npz_mapping(payload)
 
     np.testing.assert_array_equal(restored.training_steps, history.training_steps)
+    np.testing.assert_array_equal(restored.feasible, history.feasible)
     np.testing.assert_array_equal(restored.total_energy_j, history.total_energy_j)
     np.testing.assert_array_equal(
         restored.scheduled_completed_training_episodes,

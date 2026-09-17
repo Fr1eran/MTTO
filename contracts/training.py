@@ -7,11 +7,6 @@ from typing import ClassVar, Literal
 
 from .common import JSONMapping, MappingView, from_dict, to_dict
 
-CurriculumProfileName = Literal[
-    "none",
-    "dspl",
-]
-
 
 @dataclass(frozen=True, slots=True)
 class RewardConfigSnapshot(MappingView):
@@ -24,26 +19,6 @@ class RewardConfigSnapshot(MappingView):
     punctuality_potential_sigma_s: float = 20.0
     potential_transition_formula: str | None = None
     terminal_next_potential: str | None = None
-
-    def to_mapping(self) -> JSONMapping:
-        return to_dict(self)
-
-
-@dataclass(frozen=True, slots=True)
-class CurriculumMetadata(MappingView):
-    profile_name: CurriculumProfileName
-    enabled: bool
-    value_source: str | None
-    dspl_protocol: JSONMapping | None
-    reference_curve_dir: str | None
-    reference_curve_artifact_path: str | None
-    reference_curve_metrics_path: str | None
-    rl_step_distance_m: float | None
-    context_count: int | None = field(metadata={"minimum": 0})
-    initial_curriculum_version: int | None = field(metadata={"minimum": 0})
-    algorithm_id: str | None = None
-    alpha_update_protocol: JSONMapping | None = None
-    context_value_estimation_protocol: JSONMapping | None = None
 
     def to_mapping(self) -> JSONMapping:
         return to_dict(self)
@@ -82,7 +57,6 @@ class RunMetadata(MappingView):
     reward_preset_description: str
     potential_shaping_components: tuple[str, ...]
     reward_config: RewardConfigSnapshot
-    curriculum: CurriculumMetadata
     schedule_time_s: float
     step_distance: float
     reward_discount: float
@@ -114,7 +88,7 @@ class RunMetadata(MappingView):
     extensions: JSONMapping = field(default_factory=dict)
 
     ARTIFACT_TYPE: ClassVar[str] = "rl_training_metadata"
-    SCHEMA_VERSION: ClassVar[int] = 5
+    SCHEMA_VERSION: ClassVar[int] = 6
 
     def __post_init__(self) -> None:
         if (

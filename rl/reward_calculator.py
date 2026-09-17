@@ -73,7 +73,8 @@ class RewardCalculator:
     """Calculate reward from an explicit transition.
 
     Optional potential-based shaping guides safety and linear consumption of
-    timetable slack. Together these priors form the PPRS method module.
+    timetable slack. Together these priors form the Physics-Informed Reward
+    Shaping (PIRS) method module.
     Terminal stopping and punctuality scores remain the task objectives.
     """
 
@@ -176,7 +177,7 @@ class RewardCalculator:
         )
 
     def reference_punctuality_slack(self, position_m: float) -> float:
-        """Global linear slack reference; never re-anchor at curriculum resets."""
+        """Global linear slack reference; never re-anchor at resets."""
         if self.initial_min_operation_time_s is None:
             raise ValueError("initial minimum operation time is required")
         service = self.train_service
@@ -234,22 +235,25 @@ class RewardCalculator:
     def _potential_safety(
         *, speed_mps: float, min_speed_mps: float, max_speed_mps: float
     ) -> float:
-        """Safety potential with a band-scaled, non-overlapping buffer."""
-        K_safety = 1.0
-        speed_band = max_speed_mps - min_speed_mps
-        safety_buffer = min(max(0.15 * speed_band, 1.0), 5.0)
+        """Bounded Logistic risk at the two normalized envelope margins."""
+        scale = 0.5
+        steepness = 8.0
+        span = max(max_speed_mps - min_speed_mps, 1.0)
 
-        alpha = 3.0
-
-        margin_upper = max_speed_mps - speed_mps
-        x_upper = 1.0 - margin_upper / safety_buffer
-        z_upper = math.log1p(math.exp(alpha * x_upper)) / alpha
-        phi_upper = -(z_upper**2)
-        if min_speed_mps > 0.0:
-            margin_lower = speed_mps - min_speed_mps
-            x_lower = 1.0 - margin_lower / safety_buffer
-            z_lower = math.log1p(math.exp(alpha * x_lower)) / alpha
-            phi_lower = -(z_lower**2)
+        upper_exponent = steepness * (max_speed_mps - speed_mps) / span
+        if upper_exponent >= 0.0:
+            upper_tail = math.exp(-upper_exponent)
+            upper_risk = 2.0 * upper_tail / (1.0 + upper_tail)
         else:
-            phi_lower = 0.0
-        return K_safety * (phi_upper + phi_lower)
+            upper_risk = 2.0 / (1.0 + math.exp(upper_exponent))
+
+        if min_speed_mps > 0.0:
+            lower_exponent = steepness * (speed_mps - min_speed_mps) / span
+            if lower_exponent >= 0.0:
+                lower_tail = math.exp(-lower_exponent)
+                lower_risk = 2.0 * lower_tail / (1.0 + lower_tail)
+            else:
+                lower_risk = 2.0 / (1.0 + math.exp(lower_exponent))
+        else:
+            lower_risk = 0.0
+        return -scale * (upper_risk + lower_risk)

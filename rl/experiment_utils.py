@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 import numpy as np
-from numpy.typing import NDArray
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.utils import set_random_seed
@@ -20,7 +19,6 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
 
 from contracts.evaluation import EvaluationMetrics
 from contracts.training import (
-    CurriculumMetadata,
     RewardConfigSnapshot,
     RunMetadata,
     TrainingBudget,
@@ -39,19 +37,8 @@ from rl.callbacks import (
     ScheduledPolicyEvaluationCallback,
     StopTrainingOnCompletedEpisodes,
 )
-from rl.context_pool import ContextPool, ContextPoolBuilder
-from rl.context_sampler import CurriculumDistributionState
-from rl.dp_trajectory_reader import DPTrajectoryReader
-from rl.dspl import (
-    DSPLCallback,
-    DSPLStatisticsHub,
-    dspl_context_count_limit,
-    dspl_protocol_parameters,
-)
-from rl.dspl_distribution import DSPLDistributionSolver
 from rl.env_factory import make_env
 from rl.evaluation import build_single_eval_env, evaluate_and_save_final_policy
-from rl.observation_builder import ObservationBuilder
 from rl.operational_stepper import OperationalStepper
 from rl.reward_calculator import (
     DEFAULT_COMFORT_REWARD_SCALE,
@@ -59,7 +46,6 @@ from rl.reward_calculator import (
     DEFAULT_SURVIVAL_REWARD_SCALE,
     PUNCTUALITY_POTENTIAL_SCALE,
     PUNCTUALITY_POTENTIAL_SIGMA_S,
-    RewardCalculator,
     RewardConfig,
 )
 from rl.reward_diagnostics import REWARD_DIAGNOSTICS_SCHEMA_VERSION
@@ -81,7 +67,6 @@ __all__ = [
     "RUN_METADATA_FILENAME",
     "REWARD_DIAGNOSTICS_FILENAME",
     "EVALUATION_HISTORY_FILENAME",
-    "CURRICULUM_DIAGNOSTICS_FILENAME",
     "DEFAULT_SCHEDULE_TIME_S",
     "DEFAULT_REWARD_DISCOUNT",
     "DEFAULT_EVALUATION_INTERVAL_ROLLOUTS",
@@ -92,13 +77,10 @@ __all__ = [
     "DEFAULT_N_EPOCHS",
     "DEFAULT_DEVICE",
     "DEFAULT_REWARD_PRESET_NAME",
-    "DEFAULT_CURRICULUM_PROFILE_NAME",
-    "DSPL_ALGORITHM_ID",
     "DEFAULT_ENERGY_REWARD_SCALE",
     "DEFAULT_COMFORT_REWARD_SCALE",
     "DEFAULT_SURVIVAL_REWARD_SCALE",
     # dataclass
-    "dspl_protocol_parameters",
     "RewardPreset",
     "RunMetadata",
     "TrainingBudget",
@@ -109,9 +91,6 @@ __all__ = [
     "build_reward_config",
     "reward_config_parameters",
     "resolve_survival_reward_scale",
-    # curriculum profile
-    "curriculum_profile_names",
-    "resolve_curriculum_profile_name",
     # 路径 & 元数据
     "resolve_output_dir",
     "resolve_tb_log_name",
@@ -150,7 +129,6 @@ RL_TRAJECTORY_FILENAME = "trajectory.npz"
 RL_METRICS_FILENAME = "metrics.json"
 REWARD_DIAGNOSTICS_FILENAME = "episodes.npz"
 EVALUATION_HISTORY_FILENAME = "evaluations.npz"
-CURRICULUM_DIAGNOSTICS_FILENAME = "curriculum_diagnostics.json"
 DEFAULT_TRAINING_EPISODES = 5_000
 # =============================================================================
 # 训练超参数常量
@@ -169,8 +147,6 @@ STEP_LEARNING_RATE_SCHEDULE_ID = "cosine_environment_steps_v1"
 INITIAL_LEARNING_RATE = 3e-4
 FINAL_LEARNING_RATE = 1e-5
 DEFAULT_REWARD_PRESET_NAME = "basic_safety_punctuality"
-DEFAULT_CURRICULUM_PROFILE_NAME = "dspl"
-DSPL_ALGORITHM_ID = "ppo_dspl_v1"
 
 # =============================================================================
 # 数据结构 (dataclass)
@@ -204,12 +180,6 @@ class RewardPreset:
         }
 
 
-CurriculumProfileName = Literal[
-    "none",
-    "dspl",
-]
-
-
 @dataclass(frozen=True)
 class TrainingRunSpec:
     """单次训练运行的完整配置快照，由 CLI 参数解析得到。"""
@@ -218,10 +188,6 @@ class TrainingRunSpec:
     step_distance: float
     reward_discount: float
     reward_preset: RewardPreset
-    curriculum_profile: CurriculumProfileName
-    reference_curve_dir: str | None
-    reference_curve_artifact_path: str | None
-    reference_curve_metrics_path: str | None
     output_root: str
     output_dir: str
     final_output_dir: str
@@ -307,11 +273,21 @@ REWARD_PRESETS: dict[str, RewardPreset] = {
             survival_reward_scale=DEFAULT_SURVIVAL_REWARD_SCALE,
         ),
     ),
+    "basic_punctuality": RewardPreset(
+        name="basic_punctuality",
+        label="basic+punctuality",
+        description="Base reward plus linear-slack punctuality potential.",
+        config=RewardConfig(
+            enable_potential_safety=False,
+            enable_potential_punctuality=True,
+            survival_reward_scale=DEFAULT_SURVIVAL_REWARD_SCALE,
+        ),
+    ),
     "basic_safety_punctuality": RewardPreset(
         name="basic_safety_punctuality",
         label="basic+safety+punctuality",
         description=(
-            "Base reward plus Physics-Prior Reward Shaping (PPRS), combining "
+            "Base reward plus Physics-Informed Reward Shaping (PIRS), combining "
             "safety and linear-slack punctuality potentials."
         ),
         config=RewardConfig(enable_potential_punctuality=True),
@@ -322,38 +298,14 @@ REWARD_PRESET_ALIASES: dict[str, str] = {
     "default": DEFAULT_REWARD_PRESET_NAME,
     "basic": "basic",
     "basic+safety": "basic_safety",
+    "basic+punctuality": "basic_punctuality",
+    "basic+safety+punctuality": "basic_safety_punctuality",
 }
 
 
 def reward_preset_names() -> tuple[str, ...]:
     """返回所有已注册奖励情形的名称元组。"""
     return tuple(REWARD_PRESETS.keys())
-
-
-def curriculum_profile_names() -> tuple[str, ...]:
-    return (
-        "none",
-        "dspl",
-    )
-
-
-def resolve_curriculum_profile_name(
-    profile_name: str | None = None,
-) -> CurriculumProfileName:
-    normalized = (
-        DEFAULT_CURRICULUM_PROFILE_NAME
-        if profile_name is None
-        else str(profile_name).strip().lower().replace("-", "_").replace(" ", "_")
-    )
-    if not normalized:
-        normalized = DEFAULT_CURRICULUM_PROFILE_NAME
-    if normalized not in curriculum_profile_names():
-        available = ", ".join(curriculum_profile_names())
-        raise ValueError(
-            "Unknown curriculum profile "
-            + f"'{profile_name}'. Available profiles: {available}"
-        )
-    return cast(CurriculumProfileName, normalized)
 
 
 def _normalize_reward_preset_token(preset_name: str | None) -> str:
@@ -430,17 +382,13 @@ def _build_experiment_token(
     schedule_time_s: float,
     step_distance: float,
     reward_preset_name: str | None = None,
-    curriculum_profile_name: str | None = None,
     experiment_tag: str | None = None,
 ) -> str:
     schedule_token = format_float_token(schedule_time_s)
     step_token = format_float_token(step_distance)
     preset = resolve_reward_preset(reward_preset_name)
-    curriculum_profile = resolve_curriculum_profile_name(curriculum_profile_name)
 
     tokens = [f"{schedule_token}_{step_token}", preset.name]
-    if curriculum_profile != "none":
-        tokens.append(curriculum_profile)
     if experiment_tag:
         tokens.append(_sanitize_identifier_token(experiment_tag))
     return "__".join(tokens)
@@ -452,7 +400,6 @@ def resolve_output_dir(
     schedule_time_s: float,
     step_distance: float,
     reward_preset_name: str | None = None,
-    curriculum_profile_name: str | None = None,
     experiment_tag: str | None = None,
 ) -> str:
     """根据实验参数解析输出目录路径。
@@ -471,7 +418,6 @@ def resolve_output_dir(
         schedule_time_s=schedule_time_s,
         step_distance=step_distance,
         reward_preset_name=reward_preset_name,
-        curriculum_profile_name=curriculum_profile_name,
         experiment_tag=experiment_tag,
     )
     return os.path.join(output_root, experiment_token)
@@ -484,7 +430,6 @@ def resolve_tb_log_name(
     schedule_time_s: float,
     step_distance: float,
     reward_preset_name: str | None = None,
-    curriculum_profile_name: str | None = None,
     experiment_tag: str | None = None,
 ) -> str:
     """解析 TensorBoard 日志名称。
@@ -507,7 +452,6 @@ def resolve_tb_log_name(
         schedule_time_s=schedule_time_s,
         step_distance=step_distance,
         reward_preset_name=reward_preset_name,
-        curriculum_profile_name=curriculum_profile_name,
         experiment_tag=experiment_tag,
     )
     return f"train_log__{_sanitize_identifier_token(run_mode)}__{experiment_token}"
@@ -521,10 +465,6 @@ def resolve_tb_log_name(
 def build_run_metadata(
     *,
     reward_preset: RewardPreset,
-    curriculum_profile: CurriculumProfileName = DEFAULT_CURRICULUM_PROFILE_NAME,
-    reference_curve_dir: str | None = None,
-    reference_curve_artifact_path: str | None = None,
-    reference_curve_metrics_path: str | None = None,
     schedule_time_s: float,
     step_distance: float,
     reward_discount: float,
@@ -586,64 +526,10 @@ def build_run_metadata(
     Returns:
         包含实验完整元数据的 ``RunMetadata``。
     """
-    resolved_curriculum = resolve_curriculum_profile_name(curriculum_profile)
-    curriculum_enabled = resolved_curriculum != "none"
-    value_source = "ppo_value_estimate" if resolved_curriculum == "dspl" else None
-    algorithm_id = DSPL_ALGORITHM_ID if resolved_curriculum == "dspl" else None
-    alpha_update_protocol = (
-        {
-            "id": "rollout_discounted_return_eq6_v1",
-            "sample_source": (
-                "all_parallel_ppo_rollout_fragments_since_last_curriculum_update"
-            ),
-            "discounted_return_formula": "sum_t gamma^t r_t",
-            "aggregation": "arithmetic_mean",
-            "formula": (
-                "zeta * max(0, mean_rollout_return) / "
-                "KL(current_distribution || target_distribution)"
-            ),
-            "warmup": "alpha=0 for first alpha_warmup_updates curriculum updates",
-            "negative_mean_policy": "clip_to_zero",
-        }
-        if resolved_curriculum == "dspl"
-        else None
-    )
-    context_value_estimation_protocol = (
-        {
-            "id": "sampled_value_eq5_v1",
-            "estimator": "importance_weighted_samples",
-            "value_input": "raw_context_initial_observation",
-            "sampling_unit": "episode_start",
-            "formula": "g(c)=n_c*V(c)/(K*p_i(c)) for sampled c; g(c)=0 otherwise",
-            "distribution_version_policy": (
-                "statistics clear on committed curriculum version update"
-            ),
-        }
-        if resolved_curriculum == "dspl"
-        else None
-    )
-    curriculum_metadata = CurriculumMetadata(
-        profile_name=resolved_curriculum,
-        enabled=curriculum_enabled,
-        value_source=value_source,
-        dspl_protocol=(
-            dspl_protocol_parameters() if resolved_curriculum == "dspl" else None
-        ),
-        reference_curve_dir=reference_curve_dir,
-        reference_curve_artifact_path=reference_curve_artifact_path,
-        reference_curve_metrics_path=reference_curve_metrics_path,
-        rl_step_distance_m=(float(step_distance) if curriculum_enabled else None),
-        context_count=None,
-        initial_curriculum_version=(0 if curriculum_enabled else None),
-        algorithm_id=algorithm_id,
-        alpha_update_protocol=alpha_update_protocol,
-        context_value_estimation_protocol=context_value_estimation_protocol,
-    )
     experiment_token = _build_experiment_token(
         schedule_time_s=schedule_time_s,
         step_distance=step_distance,
         reward_preset_name=reward_preset.name,
-        curriculum_profile_name=resolved_curriculum,
         experiment_tag=experiment_tag,
     )
     effective_training_episodes = (
@@ -689,7 +575,6 @@ def build_run_metadata(
         reward_preset_description=reward_preset.description,
         potential_shaping_components=reward_preset.enabled_shaping_components(),
         reward_config=reward_config,
-        curriculum=curriculum_metadata,
         schedule_time_s=float(schedule_time_s),
         step_distance=float(step_distance),
         reward_discount=float(reward_discount),
@@ -790,8 +675,6 @@ def build_default_training_args() -> argparse.Namespace:
         schedule_time_s=DEFAULT_SCHEDULE_TIME_S,
         step_distance=DEFAULT_STEP_DISTANCE,
         reward_preset=DEFAULT_REWARD_PRESET_NAME,
-        curriculum_profile=DEFAULT_CURRICULUM_PROFILE_NAME,
-        reference_curve_dir=None,
         experiment_tag=None,
         run_mode="tune",
         enable_tb=None,
@@ -986,33 +869,12 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
             reward_preset,
             config=custom_reward_config,
         )
-    curriculum_profile = resolve_curriculum_profile_name(
-        getattr(args, "curriculum_profile", DEFAULT_CURRICULUM_PROFILE_NAME)
-    )
-    reference_curve_dir_raw = getattr(args, "reference_curve_dir", None)
-    reference_curve_dir: str | None = None
-    if curriculum_profile != "none":
-        if (
-            not isinstance(reference_curve_dir_raw, str)
-            or not reference_curve_dir_raw.strip()
-        ):
-            raise ValueError(
-                "reference_curve_dir is required when a curriculum profile is enabled"
-            )
-        reference_dir_path = Path(reference_curve_dir_raw)
-        if not reference_dir_path.is_dir():
-            raise FileNotFoundError(
-                f"reference trajectory directory does not exist: {reference_dir_path}"
-            )
-        reference_curve_dir = str(reference_dir_path)
-
     output_root = args.output_root
     output_dir = resolve_output_dir(
         output_root=output_root,
         schedule_time_s=schedule_time_s,
         step_distance=ds,
         reward_preset_name=reward_preset.name,
-        curriculum_profile_name=curriculum_profile,
         experiment_tag=args.experiment_tag,
     )
     final_output_dir = os.path.join(output_dir, "final")
@@ -1043,7 +905,6 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
         schedule_time_s=schedule_time_s,
         step_distance=ds,
         reward_preset_name=reward_preset.name,
-        curriculum_profile_name=curriculum_profile,
         experiment_tag=args.experiment_tag,
     )
 
@@ -1139,8 +1000,6 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
 
     run_metadata = build_run_metadata(
         reward_preset=reward_preset,
-        curriculum_profile=curriculum_profile,
-        reference_curve_dir=reference_curve_dir,
         schedule_time_s=schedule_time_s,
         step_distance=ds,
         reward_discount=reward_discount,
@@ -1182,10 +1041,6 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
         step_distance=ds,
         reward_discount=reward_discount,
         reward_preset=reward_preset,
-        curriculum_profile=curriculum_profile,
-        reference_curve_dir=reference_curve_dir,
-        reference_curve_artifact_path=None,
-        reference_curve_metrics_path=None,
         output_root=output_root,
         output_dir=output_dir,
         final_output_dir=final_output_dir,
@@ -1288,10 +1143,6 @@ def _build_env_initializer(
     rollout_capacity: int,
     reward_config: RewardConfig | None = None,
     stepper: OperationalStepper | None = None,
-    context_pool: ContextPool | None = None,
-    curriculum_distribution_state: CurriculumDistributionState | None = None,
-    context_sampling_seed: int | None = None,
-    dspl_statistics_hub: DSPLStatisticsHub | None = None,
     enable_safety_truncation_tracking: bool = False,
 ) -> Callable[[], Any]:
     def _init():
@@ -1305,52 +1156,12 @@ def _build_env_initializer(
             compact_training_info=True,
             reward_config=reward_config,
             stepper=stepper,
-            context_pool=context_pool,
-            curriculum_distribution_state=curriculum_distribution_state,
-            context_sampling_seed=context_sampling_seed,
-            dspl_statistics_hub=dspl_statistics_hub,
-            curriculum_env_rank=(
-                worker_rank if dspl_statistics_hub is not None else None
-            ),
             enable_safety_truncation_tracking=enable_safety_truncation_tracking,
             reward_diagnostics_worker_rank=worker_rank,
             reward_diagnostics_rollout_capacity=rollout_capacity,
         )
 
     return _init
-
-
-def _build_curriculum_diagnostics(
-    *,
-    profile_name: str,
-    algorithm_id: str | None,
-    curriculum_version: int,
-    initial_distribution: NDArray[np.floating],
-    final_distribution: NDArray[np.floating],
-    target_distribution: NDArray[np.floating],
-) -> dict[str, object]:
-    initial = np.asarray(initial_distribution, dtype=np.float64)
-    final = np.asarray(final_distribution, dtype=np.float64)
-    target = np.asarray(target_distribution, dtype=np.float64)
-    if initial.shape != final.shape or final.shape != target.shape:
-        raise ValueError("curriculum diagnostic distributions must have equal shapes")
-    initial_target_kl = DSPLDistributionSolver.kl_divergence(initial, target)
-    final_target_kl = DSPLDistributionSolver.kl_divergence(final, target)
-    safe_final = np.maximum(final, np.finfo(np.float64).tiny)
-    return {
-        "profile_name": profile_name,
-        "algorithm_id": algorithm_id,
-        "curriculum_version": int(curriculum_version),
-        "initial_target_kl": initial_target_kl,
-        "final_target_kl": final_target_kl,
-        "target_kl_ratio": (
-            final_target_kl / initial_target_kl if initial_target_kl > 0.0 else None
-        ),
-        "initial_distribution": initial.tolist(),
-        "final_distribution": final.tolist(),
-        "target_distribution": target.tolist(),
-        "final_distribution_entropy": float(-np.sum(safe_final * np.log(safe_final))),
-    }
 
 
 def train_single_experiment(
@@ -1372,6 +1183,20 @@ def train_single_experiment(
     """
     resolved_spec = spec if spec is not None else resolve_training_run_spec(args)
 
+    final_dir = Path(resolved_spec.final_output_dir)
+    target_artifacts = [
+        Path(resolved_spec.run_metadata_path),
+        Path(resolved_spec.final_model_save_path),
+        Path(resolved_spec.reward_diagnostics_path),
+        final_dir / RL_METRICS_FILENAME,
+        final_dir / RL_TRAJECTORY_FILENAME,
+    ]
+    if any(p.exists() for p in target_artifacts):
+        raise FileExistsError(
+            "Target directory already contains training artifacts: "
+            f"{resolved_spec.final_output_dir}"
+        )
+
     if resolved_spec.seed is not None:
         set_random_seed(
             seed=resolved_spec.seed,
@@ -1388,105 +1213,6 @@ def train_single_experiment(
         train_service=train_service,
         step_distance_m=resolved_spec.step_distance,
     )
-
-    context_pool: ContextPool | None = None
-    curriculum_distribution_state: CurriculumDistributionState | None = None
-    dspl_statistics_hub: DSPLStatisticsHub | None = None
-    curriculum_callback: BaseCallback | None = None
-    curriculum_initial_distribution: NDArray[np.float64] | None = None
-    curriculum_target_distribution: NDArray[np.float64] | None = None
-    if resolved_spec.curriculum_profile != "none":
-        if resolved_spec.reference_curve_dir is None:
-            raise RuntimeError("enabled curriculum is missing reference_curve_dir")
-        artifact = DPTrajectoryReader.resolve_matching_artifact(
-            curve_dir=resolved_spec.reference_curve_dir,
-            train_service=train_service,
-        )
-        reference_trajectory = DPTrajectoryReader.from_artifact(
-            artifact=artifact,
-            train_service=train_service,
-        )
-        context_count = dspl_context_count_limit(
-            rollout_steps_per_update=resolved_spec.rollout_steps_per_update,
-            max_episode_steps=shared_stepper.required_episode_steps,
-        )
-        context_pool_builder = ContextPoolBuilder(
-            reference_trajectory,
-            stepper=shared_stepper,
-            context_count=context_count,
-        )
-        context_pool = context_pool_builder.build()
-        observation_builder = ObservationBuilder(
-            vehicle=vehicle,
-            track=track,
-            train_service=train_service,
-            step_distance_m=resolved_spec.step_distance,
-            direction=shared_stepper.direction,
-            whole_distance_m=shared_stepper.whole_distance_m,
-            get_upper_speed_or_zero=shared_stepper.get_upper_speed_or_zero,
-        )
-        context_observations = np.empty(
-            (context_pool.context_count, ObservationBuilder.OBSERVATION_DIM),
-            dtype=np.float32,
-        )
-        for idx, context in enumerate(context_pool.contexts):
-            _ = observation_builder.build(
-                context.initial_state, out=context_observations[idx]
-            )
-        curriculum_rewards = RewardCalculator(
-            train_service,
-            max_episode_steps=shared_stepper.required_episode_steps,
-            whole_distance_m=shared_stepper.whole_distance_m,
-            max_energy_consumption_kj=shared_stepper.max_energy_consumption_kj,
-            gamma=resolved_spec.reward_discount,
-            reward_config=resolved_spec.reward_config,
-            initial_min_operation_time_s=(
-                shared_stepper.initial_min_operation_time_s
-                if resolved_spec.reward_config.enable_potential_punctuality
-                else None
-            ),
-        )
-        dspl_statistics_hub = DSPLStatisticsHub(
-            context_count=context_pool.context_count,
-            num_envs=resolved_spec.num_envs,
-            gamma=resolved_spec.reward_discount,
-        )
-        curriculum_callback = DSPLCallback(
-            context_pool=context_pool,
-            context_observations=context_observations,
-            statistics_hub=dspl_statistics_hub,
-            context_punctuality_potentials=np.asarray(
-                [
-                    curriculum_rewards.potential_punctuality(context.initial_state)
-                    for context in context_pool.contexts
-                ],
-                dtype=np.float64,
-            ),
-        )
-        curriculum_distribution_state = curriculum_callback.distribution_state
-        curriculum_initial_distribution = (
-            curriculum_distribution_state.distribution.copy()
-        )
-        curriculum_target_distribution = (
-            curriculum_callback.target_context_distribution.copy()
-        )
-        curriculum_metadata = replace(
-            resolved_spec.run_metadata.curriculum,
-            reference_curve_artifact_path=artifact.npz_path,
-            reference_curve_metrics_path=artifact.metrics_path,
-            rl_step_distance_m=resolved_spec.step_distance,
-            context_count=context_pool.context_count,
-            initial_curriculum_version=0,
-        )
-        resolved_metadata = resolved_spec.run_metadata.with_updates(
-            curriculum=curriculum_metadata
-        )
-        resolved_spec = replace(
-            resolved_spec,
-            reference_curve_artifact_path=artifact.npz_path,
-            reference_curve_metrics_path=artifact.metrics_path,
-            run_metadata=resolved_metadata,
-        )
 
     resolved_spec = replace(
         resolved_spec,
@@ -1515,12 +1241,6 @@ def train_single_experiment(
             rollout_capacity=resolved_spec.n_steps_per_env,
             reward_config=resolved_spec.reward_config,
             stepper=shared_stepper,
-            context_pool=context_pool,
-            curriculum_distribution_state=curriculum_distribution_state,
-            context_sampling_seed=(
-                None if resolved_spec.seed is None else resolved_spec.seed + env_rank
-            ),
-            dspl_statistics_hub=dspl_statistics_hub,
             enable_safety_truncation_tracking=(
                 resolved_spec.enable_safety_truncation_histogram
             ),
@@ -1578,8 +1298,6 @@ def train_single_experiment(
     callbacks: list[BaseCallback] = []
     if episode_stop_callback is not None:
         callbacks.append(episode_stop_callback)
-    if curriculum_callback is not None:
-        callbacks.append(curriculum_callback)
     reward_diagnostics_callback = RewardDiagnosticsArtifactCallback(
         output_path=resolved_spec.reward_diagnostics_path
     )
@@ -1716,24 +1434,6 @@ def train_single_experiment(
         _ = save_run_metadata(
             resolved_spec.best_eval_output_dir, resolved_spec.run_metadata
         )
-    if (
-        curriculum_callback is not None
-        and curriculum_distribution_state is not None
-        and curriculum_initial_distribution is not None
-        and curriculum_target_distribution is not None
-    ):
-        curriculum_diagnostics = _build_curriculum_diagnostics(
-            profile_name=resolved_spec.curriculum_profile,
-            algorithm_id=resolved_spec.run_metadata.curriculum.algorithm_id,
-            curriculum_version=curriculum_distribution_state.version,
-            initial_distribution=curriculum_initial_distribution,
-            final_distribution=curriculum_distribution_state.distribution,
-            target_distribution=curriculum_target_distribution,
-        )
-        with Path(resolved_spec.final_output_dir, CURRICULUM_DIAGNOSTICS_FILENAME).open(
-            "w", encoding="utf-8"
-        ) as file_obj:
-            json.dump(curriculum_diagnostics, file_obj, ensure_ascii=False, indent=2)
     model.save(resolved_spec.final_model_save_path)
     venv_train.close()
 
@@ -1780,11 +1480,7 @@ def train_single_experiment(
 def evaluate_final_training_run(
     spec: TrainingRunSpec,
 ) -> tuple[str, str]:
-    """Evaluate ``final_model`` from a completed run at the real start state.
-
-    This deliberately does not attach the curriculum reference-state provider:
-    final artifacts always represent the deployed policy on the full task.
-    """
+    """Evaluate ``final_model`` from a completed run at the real start state."""
     vehicle, track, safeguard_utility, train_service = build_scenario(
         schedule_time_s=spec.schedule_time_s
     )

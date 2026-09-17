@@ -43,8 +43,8 @@ class OperationalStepper:
         self.direction: int = (
             1 if train_service.start_position < train_service.target_position else -1
         )
-        # Nominal transition count retained for budgets, normalization, and
-        # DSPL context sizing. It is not a runtime truncation boundary.
+        # Nominal transition count retained for budgets and normalization.
+        # It is not a runtime truncation boundary.
         self.required_episode_steps: int = math.ceil(
             self.whole_distance_m / self.step_distance_m
         )

@@ -229,9 +229,6 @@ def test_main_saves_figure_and_creates_parent_dir(
     assert output_dir.is_dir()
     assert figure.saved_paths == [expected_output]
     assert figure.savefig_calls[0]["kwargs"] == {
-        "transparent": True,
-        "facecolor": "none",
-        "edgecolor": "none",
         "dpi": 1200.0,
     }
 
@@ -276,7 +273,9 @@ def test_plot_safety_speed_minimal_keeps_upper_and_lower_bounds(
     show_potential_function.plt.close(fig)
 
 
-def test_safety_speed_asymmetric_v3_is_non_positive() -> None:
+def test_safety_speed_matches_runtime_reward_calculator_formula() -> None:
+    from rl.reward_calculator import RewardCalculator
+
     speed = np.asarray([8.0, 15.0, 24.0], dtype=np.float64)
     min_speed = np.asarray([5.0, 5.0, 5.0], dtype=np.float64)
     max_speed = np.asarray([25.0, 25.0, 25.0], dtype=np.float64)
@@ -288,6 +287,16 @@ def test_safety_speed_asymmetric_v3_is_non_positive() -> None:
     )
 
     assert np.all(potential <= 0.0)
+    for s, mi, ma in zip(speed, min_speed, max_speed, strict=True):
+        expected = RewardCalculator._potential_safety(
+            speed_mps=s, min_speed_mps=mi, max_speed_mps=ma
+        )
+        actual = show_potential_function._potential_safety_speed(
+            np.asarray([s], dtype=np.float64),
+            np.asarray([mi], dtype=np.float64),
+            np.asarray([ma], dtype=np.float64),
+        )[0]
+        assert np.isclose(expected, actual, atol=1e-12)
 
 
 def test_safety_speed_single_plot_has_boundary_legend(
@@ -340,14 +349,14 @@ def test_apply_minimal_axis_style_keeps_3d_axis_on() -> None:
     show_potential_function.plt.close(fig)
 
 
-def test_apply_transparent_background_sets_figure_and_axes_transparent() -> None:
+def test_apply_transparent_background_sets_figure_and_axes_opaque() -> None:
     fig = show_potential_function.plt.figure()
     ax = fig.add_subplot(111)
 
     show_potential_function._apply_transparent_background(fig)
 
-    assert fig.patch.get_alpha() == 0.0
-    assert ax.patch.get_alpha() == 0.0
+    assert fig.patch.get_alpha() == 1.0
+    assert ax.patch.get_alpha() == 1.0
     show_potential_function.plt.close(fig)
 
 

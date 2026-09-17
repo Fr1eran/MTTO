@@ -185,7 +185,7 @@ def test_apply_sci_curve_style_sets_compact_font_sizes() -> None:
     assert plt.rcParams["grid.color"] == "#D9D9D9"
     assert plt.rcParams["grid.linestyle"] == "--"
     assert plt.rcParams["grid.linewidth"] == pytest.approx(0.6)
-    assert plt.rcParams["grid.alpha"] == pytest.approx(0.8)
+    assert plt.rcParams["grid.alpha"] == pytest.approx(1.0)
 
 
 def test_add_panel_label_places_text_on_axes() -> None:
@@ -259,7 +259,7 @@ def test_render_trajectory_on_axes_preserves_shared_plot_behavior() -> None:
         assert gridline.get_color() == "#D9D9D9"
         assert gridline.get_linestyle() == "--"
         assert gridline.get_linewidth() == pytest.approx(0.6)
-        assert gridline.get_alpha() == pytest.approx(0.8)
+        assert gridline.get_alpha() == pytest.approx(1.0)
         assert axis.get_axisbelow() is True
     finally:
         plt.close(figure)

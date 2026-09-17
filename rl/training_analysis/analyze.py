@@ -399,45 +399,6 @@ def compute_trajectory_evaluation_metrics(
     return metrics
 
 
-def compute_curriculum_distribution_metrics(
-    series_map: dict[str, ScalarSeries],
-) -> dict[str, Any]:
-    """Analyze DSPL distribution and value-estimation diagnostics."""
-    diagnostic_tags = {
-        "converged": "dspl/converged",
-        "alpha": "dspl/alpha",
-        "current_to_target_kl": "dspl/current_to_target_kl",
-        "empirical_to_target_kl": "dspl/empirical_to_target_kl",
-        "update_kl": "dspl/update_kl",
-        "value_return_mae": "dspl/value_return_mae",
-        "value_return_pearson": "dspl/value_return_pearson",
-        "importance_weight_ess": "dspl/importance_weight_ess",
-        "importance_weight_ess_ratio": "dspl/importance_weight_ess_ratio",
-        "importance_weight_max_to_mean": "dspl/importance_weight_max_to_mean",
-    }
-    diagnostics: dict[str, dict[str, float]] = {}
-    for name, tag in diagnostic_tags.items():
-        diag_steps, diag_values = _series_values(series_map, tag)
-        if diag_values.size == 0:
-            continue
-        diagnostics[name] = {
-            "final": float(diag_values[-1]),
-            "mean": float(np.mean(diag_values)),
-            "max": float(np.max(diag_values)),
-            "trend_slope_per_step": float(linear_slope(diag_steps, diag_values)),
-        }
-    if not diagnostics:
-        return {
-            "available": False,
-            "reason": "no DSPL distribution diagnostics were logged",
-        }
-    result: dict[str, Any] = {
-        "available": True,
-        "diagnostics": diagnostics,
-    }
-    return result
-
-
 def compute_safety_truncation_position_metrics(
     *,
     histogram_path: str | Path | None = None,

@@ -1,7 +1,6 @@
 import argparse
 
 from rl.experiment_utils import (
-    DEFAULT_CURRICULUM_PROFILE_NAME,
     DEFAULT_DEVICE,
     DEFAULT_NUM_ENVS,
     DEFAULT_REWARD_DISCOUNT,
@@ -10,7 +9,6 @@ from rl.experiment_utils import (
     DEFAULT_SCHEDULE_TIME_S,
     DEFAULT_STEP_DISTANCE,
     TrainingRunSpec,
-    curriculum_profile_names,
     resolve_training_run_spec,
     reward_preset_names,
     train_single_experiment,
@@ -48,24 +46,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=DEFAULT_REWARD_PRESET_NAME,
         help=(
             "奖励配置预设。basic 固定包含 energy/comfort；"
-            "basic_safety 额外启用安全势函数塑形。"
-            "basic_safety_punctuality 启用由安全势与线性剩余裕度准点势组成的 PPRS。"
+            "basic_safety 额外启用安全势函数塑形；"
+            "basic_punctuality 启用线性剩余裕度准点势；"
+            "basic_safety_punctuality 启用由安全势与线性剩余裕度准点势组成的"
+            "物理信息奖励塑形 (PIRS)。"
         ),
-    )
-    _ = parser.add_argument(
-        "--curriculum-profile",
-        type=str,
-        choices=tuple(curriculum_profile_names()),
-        default=DEFAULT_CURRICULUM_PROFILE_NAME,
-        help=(
-            "初态课程预设。none 保持真实起点训练；dspl 使用离散自步学习机制（默认）。"
-        ),
-    )
-    _ = parser.add_argument(
-        "--reference-curve-dir",
-        type=str,
-        default=None,
-        help="启用课程时必填：包含任务匹配 DP 参考轨迹的目录。",
     )
     _ = parser.add_argument(
         "--experiment-tag",
@@ -252,9 +237,6 @@ def print_training_run_spec(spec: TrainingRunSpec) -> None:
     print(f"- run_mode={spec.run_mode}")
     print(f"- reward_preset={spec.reward_preset.name}")
     print(f"- reward_config={spec.run_metadata.reward_config.to_mapping()}")
-    print(f"- curriculum_profile={spec.curriculum_profile}")
-    if spec.curriculum_profile != "none":
-        print(f"- reference_curve_dir={spec.reference_curve_dir}")
     print(f"- enable_tb={spec.enable_tb}")
     print(f"- enable_monitor={spec.enable_monitor}")
     print(f"- enable_auto_analysis={spec.enable_auto_analysis}")

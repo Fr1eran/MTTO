@@ -19,7 +19,7 @@ from .training import TrainingBudget
 
 AblationStatus = Literal["pending", "running", "completed", "failed"]
 ABLATION_MANIFEST_ARTIFACT_TYPE = "ablation_manifest"
-ABLATION_MANIFEST_SCHEMA_VERSION = 1
+ABLATION_MANIFEST_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)

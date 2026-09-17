@@ -6,15 +6,10 @@ import pytest
 from gymnasium.utils.env_checker import (
     check_env,
 )
-from numpy.typing import NDArray
 
 from model.ocs import SafeGuardUtility, TrainService
 from model.track import TrackInfo, get_slope_scalar_numba
 from model.vehicle import VehicleInfo, calc_levi_deceleration_scalar_numba
-from rl.context_pool import Context, ContextPool
-from rl.context_sampler import ContextSampler, CurriculumDistributionState
-from rl.dspl import DSPLStatisticsHub
-from rl.env_factory import make_env
 from rl.evaluation import (
     classify_arrival_status,
     evaluate_operational_policy_once,
@@ -38,9 +33,6 @@ from utils.data_loader import (
 
 class _MTTOEnvOverrides(TypedDict, total=False):
     stepper: OperationalStepper | None
-    context_sampler: ContextSampler | None
-    dspl_statistics_hub: DSPLStatisticsHub | None
-    curriculum_env_rank: int | None
     enable_trajectory_tracking: bool
     safety_truncation_buffer: SafetyTruncationBuffer | None
 
@@ -149,41 +141,6 @@ def test_punctuality_gym_and_shared_replay_reward_match(mtto_env):
     _, reward, terminated, truncated, _ = env.step(np.asarray([1.0]))
     assert reward == pytest.approx(expected.total)
     assert (terminated, truncated) == (transition.terminated, transition.truncated)
-
-
-def test_punctuality_curriculum_statistics_exclude_shaping(mtto_env):
-    source = _build_env_like(mtto_env)
-    source.reset()
-    state = replace(source.state, redundant_operation_time_s=100)
-    pool = ContextPool((Context(0, source.stepper.whole_distance_m, state),))
-    hub = DSPLStatisticsHub(context_count=1, num_envs=1, gamma=source.gamma)
-    env = _build_env_like(
-        source,
-        reward_config=RewardConfig(enable_potential_punctuality=True),
-        context_sampler=ContextSampler(
-            context_pool=pool, initial_distribution=np.ones(1), seed=1
-        ),
-        dspl_statistics_hub=hub,
-        curriculum_env_rank=0,
-    )
-    env.reset()
-    base_rewards = []
-    for action in (1.0, -1.0):
-        transition = env.stepper.advance(
-            env.state, env.observation_builder.denormalize_action(action)
-        )
-        breakdown = env.reward_calculator.calculate(transition)
-        base_rewards.append(breakdown.total - breakdown.punctuality_shaping)
-        env.step(np.asarray([action]))
-        hub.finish_rollout(version=0)
-        if transition.terminated or transition.truncated:
-            break
-    snapshot = hub.snapshot(version=0)
-    np.testing.assert_allclose(snapshot.rollout_returns, base_rewards)
-    if snapshot.completed_returns.size:
-        assert snapshot.completed_returns[0] == pytest.approx(
-            sum(env.gamma**i * r for i, r in enumerate(base_rewards))
-        )
 
 
 def test_punctuality_training_adapter_and_ppo_smoke(mtto_env):
@@ -337,102 +294,6 @@ def test_multiple_environments_can_share_one_stepper(mtto_env: MTTOEnv) -> None:
 def test_environment_rejects_mismatched_injected_stepper(mtto_env: MTTOEnv) -> None:
     with pytest.raises(ValueError, match="does not match"):
         _ = _build_env_like(mtto_env, stepper=mtto_env.stepper)
-
-
-def test_factory_shares_stepper_and_curriculum_distribution(
-    mtto_env: MTTOEnv,
-) -> None:
-    pool = ContextPool(
-        (
-            Context(
-                context_index=0,
-                remaining_distance_m=mtto_env.stepper.whole_distance_m,
-                initial_state=mtto_env.stepper.reset(),
-            ),
-        )
-    )
-    distribution_state = CurriculumDistributionState(
-        context_count=1,
-        initial_distribution=[1.0],
-    )
-    kwargs = {
-        "vehicle": mtto_env.vehicle,
-        "track": mtto_env.track,
-        "safeguard_utility": mtto_env.safeguard_utility,
-        "train_service": mtto_env.train_service,
-        "gamma": mtto_env.gamma,
-        "step_distance": mtto_env.step_distance,
-        "stepper": mtto_env.stepper,
-        "context_pool": pool,
-        "curriculum_distribution_state": distribution_state,
-    }
-
-    first = make_env(**kwargs)
-    second = make_env(**kwargs)
-
-    assert first.stepper is second.stepper is mtto_env.stepper
-    assert first.context_sampler is not None
-    assert second.context_sampler is not None
-    assert first.context_sampler.distribution_state is distribution_state
-    assert second.context_sampler.distribution_state is distribution_state
-
-
-def test_factory_shares_critic_statistics(
-    mtto_env: MTTOEnv,
-) -> None:
-    pool = ContextPool(
-        (
-            Context(
-                context_index=0,
-                remaining_distance_m=mtto_env.stepper.whole_distance_m,
-                initial_state=mtto_env.stepper.reset(),
-            ),
-        )
-    )
-    distribution_state = CurriculumDistributionState(
-        context_count=1, initial_distribution=[1.0]
-    )
-    hub = DSPLStatisticsHub(context_count=1, num_envs=1, gamma=0.9)
-    kwargs = {
-        "vehicle": mtto_env.vehicle,
-        "track": mtto_env.track,
-        "safeguard_utility": mtto_env.safeguard_utility,
-        "train_service": mtto_env.train_service,
-        "gamma": mtto_env.gamma,
-        "step_distance": mtto_env.step_distance,
-        "stepper": mtto_env.stepper,
-        "context_pool": pool,
-        "curriculum_distribution_state": distribution_state,
-        "dspl_statistics_hub": hub,
-        "curriculum_env_rank": 0,
-    }
-
-    env = make_env(**kwargs)
-    assert env.dspl_statistics_hub is hub
-
-
-class _ContextSamplerStub:
-    def __init__(self, initial_state: OperationalState) -> None:
-        self.initial_state = initial_state
-        self.version = 0
-        self.reseeded_with: int | None = None
-        self.updated: tuple[object, int] | None = None
-
-    def reseed(self, seed: int) -> None:
-        self.reseeded_with = seed
-
-    def sample(self) -> Context:
-        return Context(
-            context_index=2,
-            remaining_distance_m=100.0,
-            initial_state=self.initial_state,
-        )
-
-    def update_distribution(
-        self, weights: NDArray[np.floating] | list[float], *, version: int
-    ) -> None:
-        self.updated = (np.asarray(weights, dtype=np.float64), version)
-        self.version = version
 
 
 @pytest.mark.parametrize(

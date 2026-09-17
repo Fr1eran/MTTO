@@ -8,6 +8,7 @@ from matplotlib import pyplot as plt
 
 import scripts.run_method_ablation as method_ablation
 import scripts.run_schedule_time_change as schedule_change
+from contracts.evaluation import EvaluationHistory
 from rl.experiment_utils import (
     build_default_training_args,
     load_run_metadata,
@@ -137,7 +138,6 @@ def test_show_cli_rejects_figure_filename_override() -> None:
 def test_metadata_reward_snapshot_reconstructs_fixed_configuration() -> None:
     args = build_default_training_args()
     args.training_episodes = 8
-    args.reference_curve_dir = "."
     spec = resolve_training_run_spec(args)
     config = _reward_config_from_metadata(spec.run_metadata.reward_config)
 
@@ -148,20 +148,55 @@ def test_metadata_reward_snapshot_reconstructs_fixed_configuration() -> None:
 def test_metadata_reward_snapshot_rejects_retired_parameters() -> None:
     args = build_default_training_args()
     args.training_episodes = 8
-    args.reference_curve_dir = "."
     snapshot = replace(
         resolve_training_run_spec(args).run_metadata.reward_config,
         punctuality_potential_scale=3.25,
     )
-    with pytest.raises(ValueError, match="fixed DSPL protocol"):
+    with pytest.raises(ValueError, match="fixed PIRS protocol"):
         _reward_config_from_metadata(snapshot)
+
+
+def _write_fixed_evaluations(path: Path) -> None:
+    expected_rollouts = np.arange(
+        method_ablation.DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
+        method_ablation.METHOD_TRAINING_ROLLOUTS,
+        method_ablation.DEFAULT_EVALUATION_INTERVAL_ROLLOUTS,
+        dtype=np.int64,
+    )
+    expected_steps = (
+        expected_rollouts * method_ablation.DEFAULT_ROLLOUT_STEPS_PER_UPDATE
+    ).astype(np.int64)
+    history = EvaluationHistory(
+        training_steps=expected_steps,
+        rollout_indices=expected_rollouts,
+        total_reward=np.arange(expected_rollouts.size, dtype=np.float64),
+        episode_steps=np.full(expected_rollouts.size, 10, dtype=np.int64),
+        success=np.ones(expected_rollouts.size, dtype=np.bool_),
+        safe=np.ones(expected_rollouts.size, dtype=np.bool_),
+        feasible=np.ones(expected_rollouts.size, dtype=np.bool_),
+        stop_error_m=np.arange(1, expected_rollouts.size + 1, dtype=np.float64),
+        time_error_s=-np.arange(1, expected_rollouts.size + 1, dtype=np.float64),
+        total_energy_j=np.full(expected_rollouts.size, 9_000.0),
+        comfort_tav=np.full(expected_rollouts.size, 0.2),
+        completed_training_episodes=np.arange(expected_rollouts.size, dtype=np.int64),
+        scheduled_completed_training_episodes=np.arange(
+            expected_rollouts.size, dtype=np.int64
+        ),
+        route_completion_ratio=np.linspace(0.0, 1.0, expected_rollouts.size),
+        safety_violation_positions_m=np.asarray([], dtype=np.float64),
+        safety_violation_position_offsets=np.zeros(
+            expected_rollouts.size + 1, dtype=np.int64
+        ),
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(path, **history.to_npz_mapping())
 
 
 def _write_completed_method_ablation(
     output_root: Path,
 ) -> list[method_ablation.AblationRun]:
     args = method_ablation.build_arg_parser().parse_args(
-        ["train", "--reference-curve-dir", ".", "--output-root", str(output_root)]
+        ["train", "--output-root", str(output_root)]
     )
     runs = method_ablation.resolve_run_matrix(args)
     statuses: dict[str, object] = {}
@@ -201,6 +236,8 @@ def _write_completed_method_ablation(
                     json.dumps(metadata.to_mapping()),
                     encoding="utf-8",
                 )
+            elif name == "evaluations":
+                _write_fixed_evaluations(path)
             else:
                 path.touch()
         statuses[run.run_id] = {
@@ -229,7 +266,7 @@ def test_candidate_discovery_loads_best_and_final_for_all_full_method_seeds(
 
 def test_candidate_discovery_rejects_inconsistent_metadata(tmp_path: Path) -> None:
     runs = _write_completed_method_ablation(tmp_path)
-    full_method_run = next(run for run in runs if run.variant.id == "ppo_pprs_dspl")
+    full_method_run = next(run for run in runs if run.variant.id == "ppo_pirs")
     metadata_path = full_method_run.artifacts.metadata_best
     assert metadata_path is not None
     metadata = load_run_metadata(metadata_path.parent)
@@ -523,7 +560,6 @@ def test_candidate_rank_uses_worst_error_before_mean_energy() -> None:
 def test_exact_rank_tie_prefers_best_then_run_id() -> None:
     args = build_default_training_args()
     args.training_episodes = 8
-    args.reference_curve_dir = "."
     metadata = resolve_training_run_spec(args).run_metadata
     results = (_result(),)
 
@@ -556,3 +592,46 @@ def test_exact_rank_tie_prefers_best_then_run_id() -> None:
         "run_b__best",
         "run_a__final",
     ]
+
+
+def test_build_schedule_change_table_generates_markdown_table(tmp_path: Path) -> None:
+    candidate_dir = tmp_path / "candidates" / "cand1" / "original"
+    candidate_dir.mkdir(parents=True)
+    metrics_file = candidate_dir / "metrics.json"
+    metrics_file.write_text(
+        json.dumps({"comfort_tav": 4.81285}),
+        encoding="utf-8",
+    )
+
+    summary = {
+        "cases": [
+            {
+                "case": {"delta_time_s": 0.0, "label": "Original", "token": "original"},
+                "time_error_s": 9.4576,
+                "stop_error_m": 0.0788,
+                "total_energy_j": 3_600_000.0 * 2.5,
+                "trajectory_metrics_json": "candidates/cand1/original/metrics.json",
+            },
+            {
+                "case": {
+                    "delta_time_s": 30.0,
+                    "label": "Plus 30s",
+                    "token": "plus_30p0s",
+                },
+                "time_error_s": -9.3284,
+                "stop_error_m": 0.0772,
+                "total_energy_j": 3_600_000.0 * 2.2,
+                "trajectory_metrics_json": "missing/metrics.json",
+            },
+        ]
+    }
+
+    table = schedule_change.build_schedule_change_table(tmp_path, summary)
+
+    assert (
+        "| 计划变化 | 最终时间误差 (s) | 停站误差 (m) | 轨迹能耗 (kWh) | TAV (m/s²) |"
+        in table
+    )
+    assert "| Original | +9.4576 | 0.0788 | 2.5000 | 4.8129 |" in table
+    assert "| +30 s | -9.3284 | 0.0772 | 2.2000 | — |" in table
+    assert "TAV（累计加速度变化量）" in table

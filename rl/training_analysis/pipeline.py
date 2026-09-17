@@ -7,7 +7,6 @@ from typing import Any
 
 from .analyze import (
     compute_best_eval_metrics,
-    compute_curriculum_distribution_metrics,
     compute_regular_training_metrics,
     compute_reward_component_analysis,
     compute_safety_truncation_position_metrics,
@@ -197,9 +196,6 @@ def run_training_analysis(
     reward_component_analysis = compute_reward_component_analysis(reward_artifact)
     if reward_artifact_path is not None:
         reward_component_analysis["artifact_path"] = str(reward_artifact_path)
-    curriculum_distribution_metrics = compute_curriculum_distribution_metrics(
-        series_map
-    )
     safety_truncation_position_metrics = compute_safety_truncation_position_metrics(
         histogram_path=(
             None
@@ -235,7 +231,6 @@ def run_training_analysis(
         best_eval_metrics=best_eval_metrics,
         trajectory_evaluation_metrics=trajectory_evaluation_metrics,
         reward_component_analysis=reward_component_analysis,
-        curriculum_distribution_metrics=curriculum_distribution_metrics,
         safety_truncation_position_metrics=safety_truncation_position_metrics,
         step_snapshots=step_snapshots,
         config=asdict(cfg),

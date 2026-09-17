@@ -158,9 +158,9 @@ def _draw_infrastructure_hlines(
         y=np.zeros_like(aps),
         xmin=aps,
         xmax=dps,
-        colors="#333333",
+        colors="#666666",
         linewidth=9,
-        alpha=0.75,
+        alpha=1.0,
     )
     ax.hlines(
         y=np.zeros_like(aps),
@@ -176,9 +176,9 @@ def _draw_infrastructure_hlines(
         y=np.zeros(2),
         xmin=data.stations_cor[0, :],
         xmax=data.stations_cor[1, :],
-        colors="#333333",
+        colors="#666666",
         linewidth=9,
-        alpha=0.75,
+        alpha=1.0,
     )
     ax.hlines(
         y=np.zeros(2),
@@ -194,9 +194,9 @@ def _draw_infrastructure_hlines(
         y=np.zeros(2),
         xmin=data.acceleration_zone_start,
         xmax=data.acceleration_zone_end,
-        colors="#333333",
+        colors="#666666",
         linewidth=9,
-        alpha=0.75,
+        alpha=1.0,
     )
     ax.hlines(
         y=np.zeros(2),
@@ -273,14 +273,14 @@ def create_overview_figure(data: TrackEnvironmentData) -> Figure:
         color="saddlebrown",
         linewidth=1.0,
         fill=True,
-        alpha=0.8,
+        alpha=1.0,
         label="Slope",
     )
     ax2.axhline(y=0, color="black", linewidth=0.5, linestyle="--")
     ax2.set_xlim((0.0, 30000.0))
     ax2.set_xlabel("Position (m)")
     ax2.set_ylabel("Slope (‰)")
-    ax2.legend()
+    ax2.legend(frameon=False)
     apply_sci_grid(ax2)
     _ = ax1.text(
         0.02,

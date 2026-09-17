@@ -64,7 +64,7 @@ SUMMARY_FILENAME = "schedule_time_change_summary.json"
 DEFAULT_FIGURE_FILENAME = "schedule_time_change_comparison.pdf"
 DEFAULT_DELTA_TIMES_S = (0.0, 30.0, -30.0)
 DEFAULT_CHANGE_DISTANCE_M = 8_000.0
-FULL_METHOD_VARIANT_ID = "ppo_pprs_dspl"
+FULL_METHOD_VARIANT_ID = "ppo_pirs"
 CANDIDATE_SOURCES: tuple[Literal["best", "final"], ...] = ("best", "final")
 SUMMARY_ARTIFACT_TYPE = "schedule_time_change_selection"
 SUMMARY_SCHEMA_VERSION = 1
@@ -93,7 +93,7 @@ def _reward_config_from_metadata(snapshot: object) -> RewardConfig:
     if scale != PUNCTUALITY_POTENTIAL_SCALE or sigma_s != PUNCTUALITY_POTENTIAL_SIGMA_S:
         raise ValueError(
             "selected policy uses retired punctuality-potential parameters; "
-            "the fixed DSPL protocol requires K=5 and sigma=20 s"
+            "the fixed PIRS protocol requires K=5 and sigma=20 s"
         )
     if potential_formula not in {None, "gamma_phi_next_minus_phi_previous"}:
         raise ValueError(
@@ -298,7 +298,7 @@ def _validate_candidate_metadata(
 ) -> None:
     expected = _candidate_protocol(candidates[0].metadata)
     if candidates[0].metadata.reward_preset_name != "basic_safety_punctuality":
-        raise ValueError("complete-method candidates must use the PPRS reward preset")
+        raise ValueError("complete-method candidates must use the PIRS reward preset")
     for candidate in candidates[1:]:
         if _candidate_protocol(candidate.metadata) != expected:
             raise ValueError(
@@ -1006,8 +1006,10 @@ def _load_case_curves(
     return loaded_cases
 
 
-def _case_sort_key(item: tuple[dict[str, Any], EvaluationArtifact]):
-    case_payload, _ = item
+def _case_sort_key(
+    item: tuple[dict[str, Any], EvaluationArtifact] | dict[str, Any],
+) -> tuple[int, float]:
+    case_payload = item[0] if isinstance(item, tuple) else item
     case = case_payload.get("case")
     delta = case.get("delta_time_s", 0.0) if isinstance(case, dict) else 0.0
     delta_value = float(delta)
@@ -1016,6 +1018,58 @@ def _case_sort_key(item: tuple[dict[str, Any], EvaluationArtifact]):
     if delta_value > 0.0:
         return (1, abs(delta_value))
     return (2, abs(delta_value))
+
+
+def build_schedule_change_table(
+    experiment_dir: Path,
+    summary: dict[str, Any],
+) -> str:
+    cases_raw = summary.get("cases")
+    if not isinstance(cases_raw, list) or not cases_raw:
+        raise ValueError("Summary must contain a non-empty 'cases' list")
+
+    loaded = sorted(cases_raw, key=_case_sort_key)
+    header = (
+        "| 计划变化 | 最终时间误差 (s) | 停站误差 (m) | 轨迹能耗 (kWh) | TAV (m/s²) |"
+    )
+    separator = "| --- | --- | --- | --- | --- |"
+    lines = [header, separator]
+
+    for case_payload in loaded:
+        case = case_payload.get("case", {})
+        delta = float(case.get("delta_time_s", 0.0)) if isinstance(case, dict) else 0.0
+        if delta == 0.0:
+            change_label = "Original"
+        elif delta > 0.0:
+            change_label = f"+{delta:g} s"
+        else:
+            change_label = f"-{abs(delta):g} s"
+
+        time_error_s = float(case_payload.get("time_error_s", 0.0))
+        stop_error_m = float(case_payload.get("stop_error_m", 0.0))
+        total_energy_j = float(case_payload.get("total_energy_j", 0.0))
+        total_energy_kwh = total_energy_j / 3_600_000.0
+
+        comfort_str = "—"
+        metrics_rel = case_payload.get("trajectory_metrics_json")
+        if metrics_rel:
+            metrics_path = experiment_dir / metrics_rel
+            if metrics_path.is_file():
+                metrics_dict = json.loads(metrics_path.read_text(encoding="utf-8"))
+                comfort_val = metrics_dict.get("comfort_tav")
+                if comfort_val is not None:
+                    comfort_str = f"{float(comfort_val):.4f}"
+
+        lines.append(
+            f"| {change_label} | {time_error_s:+.4f} | {stop_error_m:.4f} | "
+            f"{total_energy_kwh:.4f} | {comfort_str} |"
+        )
+
+    lines.append(
+        "\n*注：TAV（累计加速度变化量）公式为 "
+        r"$\sum_t |a_t - a_{t-1}|$，单位为 $\mathrm{m/s^2}$。*"
+    )
+    return "\n".join(lines) + "\n"
 
 
 def _style_for_delta(delta_time_s: float) -> dict[str, Any]:
@@ -1186,10 +1240,14 @@ def run_show(args: argparse.Namespace) -> None:
         show=bool(args.show),
         factor=float(args.factor),
     )
+    table_content = build_schedule_change_table(experiment_dir, summary)
+    table_path = experiment_dir / "schedule_time_change_table.md"
+    table_path.write_text(table_content, encoding="utf-8")
 
     print("========== Schedule-Time Change Result ==========")
     print(f"  experiment_dir: {experiment_dir}")
     print(f"  summary_json:   {experiment_dir / SUMMARY_FILENAME}")
+    print(f"  table:          {table_path}")
     if saved_path:
         print(f"  figure:         {saved_path}")
     print("=================================================")
