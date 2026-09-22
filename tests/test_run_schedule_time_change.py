@@ -629,9 +629,10 @@ def test_build_schedule_change_table_generates_markdown_table(tmp_path: Path) ->
     table = schedule_change.build_schedule_change_table(tmp_path, summary)
 
     assert (
-        "| 计划变化 | 最终时间误差 (s) | 停站误差 (m) | 轨迹能耗 (kWh) | TAV (m/s²) |"
+        "| Schedule change | Final time error (s) | Stop error (m) "
+        "| Trajectory energy (kWh) | Cumulative acceleration variation (m/s²) |"
         in table
     )
     assert "| Original | +9.4576 | 0.0788 | 2.5000 | 4.8129 |" in table
     assert "| +30 s | -9.3284 | 0.0772 | 2.2000 | — |" in table
-    assert "TAV（累计加速度变化量）" in table
+    assert "Note: The cumulative acceleration variation formula" in table

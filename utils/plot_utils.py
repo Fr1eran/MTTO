@@ -24,15 +24,18 @@ SCI_GRID_ALPHA = 1.0
 SCI_BAND_ALPHA = 0.1
 
 
-def sci_tint_color(color: str, factor: float = 0.2) -> tuple[float, float, float]:
-    """Blend an RGB color with white to produce an opaque pastel tint.
+def sci_tint_color(
+    color: str, factor: float = 0.2
+) -> tuple[float, float, float, float]:
+    """Convert an RGB color to an RGBA tuple with alpha transparency.
 
-    Replaces transparent fill bands to prevent PDF transparency objects (/CA, /ca).
+    Provides transparent fill bands for uncertainty shading so overlapping
+    regions and underlying grid lines remain clearly distinguishable.
     """
     import matplotlib.colors as mcolors
 
     rgb = mcolors.to_rgb(color)
-    return tuple((1.0 - factor) + factor * c for c in rgb)
+    return (*rgb, factor)
 
 
 SCI_SERIES_LINE_STYLES: tuple[dict[str, str], ...] = (

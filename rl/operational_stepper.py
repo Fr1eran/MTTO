@@ -52,12 +52,12 @@ class OperationalStepper:
         self.max_episode_steps: int = self.required_episode_steps
         self.ecc: ECC = ECC(
             R_m=0.2796,
-            L_d=0.0002,
-            R_k=50.0,
+            L_d=0.00292,
+            R_k=0.0736,
             L_k=0.000142,
             Tau=0.258,
             Psi_fd=3.9629,
-            k_c=0.8,
+            k_c=0.5,
         )
         self.sps: SPS = SPS(
             safeguard_utility=safeguard_utility,

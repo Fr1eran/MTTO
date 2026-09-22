@@ -453,11 +453,11 @@ def plot_curve_aggregates(
     apply_sci_figure_layout(
         figure,
         columns=2,
-        height_in=3.25,
+        height_in=3.00,
         left=0.10,
         bottom=0.19,
-        top=0.84,
-        wspace=0.34,
+        top=0.90,
+        wspace=0.24,
     )
     if show:
         plt.show()
@@ -653,8 +653,8 @@ def build_step_distance_summary_and_table(
 
     # Format Markdown table
     header = (
-        "| 步长 | 严格可行率 | 绝对停站误差 (m) | 绝对到站时间误差 (s) "
-        "| 能耗 (kWh) | TAV (m/s²) |"
+        "| Step distance | Strict feasibility rate | Stop error (m) | Time error (s) "
+        "| Total energy (kWh) | Cumulative acceleration variation (m/s²) |"
     )
     separator = "| --- | --- | --- | --- | --- | --- |"
     rows = [header, separator]
@@ -672,9 +672,10 @@ def build_step_distance_summary_and_table(
             f"{m['comfort_tav']['mean']:.4f}±{m['comfort_tav']['std']:.4f} |"
         )
     table_note = (
-        "\n*注：提前失败会影响能耗和误差的解释，须结合严格可行率综合评估。"
-        "TAV（累计加速度变化量）公式为 "
-        r"$\sum_t |a_t - a_{t-1}|$，单位为 $\mathrm{m/s^2}$。*"
+        "\n*Note: Early failures affect the interpretation of energy and errors, "
+        "and should be evaluated comprehensively with the strict feasibility rate. "
+        "The cumulative acceleration variation formula is "
+        r"$\sum_t |a_t - a_{t-1}|$, with unit $\mathrm{m/s^2}$.*"
     )
     markdown_table = "\n".join(rows) + table_note
 

@@ -395,10 +395,15 @@ def _plot_method_trajectory_metrics(
     apply_sci_curve_style()
     fig, axes = plt.subplots(2, 2)
     panels = (
-        (axes[0, 0], "stop_error_m", "Mean absolute stop error (m)", "(a)"),
-        (axes[0, 1], "abs_time_error_s", "Mean absolute time error (s)", "(b)"),
-        (axes[1, 0], "total_energy_kwh", "Mean trajectory energy (kWh)", "(c)"),
-        (axes[1, 1], "comfort_tav", "TAV (m/s²)", "(d)"),
+        (axes[0, 0], "stop_error_m", "Absolute stop error (m)", "(a)"),
+        (axes[0, 1], "abs_time_error_s", "Absolute time error (s)", "(b)"),
+        (axes[1, 0], "total_energy_kwh", "Trajectory energy (kWh)", "(c)"),
+        (
+            axes[1, 1],
+            "comfort_tav",
+            "Cumulative acceleration variation (m/s²)",
+            "(d)",
+        ),
     )
     for axis, key, ylabel, panel in panels:
         for aggregate in aggregates:
@@ -459,12 +464,12 @@ def _plot_method_trajectory_metrics(
     apply_sci_figure_layout(
         fig,
         columns=2,
-        height_in=4.8,
+        height_in=4.6,
         left=0.11,
         bottom=0.12,
-        top=0.89,
-        wspace=0.42,
-        hspace=0.42,
+        top=0.92,
+        wspace=0.30,
+        hspace=0.32,
     )
     return fig
 
@@ -730,7 +735,7 @@ def _plot_method_training_curves(
     _format_transition_axis(inset_a)
 
     axes[0].set_xlabel("Environment transitions")
-    axes[0].set_ylabel("Speed violations / 10k transitions")
+    axes[0].set_ylabel("Speed violations / 10⁴ transitions")
     axes[0].set_xlim(left=0, right=METHOD_TRAINING_STEPS)
     axes[0].set_ylim(bottom=0.0)
     _format_transition_axis(axes[0])
@@ -738,7 +743,7 @@ def _plot_method_training_curves(
     add_panel_label(ax=axes[0], label="(a)")
 
     axes[1].set_xlabel("Environment transitions")
-    axes[1].set_ylabel("Training arrival ratio (diagnostic)")
+    axes[1].set_ylabel("Training arrival rate")
     axes[1].set_xlim(left=0, right=METHOD_TRAINING_STEPS)
     axes[1].set_ylim(-0.03, 1.03)
     _format_transition_axis(axes[1])
@@ -757,11 +762,11 @@ def _plot_method_training_curves(
     apply_sci_figure_layout(
         fig,
         columns=2,
-        height_in=3.0,
+        height_in=2.85,
         left=0.11,
         bottom=0.18,
-        top=0.86,
-        wspace=0.35,
+        top=0.90,
+        wspace=0.24,
     )
     return fig
 
@@ -771,8 +776,8 @@ def _render_method_training_table(training_data: dict[str, Any]) -> str:
         "# Method Ablation Training Process Table",
         "",
         (
-            "| Method | Rollouts | Low Viol. Rate (/10k) | High Viol. Rate (/10k) | "
-            "Total Viol. Rate (/10k) | Arrival Ratio | Low Violations | "
+            "| Method | Rollouts | Low Viol. Rate (/10⁴) | High Viol. Rate (/10⁴) | "
+            "Total Viol. Rate (/10⁴) | Arrival Ratio | Low Violations | "
             "High Violations | Total Violations | Transitions | Arrivals / Completed |"
         ),
         ("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"),
@@ -822,12 +827,15 @@ def _render_method_training_table(training_data: dict[str, Any]) -> str:
         [
             "",
             (
-                "*注：统计按 4 个阶段（各 100 个 rollout = 819,200 次转移，"
-                "5 种子合计 4,096,000 次转移）汇总。"
-                "违规率为每万次环境转移发生次数，"
-                "到达率为到达终点回合数占完成回合数比例；"
-                "均值与样本标准差（ddof=1）基于 5 个种子计算。"
-                "同时展示 5 种子累计违规次数及到达回合分子/分母。*"
+                "*Note: Statistics are aggregated across 4 stages "
+                "(100 rollouts = 819,200 transitions each, totaling "
+                "4,096,000 transitions across 5 seeds). "
+                "Violation rate is the number of occurrences per 10k "
+                "environment transitions; arrival rate is the proportion "
+                "of completed episodes that reach the terminal. "
+                "Mean and sample standard deviation (ddof=1) are calculated "
+                "across 5 seeds. Cumulative violation counts and arrival "
+                "episode numerators/denominators are also shown.*"
             ),
         ]
     )
@@ -866,8 +874,8 @@ def _render_method_performance_table(
         "# Method Ablation Performance Table",
         "",
         (
-            "| Method | 严格可行率 | Stop Error (m) | Time Error (s) | "
-            "Total Energy (kWh) | TAV (m/s²) |"
+            "| Method | Strict feasibility rate | Stop error (m) | Time error (s) | "
+            "Total energy (kWh) | Cumulative acceleration variation (m/s²) |"
         ),
         "| --- | --- | --- | --- | --- | --- |",
     ]
@@ -903,12 +911,14 @@ def _render_method_performance_table(
         [
             "",
             (
-                "*注：指标基于各方法 5 个随机种子的 best/ 独立评估轨迹统计"
-                "（均值 ± 样本标准差，ddof=1），包含未达标运行。"
-                "严格可行率为 5 个种子中严格可行轨迹的比例。"
-                "能耗单位由 J 换算为 kWh。"
-                "TAV（累计加速度变化量）公式为 "
-                r"$\sum_t |a_t - a_{t-1}|$，单位为 $\mathrm{m/s^2}$。*"
+                "*Note: Metrics are based on best/independent evaluation "
+                "trajectories across 5 random seeds per method "
+                "(mean ± sample standard deviation, ddof=1), including "
+                "non-conforming runs. Strict feasibility rate is the proportion "
+                "of strictly feasible trajectories across 5 seeds. "
+                "Energy units are converted from J to kWh. "
+                "The cumulative acceleration variation formula is "
+                r"$\sum_t |a_t - a_{t-1}|$, with unit $\mathrm{m/s^2}$.*"
             ),
         ]
     )

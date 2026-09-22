@@ -427,7 +427,7 @@ uv run python -m scripts.show_potential_function \
 ```
 
 ```bash
-uv run python -m scripts.show_potential_function --plot-type safety-speed
+uv run python -m scripts.show_potential_function --plot-type safety
 ```
 
 保存图片但不打开窗口：

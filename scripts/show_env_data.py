@@ -218,10 +218,11 @@ def create_overview_figure(data: TrackEnvironmentData) -> Figure:
     apply_sci_figure_layout(
         fig,
         columns=2,
-        height_in=4.2,
+        height_in=4.0,
         left=0.09,
+        right=0.96,
         bottom=0.13,
-        top=0.82,
+        top=0.84,
         hspace=0.18,
     )
     data.safeguard.render(ax=ax1, layers=SafeGuardUtility.FULL_CURVE_VIEW_LAYERS)

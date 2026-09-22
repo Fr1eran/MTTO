@@ -347,12 +347,11 @@ def test_metric_aggregation_uses_sample_std_and_explicit_best_artifacts(
     table_md, summary, rec, status = (
         step_distance_ablation.build_step_distance_summary_and_table(manifest_obj)
     )
-    assert "严格可行率" in table_md
-    assert "严格可行数/5" not in table_md
+    assert "Strict feasibility rate" in table_md
+    assert "Step distance" in table_md
     assert "50.0% (1/2)" in table_md
-    assert "TAV (m/s²)" in table_md
-    assert "舒适度 (m/s³)" not in table_md
-    assert "累计加速度变化量" in table_md
+    assert "Cumulative acceleration variation (m/s²)" in table_md
+    assert "Note:" in table_md
     assert summary["variants"]["50p0"]["feasible_rate"] == pytest.approx(0.5)
     assert summary["variants"]["50p0"]["feasible_count"] == 1
     assert summary["variants"]["50p0"]["metrics"]["stop_error_m"][

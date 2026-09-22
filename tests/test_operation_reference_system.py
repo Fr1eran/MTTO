@@ -211,12 +211,12 @@ def test_max_energy_and_min_operation_time_consistent(reference_context):
     vehicle, track, gamma = reference_context
     ecc = ECC(
         R_m=0.2796,
-        L_d=0.0002,
-        R_k=50.0,
+        L_d=0.00292,
+        R_k=0.0736,
         L_k=0.000142,
         Tau=0.258,
         Psi_fd=3.9629,
-        k_c=0.8,
+        k_c=0.5,
     )
     begin_pos = float(track.speed_limit_intervals[0])
     end_pos = float(track.speed_limit_intervals[-1])

@@ -393,12 +393,17 @@ def plot_safety_potential_heatmap_speed(*, minimal: bool = False) -> Figure:
 PLOT_TYPE_CHOICES: tuple[str, ...] = (
     "punctuality",
     "safety-punctuality",
-    "safety-speed",
+    "safety",
 )
 FIGURE_FILENAMES = {
     "punctuality": "punctuality_potential.pdf",
     "safety-punctuality": "safety_punctuality_potential.pdf",
-    "safety-speed": "safety_speed_potential.pdf",
+    "safety": "safety_potential.pdf",
+}
+FIGURE_FILENAMES_MINIMAL = {
+    "punctuality": "punctuality_potential_minimal.tiff",
+    "safety-punctuality": "safety_punctuality_potential_minimal.tiff",
+    "safety": "safety_potential_minimal.tiff",
 }
 
 
@@ -456,7 +461,7 @@ def _resolve_plotter(
         "safety-punctuality": lambda: plot_safety_punctuality_potentials(
             schedule_time_s=schedule_time_s, minimal=minimal
         ),
-        "safety-speed": lambda: plot_safety_potential_heatmap_speed(minimal=minimal),
+        "safety": lambda: plot_safety_potential_heatmap_speed(minimal=minimal),
     }
     return plotters[plot_type]
 
@@ -481,7 +486,7 @@ def plot_punctuality_potential(
         apply_sci_grid(ax)
         fig.legend(
             (reference_line,),
-            (r"$\rho^*$",),
+            (r"$\rho_{\mathrm{ref}}$",),
             loc="upper center",
             frameon=False,
             bbox_to_anchor=(0.5, 0.94),
@@ -505,7 +510,7 @@ def plot_safety_punctuality_potentials(
     fig, (ax_safety, ax_punctuality) = plt.subplots(
         1,
         2,
-        figsize=sci_figure_size(columns=2, height_in=3.1),
+        figsize=sci_figure_size(columns=2, height_in=2.45),
     )
     safety_mesh = ax_safety.pcolormesh(
         safety_field.position_grid,
@@ -525,18 +530,18 @@ def plot_safety_punctuality_potentials(
         _apply_minimal_axis_style(ax_safety)
         _apply_minimal_axis_style(ax_punctuality)
     else:
-        fig.subplots_adjust(top=0.83, bottom=0.18, left=0.08, right=0.96, wspace=0.30)
+        fig.subplots_adjust(top=0.87, bottom=0.20, left=0.095, right=0.945, wspace=0.55)
         ax_safety.set(xlabel="Position (m)", ylabel="Speed (km/h)")
         ax_punctuality.set(xlabel="Position (m)", ylabel="Redundant operation time (s)")
         for axis in (ax_safety, ax_punctuality):
             apply_sci_grid(axis)
         fig.legend(
             (min_speed_line, max_speed_line, reference_line),
-            (r"$v_{\min}(x)$", r"$v_{\max}(x)$", r"$\rho^*$"),
+            (r"$v_{\min}(x)$", r"$v_{\max}(x)$", r"$\rho_{\mathrm{ref}}$"),
             loc="upper center",
             ncols=3,
             frameon=False,
-            bbox_to_anchor=(0.5, 0.94),
+            bbox_to_anchor=(0.5, 0.99),
         )
         _ = fig.colorbar(safety_mesh, ax=ax_safety, pad=0.02, fraction=0.046)
         _ = fig.colorbar(punctuality_mesh, ax=ax_punctuality, pad=0.02, fraction=0.046)
@@ -546,7 +551,22 @@ def plot_safety_punctuality_potentials(
     return fig
 
 
-def _save_compact_figure(figure: Figure, output_dir: Path, *, plot_type: str) -> Path:
+def _save_compact_figure(
+    figure: Figure,
+    output_dir: Path,
+    *,
+    plot_type: str,
+    minimal: bool = False,
+) -> Path:
+    if minimal:
+        output_path = output_dir / FIGURE_FILENAMES_MINIMAL[plot_type]
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(
+            output_path,
+            dpi=1200.0,
+            pil_kwargs={"compression": "tiff_lzw"},
+        )
+        return output_path
     return save_sci_figure(
         figure, output_dir / FIGURE_FILENAMES[plot_type], transparent=False
     )
@@ -570,7 +590,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if cli_args.output_dir is not None:
         output_path = _save_compact_figure(
-            figure, cli_args.output_dir, plot_type=cli_args.plot_type
+            figure,
+            cli_args.output_dir,
+            plot_type=cli_args.plot_type,
+            minimal=cli_args.minimal,
         )
         print(f"图像已保存: {output_path}")
 

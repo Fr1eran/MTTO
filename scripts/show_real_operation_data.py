@@ -154,12 +154,12 @@ def main() -> None:
     vehicle = VehicleInfo(mass=317.5, numoftrainsets=5, length=128.5)
     tec = ECC(
         R_m=0.2796,
-        L_d=0.0002,
-        R_k=50.0,
+        L_d=0.00292,
+        R_k=0.0736,
         L_k=0.000142,
         Tau=0.258,
         Psi_fd=3.9629,
-        k_c=0.8,
+        k_c=0.5,
     )
 
     propulsion_energy_consumption, leviation_energy_consumption = (

@@ -148,11 +148,12 @@ def test_format_comparison_table_contains_only_requested_metrics() -> None:
     assert "Time error (s)" in table
     assert "Stop error (m)" in table
     assert "Total energy (kWh)" in table
-    assert "TAV (m/s²)" in table
+    assert "Cumulative acceleration variation (m/s²)" in table
     assert "123.456" in table
     assert "0.123456" in table
     assert "—" in table
-    assert "不可直接比较" in table
+    assert "not directly comparable" in table
+    assert "Note:" in table
 
 
 def test_deduplicate_legend_is_removed() -> None:
@@ -292,5 +293,5 @@ def test_main_uses_comparison_axes_and_scientific_export(
     table_text = output_table.read_text(encoding="utf-8")
     assert "Proposed Method" in table_text
     assert "Total energy (kWh)" in table_text
-    assert "TAV (m/s²)" in table_text
+    assert "Cumulative acceleration variation (m/s²)" in table_text
     assert "—" in table_text

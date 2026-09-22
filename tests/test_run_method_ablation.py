@@ -555,9 +555,9 @@ def test_run_show_does_not_generate_selection_file(
     assert list(tmp_path.glob("**/selected_policy*.json")) == []
     assert table_dir.is_dir()
     perf_table = (table_dir / "method_performance_table.md").read_text(encoding="utf-8")
-    assert "严格可行率" in perf_table
-    assert "TAV (m/s²)" in perf_table
-    assert "累计加速度变化量" in perf_table
+    assert "Strict feasibility rate" in perf_table
+    assert "Cumulative acceleration variation (m/s²)" in perf_table
+    assert "Note:" in perf_table
     assert summary_file.is_file()
     summary_data = json.loads(summary_file.read_text(encoding="utf-8"))
     assert "feasible_summary" in summary_data

@@ -25,6 +25,7 @@ from utils.plot_utils import (
     VIS_ACTUAL_PURPLE,
     VIS_DP_BLACK,
     VIS_PROPOSED_ORANGE,
+    add_panel_label,
     apply_sci_curve_style,
     apply_sci_figure_layout,
     apply_sci_grid,
@@ -87,12 +88,12 @@ def _compute_segment_midpoints(pos_arr: np.ndarray | list[float]) -> np.ndarray:
 def _build_ecc() -> ECC:
     return ECC(
         R_m=0.2796,
-        L_d=0.0002,
-        R_k=50.0,
+        L_d=0.00292,
+        R_k=0.0736,
         L_k=0.000142,
         Tau=0.258,
         Psi_fd=3.9629,
-        k_c=0.8,
+        k_c=0.5,
     )
 
 
@@ -254,7 +255,7 @@ def format_comparison_table(
         ("Time error (s)", lambda m: f"{m.time_error_s:.3f}"),
         ("Stop error (m)", lambda m: f"{m.stop_error_m:.3f}"),
         ("Total energy (kWh)", lambda m: f"{m.total_energy_kwh:.3f}"),
-        ("TAV (m/s²)", _fmt_tav),
+        ("Cumulative acceleration variation (m/s²)", _fmt_tav),
     ]
     headers = ["Metric", *(label for label, _ in profile_metrics)]
     values = [
@@ -283,10 +284,10 @@ def format_comparison_table(
         *(render_row(row) for row in values),
     ]
     note = (
-        "\n*注：实际运行加速度计算口径不同"
-        "（由离散运营数据差分估计），与 DP/RL 不可直接比较。"
-        "TAV（累计加速度变化量）公式为 "
-        r"$\sum_t |a_t - a_{t-1}|$，单位为 $\mathrm{m/s^2}$。*"
+        "\n*Note: Actual operation acceleration calculation differs "
+        "(estimated by differencing discrete operational data) and is not "
+        "directly comparable with DP/RL. The cumulative acceleration variation "
+        r"formula is $\sum_t |a_t - a_{t-1}|$, with unit $\mathrm{m/s^2}$.*"
     )
     return "\n".join(rendered_rows) + note
 
@@ -321,6 +322,7 @@ def _finalize_comparison_figure(
         columns=2,
         height_in=5.5,
         left=0.11,
+        right=0.96,
         bottom=0.10,
         top=0.92,
         hspace=0.30,
@@ -458,6 +460,7 @@ def main() -> None:
         curve_color=_TRAJECTORY_COLORS[0],
         curve_label="DP optimized speed curve",
         safeguard=safeguard,
+        render_endpoints=False,
     )
     render_rl_curve_on_axes(
         ax=ax_speed,
@@ -498,17 +501,11 @@ def main() -> None:
     )
     ax_speed.set_ylabel("Speed (km/h)")
     ax_speed.set_xlabel("")
-    ax_speed.text(
-        0.02,
-        0.92,
-        "(a)",
-        transform=ax_speed.transAxes,
-        fontsize=10,
-        fontweight="bold",
-    )
+    add_panel_label(ax_speed, "(a)")
 
+    acc_profiles = [p for p in profiles if p.label != "Actual operation"]
     for profile, color, linestyle in zip(
-        profiles, _TRAJECTORY_COLORS, _TRAJECTORY_LINESTYLES, strict=True
+        acc_profiles, _TRAJECTORY_COLORS, _TRAJECTORY_LINESTYLES, strict=False
     ):
         ax_acc.plot(
             _compute_segment_midpoints(profile.position_m),
@@ -521,14 +518,8 @@ def main() -> None:
     ax_acc.axhline(0.0, color="#888888", linewidth=0.8, linestyle="--")
     ax_acc.set_xlabel("")
     ax_acc.set_ylabel(r"Acceleration ($\mathrm{m/s^2}$)")
-    ax_acc.text(
-        0.02,
-        0.92,
-        "(b)",
-        transform=ax_acc.transAxes,
-        fontsize=10,
-        fontweight="bold",
-    )
+    ax_acc.set_ylim(-1.5, 1.6)
+    add_panel_label(ax_acc, "(b)")
     apply_sci_grid(ax_acc)
 
     for profile, color, linestyle in zip(
@@ -550,15 +541,8 @@ def main() -> None:
             label=f"{profile.label} cumulative energy",
         )
     ax_energy.set_xlabel("Position (m)")
-    ax_energy.set_ylabel("Cumulative energy (kWh)")
-    ax_energy.text(
-        0.02,
-        0.92,
-        "(c)",
-        transform=ax_energy.transAxes,
-        fontsize=10,
-        fontweight="bold",
-    )
+    ax_energy.set_ylabel("Energy (kWh)")
+    add_panel_label(ax_energy, "(c)")
     apply_sci_grid(ax_energy)
     _finalize_comparison_figure(fig, (ax_speed, ax_acc, ax_energy))
 

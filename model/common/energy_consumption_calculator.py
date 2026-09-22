@@ -161,6 +161,17 @@ class ECC:
     Transportation Research Record,
     vol. 2674, no. Compendex, pp. 729-738, 2020, doi: 10.1177/0361198120938052.
     [3] 柴晓凤．中速磁浮节能运行图优化方法研究[D]. 北京交通大学, 2020.
+    [4] Z. Zou, M. Zheng, and Q. Lu,
+    “Modeling and Simulation of Traction Power Supply System for
+    High-Speed Maglev Train,” World Electric Vehicle Journal,
+    vol. 13, no. 5, p. 82, 2022, doi: 10.3390/wevj13050082.
+    R_m、Tau、Psi_fd 取自文献[4]表 1；R_k 按文献[4]馈电电缆电阻
+    0.0368 Ω/km 与 2 km 等效电缆长度取 0.0736 Ω（与 L_k 所对应的长度一致）。
+    L_d 由文献[4]表 1 推导：文献[4]的直线电机为三相对称、非凸极结构，
+    自感与互感的交流分量为零，故 d 轴电感
+    L_d = L_sσ + L_DC - M_DC = 2.2 mH + 0.48 mH - (-0.24 mH) = 2.92 mH，
+    其中 L_sσ 为漏感，L_DC、M_DC 分别为自感、互感的直流分量。
+    k_c 取文献[2]表 2 的 0.5，即两端变电站平均分担电流。
 
 
     Attributes:

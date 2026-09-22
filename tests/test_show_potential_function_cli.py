@@ -139,6 +139,7 @@ def test_show_potential_function_cli_accepts_plot_type(plot_type: str) -> None:
         "stopping-heatmap",
         "stopping-slices",
         "guidance-wide",
+        "safety-speed",
     ),
 )
 def test_show_potential_function_cli_rejects_retired_plot_types(
@@ -194,13 +195,27 @@ def test_main_dispatches_selected_plot_type(monkeypatch: pytest.MonkeyPatch) -> 
     }
 
 
+@pytest.mark.parametrize(
+    ("minimal", "expected_filename", "expected_kwargs"),
+    (
+        (False, "punctuality_potential.pdf", {"dpi": 1200.0}),
+        (
+            True,
+            "punctuality_potential_minimal.tiff",
+            {"dpi": 1200.0, "pil_kwargs": {"compression": "tiff_lzw"}},
+        ),
+    ),
+)
 def test_main_saves_figure_and_creates_parent_dir(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    minimal: bool,
+    expected_filename: str,
+    expected_kwargs: dict[str, object],
 ) -> None:
     figure = _FakeFigure()
     output_dir = tmp_path / "nested"
-    expected_output = output_dir / "punctuality_potential.pdf"
+    expected_output = output_dir / expected_filename
 
     def _fake_resolve_plotter(
         _plot_type: str, *, minimal: bool, schedule_time_s: float
@@ -216,21 +231,21 @@ def test_main_saves_figure_and_creates_parent_dir(
     )
     monkeypatch.setattr(show_potential_function.plt, "show", lambda: None)
 
-    exit_code = show_potential_function.main(
-        [
-            "--plot-type",
-            "punctuality",
-            "--output-dir",
-            str(output_dir),
-        ]
-    )
+    cli_args = [
+        "--plot-type",
+        "punctuality",
+        "--output-dir",
+        str(output_dir),
+    ]
+    if minimal:
+        cli_args.append("--minimal")
+
+    exit_code = show_potential_function.main(cli_args)
 
     assert exit_code == 0
     assert output_dir.is_dir()
     assert figure.saved_paths == [expected_output]
-    assert figure.savefig_calls[0]["kwargs"] == {
-        "dpi": 1200.0,
-    }
+    assert figure.savefig_calls[0]["kwargs"] == expected_kwargs
 
 
 def test_main_does_not_save_when_save_flag_is_disabled(
@@ -252,7 +267,7 @@ def test_main_does_not_save_when_save_flag_is_disabled(
     )
     monkeypatch.setattr(show_potential_function.plt, "show", lambda: None)
 
-    exit_code = show_potential_function.main(["--plot-type", "safety-speed"])
+    exit_code = show_potential_function.main(["--plot-type", "safety"])
 
     assert exit_code == 0
     assert figure.saved_paths == []

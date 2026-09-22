@@ -1030,7 +1030,8 @@ def build_schedule_change_table(
 
     loaded = sorted(cases_raw, key=_case_sort_key)
     header = (
-        "| 计划变化 | 最终时间误差 (s) | 停站误差 (m) | 轨迹能耗 (kWh) | TAV (m/s²) |"
+        "| Schedule change | Final time error (s) | Stop error (m) "
+        "| Trajectory energy (kWh) | Cumulative acceleration variation (m/s²) |"
     )
     separator = "| --- | --- | --- | --- | --- |"
     lines = [header, separator]
@@ -1066,8 +1067,8 @@ def build_schedule_change_table(
         )
 
     lines.append(
-        "\n*注：TAV（累计加速度变化量）公式为 "
-        r"$\sum_t |a_t - a_{t-1}|$，单位为 $\mathrm{m/s^2}$。*"
+        "\n*Note: The cumulative acceleration variation formula is "
+        r"$\sum_t |a_t - a_{t-1}|$, with unit $\mathrm{m/s^2}$.*"
     )
     return "\n".join(lines) + "\n"
 
@@ -1211,11 +1212,11 @@ def plot_schedule_change_result(
     apply_sci_figure_layout(
         fig,
         columns=2,
-        height_in=4.2,
+        height_in=3.8,
         left=0.09,
         right=0.97,
-        bottom=0.14,
-        top=0.84,
+        bottom=0.15,
+        top=0.88,
     )
 
     saved_path: str | None = None
