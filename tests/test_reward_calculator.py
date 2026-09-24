@@ -7,9 +7,7 @@ import pytest
 from model.ocs import SPSState, TrainService
 from rl.operational_state import OperationalState, OperationalTransition, ViolationCode
 from rl.reward_calculator import (
-    DEFAULT_COMFORT_REWARD_SCALE,
-    DEFAULT_ENERGY_REWARD_SCALE,
-    DEFAULT_SURVIVAL_REWARD_SCALE,
+    LI_GOAL_REWARD_SCALE,
     PUNCTUALITY_POTENTIAL_SCALE,
     PUNCTUALITY_POTENTIAL_SIGMA_S,
     RewardCalculator,
@@ -362,158 +360,44 @@ def test_safety_potential_can_be_disabled() -> None:
     assert reward.safety == 0.0
 
 
-def test_survival_reward_scale_is_configurable() -> None:
-    service = TrainService(
-        start_position=0.0,
-        target_position=100.0,
-        schedule_time=20.0,
-        max_acc_change=1.0,
-        max_stop_error=2.0,
-    )
-    calculator = RewardCalculator(
-        service,
-        max_episode_steps=10,
-        whole_distance_m=100.0,
-        max_energy_consumption_kj=100.0,
-        gamma=0.995,
-        reward_config=RewardConfig(survival_reward_scale=50.0),
-    )
-    reward = calculator.calculate(
-        OperationalTransition(
-            _state(),
-            _state(position=10.0),
-            1.0,
-            10.0,
-            1.0,
-            0.0,
-            False,
-            False,
-            ViolationCode.ONGOING,
-        )
-    )
-    assert reward.survival == pytest.approx(5.0)
-
-
-def test_dense_reward_scales_are_configurable() -> None:
-    service = TrainService(
-        start_position=0.0,
-        target_position=100.0,
-        schedule_time=20.0,
-        max_acc_change=1.0,
-        max_stop_error=2.0,
-    )
-    calculator = RewardCalculator(
-        service,
-        max_episode_steps=10,
-        whole_distance_m=100.0,
-        max_energy_consumption_kj=100.0,
-        gamma=0.995,
-        reward_config=RewardConfig(
-            energy_reward_scale=30.0,
-            comfort_reward_scale=10.0,
-            survival_reward_scale=0.0,
-        ),
-    )
-    reward = calculator.calculate(
-        OperationalTransition(
-            _state(acc=0.0),
-            _state(position=10.0, energy=5.0, acc=1.0),
-            1.0,
-            10.0,
-            1.0,
-            5.0,
-            False,
-            False,
-            ViolationCode.ONGOING,
-        )
-    )
-
-    assert reward.energy == pytest.approx(-1.5)
-    assert reward.comfort == pytest.approx(-1.0)
-    assert reward.survival == 0.0
-
-
-def test_zero_dense_reward_scales_disable_components() -> None:
-    config = RewardConfig(energy_reward_scale=0.0, comfort_reward_scale=0.0)
-    service = TrainService(
-        start_position=0.0,
-        target_position=100.0,
-        schedule_time=20.0,
-        max_acc_change=1.0,
-        max_stop_error=2.0,
-    )
-    calculator = RewardCalculator(
-        service,
-        max_episode_steps=10,
-        whole_distance_m=100.0,
-        max_energy_consumption_kj=100.0,
-        gamma=0.995,
-        reward_config=config,
-    )
-    reward = calculator.calculate(
-        OperationalTransition(
-            _state(acc=0.0),
-            _state(position=10.0, energy=5.0, acc=1.0),
-            1.0,
-            10.0,
-            1.0,
-            5.0,
-            False,
-            False,
-            ViolationCode.ONGOING,
-        )
-    )
-
-    assert reward.energy == 0.0
-    assert reward.comfort == 0.0
-
-
 @pytest.mark.parametrize(
-    "invalid_value",
-    (-1.0, float("nan"), float("inf"), float("-inf"), "invalid", None),
+    ("arrival_time_s", "stop_position_m", "punctuality", "stopping"),
+    ((25.0, 100.0, 50.0, 0.0), (35.0, 97.0, -0.4 * 15.0, -3.0)),
 )
-def test_reward_config_invalid_scales_fall_back_to_defaults(
-    invalid_value: object,
+def test_li_goal_reward_scales_published_values(
+    calculator: RewardCalculator,
+    arrival_time_s: float,
+    stop_position_m: float,
+    punctuality: float,
+    stopping: float,
 ) -> None:
-    config = RewardConfig(
-        energy_reward_scale=invalid_value,  # type: ignore[arg-type]
-        comfort_reward_scale=invalid_value,  # type: ignore[arg-type]
-        survival_reward_scale=invalid_value,  # type: ignore[arg-type]
-    )
-
-    assert config.energy_reward_scale == DEFAULT_ENERGY_REWARD_SCALE
-    assert config.comfort_reward_scale == DEFAULT_COMFORT_REWARD_SCALE
-    assert config.survival_reward_scale == DEFAULT_SURVIVAL_REWARD_SCALE
-
-
-def test_survival_reward_zero_disables_survival() -> None:
-    service = TrainService(
-        start_position=0.0,
-        target_position=100.0,
-        schedule_time=20.0,
-        max_acc_change=1.0,
-        max_stop_error=2.0,
-    )
-    calculator = RewardCalculator(
-        service,
+    li = RewardCalculator(
+        replace(calculator.train_service, max_arr_time_error_s=10.0),
         max_episode_steps=10,
         whole_distance_m=100.0,
         max_energy_consumption_kj=100.0,
         gamma=0.995,
-        reward_config=RewardConfig(survival_reward_scale=0.0),
+        reward_config=RewardConfig(reward_scheme="li2023_scaled"),
+        train_mass_kg=1000.0,
     )
-    reward = calculator.calculate(
+    reward = li.calculate(
         OperationalTransition(
-            _state(),
-            _state(position=10.0),
-            1.0,
+            _state(position=90.0, speed=1.0),
+            _state(position=stop_position_m, time=arrival_time_s, energy=5.0),
+            0.0,
             10.0,
             1.0,
-            0.0,
-            False,
+            5.0,
+            True,
             False,
             ViolationCode.ONGOING,
         )
     )
-    assert reward.survival == 0.0
-    assert RewardConfig().survival_reward_scale == 50.0
+
+    # Published goal-state values of Li et al. (2023) multiplied by 5.
+    assert LI_GOAL_REWARD_SCALE == pytest.approx(5.0)
+    assert reward.survival == pytest.approx(2.5 + 5.0 * 350.0)
+    assert reward.terminal_punctuality == pytest.approx(5.0 * punctuality)
+    assert reward.terminal_stopping == pytest.approx(5.0 * stopping)
+    # r_E * E with E = 5 kJ * 1000 / (1000 kg * 100 m).
+    assert reward.energy == pytest.approx(5.0 * -0.6 * 0.05)

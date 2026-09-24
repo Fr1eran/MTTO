@@ -15,6 +15,8 @@ from rl.operational_stepper import OperationalStepper
 from rl.reward_calculator import (
     PUNCTUALITY_POTENTIAL_SCALE,
     PUNCTUALITY_POTENTIAL_SIGMA_S,
+    SAFETY_POTENTIAL_SCALE,
+    SAFETY_POTENTIAL_STEEPNESS,
     RewardCalculator,
     RewardConfig,
     punctuality_potential_from_error,
@@ -89,11 +91,9 @@ def _potential_safety_speed(
     min_speed: NDArray[np.floating] | float,
     max_speed: NDArray[np.floating] | float,
 ) -> NDArray[np.float64] | float:
-    scale = 0.5
-    steepness = 8.0
     span = np.maximum(max_speed - min_speed, 1.0)
 
-    upper_exponent = steepness * (max_speed - speed) / span
+    upper_exponent = SAFETY_POTENTIAL_STEEPNESS * (max_speed - speed) / span
     upper_tail = np.exp(-np.abs(upper_exponent))
     upper_risk = np.where(
         upper_exponent >= 0.0,
@@ -101,7 +101,7 @@ def _potential_safety_speed(
         2.0 / (1.0 + upper_tail),
     )
 
-    lower_exponent = steepness * (speed - min_speed) / span
+    lower_exponent = SAFETY_POTENTIAL_STEEPNESS * (speed - min_speed) / span
     lower_tail = np.exp(-np.abs(lower_exponent))
     lower_risk = np.where(
         min_speed > 0.0,
@@ -113,7 +113,7 @@ def _potential_safety_speed(
         0.0,
     )
 
-    return -scale * (upper_risk + lower_risk)
+    return -SAFETY_POTENTIAL_SCALE * (upper_risk + lower_risk)
 
 
 def interp_with_constant_fill(

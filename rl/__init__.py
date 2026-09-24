@@ -2,11 +2,13 @@ from .observation_builder import ObservationBuilder
 from .operational_state import OperationalState, OperationalTransition, ViolationCode
 from .operational_stepper import OperationalStepper
 from .reward_calculator import (
-    DEFAULT_COMFORT_REWARD_SCALE,
-    DEFAULT_ENERGY_REWARD_SCALE,
-    DEFAULT_SURVIVAL_REWARD_SCALE,
+    COMFORT_REWARD_SCALE,
+    ENERGY_REWARD_SCALE,
     PUNCTUALITY_POTENTIAL_SCALE,
     PUNCTUALITY_POTENTIAL_SIGMA_S,
+    SAFETY_POTENTIAL_SCALE,
+    SAFETY_POTENTIAL_STEEPNESS,
+    SURVIVAL_REWARD_SCALE,
     RewardBreakdown,
     RewardCalculator,
     RewardConfig,
@@ -14,11 +16,13 @@ from .reward_calculator import (
 )
 
 __all__ = [
-    "DEFAULT_COMFORT_REWARD_SCALE",
-    "DEFAULT_ENERGY_REWARD_SCALE",
-    "DEFAULT_SURVIVAL_REWARD_SCALE",
+    "COMFORT_REWARD_SCALE",
+    "ENERGY_REWARD_SCALE",
     "PUNCTUALITY_POTENTIAL_SCALE",
     "PUNCTUALITY_POTENTIAL_SIGMA_S",
+    "SAFETY_POTENTIAL_SCALE",
+    "SAFETY_POTENTIAL_STEEPNESS",
+    "SURVIVAL_REWARD_SCALE",
     "punctuality_potential_from_error",
     "ObservationBuilder",
     "OperationalState",

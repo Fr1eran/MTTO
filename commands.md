@@ -312,6 +312,20 @@ uv run python -m scripts.compare_speed_profiles \
   --rl-model-dir "$RL_MODEL_DIR"
 ```
 
+叠加 RL 基线（`--baseline-rl 标签=模型目录`，可重复，按给定顺序绘制，最多 3 个），并输出论文图与对比表（Δt 为有符号量；未满足停站/准点容限的能耗比较以 `^a` 标注）：
+
+```bash
+uv run python -m scripts.compare_speed_profiles \
+  --dp-curve-dir output/paper_experiment/03_multiobjective/20260917_01/dp/465p0_0p1_uni30p0/ \
+  --rl-model-dir "$RL_MODEL_DIR" \
+  --baseline-rl "PPO-BR=output/paper_experiment/06_li2023_baseline/20260923_02/465p0_30p0__li2023_scaled__li2023_scaled_r05/best/" \
+  --real-curve output/paper_experiment/03_multiobjective/20260917_01/aligned_real_operation_curve.npz \
+  --output-dir output/paper_experiment/03_multiobjective/20260923_02 \
+  --no-show
+```
+
+Windows 中文控制台若出现 `UnicodeEncodeError: 'gbk'`，先设置 `PYTHONIOENCODING=utf-8`。
+
 对比 DP 与 RL 的 SPS 合规性：
 
 ```bash

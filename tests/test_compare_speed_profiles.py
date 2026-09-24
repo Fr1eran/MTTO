@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -13,8 +14,10 @@ from scripts.compare_speed_profiles import (
     _build_cli_parser,
     _create_comparison_axes,
     _finalize_comparison_figure,
+    _parse_baseline_spec,
     _resolve_target_schedule_time,
     _validate_common_target_position,
+    compute_min_limit_margin_kmh,
     format_comparison_table,
     load_real_operation_profile,
 )
@@ -43,9 +46,9 @@ def test_comparison_figure_uses_one_trajectory_only_shared_legend() -> None:
     assert len(figure.legends) == 1
     legend = figure.legends[0]
     assert [text.get_text() for text in legend.texts] == [
-        "DP optimization",
-        "Proposed Method",
-        "Actual operation",
+        "DP",
+        "PPO-PIRS (proposed)",
+        "Recorded operation",
     ]
     assert [handle.get_color() for handle in legend.legend_handles] == [
         "#181818",
@@ -78,7 +81,7 @@ def test_load_real_operation_profile_reads_required_aligned_arrays(
 
     profile = load_real_operation_profile(curve_path)
 
-    assert profile.label == "Actual operation"
+    assert profile.label == "Recorded operation"
     assert profile.target_position_m == pytest.approx(110.0)
     np.testing.assert_allclose(profile.position_m, [100.0, 110.0])
 
@@ -131,21 +134,21 @@ def test_format_comparison_table_contains_only_requested_metrics() -> None:
     table = format_comparison_table(
         [
             (
-                "DP optimization",
+                "DP",
                 ProfileMetrics(1.25, 0.0, 123.456, 0.123456),
             ),
             (
-                "Proposed Method",
+                "PPO-PIRS (proposed)",
                 ProfileMetrics(2.5, 0.25, 120.0, 0.1),
             ),
             (
-                "Actual operation",
+                "Recorded operation",
                 ProfileMetrics(3.0, 0.5, 130.0, None),
             ),
         ]
     )
 
-    assert "Time error (s)" in table
+    assert "Time error Δt (s)" in table
     assert "Stop error (m)" in table
     assert "Total energy (kWh)" in table
     assert "Cumulative acceleration variation (m/s²)" in table
@@ -211,7 +214,7 @@ def test_main_uses_comparison_axes_and_scientific_export(
         compare_module,
         "load_real_operation_profile",
         lambda *a, **kw: SpeedProfile(
-            label="Actual operation",
+            label="Recorded operation",
             position_m=pos,
             speed_mps=speed,
             time_s=time,
@@ -230,9 +233,9 @@ def test_main_uses_comparison_axes_and_scientific_export(
         called_helpers.append("_create_comparison_axes")
         return orig_create_axes()
 
-    def spy_finalize(figure, axes):
+    def spy_finalize(figure, axes, legend_entries=None):
         called_helpers.append("_finalize_comparison_figure")
-        return orig_finalize(figure, axes)
+        return orig_finalize(figure, axes, legend_entries)
 
     def spy_recover_time(pos_arr, speed_arr):
         called_helpers.append("recover_time_axis_from_trajectory")
@@ -291,7 +294,85 @@ def test_main_uses_comparison_axes_and_scientific_export(
     assert output_table.is_file()
     assert output_table.stat().st_size > 0
     table_text = output_table.read_text(encoding="utf-8")
-    assert "Proposed Method" in table_text
+    assert "PPO-PIRS (proposed)" in table_text
     assert "Total energy (kWh)" in table_text
     assert "Cumulative acceleration variation (m/s²)" in table_text
     assert "—" in table_text
+
+
+def test_cli_accepts_repeated_rl_baselines() -> None:
+    args = _build_cli_parser().parse_args(
+        [
+            "--rl-model-dir",
+            "output/proposed",
+            "--baseline-rl",
+            "PPO-BR=output/ppo_br/best",
+            "--baseline-rl",
+            "PPO=output/ppo/best",
+        ]
+    )
+
+    assert [_parse_baseline_spec(raw) for raw in args.baseline_rl] == [
+        ("PPO-BR", "output/ppo_br/best"),
+        ("PPO", "output/ppo/best"),
+    ]
+
+
+@pytest.mark.parametrize("raw", ("output/ppo_br/best", "=output/ppo_br", "PPO-BR="))
+def test_baseline_spec_requires_label_and_directory(raw: str) -> None:
+    with pytest.raises(ValueError, match="LABEL=DIR"):
+        _ = _parse_baseline_spec(raw)
+
+
+def test_comparison_figure_legend_lists_all_supplied_trajectories() -> None:
+    figure, axes = _create_comparison_axes()
+    entries = [
+        ("DP", "#181818", "-"),
+        ("PPO-CR", "#009E73", ":"),
+        ("PPO-PIRS (proposed)", "#ED7D31", "--"),
+        ("Recorded operation", "#7B61A8", "-."),
+    ]
+
+    _finalize_comparison_figure(figure, axes, entries)
+
+    legend = figure.legends[0]
+    assert [text.get_text() for text in legend.texts] == [e[0] for e in entries]
+    assert [h.get_color() for h in legend.legend_handles] == [e[1] for e in entries]
+    plt.close(figure)
+
+
+def test_min_limit_margin_uses_moving_samples_against_step_limit() -> None:
+    safeguard = SimpleNamespace(
+        speed_limits=np.asarray([20.0, 10.0]),
+        speed_limit_intervals=np.asarray([0.0, 100.0]),
+        gamma=0.5,
+    )
+    profile = SpeedProfile(
+        "RL",
+        np.asarray([0.0, 100.0, 200.0]),
+        np.asarray([0.0, 6.0, 0.0]),
+        np.asarray([0.0, 10.0, 20.0]),
+        200.0,
+    )
+
+    margin = compute_min_limit_margin_kmh(profile, safeguard)
+
+    # After 100 m the limit is 10 * 0.5 = 5 m/s while the speed is near 6 m/s.
+    assert margin == pytest.approx((5.0 - 6.0) * 3.6, abs=0.1)
+
+
+def test_table_flags_energy_obtained_outside_tolerance() -> None:
+    table = format_comparison_table(
+        [
+            ("DP", ProfileMetrics(-8.3, 0.0, 100.0, 1.0, True, 0.0)),
+            ("PPO-CR", ProfileMetrics(132.0, 0.1, 90.0, 0.5, False, 2.7)),
+            ("Recorded operation", ProfileMetrics(4.6, 0.0, 200.0, None, True, 12.4)),
+        ]
+    )
+
+    assert "-8.300" in table and "+132.000" in table
+    assert "Within stop/time tolerance" in table
+    assert "55.00^a" in table  # (200 - 90) / 200
+    assert "-10.00^a" in table  # (90 - 100) / 100
+    assert "50.00 " in table  # DP vs Actual, no dagger
+    assert "Min. margin to line speed limit (km/h)" in table

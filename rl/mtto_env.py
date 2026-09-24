@@ -93,6 +93,7 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
                 and reward_config.enable_potential_punctuality
                 else None
             ),
+            train_mass_kg=float(vehicle.mass) * 1000.0,
         )
         self.reward_config: RewardConfig = self.reward_calculator.reward_config
         self.safety_truncation_buffer = safety_truncation_buffer

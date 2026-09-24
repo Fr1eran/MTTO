@@ -103,7 +103,22 @@ def _reward_config_from_metadata(snapshot: object) -> RewardConfig:
         raise ValueError(
             "selected policy uses an unsupported terminal potential policy"
         )
-    return RewardConfig(**values)
+    config = RewardConfig(
+        enable_potential_safety=bool(values.pop("enable_potential_safety")),
+        enable_potential_punctuality=bool(values.pop("enable_potential_punctuality")),
+        reward_scheme=str(values.pop("reward_scheme")),
+    )
+    # Remaining entries are reward magnitudes, now fixed in code; the policy
+    # must have been trained with exactly those values.
+    fixed = reward_config_parameters(config)
+    retired = {
+        name: value for name, value in values.items() if fixed.get(name) != value
+    }
+    if retired:
+        raise ValueError(
+            f"selected policy was trained with retired reward magnitudes: {retired}"
+        )
+    return config
 
 
 @dataclass(frozen=True)

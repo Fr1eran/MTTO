@@ -41,11 +41,14 @@ from rl.env_factory import make_env
 from rl.evaluation import build_single_eval_env, evaluate_and_save_final_policy
 from rl.operational_stepper import OperationalStepper
 from rl.reward_calculator import (
-    DEFAULT_COMFORT_REWARD_SCALE,
-    DEFAULT_ENERGY_REWARD_SCALE,
-    DEFAULT_SURVIVAL_REWARD_SCALE,
+    COMFORT_REWARD_SCALE,
+    ENERGY_REWARD_SCALE,
+    LI_GOAL_REWARD_SCALE,
     PUNCTUALITY_POTENTIAL_SCALE,
     PUNCTUALITY_POTENTIAL_SIGMA_S,
+    SAFETY_POTENTIAL_SCALE,
+    SAFETY_POTENTIAL_STEEPNESS,
+    SURVIVAL_REWARD_SCALE,
     RewardConfig,
 )
 from rl.reward_diagnostics import REWARD_DIAGNOSTICS_SCHEMA_VERSION
@@ -77,9 +80,9 @@ __all__ = [
     "DEFAULT_N_EPOCHS",
     "DEFAULT_DEVICE",
     "DEFAULT_REWARD_PRESET_NAME",
-    "DEFAULT_ENERGY_REWARD_SCALE",
-    "DEFAULT_COMFORT_REWARD_SCALE",
-    "DEFAULT_SURVIVAL_REWARD_SCALE",
+    "ENERGY_REWARD_SCALE",
+    "COMFORT_REWARD_SCALE",
+    "SURVIVAL_REWARD_SCALE",
     # dataclass
     "RewardPreset",
     "RunMetadata",
@@ -90,7 +93,6 @@ __all__ = [
     "resolve_reward_preset",
     "build_reward_config",
     "reward_config_parameters",
-    "resolve_survival_reward_scale",
     # 路径 & 元数据
     "resolve_output_dir",
     "resolve_tb_log_name",
@@ -233,24 +235,29 @@ class TrainingRunSpec:
 # =============================================================================
 
 
-def resolve_survival_reward_scale(raw_scale: float | None) -> float:
-    """解析生存奖励尺度；无效值由 RewardConfig 回退为默认值。"""
-    value = DEFAULT_SURVIVAL_REWARD_SCALE if raw_scale is None else raw_scale
-    return RewardConfig(survival_reward_scale=value).survival_reward_scale
+def goal_reward_scale(reward_config: RewardConfig) -> float:
+    """Fixed goal-state multiplier recorded in metadata for the reward scheme."""
+    if reward_config.reward_scheme == "li2023_scaled":
+        return LI_GOAL_REWARD_SCALE
+    return 1.0
 
 
 def reward_config_parameters(reward_config: RewardConfig) -> dict[str, Any]:
-    """Return runtime reward settings plus fixed punctuality protocol values."""
+    """Return the reward switches plus the fixed reward magnitudes."""
     return {
-        "energy_reward_scale": float(reward_config.energy_reward_scale),
-        "comfort_reward_scale": float(reward_config.comfort_reward_scale),
+        "energy_reward_scale": ENERGY_REWARD_SCALE,
+        "comfort_reward_scale": COMFORT_REWARD_SCALE,
         "enable_potential_safety": bool(reward_config.enable_potential_safety),
-        "survival_reward_scale": float(reward_config.survival_reward_scale),
+        "survival_reward_scale": SURVIVAL_REWARD_SCALE,
+        "safety_potential_scale": SAFETY_POTENTIAL_SCALE,
+        "safety_potential_steepness": SAFETY_POTENTIAL_STEEPNESS,
         "enable_potential_punctuality": reward_config.enable_potential_punctuality,
         "punctuality_potential_scale": PUNCTUALITY_POTENTIAL_SCALE,
         "punctuality_potential_sigma_s": PUNCTUALITY_POTENTIAL_SIGMA_S,
         "potential_transition_formula": "gamma_phi_next_minus_phi_previous",
         "terminal_next_potential": "observed_next_state",
+        "reward_scheme": reward_config.reward_scheme,
+        "goal_reward_scale": goal_reward_scale(reward_config),
     }
 
 
@@ -259,19 +266,13 @@ REWARD_PRESETS: dict[str, RewardPreset] = {
         name="basic",
         label="basic",
         description="Base reward only: energy and comfort are always enabled.",
-        config=RewardConfig(
-            enable_potential_safety=False,
-            survival_reward_scale=DEFAULT_SURVIVAL_REWARD_SCALE,
-        ),
+        config=RewardConfig(enable_potential_safety=False),
     ),
     "basic_safety": RewardPreset(
         name="basic_safety",
         label="basic+safety",
         description="Base reward plus potential-based safety shaping.",
-        config=RewardConfig(
-            enable_potential_safety=True,
-            survival_reward_scale=DEFAULT_SURVIVAL_REWARD_SCALE,
-        ),
+        config=RewardConfig(enable_potential_safety=True),
     ),
     "basic_punctuality": RewardPreset(
         name="basic_punctuality",
@@ -280,7 +281,6 @@ REWARD_PRESETS: dict[str, RewardPreset] = {
         config=RewardConfig(
             enable_potential_safety=False,
             enable_potential_punctuality=True,
-            survival_reward_scale=DEFAULT_SURVIVAL_REWARD_SCALE,
         ),
     ),
     "basic_safety_punctuality": RewardPreset(
@@ -291,6 +291,20 @@ REWARD_PRESETS: dict[str, RewardPreset] = {
             "safety and linear-slack punctuality potentials."
         ),
         config=RewardConfig(enable_potential_punctuality=True),
+    ),
+    "li2023_scaled": RewardPreset(
+        name="li2023_scaled",
+        label="Li et al. (2023), goal reward rescaled",
+        description=(
+            "Binary goal-directed reward of Li et al. (2023) with the published "
+            "per-step penalties and tuned coefficients; T_lim set to the 10 s "
+            "strict punctuality tolerance; every goal-state term multiplied by "
+            "(1 - 0.99) / (1 - 0.998) = 5 so that r_g keeps the margin over "
+            "r_inf / (1 - gamma) that Li et al. require (their gamma = 0.99)."
+        ),
+        config=RewardConfig(
+            enable_potential_safety=False, reward_scheme="li2023_scaled"
+        ),
     ),
 }
 
@@ -341,27 +355,15 @@ def resolve_reward_preset(preset_name: str | None = None) -> RewardPreset:
     return preset
 
 
-def build_reward_config(
-    preset_name: str | None = None,
-    *,
-    survival_reward_scale: float | None = None,
-) -> RewardConfig:
-    """根据奖励情形名构建 RewardConfig 实例。
+def build_reward_config(preset_name: str | None = None) -> RewardConfig:
+    """根据奖励情形名返回 RewardConfig 实例。
 
     Args:
         preset_name: 预设名，同 resolve_reward_preset。
-        survival_reward_scale: 可选覆盖的生存奖励尺度；
-            若为负数或非有限数则覆写为默认值。
     Returns:
         用于初始化 MTTOEnv 的 RewardConfig。
     """
-    base_config = resolve_reward_preset(preset_name).config
-    overrides: dict[str, object] = {}
-    if survival_reward_scale is not None:
-        overrides["survival_reward_scale"] = resolve_survival_reward_scale(
-            survival_reward_scale
-        )
-    return replace(base_config, **overrides) if overrides else base_config
+    return resolve_reward_preset(preset_name).config
 
 
 # =============================================================================
@@ -559,15 +561,19 @@ def build_run_metadata(
         else None
     )
     reward_config = RewardConfigSnapshot(
-        energy_reward_scale=float(reward_preset.config.energy_reward_scale),
-        comfort_reward_scale=float(reward_preset.config.comfort_reward_scale),
+        energy_reward_scale=ENERGY_REWARD_SCALE,
+        comfort_reward_scale=COMFORT_REWARD_SCALE,
         enable_potential_safety=bool(reward_preset.config.enable_potential_safety),
-        survival_reward_scale=float(reward_preset.config.survival_reward_scale),
+        survival_reward_scale=SURVIVAL_REWARD_SCALE,
+        safety_potential_scale=SAFETY_POTENTIAL_SCALE,
+        safety_potential_steepness=SAFETY_POTENTIAL_STEEPNESS,
         enable_potential_punctuality=reward_preset.config.enable_potential_punctuality,
         punctuality_potential_scale=PUNCTUALITY_POTENTIAL_SCALE,
         punctuality_potential_sigma_s=PUNCTUALITY_POTENTIAL_SIGMA_S,
         potential_transition_formula="gamma_phi_next_minus_phi_previous",
         terminal_next_potential="observed_next_state",
+        reward_scheme=reward_preset.config.reward_scheme,
+        goal_reward_scale=goal_reward_scale(reward_preset.config),
     )
     return RunMetadata(
         reward_preset_name=reward_preset.name,
@@ -684,7 +690,6 @@ def build_default_training_args() -> argparse.Namespace:
         analysis_output_root="mtto_train_reports",
         analysis_min_points_per_10k_steps=5.0,
         analysis_sampling_quality_mode="warn_only",
-        survival_reward_scale=None,
         reward_discount=DEFAULT_REWARD_DISCOUNT,
         num_envs=DEFAULT_NUM_ENVS,
         rollout_steps_per_update=DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
@@ -859,16 +864,6 @@ def resolve_training_run_spec(args: argparse.Namespace) -> TrainingRunSpec:
         raise ValueError("step_distance must be finite and positive")
     reward_discount = float(args.reward_discount)
     reward_preset = resolve_reward_preset(args.reward_preset)
-    raw_survival_scale = getattr(args, "survival_reward_scale", None)
-    if raw_survival_scale is not None:
-        custom_reward_config = build_reward_config(
-            reward_preset.name,
-            survival_reward_scale=raw_survival_scale,
-        )
-        reward_preset = replace(
-            reward_preset,
-            config=custom_reward_config,
-        )
     output_root = args.output_root
     output_dir = resolve_output_dir(
         output_root=output_root,

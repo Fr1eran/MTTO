@@ -14,11 +14,15 @@ class RewardConfigSnapshot(MappingView):
     comfort_reward_scale: float
     enable_potential_safety: bool
     survival_reward_scale: float
+    safety_potential_scale: float = 0.5
+    safety_potential_steepness: float = 8.0
     enable_potential_punctuality: bool = False
     punctuality_potential_scale: float = 5.0
     punctuality_potential_sigma_s: float = 20.0
     potential_transition_formula: str | None = None
     terminal_next_potential: str | None = None
+    reward_scheme: str = "base"
+    goal_reward_scale: float = 1.0
 
     def to_mapping(self) -> JSONMapping:
         return to_dict(self)

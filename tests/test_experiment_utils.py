@@ -5,9 +5,7 @@ import numpy as np
 import pytest
 
 from rl.experiment_utils import (
-    DEFAULT_COMFORT_REWARD_SCALE,
     DEFAULT_DEVICE,
-    DEFAULT_ENERGY_REWARD_SCALE,
     DEFAULT_NUM_ENVS,
     DEFAULT_REWARD_PRESET_NAME,
     DEFAULT_ROLLOUT_STEPS_PER_UPDATE,
@@ -25,6 +23,7 @@ from rl.experiment_utils import (
     reward_preset_names,
     save_run_metadata,
 )
+from rl.reward_calculator import RewardConfig
 
 
 def test_default_training_args_use_shared_vector_environment_defaults() -> None:
@@ -120,6 +119,7 @@ def test_reward_preset_names_include_pirs_component_profiles() -> None:
         "basic_safety",
         "basic_punctuality",
         "basic_safety_punctuality",
+        "li2023_scaled",
     )
 
 
@@ -146,8 +146,6 @@ def test_reward_presets_keep_energy_comfort_and_toggle_potential_shaping() -> No
     }
     for profile_name, expected in expected_flags.items():
         reward_config = build_reward_config(profile_name)
-        assert reward_config.energy_reward_scale == DEFAULT_ENERGY_REWARD_SCALE
-        assert reward_config.comfort_reward_scale == DEFAULT_COMFORT_REWARD_SCALE
         assert reward_config.enable_potential_safety is expected
 
 
@@ -269,33 +267,28 @@ def test_add_panel_label_places_text_on_axes() -> None:
     plt.close(fig)
 
 
-def test_resolve_survival_reward_scale_fallback_on_negative_or_invalid() -> None:
-    from rl.experiment_utils import (
-        DEFAULT_SURVIVAL_REWARD_SCALE,
-        resolve_survival_reward_scale,
-        reward_config_parameters,
-    )
+def test_reward_metadata_records_fixed_reward_magnitudes() -> None:
+    from rl.experiment_utils import reward_config_parameters
 
-    assert resolve_survival_reward_scale(None) == DEFAULT_SURVIVAL_REWARD_SCALE
-    assert resolve_survival_reward_scale(50.0) == 50.0
-    assert resolve_survival_reward_scale(0.0) == 0.0
-    assert resolve_survival_reward_scale(-10.0) == DEFAULT_SURVIVAL_REWARD_SCALE
-    assert resolve_survival_reward_scale(float("nan")) == DEFAULT_SURVIVAL_REWARD_SCALE
-    assert resolve_survival_reward_scale(float("inf")) == DEFAULT_SURVIVAL_REWARD_SCALE
+    pirs = reward_config_parameters(build_reward_config("basic_safety_punctuality"))
+    assert pirs["energy_reward_scale"] == 15.0
+    assert pirs["comfort_reward_scale"] == 20.0
+    assert pirs["survival_reward_scale"] == 50.0
+    assert pirs["safety_potential_scale"] == 0.5
+    assert pirs["safety_potential_steepness"] == 8.0
+    assert pirs["goal_reward_scale"] == 1.0
+    baseline = reward_config_parameters(build_reward_config("li2023_scaled"))
+    assert baseline["reward_scheme"] == "li2023_scaled"
+    assert baseline["goal_reward_scale"] == pytest.approx(5.0)
 
-    cfg = build_reward_config("basic_safety", survival_reward_scale=-5.0)
-    assert cfg.survival_reward_scale == DEFAULT_SURVIVAL_REWARD_SCALE
 
-    cfg_custom = build_reward_config("basic", survival_reward_scale=30.0)
-    assert cfg_custom.survival_reward_scale == 30.0
-
-    d = reward_config_parameters(cfg_custom)
-    assert d["energy_reward_scale"] == DEFAULT_ENERGY_REWARD_SCALE
-    assert d["comfort_reward_scale"] == DEFAULT_COMFORT_REWARD_SCALE
-    assert d["survival_reward_scale"] == 30.0
-    assert d["enable_potential_safety"] is False
-    assert "enable_energy" not in d
-    assert "enable_comfort" not in d
+def test_reward_config_exposes_no_magnitude_fields() -> None:
+    fields = set(RewardConfig.__dataclass_fields__)
+    assert fields == {
+        "enable_potential_safety",
+        "enable_potential_punctuality",
+        "reward_scheme",
+    }
 
 
 def test_punctuality_potential_parameters_are_not_runtime_configurable() -> None:
