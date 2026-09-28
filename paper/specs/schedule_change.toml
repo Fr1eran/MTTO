@@ -1,0 +1,9 @@
+[experiment]
+source_spec = "paper/specs/method_ablation.toml"
+source_variant = "ppo_pirs"
+candidate_sources = ["best", "final"]
+delta_times_s = [0.0, 30.0, -30.0]
+# change_distance_m is the absolute track position (m) at which the schedule
+# change triggers, not a distance relative to the task's start position.
+change_distance_m = 8000.0
+output_root = "output/paper_experiment/04_schedule_time_change"

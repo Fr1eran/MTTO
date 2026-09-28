@@ -1,0 +1,31 @@
+[vehicle]
+mass = 317.5
+numoftrainsets = 5
+length = 128.5
+max_speed = 138.88888888888889
+max_acc = 1.0
+max_dec = -1.0
+max_slope_capacity = 4.0
+levi_power_per_mass = 1.7
+
+[energy]
+R_m = 0.2796
+L_d = 0.00292
+R_k = 0.0736
+L_k = 0.000142
+Tau = 0.258
+Psi_fd = 3.9629
+k_c = 0.5
+Phi_1 = 0.1049
+Phi_2 = 1.006
+
+[safeguard]
+factor = 0.99
+step_delay_s = 2.0
+distance_step_m = 1.0
+position_error_m = 1.0
+speed_error_mps = 0.1
+traction_cutoff_delay_s = 0.5
+vortex_brake_delay_s = 0.5
+min_curve_position_offset_m = 0.0
+prepend_acceleration_zone_end = true

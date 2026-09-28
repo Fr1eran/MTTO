@@ -1,23 +1,25 @@
+[build-system]
+requires = ["uv_build>=0.12.15,<0.13"]
+build-backend = "uv_build"
+
 [project]
 name = "mtto"
-version = "0.1.0"
+version = "0.2.0"
 description = "Maglev Train Trajectory Optimization based on Reinforcement Learning"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "gymnasium>=1.2.3",
-    "matplotlib>=3.10.8",
     "numba>=0.65.1",
-    "openpyxl>=3.1.5",
-    "pandas>=3.0.1",
-    "pytest>=9.0.2",
     "rich>=15.0.0",
-    "scipy>=1.17.1",
     "stable-baselines3>=2.7.1",
     "tensorboard>=2.21.0",
     "torch>=2.3,<3",
     "tqdm>=4.67.3",
 ]
+
+[project.scripts]
+mtto = "mtto.cli:main"
 
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }
@@ -29,6 +31,12 @@ explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "slow: 耗时较长的用例，默认排除",
+    "golden: 与 output/golden/ 回归快照比对，默认排除；缺失时先运行 uv run python -m tests.golden.record",
+]
+addopts = "-m 'not slow and not golden' --import-mode=importlib"
 
 [tool.ruff]
 line-length = 88
@@ -49,3 +57,15 @@ force-wrap-aliases = true
 quote-style = "double"
 indent-style = "space"
 docstring-code-format = true
+
+[dependency-groups]
+dev = [
+    {include-group = "paper"},
+    "pytest>=9.0.2",
+    "ruff>=0.16.9",
+]
+paper = [
+    "matplotlib>=3.10.8",
+    "openpyxl>=3.1.5",
+    "pandas>=3.0.1",
+]

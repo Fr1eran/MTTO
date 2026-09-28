@@ -1,0 +1,43 @@
+[experiment]
+name = "method"
+scenario = "paper/specs/scenario.toml"
+line_dir = "paper/data/line"
+tasks = "paper/specs/tasks.toml"
+task = "longyang_to_airport"
+output_root = "output/paper_experiment/02_method_ablation"
+seeds = [11, 131, 239, 359, 443]
+
+[train]
+step_distance_m = 30.0
+gamma = 0.998
+budget_mode = "environment_steps"
+# training_episodes omitted: None in environment_steps mode
+training_rollouts = 400
+num_envs = 8
+n_steps_per_env = 1024
+evaluation_interval_rollouts = 12
+# evaluation_interval_episodes omitted: None when evaluating by rollouts
+evaluation_deterministic = true
+keep_best = true
+safety_truncation_bin_size_m = 5000.0
+device = "cpu"
+
+[[variants]]
+id = "ppo"
+label = "PPO"
+reward_preset = "basic"
+
+[[variants]]
+id = "ppo_safety"
+label = "PPO+Safety"
+reward_preset = "basic_safety"
+
+[[variants]]
+id = "ppo_punctuality"
+label = "PPO+Punctuality"
+reward_preset = "basic_punctuality"
+
+[[variants]]
+id = "ppo_pirs"
+label = "PPO+PIRS"
+reward_preset = "basic_safety_punctuality"

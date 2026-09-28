@@ -1,0 +1,14 @@
+## Example [dp] configuration for `mtto dp --config paper/specs/dp.toml ...`.
+##
+## Carries over the parameter defaults of the pre-refactor `scripts/reproduce_dp.py`
+## (see `git show refactor/step-7d1:scripts/reproduce_dp.py`), mapped onto
+## mtto.workflows.dp.DPConfig.
+[dp]
+delta_speed = 0.1
+stage_division = "uniform"
+uniform_step_size = 30.0
+sub_stage_count = 30
+max_outer_iterations = 100
+precompute_mode = "parallel"
+precompute_workers = 4
+# precompute_chunk_size omitted: None (chunk size auto-estimated)

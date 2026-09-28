@@ -1,0 +1,17 @@
+## Example [analysis] configuration for `mtto analyze-training --config paper/specs/analysis.toml ...`.
+##
+## Carries over the pre-refactor default values of the former
+## `mtto.rl.training_analysis.pipeline.AnalysisConfig` field defaults
+## (gate-3 ruling C: default values moved out of the library into this spec file).
+[analysis]
+step_window_size = 5000
+ema_alpha = 0.1
+kl_threshold = 0.03
+include_snapshots = false
+export_csv = false
+report_bar_width = 24
+# training_log_interval omitted: None (auto-detected from data)
+min_points_per_10k_steps = 5.0
+rollout_steps_per_update = 2048
+sampling_quality_mode = "warn_only"
+# sampling_health_tags omitted: None (default tag set used)

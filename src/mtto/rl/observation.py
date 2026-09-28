@@ -1,0 +1,201 @@
+"""Pure conversion from an operational state to the agent observation."""
+
+import math
+from typing import Final
+
+import numpy as np
+from numpy.typing import NDArray
+
+from mtto.domain.dynamics import Vehicle, calc_levi_deceleration_scalar_numba
+from mtto.domain.line import Line, get_slope_scalar_numba
+from mtto.domain.scenario import Task
+from mtto.domain.srtsp import SrtspLookup, lookup_upper_speed_or_zero
+from mtto.rl.state import State
+
+POLICY_IO_VERSION: Final[int] = 1
+
+
+class ObservationBuilder:
+    target_attraction_domain_radius_m: float = 3000.0
+    lookahead_distance_m: float = 1000.0
+    lookahead_num_samples: int = 10
+    OBSERVATION_DIM: int = 12
+
+    def __init__(
+        self,
+        *,
+        vehicle: Vehicle,
+        track: Line,
+        task: Task,
+        step_distance_m: float,
+        whole_distance_m: float,
+        srtsp_lookup: SrtspLookup,
+    ) -> None:
+        self.vehicle: Vehicle = vehicle
+        self.track: Line = track
+        self.task: Task = task
+        self.step_distance_m: float = float(step_distance_m)
+        if not math.isfinite(self.step_distance_m) or self.step_distance_m <= 0.0:
+            raise ValueError("step_distance_m must be finite and positive")
+        self.whole_distance_m: float = max(whole_distance_m, 1e-12)
+        self.srtsp_lookup = srtsp_lookup
+        (
+            self._lookahead_travelled_m,
+            self._lookahead_avg_slope_by_step,
+            self._lookahead_avg_upper_speed_by_step,
+        ) = self._build_lookahead_feature_cache()
+        self._obs_buffer: NDArray[np.float32] = np.empty(
+            self.OBSERVATION_DIM, dtype=np.float32
+        )
+
+    def build(
+        self,
+        state: State,
+        out: NDArray[np.float32] | None = None,
+    ) -> NDArray[np.float32]:
+        uses_internal_buffer = out is None
+        target = self._obs_buffer if uses_internal_buffer else out
+        assert target is not None
+        distance = self.task.target_position_m - state.s_m
+        suggested = self.calc_coasting_acc(state)
+        if abs(distance) <= self.target_attraction_domain_radius_m:
+            suggested = -(state.v_mps**2) / (2.0 * max(abs(distance), 1e-6))
+
+        target[0] = max(-1.0, min(1.0, distance / self.whole_distance_m))
+        target[1] = max(-1.0, min(1.0, state.v_mps / self.vehicle.max_speed))
+        target[2] = self.normalize_acc_to_action(state.commanded_acceleration_mps2)
+        target[3] = self.normalize_acc_to_action(suggested)
+        target[4] = max(
+            -1.0,
+            min(
+                1.0,
+                (state.schedule_time_s - state.t_s) / state.schedule_time_s,
+            ),
+        )
+        target[5] = max(
+            -1.0,
+            min(
+                1.0,
+                state.slack_time_s / state.schedule_time_s,
+            ),
+        )
+        target[6] = max(-1.0, min(1.0, state.max_speed_mps / self.vehicle.max_speed))
+        target[7] = max(-1.0, min(1.0, state.lower_limit_mps / self.vehicle.max_speed))
+        target[8] = max(
+            -1.0, min(1.0, state.slope_permille / self.vehicle.max_slope_capacity)
+        )
+        target[9] = max(
+            -1.0,
+            min(
+                1.0,
+                self.get_lookahead_avg_slope(state.s_m)
+                / self.vehicle.max_slope_capacity,
+            ),
+        )
+        target[10] = max(
+            -1.0,
+            min(
+                1.0,
+                self.get_lookahead_avg_upper_speed(state.s_m) / self.vehicle.max_speed,
+            ),
+        )
+        target[11] = self.calc_approach_progress(distance)
+        # The internal buffer is scratch storage only.  Returning it would
+        # expose a mutable array that the next build() call overwrites.
+        return target.copy() if uses_internal_buffer else target
+
+    def normalize_acc_to_action(self, acc: float) -> float:
+        value = (
+            2.0
+            * (float(acc) - self.vehicle.max_dec)
+            / (self.vehicle.max_acc - self.vehicle.max_dec)
+            - 1.0
+        )
+        return max(-1.0, min(1.0, value))
+
+    def denormalize_action(self, action: float) -> float:
+        value = (self.vehicle.max_acc + self.vehicle.max_dec) / 2.0 + float(action) * (
+            self.vehicle.max_acc - self.vehicle.max_dec
+        ) / 2.0
+        return float(value)
+
+    def calc_coasting_acc(self, state: State) -> float:
+        return -float(
+            calc_levi_deceleration_scalar_numba(
+                state.v_mps,
+                state.slope_permille,
+                self.vehicle.mass,
+                self.vehicle.numoftrainsets,
+            )
+        )
+
+    def calc_approach_progress(self, distance_m: float) -> float:
+        return max(
+            0.0,
+            min(
+                1.0,
+                1.0 - abs(float(distance_m)) / self.target_attraction_domain_radius_m,
+            ),
+        )
+
+    def _build_lookahead_feature_cache(
+        self,
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+        offsets = np.linspace(
+            self.step_distance_m,
+            self.lookahead_distance_m,
+            self.lookahead_num_samples,
+            dtype=np.float64,
+        )
+        node_count = int(math.ceil(self.whole_distance_m / self.step_distance_m)) + 1
+        travelled_m = np.minimum(
+            np.arange(node_count, dtype=np.float64) * self.step_distance_m,
+            self.whole_distance_m,
+        )
+        travelled_m[-1] = self.whole_distance_m
+        slope_cache = np.empty(travelled_m.size, dtype=np.float64)
+        upper_speed_cache = np.empty(travelled_m.size, dtype=np.float64)
+        start_position_m = float(self.task.start_position_m)
+        for step_index, travelled in enumerate(travelled_m):
+            position_m = start_position_m + float(travelled)
+            slope_cache[step_index] = (
+                sum(
+                    get_slope_scalar_numba(
+                        position_m + float(offset),
+                        self.track.slopes,
+                        self.track.slope_intervals,
+                    )
+                    for offset in offsets
+                )
+                / offsets.size
+            )
+            upper_speed_cache[step_index] = (
+                sum(
+                    lookup_upper_speed_or_zero(
+                        self.srtsp_lookup, position_m + float(offset)
+                    )
+                    for offset in offsets
+                )
+                / offsets.size
+            )
+        for values in (travelled_m, slope_cache, upper_speed_cache):
+            values.flags.writeable = False
+        return travelled_m, slope_cache, upper_speed_cache
+
+    def _lookahead_at_position(
+        self, position_m: float, values: NDArray[np.float64]
+    ) -> float:
+        travelled_m = float(position_m) - float(self.task.start_position_m)
+        if not 0.0 <= travelled_m <= self.whole_distance_m:
+            raise ValueError("position_m is outside the task route")
+        return float(np.interp(travelled_m, self._lookahead_travelled_m, values))
+
+    def get_lookahead_avg_slope(self, position_m: float) -> float:
+        return self._lookahead_at_position(
+            position_m, self._lookahead_avg_slope_by_step
+        )
+
+    def get_lookahead_avg_upper_speed(self, position_m: float) -> float:
+        return self._lookahead_at_position(
+            position_m, self._lookahead_avg_upper_speed_by_step
+        )

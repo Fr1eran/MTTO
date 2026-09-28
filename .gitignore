@@ -37,3 +37,4 @@ ENV/
 # 排除所有输出结果
 /output/**/*
 *tmp/
+/dist/

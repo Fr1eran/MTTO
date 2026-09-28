@@ -1,794 +1,250 @@
 # MTTO
 
-中高速磁浮列车运行速度曲线优化 —— 动态规划（基线）& 强化学习（主）双链路。
+中高速磁浮列车运行速度曲线优化 —— 动态规划（基线）与强化学习（主，物理先验奖励塑形 PIRS）双链路。
 
 ---
 
 ## 目录
 
 - [项目结构](#项目结构)
-- [快速开始](#快速开始)
-- [脚本详解](#脚本详解)
-  - [RL 训练 · `train_rl`](#rl-训练--train_rl)
-  - [RL 评估 · `evaluate_rl`](#rl-评估--evaluate_rl)
-  - [RL 中途计划时间突变实验 · `run_schedule_time_change`](#rl-中途计划时间突变实验--run_schedule_time_change)
-  - [训练日志分析 · `analyze_training_data`](#训练日志分析--analyze_training_data)
-  - [DP 基线复现 · `reproduce_dp`](#dp-基线复现--reproduce_dp)
-  - [DP 结果可视化 · `show_dp_result`](#dp-结果可视化--show_dp_result)
-  - [RL 结果可视化 · `show_rl_result`](#rl-结果可视化--show_rl_result)
-  - [三基线速度曲线对比 · `compare_speed_profiles`](#三基线速度曲线对比--compare_speed_profiles)
-    - [SPS 合规分析 · `analyze_sps_compliance`](#sps-合规分析--analyze_sps_compliance)
-  - [线路环境与防护曲线 · `show_env_data`](#线路环境与防护曲线--show_env_data)
-  - [计算并保存防护曲线 · `calc_and_save_safeguard_curves`](#计算并保存防护曲线--calc_and_save_safeguard_curves)
-  - [最短运行时间曲线 · `calc_min_operation_time_curve`](#最短运行时间曲线--calc_min_operation_time_curve)
-  - [实际运营数据 · `show_real_operation_data`](#实际运营数据--show_real_operation_data)
-  - [势函数展示 · `show_potential_function`](#势函数展示--show_potential_function)
-  - [终端评分函数可视化 · `show_score_function`](#终端评分函数可视化--show_score_function)
-- [测试](#测试)
+- [架构设计](#架构设计)
+  - [分层与依赖方向](#分层与依赖方向)
+  - [关键设计决定](#关键设计决定)
+  - [正确性的保证方式](#正确性的保证方式)
+  - [扩展接缝](#扩展接缝)
+  - [已知限制与推迟事项](#已知限制与推迟事项)
+- [安装](#安装)
+- [命令行：`mtto`](#命令行mtto)
+  - [`mtto train`](#mtto-train)
+  - [`mtto evaluate`](#mtto-evaluate)
+  - [`mtto dp`](#mtto-dp)
+  - [`mtto analyze-training`](#mtto-analyze-training)
+- [产物约定](#产物约定)
+- [论文实验与图表](#论文实验与图表)
+- [测试与代码检查](#测试与代码检查)
+- [Golden 回归快照](#golden-回归快照)
+- [扩展占位](#扩展占位)
 
 ---
 
 ## 项目结构
 
+```text
+src/mtto/                 可安装的库（不依赖 matplotlib、pandas、openpyxl）
+  domain/                 高速磁浮列车运行机理：线路、动力学、能耗、动力学积分、安全防护、
+                          最短运行时间速度曲线（SRTSP）、运行场景 Scenario/Task、SpeedProfile
+  evaluation/             速度曲线质量：指标、安全防护审计、可行判定、择优规则
+  rl/                     强化学习：环境、观测/动作编解码、奖励、PPO 构建、评估、训练期诊断、
+                          训练日志分析（training_analysis/）；morl/（占位，见下）
+  dp/                     动态规划：状态图、求解器、状态图磁盘缓存
+  io/                     产物读写约定（run.json 等，见下）、场景/任务加载、TensorBoard 读取
+  workflows/              cli、paper、app 共用的入口：train、evaluate、dp、analysis
+  cli.py                  命令行入口（`mtto` 命令）
+paper/                    论文：验证方法可行性的仿真实验（依赖组 paper：matplotlib、pandas、openpyxl）
+  README.md                 完整仿真实验指南
+  data/line/  data/operation/   上海磁浮示范线线路数据与实测运营数据
+  real_operation.py         实测运营数据读取、位置对齐与时间恢复
+  specs/                    场景、任务与实验定义（TOML）
+  experiments/               实验编排：TOML 解析、矩阵展开、中断恢复与结果复用
+  analysis.py               跨种子聚合、约束统计等论文分析
+  plotting/                 matplotlib 绘图代码
+  figures/                  论文图表脚本
+app/                      面向非专业用户的应用层（本次只占位，见 `app/ui/README.md`、`app/api/README.md`）
+tests/                    单元测试、golden 快照（`tests/golden/`）、论文层测试（`tests/paper/`）
 ```
-MTTO/
-├── model/                  # 核心模型
-│   ├── common/             #   能耗计算 (ECC)、最短运行时间参考函数 (ORS)
-│   ├── force/              #   制动力、运行阻力
-│   ├── ocs/                #   防护曲线、安全工具、停车点步进、运营任务
-│   ├── track/              #   线路信息
-│   └── vehicle/            #   车辆参数
-├── rl/                     # 强化学习
-│   ├── callbacks.py        #   训练回调（TensorBoard 日志 & 最优轨迹评估）
-│   ├── env_factory.py      #   环境工厂
-│   ├── evaluation.py       #   评估辅助
-│   ├── experiment_utils.py #   reward preset、运行元数据、输出命名
-│   ├── mtto_env.py         #   Gym 环境
-│   └── training_analysis/  #   训练日志分析流水线
-├── contracts/              # DTO、领域快照和版本化持久化 schema
-├── scripts/                # 可执行入口
-├── tests/                  # 单元测试
-├── data/                   # 线路 & 运营数据
-├── output/                 # 输出产物（模型、曲线、报告）
-└── utils/                  # 工具函数（绘图、IO、几何、索引）
+
+## 架构设计
+
+代码组织围绕三个目标：
+
+1. **DP 与 RL 共用同一套运行机理**，两条链路的差异只在算法本身；
+2. **任何来源的速度曲线（RL、DP、实测数据）用同一把尺子评价**；
+3. **计算结果可以溯源，论文实验可以安全地中断、恢复与复用**。
+
+由此得到下面的分层、若干条贯穿全库的约定，以及以 golden 快照为核心的验证方式。
+
+### 分层与依赖方向
+
+```text
+cli        → workflows
+app        → workflows
+paper      → mtto 的任意模块（研究代码，可直接使用 domain、rl.rewards 等）
+workflows  → rl, dp, evaluation, io
+rl         → evaluation, domain
+dp         → domain
+io         → rl（终止原因、诊断数据、策略 IO 版本的读写）, evaluation（质量报告的读写）, domain
+evaluation → domain
+domain     → numpy、numba、标准库
 ```
 
----
+| 层 | 职责 | 刻意不做的事 |
+| --- | --- | --- |
+| `domain` | 高速磁浮列车运行机理：线路查询、动力学、匀变速运动学、能耗、安全防护（静态允许速度域、停车点步进与动态双限）、最短运行时间速度曲线（SRTSP）、`Scenario`/`Task`、`SpeedProfile`；热点函数为 numba kernel | 不含算法、不做 I/O；只有 `scenario.py` 聚合各组成部分，其余模块不导入它，从结构上避免循环导入 |
+| `evaluation` | 速度曲线质量：指标、按节点的动态双限审计、可行判定、择优规则 | 与算法、奖励无关 |
+| `rl`、`dp` | 两种算法：RL 的环境状态转移、观测与动作编解码、奖励、PPO 构建与回调、训练诊断；DP 的状态图、求解与状态图缓存 | 彼此不导入，也不导入 `io`；各自实现状态转移，只调用 `domain` 的共用函数 |
+| `io` | 产物与输入的唯一读写点：`run.json` 等固定文件名与严格读写、按路径加载场景与任务、TensorBoard 读取 | 不导入 `workflows` |
+| `workflows` | `cli`、`paper`、`app` 共用的入口：`train`、`evaluate`、`dp`、`analysis`；接收配置对象、返回结果对象、以回调报告进度 | 不解析命令行参数、不打印、不绘图 |
+| `cli` | 解析参数、调用 `workflows`、显示结果 | 不含业务逻辑 |
+| `paper` | 论文专用：数据、TOML 定义、实验编排与结果复用、跨种子分析、全部绘图 | — |
 
-## 快速开始
+`src/mtto` 不导入 `paper` 与 `app`，也不依赖 matplotlib、pandas、openpyxl（它们在 `paper` 依赖组中）。上表中的每条依赖规则都由 `tests/test_dependency_boundaries.py` 用 AST 扫描检查，破坏分层会直接导致测试失败。
 
-所有脚本均通过 `python -m scripts.<name>` 运行：
+### 关键设计决定
 
-| 用途 | 命令 |
-|------|------|
-| RL 训练 | `python -m scripts.train_rl` |
-| 方法消融实验 | `python -m scripts.run_method_ablation train/show` |
-| 空间步长消融 | `python -m scripts.run_step_distance_ablation train/show` |
-| RL 评估 | `python -m scripts.evaluate_rl` |
-| RL 中途计划时间突变实验 | `python -m scripts.run_schedule_time_change evaluate` / `python -m scripts.run_schedule_time_change show` |
-| 训练日志分析 | `python -m scripts.analyze_training_data` |
-| DP 基线复现 | `python -m scripts.reproduce_dp` |
-| DP 结果可视化 | `python -m scripts.show_dp_result` |
-| RL 结果可视化 | `python -m scripts.show_rl_result` |
-| 速度曲线对比可视化 | `python -m scripts.compare_speed_profiles` |
-| SPS 合规分析 | `python -m scripts.analyze_sps_compliance` |
-| 线路环境与防护曲线可视化 | `python -m scripts.show_env_data` |
-| 计算并保存防护曲线 | `python -m scripts.calc_and_save_safeguard_curves` |
-| 最短运行时间曲线 | `python -m scripts.calc_min_operation_time_curve` |
-| 实际运营数据展示 | `python -m scripts.show_real_operation_data` |
-| 势函数可视化 | `python -m scripts.show_potential_function` |
-| 终端评分函数可视化 | `python -m scripts.show_score_function` |
+**共用运行机理，不设公共仿真层。** RL 的一步是 `kinematics.run_distance` 加 `energy.segment_energy`（能耗使用指令加速度）；DP 的一条边是 `kinematics.accel_between` 加加速度上下限检查与 `energy.segment_energy`。两者调用同一组函数，一致性由 `tests/test_kinematics.py` 检查。环境的状态转移仍由各算法自己实现，而不是抽出一个公共模拟器：这样将来加入按时间步离散的环境（`kinematics.run_time` 已提供）或 MORL 算法时，只需复用 `domain` 函数，不必迁就一个为现有算法设计的仿真接口。
 
-RL 工作流脚本 `train_rl`、`evaluate_rl`、`run_schedule_time_change evaluate`、`analyze_training_data` 和 `show_rl_result` 统一支持 `--dry-run`，用于预览有效配置、路径解析结果或展示计划，而不执行训练、评估、分析或绘图。
+**速度曲线只有一种表示，质量评估只有一条路径。** RL 轨迹、DP 最优解与实测运营曲线都表示为 `SpeedProfile`（节点上的位置、速度、时间、牵引与悬浮累计能耗，以及段上的 Δv/Δt 加速度），统一交给 `evaluation.quality.assess`，得到 `QualityReport`：指标、动态双限审计、完成/精确停车/安全/准点/可行判定。择优排序（`selection_key`）也只基于它。论文中不同方法之间的对比因此建立在同一套口径上。
 
-论文全套仿真的固定参数、执行顺序、中断恢复和产物验收见
-[完整仿真实验指导](output/完整仿真实验指导.md)。论文产物按
-`00_figures`（仅存放方法与环境说明图）、`01_step_distance`、`02_method_ablation`、
-`03_multiobjective`、`04_schedule_time_change`（分别存放对应实验的结果图与表格）分类，每批使用统一的
-`YYYYMMDD_NN` 子目录。步长 v12、方法 v11、训练元数据 schema v6、消融 manifest schema v2、评估历史 schema v4 和严格评估
-schema v2 不与旧结果混用。直接训练入口在目标目录已存在训练产物时会抛出 `FileExistsError` 拒绝直接覆盖。
+**算法约束与质量判定分开。** 算法可以采用更严格的运行上限（RL 与 DP 使用 SRTSP 上限，DP 还使用静态允许速度域），它们只影响算法内部；质量判定中的“安全”只按动态双限速度防护，并且逐节点审计、记录全部越界。越界判定集中在 `domain/safeguard`，“是否停在允许停车区内”只由 `Task.stop_state` 回答。
 
----
+**终止语义显式化。** 回合结束时环境给出 `TerminationReason`（停区内停车、停车不足、越过终点、低于下限、高于动态双限上限、高于 SRTSP 上限，见 `rl/state.py`）。所有终止原因都映射为 Gym 的 `terminated`，失败终点不参与 PPO 的价值 bootstrap；`truncated` 只留给将来的时间上限。奖励分支、成功判定与训练诊断都直接按终止原因计算，不再从标志组合反推。
 
-## 脚本详解
+**不可变配置与显式状态。** `Scenario`、`Task`、`ScheduleChange` 都是冻结 dataclass；计划运行时间与计划变更进入环境状态，而不是原地修改共享对象；每个派生量只在一处计算（例如 SRTSP 查找表与奖励归一化常数由 `workflows` 计算一次，传给所有并行环境）。
 
-### RL 训练 · `train_rl`
+**数值只有一个定义点。** 车辆参数、能耗参数、防护曲线的生成输入、任务起终点与阈值只写在 `paper/specs/*.toml` 中；库中参数 dataclass 的数值字段不设默认值（表示“无”的可选字段可以默认 `None`）。`io/scenario.py` 按调用方传入的路径读取线路数据，在内存中生成防护曲线（不依赖本地缓存文件），并计算 `scenario_hash` 供溯源与复用使用。
 
-使用 PPO 算法训练磁浮列车最优速度曲线策略。通过 `--run-mode` 一键切换日志与分析开关。
+**库负责计算与溯源，论文层负责复用。** `io/artifacts.py` 规定每类运行的产物组成并做严格读写；`run.json` 在其余产物写完并校验后最后原子写入，是运行完成的唯一标志；RL 的 `result.json` 记录终止原因、策略来源与实际训练完成情况。结果能否复用由 `paper/experiments` 判断：复用键由配置、场景哈希、任务、`mtto` 版本号（评估运行另加被评估策略文件的 SHA-256）组成，`paper.json` 同时记录 git 提交与工作区是否 dirty。库本身不做任何复用判断。
 
-#### 运行模式
+**版本号代表计算逻辑。** 复用键不包含代码哈希，而是包含 `pyproject.toml` 中的版本号：修改物理、判定或奖励等计算逻辑时必须递增版本号，旧结果随之不再被复用；只修改 `paper/`、CLI、测试或文档时不递增。DP 状态图缓存（库中唯一的缓存）的键同样包含版本号。
 
-| 模式 | 说明 |
-|------|------|
-| `tune`（默认） | 启用 TensorBoard、采样回调、best-eval、训练后自动分析 |
-| `reproduce` | 关闭所有日志与分析，最大化训练效率 |
-| `monitor_best` | 关闭高频采样回调，保留 VecMonitor 基础监控与 best-eval（rollout 指标写入 TensorBoard） |
-| `best_only` | 仅保留 best-eval，适合低开销筛选最优模型 |
+**只在已有两个实现时才抽象**，并遵循 `AGENTS.md`：只在真正的边界（外部文件、用户输入）做校验，内部调用之间信任契约，不写防御性的重复检查。
 
-#### 训练环境与并行
+### 正确性的保证方式
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `--num-envs` | `int` | `8` | 向量化采样环境数量 |
-| `--step-distance` | `float` | `30.0` | 固定空间控制步长 (m)，`--max-step-distance` 为兼容别名 |
-| `--schedule-time-s` | `float` | `465.0` | 规划运行时间 (s) |
+- **golden 回归快照**（`tests/golden/`，`uv run pytest -m golden`）：固定动作序列下的 RL 轨迹，覆盖全部终止结局、全部奖励预设的逐步奖励与观测、计划变更的三种情形、DP 最优解，以及 RL/DP 用例的 `evaluation.quality.assess` 结果。离散量（终止原因、步数、停车点序号、质量判定的布尔结果）必须完全相等；连续量纯数值计算 `rtol=1e-9`，奖励与能耗 `rtol=1e-7`。快照是当前版本的回归基线，不是与重构前实现的对比；详见[Golden 回归快照](#golden-回归快照)。
+- **依赖边界测试**：见上一节。
+- 固定随机种子时，CPU 上的训练逐位可复现。重构完成时评估链路与重构前逐位一致、训练过程除有意修复的终止语义（旧实现把领域失败当作截断）外逐位一致，此结论由当时的迁移基线验证；迁移基线已完成使命并随本次测试整理移除，不再是仓库内的自动化保证，仅留作历史记录。
 
-训练入口与奖励、方法及步长消融脚本统一使用 `DummyVecEnv`。
-`--num-envs` 大于 1 时会在同一进程内依次采样多个环境，不再提供多进程后端选项。
-消融输出目录中如果已经存在 manifest，新训练默认拒绝覆盖；配置不兼容或旧 schema 的
-manifest 也不会用于恢复。需要断点恢复时显式使用 `--resume`；确认要重新开始时使用
-`--force-new`，旧 manifest 会先备份。resume 只跳过状态为 `completed` 且 canonical 产物
-完整的运行，失败、中断或产物不完整的运行会从头重跑。
+### 扩展接缝
 
-#### 真实起点重置与防覆盖保护
+| 扩展 | 现有接缝 | 届时要做的事 |
+| --- | --- | --- |
+| MORL 与其他 Pareto 解集算法 | `Task.schedule_time_s` 可为 `None`（可行判定随之不含到站时间）；奖励按分量返回 `RewardBreakdown`；`evaluation/quality.py` 与奖励无关 | 在 `rl/morl/` 或新的算法包中实现状态转移与目标定义；基于质量指标的 Pareto 分析放入 `evaluation/` |
+| 应用层 `app/`（UI、API） | 只调用 `workflows`；`workflows` 返回含 `SpeedProfile` 的结果对象、以回调报告进度；`Scenario`/`Task` 不可变；线路数据按路径读取 | 在 `workflows` 中增加取消机制，长任务放到独立进程，再决定服务框架与前端 |
+| 数据库 | 每个运行的 `run.json` 含完整配置与输入 | 按真实查询需求设计表结构 |
+| 按时间步离散的环境 | `kinematics.run_time` 已实现并测试 | 新环境调用 `run_time`；质量评估增加冲击率舒适度口径；终止原因增加时间上限并映射为 `truncated` |
+| 完整反向运行 | `Task` 构造时对反向运行显式报错 | 引入路线坐标变换，在构造 `Scenario` 时镜像数据 |
 
-所有强化学习训练环境始终在 reset 时重置到实际任务起点（`self.stepper.reset()`），完全移除了历史版本中的课程学习（DSPL）、状态池与 context 采样机制。训练入口不再接收 `--curriculum-profile` 或 `--reference-curve-dir` 参数。
+### 已知限制与推迟事项
 
-为防止意外破坏已有的实验记录与模型权重，单次直接训练（`train_single_experiment`）在启动前会严格检查目标输出目录。如果目标目录中已经包含任何训练产物（如 `run_metadata_path`、`final_model_save_path`、`reward_diagnostics_path`、`metrics.json` 或 `trajectory.npz`），将直接抛出 `FileExistsError` 拒绝执行，不提供静默覆盖选项。如需重新训练，必须显式指定不同的 `--output-root` 或 `--experiment-tag`，或者在确认安全的前提下手动清理目标目录。
+| 事项 | 触发条件 |
+| --- | --- |
+| RL 只在步末检查动态双限，步内越界可能漏检 | 质量审计显示漏检有实际影响时 |
+| 能耗内核在牵引/制动切换附近不连续（加速度相差约 1e-13 时牵引能耗可相差约 0.09 kJ） | 需要能耗数值连续（如基于梯度的优化）或排查能耗异常时 |
+| DP 状态图缓存使用 pickle，只应读取可信目录 | 缓存目录需要接收外部文件时 |
+| 训练没有中途 checkpoint，中断的运行整体重跑 | 单次训练耗时长到无法接受重跑时 |
+| 运营标准（停车误差、准点阈值等）与 `Task` 放在一起 | 需要多套运营标准时 |
+| 反向运行、按时间步离散的环境、MORL、应用层 | 见上一节 |
 
-#### 奖励配置与实验标识
-
-默认奖励预设为 `basic_safety_punctuality`，对应本文的物理先验奖励塑形
-（Physics-Informed Reward Shaping, PIRS）：组合速度安全势与线性剩余裕度准点势。
-若要进行方法消融或单独启用特定势函数，可通过 `--reward-preset` 指定：
-- `basic`：仅包含基础 `energy + comfort`；
-- `basic_safety`：在基础奖励上启用安全势函数塑形；
-- `basic_punctuality`：在基础奖励上启用准点势函数塑形；
-- `basic_safety_punctuality`：完整启用安全势与准点势（PIRS）。
-
-令 `q` 为沿运行方向计算并裁剪到 `[0,1]` 的剩余距离比例，`b0` 为全程静止起点的
-计划时间减最短运行时间，参考裕度为 `b_ref=b0*q`。
-实际裕度与参考的差为 `e`，势函数为 `Phi=-K*e²/(sigma²+e²)`。安全势与准点势
-在普通转移、成功终止、违规截断均统一计算为
-`gamma*Phi(next)-Phi(previous)`，不将任务终止后的下一状态势显式归零。准点参数固定为
-`K=5`、`sigma=20 s`，不提供运行时覆盖；负初始裕度保留符号，势函数不替代原终端
-准点评分。
-计划时间变化后以新计划更新全程参考线，不从变化点重锚；变更接口本身不发奖励，
-不对跨外部计划变更的整段回报宣称固定任务策略不变性。
+## 安装
 
 ```bash
-python -m scripts.train_rl --reward-preset basic_safety_punctuality
-python -m scripts.show_potential_function --plot-type punctuality --no-show --output-dir output
+uv sync
 ```
 
-诊断中记录 `punctuality_shaping` 分量，诊断 schema 为 4，读取旧版 2/3 时该分量补零。
-上述参数是实验起点，短程训练验证不代表准点性能提升。
+`uv sync` 默认安装 `dev` 依赖组，其中包含 `paper` 依赖组（matplotlib、pandas、openpyxl），因此论文实验与出图脚本无需额外安装步骤。命令行入口 `mtto` 在 `uv sync` 后即可用（`[project.scripts]`，见 `pyproject.toml`）。
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `--reward-preset` | `str` | `basic_safety_punctuality` | 原始尺度奖励预设；支持 `basic`、`basic_safety`、`basic_punctuality`、`basic_safety_punctuality`（PIRS） |
-| `--experiment-tag` | `str` | `None` | 附加实验标签，用于隔离输出目录与 TensorBoard 运行名 |
+## 命令行：`mtto`
 
-训练和评估均直接使用原始奖励尺度，停站精度和准点终端评分函数保持不变。
+`mtto` 提供四个子命令，均通过 `--scenario`/`--line-dir`/`--tasks`/`--task`（除 `analyze-training` 外）指定场景与任务；论文口径的场景/任务定义位于 `paper/specs/scenario.toml`、`paper/specs/tasks.toml`（任务名 `longyang_to_airport`）。完整参数见 `uv run mtto <子命令> --help`。
 
-#### PPO 超参数
+### `mtto train`
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `--reward-discount` | `float` | `0.998` | 回报折扣因子 γ |
-| `--rollout-steps-per-update` | `int` | `8192` | 每次更新的 rollout 总步数 |
-| `--n-steps-per-env` | `int` | 自动推导 | 每个环境的步数（优先级高于 `--rollout-steps-per-update`） |
-| `--budget-mode` | `str` | `completed_episodes` | 训练预算模式：`completed_episodes` 或 `environment_steps` |
-| `--training-episodes` | `int` | 模式默认 `5000` | 完成回合预算；仅用于 `completed_episodes` |
-| `--training-rollouts` | `int` | `None` | PPO rollout 总数；`environment_steps` 模式必填 |
-| `--device` | `str` | `cpu` | 运行设备：`cpu` / `cuda` |
-
-#### 日志与分析
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `--tensorboard-log-dir` | `str` | `mtto_ppo_tensorboard_logs` | TensorBoard 日志根目录 |
-| `--tb-log-name` | `str` | 自动生成 | TensorBoard 运行名称；未指定时会拼接 run-mode、reward-preset、时间参数和 experiment-tag |
-| `--log-interval` | `int` | `1`（tune）/ `5`（reproduce）/ `1`（monitor_best）/ `10`（best_only） | PPO 日志打印间隔 |
-| `--output-root` | `str` | `output/optimal/rl/` | 训练结果输出根目录 |
-| `--run-mode` | `str` | `tune` | `tune` / `reproduce` / `monitor_best` / `best_only` |
-| `--enable-tb` | `bool` | 取决于 run-mode | 启用 TensorBoard 日志 |
-| `--enable-monitor` | `bool` | 取决于 run-mode | 启用 VecMonitor 包装器 |
-| `--enable-auto-analysis` | `bool` | 取决于 run-mode | 启用训练后自动分析 |
-| `--enable-safety-truncation-histogram` | `bool` | tune 模式启用 | 按 rollout 汇总安全截断位置并保存直方图 |
-| `--dry-run` | `bool` | `False` | 仅解析有效训练配置、输出路径和运行元数据预览，不创建环境或启动训练 |
-
-每次训练在 `final/` 写入 `policy.zip`、`metadata.json` 和 `episodes.npz`；最终独立评估再写入 `trajectory.npz` 与 `metrics.json`。`metadata.json` 的 `training_budget.mode` 记录预算模式，顶层不重复写入 `budget_mode`。该二进制产物保存完整 episode 奖励分量累计值及 rollout 级 transition 充分统计量。
-
-#### Best-Eval（训练期最优轨迹评估）
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `--enable-best-evaluation-artifacts` | `bool` | 取决于 run-mode | 启用训练期最优模型与轨迹产物 |
-| `--evaluation-interval-rollouts` | `int` | `12` | 每完成指定数量的 PPO rollouts 执行一次评估 |
-| `--evaluation-interval-episodes` | `int` | `None` | 每跨过指定数量的完成训练回合执行一次评估；与 rollout 间隔互斥 |
-| `--evaluation-deterministic` | `bool` | `True` | 是否使用确定性策略推理 |
-| `--evaluation-history-path` | `str` | `None` | 可选的完整评估历史 NPZ 输出路径 |
-
-评估仅在 rollout 边界触发，不在每个训练 step 中执行。通用训练入口支持按 rollout
-或按完成回合两种互斥调度；按回合调度在阈值被跨过后的下一次 `_on_rollout_start`
-触发，因此实际回合数会有小幅 rollout 边界超调。评估历史同时记录规则目标回合数、
-实际完成回合数、环境 transition 数与 rollout 序号；最优轨迹 metrics 使用
-`evaluation_rollout_index`。
-
-环境成功终止要求速度绝对值不超过 `0.01 m/s`，且
-`stop_error_m <= max_stop_error * 30`（默认 `max_stop_error=0.3 m`，即 9 m）。
-评估中的 `precise_arrival` 仍要求 `stop_error_m <= max_stop_error`，默认 0.3 m；
-因此 success rate 与 precise-arrival rate 是不同指标。准点还要求
-`abs(time_error_s) < max_arr_time_error_s`，默认阈值为 `10.0 s`。
-
-安全判定统一为 `min_safety_margin_mps >= -1e-6` 且
-`safety_violation_count == 0`；严格可行性要求成功、精确停站、准点和安全同时成立。
-评估指标使用严格 schema v2，并显式保存 `safety_violation_count`、`safe` 与
-`feasible`，不再从缺失字段的旧指标中重建选择键或安全状态。
-
-Best-eval 排序规则：
-- 严格可行（安全、成功、精确停站且准点）轨迹优先于所有不可行轨迹
-- 严格可行轨迹之间优先选择总能耗更低者
-- 尚无严格可行轨迹时，依次按安全成功、停站精度、准点性和能耗回退
-
-论文方法消融固定为四组对照实验：PPO（`ppo`，对应 `basic`）、PPO+Safety（`ppo_safety`，对应 `basic_safety`）、PPO+Punctuality（`ppo_punctuality`，对应 `basic_punctuality`）与 PPO+PIRS（`ppo_pirs`，对应 `basic_safety_punctuality`）。
-Manifest schema 版本为 2，protocol 版本为 11，不再要求 DP 参考轨迹。
-步长消融（协议版本 12）统一使用完整 PIRS 基准（`ppo_pirs`），对 10、30、50、100 m 和 5 个种子统一使用 400 个 rollout（3,276,800 个环境状态转移），每 12 个 rollout 调度一次独立评估，周期评估点为 12–396（共 33 个点）。主图展示行程完成率和可行率（均值与样本标准差带，截断至 0–100%）。性能表汇总各步长 5 个种子 `best/` 轨迹的严格可行率（百分比与分子/分母）及各项指标均值 ± 样本标准差（保留全部 5 个种子），能耗单位为 kWh。旧步长协议结果不迁移或混入新输出目录。
-
-固定 30 m 步长后的方法消融以 400 个 rollout（3,276,800 个环境状态转移）作为预算，RL 环境步长为 30 m。每 12 个 rollout 调度一次独立评估，共 33 个周期评估点。方法消融输出两张核心图表：图 1 为近 12 rollouts 违规率与到达率；图 2 为停站误差、时间误差、能耗（kWh）与舒适度 2×2 子图（含 300–396 rollout 放大图与阈值线）。表 1 汇总四个时期的违规率与到达率，表 2 汇总各方法 5 种子 `best/` 轨迹严格可行率与各项性能均值 ± 样本标准差，并在控制台输出代表性 PPO+PIRS 策略路径。
+训练 RL 策略。`--config` 指向一个 TOML 文件的 `[train]` 表，严格解析（多余键或缺少不允许为空的键都会报错；允许为 `None` 的键可以省略）；字段定义见 `mtto.workflows.train.TrainConfig`。`paper/specs/train.toml` 是一份可直接使用的示例配置（对应论文方法消融的 PIRS 变体、第一个种子）：
 
 ```bash
-# 预览方法消融矩阵
-uv run python -m scripts.run_method_ablation train --dry-run
-
-# 正式方法消融
-uv run python -m scripts.run_method_ablation train
+uv run mtto train \
+  --scenario paper/specs/scenario.toml \
+  --line-dir paper/data/line \
+  --tasks paper/specs/tasks.toml \
+  --task longyang_to_airport \
+  --config paper/specs/train.toml \
+  --output-dir output/train/example
 ```
 
-#### 训练后自动分析
+`--output-dir` 必须是尚不存在的目录（已存在时报错，不做覆盖）；可选 `--tensorboard-dir`、`--run-id`、`--schedule-time`（覆盖任务的计划运行时间）。
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `--analysis-output-root` | `str` | `mtto_train_reports` | 分析报告输出目录 |
-| `--analysis-min-points-per-10k-steps` | `float` | `5.0` | 每万步最低样本数 |
-| `--analysis-min-unique-episodes` | `int` | `100` | 最低唯一回合数 |
-| `--analysis-max-mean-step-gap` | `float` | `2048.0` | 最大平均训练步间隔 |
-| `--analysis-sampling-quality-mode` | `str` | `warn_only` | 采样质量闸门：`warn_only` / `strict_fail` |
+### `mtto evaluate`
 
-输出产物（轻量模式）：`report.md` + `analysis_snapshot.json`。
-
-#### 示例
+在单环境中确定性（或加 `--stochastic` 随机）评估一次已完成的训练运行（`--policy-run`，加 `--use-best` 使用其 `best/` 检查点而非最终策略）：
 
 ```bash
-# 默认调优训练
-python -m scripts.train_rl --run-mode tune
-
-# 高效复现（关闭日志，不进行 best model 评估，仅得到最终训练模型）
-python -m scripts.train_rl --run-mode reproduce
-
-# 关闭高频回调，保留基础监控 + best-eval
-python -m scripts.train_rl --run-mode monitor_best
-
-# 使用安全势函数预设，并附加实验标签
-python -m scripts.train_rl --run-mode monitor_best --reward-preset basic_safety --experiment-tag exp_a
-
-# 仅预览 monitor_best 训练配置与输出路径
-python -m scripts.train_rl --run-mode monitor_best --reward-preset basic_safety --dry-run
-
-# 低开销训练，仅保留 best-eval
-python -m scripts.train_rl --run-mode best_only
-
-# 430s tune，每 12 个 rollouts 触发一次 best-eval
-python -m scripts.train_rl --output-root output/optimal/rl/ --schedule-time-s 430.0 --step-distance 100.0 --run-mode tune --training-episodes 5000 --num-envs 8 --evaluation-interval-rollouts 12 --evaluation-deterministic --device cpu
-
-# 430s monitor_best，每 6 个 rollouts 评估一次
-python -m scripts.train_rl --output-root output/optimal/rl/safety_speed/ --schedule-time-s 430.0 --step-distance 100.0 --run-mode monitor_best --training-episodes 5000 --num-envs 8 --evaluation-interval-rollouts 6 --evaluation-deterministic --device cpu
+uv run mtto evaluate \
+  --scenario paper/specs/scenario.toml \
+  --line-dir paper/data/line \
+  --tasks paper/specs/tasks.toml \
+  --task longyang_to_airport \
+  --policy-run output/train/example \
+  --use-best \
+  --output-dir output/eval/example
 ```
 
----
+### `mtto dp`
 
-### RL 评估 · `evaluate_rl`
-
-加载用户明确指定的 PPO 模型目录，在单环境中执行评估 rollout，可选录制视频。目录必须直接包含 `policy.zip` 与 `metadata.json`，脚本不会搜索或推断 `best` / `final`。
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `--model-dir` | `str` | 必填 | 直接包含 `policy.zip` 与 `metadata.json` 的模型目录 |
-| `--reward-discount` | `float` | 从 `metadata.json` 读取 | 折扣因子（重建环境用） |
-| `--schedule-time-s` | `float` | 从 `metadata.json` 读取 | 规划运行时间 |
-| `--step-distance` | `float` | 从 `metadata.json` 读取 | 环境固定空间控制步长 (m) |
-| `--reward-preset` | `str` | 从 `metadata.json` 读取 | 评估所使用的原始尺度奖励预设 |
-| `--device` | `str` | `cpu` | 推理设备 |
-| `--deterministic` | `bool` | `True` | 是否使用确定性策略 |
-| `--record-video` | `bool` | `False` | 是否录制评估视频 |
-| `--save-trajectory` | `bool` | `True` | 是否保存轨迹 NPZ 与指标 JSON |
-| `--video-folder` | `str` | `mtto_eval_video` | 视频输出目录 |
-| `--output-dir` | `str` | `None` | 轨迹文件输出目录（默认使用 `--model-dir`） |
-| `--video-length` | `int` | `10000` | 最大录制步数 |
-| `--video-trigger-step` | `int` | `0` | 视频录制触发步数 |
-| `--dry-run` | `bool` | `False` | 仅解析有效评估配置、训练元数据回填结果与输入输出路径，不加载模型或运行 rollout |
-
-评估成功后保存统一命名的 `trajectory.npz` 与 `metrics.json`。评估元数据中的模型目录使用相对输出目录的路径。
+用动态规划求解速度曲线。`--config` 指向 TOML 文件的 `[dp]` 表，同样严格解析；字段定义见 `mtto.workflows.dp.DPConfig`。`paper/specs/dp.toml` 是一份示例配置（沿用重构前 `reproduce_dp` 脚本的默认参数）：
 
 ```bash
-# 录制视频
-python -m scripts.evaluate_rl --model-dir output/optimal/rl/.../final/ --record-video
-
-# 指定模型目录与设备
-python -m scripts.evaluate_rl \
-    --model-dir output/optimal/rl/.../final/ \
-    --device cuda
-
-# 覆盖训练元数据中的 reward preset 与时间参数
-python -m scripts.evaluate_rl \
-    --model-dir output/optimal/rl/.../final/ \
-    --reward-preset basic_safety \
-    --schedule-time-s 430.0
-
-# 仅预览有效评估配置
-python -m scripts.evaluate_rl --model-dir output/optimal/rl/.../final/ --dry-run
+uv run mtto dp \
+  --scenario paper/specs/scenario.toml \
+  --line-dir paper/data/line \
+  --tasks paper/specs/tasks.toml \
+  --task longyang_to_airport \
+  --config paper/specs/dp.toml \
+  --output-dir output/dp/example
 ```
 
----
+可选 `--cache-dir` 指定状态转移图的磁盘缓存目录；不传时不做磁盘缓存，每次重新计算。
 
-### RL 中途计划时间突变实验 · `run_schedule_time_change`
+### `mtto analyze-training`
 
-从一次完整的方法消融中读取 5 个 PPO+PIRS（`ppo_pirs`）种子的 `best/`
-和 `final/`，对 10 个候选分别运行计划时间突变评估。根 summary 根据跨工况的
-严格可行性、安全、完成、停站/准点误差和能耗选出最稳健候选；`show` 只绘制该候选。
-默认工况为 `Original`、`Plus 30s`、`Minus 30s`。
-
-#### `evaluate` 参数
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `--method-ablation-dir` | `str` | 必填 | 完整方法消融的 `YYYYMMDD_NN` 目录 |
-| `--output-dir` | `str` | 必填 | 新的时间突变 `YYYYMMDD_NN` 目录；已存在时拒绝覆盖 |
-| `--device` | `str` | `cpu` | 推理设备 |
-| `--deterministic` | `bool` | `True` | 是否使用确定性策略 |
-| `--change-distance-m` | `float` | `8000.0` | 触发计划时间变化的位置 (m)，即线路 8 km 处 |
-| `--delta-times-s` | `str` | `0,30,-30` | 逗号分隔的计划时间变化量；新计划时间为 `schedule_time_s + delta` |
-| `--dry-run` | `bool` | `False` | 仅解析配置与路径，不加载模型或运行 rollout |
-
-`evaluate` 不接受奖励、步长、折扣或初始计划时间覆盖，并会在输出目录中保存：
-
-- `candidates/<run_id>__<best|final>/<case>/trajectory.npz`
-- `candidates/<run_id>__<best|final>/<case>/metrics.json`
-- 每个候选的 `schedule_time_change_summary.json`
-- 根 `schedule_time_change_summary.json`
-
-#### `show` 参数
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `--load-dir` | `str` | 必填 | 直接包含根 summary 的 `YYYYMMDD_NN` 结果目录 |
-| `--save-figure` | `bool` | `True` | 是否保存对比图 |
-| `--show` | `bool` | `True` | 是否弹出图窗 |
-| `--factor` | `float` | `0.99` | 绘制安全防护背景时使用的安全系数 |
-
-启用 `--save-figure` 时，图像固定保存为该实验目录下的
-`schedule_time_change_comparison.pdf`，不接受文件名或扩展名覆盖。
+对一次已完成的训练运行生成派生分析报告（不写 `run.json`，因为它不是计算运行）；`--train-run` 指向 `mtto train` 的输出目录。`--config` 指向一个 TOML 文件的 `[analysis]` 表，严格解析，为必填项（多余键或缺少不允许为空的键都会报错；允许为 `None` 的键可以省略）；字段定义见 `mtto.rl.training_analysis.pipeline.AnalysisConfig`。`paper/specs/analysis.toml` 是一份可直接使用的示例配置（对应重构前的默认值）：
 
 ```bash
-# 仅预览将要运行的突变实验矩阵
-python -m scripts.run_schedule_time_change evaluate \
-    --method-ablation-dir output/paper_experiment/02_method_ablation/20260910_01 \
-    --output-dir output/paper_experiment/04_schedule_time_change/20260910_01 \
-    --dry-run
-
-# 评估完整方法的 10 个 best/final 候选
-python -m scripts.run_schedule_time_change evaluate \
-    --method-ablation-dir output/paper_experiment/02_method_ablation/20260910_01 \
-    --output-dir output/paper_experiment/04_schedule_time_change/20260910_01 \
-    --change-distance-m 8000.0
-
-# 自定义突变位置和时间变化组合
-python -m scripts.run_schedule_time_change evaluate \
-    --method-ablation-dir output/paper_experiment/02_method_ablation/20260910_01 \
-    --output-dir output/paper_experiment/04_schedule_time_change/20260910_02 \
-    --change-distance-m 12000.0 \
-    --delta-times-s 0,-5,5,-15,15
-
-# 展示指定批次的最优候选，并保存对比图
-python -m scripts.run_schedule_time_change show \
-    --load-dir output/paper_experiment/04_schedule_time_change/20260910_01
-
-# 只保存图像，不弹出图窗
-python -m scripts.run_schedule_time_change show \
-    --load-dir output/paper_experiment/04_schedule_time_change/20260910_01 \
-    --no-show
+uv run mtto analyze-training \
+  --train-run output/train/example \
+  --output-root output/analysis/example \
+  --config paper/specs/analysis.toml
 ```
 
----
+## 产物约定
 
-### 训练日志分析 · `analyze_training_data`
+产物读写统一经由 `mtto.io.artifacts`，固定文件名与严格键检查见该模块。每个运行目录以 `run.json`（运行来源、配置、`mtto` 版本、创建时间，最后原子写入，作为完成标记）区分三种 `kind`：
 
-对 TensorBoard 训练日志进行全维度分析并生成 LLM 友好报告。
+| `kind` | 必需产物 | 可选产物 |
+| --- | --- | --- |
+| `rl_train` | `run.json`、`policy.zip`、`profile.npz`、`quality.json`、`result.json`（最终策略） | `best/` 子目录（含同样一套文件，训练期最优策略）；`diagnostics.npz`（奖励诊断、安全截断统计）、`evaluations.npz`（周期评估历史） |
+| `dp_solve` | `run.json`、`profile.npz`、`quality.json` | — |
+| `evaluation` | `run.json`、`profile.npz`、`quality.json`；评估 RL 策略时另需 `result.json` | — |
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `--log-root` | `str` | `mtto_ppo_tensorboard_logs` | TensorBoard 日志根目录 |
-| `--run-name` | `str` | 最新一次运行 | 指定运行子目录名 |
-| `--output-root` | `str` | `mtto_train_reports` | 分析报告输出目录 |
-| `--step-window-size` | `int` | `5000` | Step 快照窗口大小 |
-| `--episode-window-size` | `int` | `20` | Episode 快照窗口大小 |
-| `--ema-alpha` | `float` | `0.1` | 收敛分析 EMA 系数 |
-| `--kl-threshold` | `float` | `0.03` | Approx KL 安全阈值 |
-| `--near-miss-threshold-mps` | `float` | `1.0` | 安全边界近失阈值 (m/s) |
-| `--position-bin-size-m` | `float` | `500.0` | 地理位置分箱大小 (m) |
-| `--critical-point-radius-m` | `float` | `300.0` | SPS 区域邻域半径 (m) |
-| `--top-k-spatial-bins` | `int` | `8` | 报告中空间风险 Top-K |
-| `--top-k-critical-points` | `int` | `8` | 报告中关键点 Top-K |
-| `--report-bar-width` | `int` | `24` | ASCII 柱状图宽度 |
-| `--training-log-interval` | `int` | — | 训练日志间隔（存入元数据） |
-| `--min-points-per-10k-steps` | `float` | `5.0` | 每万步最低样本数 |
-| `--min-unique-episodes` | `int` | `100` | 最低唯一回合数 |
-| `--max-mean-step-gap` | `float` | `2048.0` | 最大平均步间隔 |
-| `--sampling-quality-mode` | `str` | `warn_only` | `warn_only` / `strict_fail` |
-| `--export-csv` | `bool` | `False` | 导出 CSV 产物 |
-| `--include-snapshots` | `bool` | `False` | 包含原始 step/episode 快照 |
-| `--dry-run` | `bool` | `False` | 仅解析日志分析配置与输出路径，不执行分析 |
+`profile.npz` 是 `SpeedProfile`（位置、速度、时间、分段加速度、牵引/悬浮能耗）；`quality.json` 是 `QualityReport`（指标、安全防护审计、完成/精确停站/安全/准点/可行判定）；`result.json`（仅 RL）记录终止原因、累计奖励、末状态与（训练运行）实际训练步数/预算达成情况。
 
-```bash
-# 默认分析（轻量输出）
-python -m scripts.analyze_training_data
+## 论文实验与图表
 
-# 指定运行 + 导出 CSV
-python -m scripts.analyze_training_data \
-    --run-name trainning_log_1 --export-csv
-
-# 导出 CSV + 原始快照
-python -m scripts.analyze_training_data \
-    --export-csv --include-snapshots
-
-# 严格采样质量闸门
-python -m scripts.analyze_training_data \
-    --sampling-quality-mode strict_fail
-
-# 仅预览分析配置
-python -m scripts.analyze_training_data --run-name trainning_log_1 --dry-run
-```
-
----
-
-### DP 基线复现 · `reproduce_dp`
-
-基于动态规划（DP）+预计算状态转移图计算磁浮列车最优速度曲线。外层二分搜索调整时间乘子逼近目标运行时间，内层逆推 DP 求解最小能耗轨迹。
-
-#### 优化参数
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `--output-root` | `str` | `output/optimal/dp` | 输出根目录 |
-| `--schedule-time-s` | `float` | `430.0` | 规划运行时间 (s) |
-| `--delta-speed-mps` | `float` | `0.1` | 速度搜索步长 (m/s) |
-| `--max-outer-iterations` | `int` | `100` | 外层二分搜索最大迭代次数 |
-
-> 输出目录规则：`{output-root}/{time}_{speed}_{division}/`，例如 430.0 s + 0.1 m/s + 变间距 30 子阶段 → `430p0_0p1_var30/`。
-
-#### 阶段划分
-
-支持两种离散化方式，通过 `--stage-division` 切换：
-
-| 方式 | 说明 | 关联参数 |
-|------|------|----------|
-| `variable`（默认） | 基于安全临界点（IDP）划分大区间，每区间等分为 N 个子阶段 | `--sub-stage-count`（默认 `30`） |
-| `uniform` | 从起点到终点按固定距离等分 | `--uniform-step-size`（默认 `100.0` m） |
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `--stage-division` | `str` | `variable` | `variable` / `uniform` |
-| `--sub-stage-count` | `int` | `30` | 变间距时每个临界区间的子阶段数 |
-| `--uniform-step-size` | `float` | `100.0` | 等间距时的阶段步长 (m) |
-
-#### 并行预计算
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `--precompute-mode` | `str` | `serial` | `serial` / `parallel` |
-| `--precompute-workers` | `int` | `CPU - 1` | 并行进程数 |
-| `--precompute-chunk-size` | `int` | 自动估计 | 每个任务块的阶段数 |
-| `--mp-start-method` | `str` | Windows 默认 `spawn` | `spawn` / `fork` / `forkserver` |
-| `--hide-precompute-progress` | `flag` | — | 关闭预计算进度条 |
-
-#### 磁盘缓存
-
-状态转移图预计算结果可持久化到磁盘，避免相同参数下重复计算。缓存默认开启，位于 `output/_dp_transition_graph_cache/`。
-
-**文件夹命名规则：** `{div_token}_{delta_token}_{hash12}`
-
-| 组成部分 | 说明 | 示例 |
-|----------|------|------|
-| `div_token` | 变间距 `var{子阶段数}`，等间距 `uni{步长}` | `var30`、`uni100p0` |
-| `delta_token` | 速度步长格式化值 | `0p1` |
-| `hash12` | 所有输入参数的 SHA256 前 12 位 | `a1b2c3d4e5f6` |
-
-> 完整示例：`var30_0p1_a1b2c3d4e5f6/`
-
-**缓存文件夹内容：**
-
-| 文件 | 用途 |
-|------|------|
-| `graph_data.pkl.gz` | gzip 压缩的完整状态转移图（stages、speed_states、transitions 等） |
-| `metadata.json` | 人类可读的缓存元数据与 SHA256 完整性校验签名 |
-
-**缓存键** 涵盖所有影响转移图计算的输入：离散化网格、车辆参数（mass、max_acc、max_dec 等）、ECC 能耗参数、防护曲线与限速、轨道坡度。任一输入变化会自动生成新的缓存文件夹。
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `--skip-disk-cache` | `flag` | — | 跳过磁盘缓存，每次强制重新计算 |
-
-> 过期策略：手动删除对应的缓存文件夹即可，下次运行会自动重新计算并写入。
-
-#### 示例
-
-```bash
-# 默认（变间距、串行预计算、启用磁盘缓存）
-python -m scripts.reproduce_dp
-
-# 并行预计算
-python -m scripts.reproduce_dp --precompute-mode parallel
-
-# 显式 4 进程 + 分块
-python -m scripts.reproduce_dp \
-    --precompute-mode parallel --precompute-workers 4 \
-    --precompute-chunk-size 15 --mp-start-method spawn
-
-# 等间距划分，步长 50 m
-python -m scripts.reproduce_dp --stage-division uniform --uniform-step-size 50.0
-
-# 变间距，增大子阶段密度
-python -m scripts.reproduce_dp --stage-division variable --sub-stage-count 50
-
-# 跳过磁盘缓存，强制重算
-python -m scripts.reproduce_dp --skip-disk-cache
-
-# 自定义时间 + 速度步长
-python -m scripts.reproduce_dp --schedule-time-s 500.0 --delta-speed-mps 0.05
-```
-
----
-
-### DP 结果可视化 · `show_dp_result`
-
-加载已保存的 DP 最优速度曲线及指标，叠加防护曲线背景渲染，并展示 DP 轨迹的冗余运行时间变化曲线。
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `--curve-dir` | `str` | `output/optimal/dp` | 递归搜索曲线文件的目录 |
-| `--no-safeguard` | `flag` | — | 不绘制防护曲线背景 |
-| `--factor` | `float` | `0.99` | 防护曲线渲染因子 |
-
-```bash
-python -m scripts.show_dp_result
-python -m scripts.show_dp_result --curve-dir output/optimal/dp --factor 0.95
-python -m scripts.show_dp_result --no-safeguard
-```
-
----
-
-### RL 结果可视化 · `show_rl_result`
-
-加载用户明确指定的模型目录中的 RL 单条轨迹及指标，叠加防护曲线背景渲染。模型目录可以是一次训练的 `best/` 或 `final/`，并须直接包含统一命名的产物。
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `--model-dir` | `str` | 必填 | 直接包含 `trajectory.npz`、`metrics.json` 和 `metadata.json` 的目录 |
-| `--no-safeguard` | `flag` | — | 不绘制防护曲线背景 |
-| `--factor` | `float` | `0.99` | 防护曲线渲染因子 |
-| `--dry-run` | `bool` | `False` | 仅解析将加载的轨迹产物与 metrics 路径，不读取数据或显示图窗 |
-
-```bash
-python -m scripts.show_rl_result --model-dir output/optimal/rl/.../best/
-python -m scripts.show_rl_result --model-dir output/optimal/rl/.../final/
-python -m scripts.show_rl_result --model-dir output/optimal/rl/.../final/ --dry-run
-python -m scripts.show_rl_result --model-dir output/optimal/rl/.../best/ --no-safeguard
-```
-
----
-
-### 三基线速度曲线对比 · `compare_speed_profiles`
-
-在同一窗口内对比展示 DP、RL 与实际运行的速度曲线，包含三联图：
-- 速度-位置轨迹叠加（含安全防护背景）
-- 加速度-位置曲线
-- 累计总能耗（牵引+悬浮）-位置曲线
-
-终端会以统一评价口径输出时间误差、停站误差、总能耗（kWh）和舒适度 TAV（m/s²）的三基线对比表；指定 `--output-dir` 时额外保存 `dp_rl_actual_comparison_table.md`。实际运行曲线默认读取 `output/real_operation/aligned_real_operation_curve.npz`，其加速度估算口径不同，TAV 显示为“—”；首次使用前请先运行 `python -m scripts.transform_real_operation_curve`。
-
-DP 轨迹仍从给定目录解析；RL 轨迹只从用户明确指定的模型目录读取。
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `--dp-curve-dir` | `str` | `output/optimal/dp` | DP 输出根目录，递归搜索最新曲线产物 |
-| `--rl-model-dir` | `str` | 必填 | 直接包含 RL 统一轨迹产物的模型目录 |
-| `--real-curve` | `str` | `output/real_operation/aligned_real_operation_curve.npz` | 重标定后的实际运行曲线 NPZ |
-| `--no-safeguard` | `flag` | — | 速度图不渲染 safeguard 背景 |
-| `--factor` | `float` | `0.99` | safeguard 背景渲染因子 |
-
-```bash
-# 指定 DP 目录、RL 模型目录与实际运行曲线
-python -m scripts.compare_speed_profiles \
-    --dp-curve-dir output/optimal/dp \
-    --rl-model-dir output/optimal/rl/.../best/ \
-    --real-curve output/real_operation/aligned_real_operation_curve.npz
-
-# 关闭 safeguard 背景并调整渲染因子
-python -m scripts.compare_speed_profiles --rl-model-dir output/optimal/rl/.../best/ --no-safeguard --factor 0.97
-```
-
----
-
-### SPS 合规分析 · `analyze_sps_compliance`
-
-离线回放 DP 与 RL 轨迹在停车点步进机制（SPS）下的合规性，核心判据固定为：
-- 是否触发过步进请求（`triggered`）
-- 是否存在“因未满足 `T_s` 时延约束导致的 min/max 防护边界违规”（`delay_related_boundary_violation`）
-
-默认输出模式为 `text+plot`（文本摘要 + 主图）。主图仅在速度-位置平面展示，并标注：
-- `REQUEST_START` 位置
-- `STEP_COMPLETE` 位置
-
-当事件点密集时，可切换为仅保留 marker（不显示文本注释）。
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `--dp-curve-dir` | `str` | `output/optimal/dp` | DP 输出根目录，递归搜索最新曲线产物 |
-| `--rl-model-dir` | `str` | RL 模式必填 | 直接包含 RL 统一轨迹产物的模型目录 |
-| `--schedule-time-s` | `float` | `None` | 可选覆盖场景构建使用的计划运行时间 |
-| `--step-delay-s` | `float` | `2.0` | SPS 回放中的步进平均时延 `T_s` |
-| `--boundary-eps` | `float` | `1e-6` | 边界违规判定数值容差 |
-| `--output-mode` | `str` | `text+plot` | 输出模式：`text` / `plot` / `json` / `text+plot` |
-| `--json-output-path` | `str` | `None` | 启用 json 输出时，可选写入路径 |
-| `--event-annotation` | `str` | `auto` | 标注模式：`auto` / `text` / `marker-only` |
-| `--max-text-annotations` | `int` | `12` | `auto` 模式下文本标注上限 |
-| `--no-safeguard` | `flag` | — | 主图不绘制 safeguard 背景 |
-| `--factor` | `float` | `0.99` | safeguard 渲染与回放边界使用的因子 |
-
-```bash
-# 默认比较模式：文本摘要 + 主图（含事件 marker）
-python -m scripts.analyze_sps_compliance --rl-model-dir output/optimal/rl/.../best/
-
-# 仅输出文本
-python -m scripts.analyze_sps_compliance --rl-model-dir output/optimal/rl/.../best/ --output-mode text
-
-# 输出 JSON 并写入文件
-python -m scripts.analyze_sps_compliance \
-    --rl-model-dir output/optimal/rl/.../best/ \
-    --output-mode json \
-    --json-output-path output/optimal/sps_compliance_report.json
-
-# 主图启用 marker-only（不显示文本注释）
-python -m scripts.analyze_sps_compliance --rl-model-dir output/optimal/rl/.../best/ --event-annotation marker-only
-
-# 指定 RL 模型目录与 SPS 时延参数
-python -m scripts.analyze_sps_compliance \
-    --rl-model-dir output/optimal/rl/.../final/ \
-    --step-delay-s 2.0
-```
-
----
-
-### 线路环境与防护曲线 · `show_env_data`
-
-可视化展示磁浮列车运行线路环境数据与安全防护曲线，支持 `--view {overview,full-curves,danger-region,all}` 视图切换：
-- `overview`（默认）：综合环境视图（上图为防护曲线+车站/加速区/ASA，下图为轨道坡度）。
-- `full-curves`：全量安全防护曲线视图（Safe levitation, safe braking, min/max curves 与基础设施）。
-- `danger-region`：危险交叉点与局部危险速度域视图。
-- `all`：同时生成并展示以上所有视图。
-
-```bash
-# 默认展示综合环境视图（含坡度）
-python -m scripts.show_env_data
-
-# 展示全量安全防护曲线
-python -m scripts.show_env_data --view full-curves
-
-# 展示危险速度域与交叉点
-python -m scripts.show_env_data --view danger-region
-
-# 保存为图片且不弹出交互窗口
-python -m scripts.show_env_data --view overview --output-dir output/figures --no-show
-```
-
----
-
-### 计算并保存防护曲线 · `calc_and_save_safeguard_curves`
-
-离线计算并序列化保存完整的安全防护曲线数据至
-`output/safeguardcurves/`，供后续训练与评估加载。默认拒绝覆盖已有产物；
-确认重新生成时需要指定 `--force`。
-
-```bash
-python -m scripts.calc_and_save_safeguard_curves --dry-run
-python -m scripts.calc_and_save_safeguard_curves --force
-```
-
-可以调整距离步长、车辆参数、安全误差与执行延时，并将结果保存到自定义目录：
-
-```bash
-python -m scripts.calc_and_save_safeguard_curves \
-  --output-dir output/safeguardcurves_0p5m \
-  --distance-step-m 0.5
-```
-
-查看完整参数：
-
-```bash
-python -m scripts.calc_and_save_safeguard_curves --help
-```
-
----
-
-### 最短运行时间曲线 · `calc_min_operation_time_curve`
-
-基于最短运行时间参考系统（Operation Reference System）的模块级函数计算
-从起点到终点的理论最短运行时间曲线。
-
-```bash
-python -m scripts.calc_min_operation_time_curve
-```
-
----
-
-### 实际运营数据 · `show_real_operation_data`
-
-加载并绘制上海磁浮示范线（龙阳路 → 浦东国际机场）的实际运营速度/加速度随里程变化曲线。
-
-```bash
-python -m scripts.show_real_operation_data
-```
-
----
-
-### 势函数展示 · `show_potential_function`
-
-可视化训练奖励实际使用的安全势函数和准点势函数。单面板图采用 85 mm 的
-SCI 单栏宽度，多面板联合图采用 170 mm 的双栏宽度。所有静态图按固定物理尺寸
-保存为 PDF，嵌入栅格元素使用 1200 DPI。用户只指定 `--output-dir`，文件名和
-`.pdf` 扩展名由脚本根据图类型固定。
-项目图片的英文与数学字形统一优先使用 Arial；Arial 不可用时回退到
-Liberation Sans 等兼容无衬线字体，并以 TrueType 形式嵌入 PDF；中文字形使用
-Noto Sans CJK 无衬线回退。
-脚本仅保留运行时实际使用的速度安全势与准点势，不再提供位置安全势或停站势。
-
-```bash
-# 完整线路上的位置–冗余运行时间准点势热图
-python -m scripts.show_potential_function --plot-type punctuality
-
-# 安全势与准点势双栏并排展示
-python -m scripts.show_potential_function --plot-type safety-punctuality
-
-# 覆盖准点势使用的计划运行时间
-python -m scripts.show_potential_function \
-  --plot-type punctuality --schedule-time-s 465
-```
-
----
-
-### 终端评分函数可视化 · `show_score_function`
-
-可视化展示停站精度评分函数 $f_s(x)$ 与准点率评分函数 $f_p(t)$（支持 `--plot {combined,stopping,punctuality}`）：
-- `combined`（默认）：停站与准点评分函数综合双子图。
-- `stopping`：停站误差评分曲线与死区/衰减阈值。
-- `punctuality`：准点时间误差评分衰减曲线。
-
-```bash
-# 展示停站与准点综合评分曲线
-python -m scripts.show_score_function --plot combined
-
-# 展示停站误差评分曲线
-python -m scripts.show_score_function --plot stopping
-
-# 展示准点时间误差评分曲线
-python -m scripts.show_score_function --plot punctuality
-
-# 保存为图片且不弹出交互窗口
-python -m scripts.show_score_function --plot combined --output-dir output/figures --no-show
-```
-
----
+`paper/` 下的仿真实验（空间步长消融、方法消融、DP/PIRS/实际运行三方对比、计划时间变化鲁棒性）及其结果复用规则详见 [`paper/README.md`](paper/README.md)。
 
 ## 测试与代码检查
 
 ```bash
-# 全量测试
-PYTHONPATH=. uv run pytest -q
-
-# 指定测试文件
-PYTHONPATH=. uv run pytest -q tests/test_mtto_env.py
-
-# 代码风格与静态检查
-uv run ruff check .
+uv run pytest                                   # 默认跳过标记为 slow、golden 的用例
+uv run pytest -m slow                           # 耗时较长的用例
+uv run python -m tests.golden.record            # 录制 golden 回归快照到 output/golden/
+uv run pytest -m golden                         # 与已录制的快照比对
+uv run ruff check src tests paper
+uv run ruff format --check src tests paper
 ```
+
+## Golden 回归快照
+
+`tests/golden/` 下的测试用固定输入回放当前实现，比对结果与录制时保存的快照，用来发现"计算逻辑被无意改动"（另见[关键设计决定](#关键设计决定)中的版本号约定：论文结果复用依赖"改了计算逻辑就递增版本号"，golden 快照是唯一的自动检查）。
+
+- **输入（入库）**：固定动作序列 `tests/golden/actions/*.npy`，由各用例的控制器生成后冻结；控制器与 `generate_actions` 只在显式传入 `--regenerate-actions <case>` 时才重新生成，默认直接回放已入库的序列。
+- **输出（不入库）**：RL 固定动作轨迹、逐步奖励与观测、计划变更情形、DP 最优解，以及 RL/DP 用例的质量评估快照（`evaluation.quality.assess` 的全部指标、判定结果、越界与事件统计），写到仓库根目录下的 `output/golden/`（`.gitignore` 已排除 `output/`），并附 `manifest.json`（`mtto_version`、`git_commit`、`dirty`、录制时间、用例列表）。
+- **录制**：`uv run python -m tests.golden.record [--case NAME] [--force] [--regenerate-actions NAME]`；已存在的快照不覆盖，除非 `--force`。
+- **比对**：`uv run pytest -m golden`（`golden` 标记默认排除）。快照缺失时测试失败并提示先执行录制命令；比对失败时错误信息附带 `manifest.json` 中的 `mtto_version`、`git_commit`，便于判断是否改了计算逻辑却没递增版本号。默认的 `uv run pytest` 不依赖 `output/golden/`，在全新克隆上可直接通过。
+- **使用约定**：在已知正确的干净提交上录制快照；修改代码后运行 `uv run pytest -m golden`；若差异是有意的计算逻辑变化，递增 `pyproject.toml` 中的 `project.version` 并重新录制（`--force`）。
+
+`tests/paper/` 存放论文层（`paper/experiments`、`paper/analysis` 等）的测试。
+
+## 扩展占位
+
+`src/mtto/rl/morl/`、`app/ui/`、`app/api/` 目前只有占位 `README.md`，说明各自的扩展接缝与届时要做的事；详见其中内容与上文[扩展接缝](#扩展接缝)。

@@ -1,0 +1,314 @@
+from collections.abc import Callable
+from typing import cast
+
+import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.backend_bases import Event, KeyEvent
+
+from mtto.domain.safeguard import detect_danger
+from mtto.domain.srtsp import (
+    max_energy_and_min_operation_time,
+    min_operation_time,
+    min_operation_time_curve,
+)
+from paper.figures import load_paper_scenario, load_paper_task
+from paper.plotting.profiles import (
+    DANGER_VIEW_LAYERS,
+    render_safeguard,
+)
+from paper.plotting.style import (
+    apply_sci_grid,
+    sci_figure_size,
+    set_chinese_font,
+)
+
+
+def main() -> None:
+    scenario = load_paper_scenario()
+    task = load_paper_task()
+    safeguard = scenario.safeguard
+    track = scenario.line
+    vehicle = scenario.vehicle
+    factor = scenario.safeguard.params.factor
+
+    # 初始化位置和速度
+    begin_pos = task.start_position_m
+    begin_speed = 0.0
+    max_speed = float(np.max(track.speed_limits))
+
+    end_pos = task.target_position_m
+    end_speed = 0.0
+
+    distance = 100.0
+
+    # 设置matplotlib
+    set_chinese_font()
+
+    # 创建初始图形（只创建一次）
+    fig, ax = plt.subplots(figsize=sci_figure_size(columns=2, height_in=4.0))
+
+    # 绘制静态元素（区间限速、危险速度域和终点等）
+    render_safeguard(safeguard, ax=ax, layers=DANGER_VIEW_LAYERS)
+
+    _ = ax.scatter(
+        end_pos,
+        end_speed * 3.6,
+        marker="o",
+        color="red",
+        s=100,
+        alpha=0.8,
+        label="终点",
+        zorder=5,
+        edgecolors="black",
+        linewidths=1.5,
+    )
+
+    _ = ax.set_xlim((0.0, 30000.0))
+    _ = ax.set_ylim((0.0, 500.0))
+    _ = ax.set_xlabel(r"位置$s\left( m \right)$")
+    _ = ax.set_ylabel(r"速度$v\left( km/h \right)$")
+    apply_sci_grid(ax)
+    _ = ax.legend(loc="upper right")
+
+    # 初始化动态元素的引用（起点和运行曲线）
+    start_point = None
+    curve_line = None
+
+    # 添加说明文本
+    instructions = (
+        "键盘命令：\n"
+        "  Y - 随机生成起点并绘制曲线\n"
+        "  I - 手动输入起点参数并绘制曲线\n"
+        "  P - 在控制台打印当前参数\n"
+        "  Q - 退出程序"
+    )
+    _ = fig.text(
+        0.02,
+        0.98,
+        instructions,
+        transform=fig.transFigure,
+        verticalalignment="top",
+        fontsize=10,
+        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
+    )
+
+    # 更新标题显示命令提示
+    _ = ax.set_title("极限操作模式下的最短运行时间曲线", fontsize=12)
+
+    # 绘制曲线的通用函数
+    def draw_curve(pos: float, speed: float) -> bool:
+        nonlocal start_point, curve_line
+
+        try:
+            # 计算最短运行时间曲线
+            min_curve_pos_array, min_curve_speed_array = min_operation_time_curve(
+                vehicle=vehicle,
+                track=track,
+                factor=factor,
+                begin_pos=pos,
+                begin_speed=speed,
+                end_pos=task.target_position_m,
+                end_speed=0.0,
+            )
+
+            # 计算参考运行模式下的某些参数
+            next_pos = pos + distance
+            next_speed = max(
+                0.0, np.interp(next_pos, min_curve_pos_array, min_curve_speed_array)
+            )
+            t_min = min_operation_time(
+                vehicle=vehicle,
+                track=track,
+                factor=factor,
+                begin_pos=pos,
+                begin_speed=speed,
+                end_pos=next_pos,
+                end_speed=next_speed,
+            )
+
+            T_min = min_operation_time(
+                vehicle=vehicle,
+                track=track,
+                factor=factor,
+                begin_pos=pos,
+                begin_speed=speed,
+                end_pos=task.target_position_m,
+                end_speed=0.0,
+            )
+
+            # 计算最速操作模式下的总运行时间和能耗
+            PEC, LEC, total_operation_time = max_energy_and_min_operation_time(
+                vehicle=vehicle,
+                track=track,
+                factor=factor,
+                energy=scenario.energy,
+                begin_pos=pos,
+                begin_speed=speed,
+                end_pos=task.target_position_m,
+                end_speed=0.0,
+                distance=end_pos - pos,
+            )
+            total_energy = PEC + LEC
+
+            # 移除旧的起点和曲线（如果存在）
+            if start_point is not None:
+                start_point.remove()
+            if curve_line is not None:
+                curve_line.remove()
+
+            # 绘制新的起点
+            start_point = ax.scatter(
+                pos,
+                speed * 3.6,
+                marker="o",
+                color="yellow",
+                s=100,
+                alpha=0.8,
+                label="起点",
+                zorder=5,
+                edgecolors="black",
+                linewidths=1.5,
+            )
+
+            # 绘制新的最短运行时间曲线
+            (curve_line,) = ax.plot(
+                min_curve_pos_array,
+                min_curve_speed_array * 3.6,
+                label="最短运行时间曲线",
+                color="blue",
+                alpha=0.7,
+                linewidth=2,
+            )
+
+            # 更新标题
+            _ = ax.set_title(
+                "极限操作模式下的最短运行时间曲线\n"
+                + f"起点: ({pos:.2f}m, {speed:.2f}m/s) "
+                + f"运行能耗: {total_energy:.2f} 运行时间: {total_operation_time:.2f}\n"
+                + rf"$t_m={t_min:.2f}$"
+                + rf"$T_m={T_min:.2f}$",
+                fontsize=12,
+            )
+
+            # 更新图例
+            _ = ax.legend(loc="upper right")
+
+            fig.canvas.draw_idle()
+            return True
+
+        except Exception as e:
+            print(f"计算或绘制时出错: {e}")
+            return False
+
+    # 定义键盘事件处理函数
+    def on_key(event: KeyEvent):
+        nonlocal begin_pos, begin_speed, start_point, curve_line
+
+        if event.key is None:
+            return
+
+        key = event.key.lower()
+
+        if key == "y":
+            # 随机初始化并绘制曲线
+            begin_pos = float(
+                np.random.uniform(task.start_position_m, task.target_position_m)
+            )
+            begin_speed = float(np.random.uniform(0.0, max_speed))
+            while detect_danger(safeguard, pos=begin_pos, speed=begin_speed):
+                begin_pos = float(
+                    np.random.uniform(task.start_position_m, task.target_position_m)
+                )
+                begin_speed = float(np.random.uniform(0.0, max_speed))
+
+            if not draw_curve(begin_pos, begin_speed):
+                print("[I] 曲线绘制失败！")
+
+        elif key == "i":
+            # 手动输入起点参数并绘制曲线
+            print("\n" + "=" * 50)
+            print("[I] 手动输入起点参数")
+            print("=" * 50)
+
+            try:
+                # 输入位置
+                pos_input = input(
+                    f"请输入起点位置 (m) [范围: {task.start_position_m:.2f} - {task.target_position_m:.2f}]: "  # noqa: E501
+                ).strip()
+                if not pos_input:
+                    print("[I] 取消操作")
+                    return
+
+                input_pos = float(pos_input)
+                if (
+                    input_pos < task.start_position_m
+                    or input_pos > task.target_position_m
+                ):
+                    print(
+                        f"[I] 错误：位置超出范围 ({task.start_position_m:.2f} - {task.target_position_m:.2f})"  # noqa: E501
+                    )
+                    return
+
+                # 输入速度
+                speed_input = input(
+                    f"请输入起点速度 (m/s) [范围: 0 - {max_speed:.2f}]: "
+                ).strip()
+                if not speed_input:
+                    print("[I] 取消操作")
+                    return
+
+                input_speed = float(speed_input)
+
+                if input_speed < 0 or input_speed > max_speed:
+                    print(f"[I] 错误：速度超出范围 (0 - {max_speed * 3.6:.2f} km/h)")
+                    return
+
+                # 检查是否在危险区域
+                if detect_danger(safeguard, pos=input_pos, speed=input_speed):
+                    print("[I] 警告：该起点位于危险速度域内！")
+                    confirm = input("[I] 是否继续绘制？(y/n): ").strip().lower()
+                    if confirm != "y":
+                        print("[I] 已取消操作")
+                        return
+
+                # 更新局部变量
+                begin_pos = input_pos
+                begin_speed = input_speed
+
+                print(f"[I] 使用起点位置: {begin_pos:.2f} m")
+                print(f"[I] 使用起点速度: {begin_speed:.2f} m/s")
+
+                if draw_curve(begin_pos, begin_speed):
+                    print("[I] 曲线绘制完成！")
+
+            except ValueError:
+                print("输入错误：请输入有效的数字")
+            except Exception as e:
+                print(f"[I] 发生错误: {e}")
+
+        elif key == "p":
+            # 输出当前参数
+            print("\n" + "=" * 50)
+            print("[P] 当前参数：")
+            print(f"    起点位置 (begin_pos): {begin_pos:.2f} m")
+            print(f"    起点速度 (begin_speed): {begin_speed:.2f} m/s")
+            print("=" * 50)
+
+        elif key == "q":
+            # 退出程序
+            print("\n[Q] 正在退出程序...")
+            plt.close(fig)
+            print("[Q] 程序已退出。")
+
+    # 连接键盘事件
+    _ = fig.canvas.mpl_connect(
+        "key_press_event",
+        cast(Callable[[Event], None], on_key),
+    )
+
+    # 显示图形并阻塞
+    plt.show()
+
+
+if __name__ == "__main__":
+    main()

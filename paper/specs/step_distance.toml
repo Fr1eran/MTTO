@@ -1,0 +1,41 @@
+[experiment]
+name = "step_distance"
+scenario = "paper/specs/scenario.toml"
+line_dir = "paper/data/line"
+tasks = "paper/specs/tasks.toml"
+task = "longyang_to_airport"
+output_root = "output/paper_experiment/01_step_distance"
+seeds = [11, 131, 239, 359, 443]
+
+[train]
+reward_preset = "basic_safety_punctuality"
+gamma = 0.998
+budget_mode = "environment_steps"
+training_rollouts = 400
+num_envs = 8
+n_steps_per_env = 1024
+evaluation_interval_rollouts = 12
+evaluation_deterministic = true
+keep_best = true
+safety_truncation_bin_size_m = 5000.0
+device = "cpu"
+
+[[variants]]
+id = "10p0"
+label = "10 m"
+step_distance_m = 10.0
+
+[[variants]]
+id = "30p0"
+label = "30 m"
+step_distance_m = 30.0
+
+[[variants]]
+id = "50p0"
+label = "50 m"
+step_distance_m = 50.0
+
+[[variants]]
+id = "100p0"
+label = "100 m"
+step_distance_m = 100.0
