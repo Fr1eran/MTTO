@@ -29,7 +29,13 @@ from mtto.rl.diagnostics import (
     SafetyTruncationBuffer,
 )
 from mtto.rl.observation import ObservationBuilder
-from mtto.rl.rewards import RewardCalculator, RewardConfig, RewardNormalization
+from mtto.rl.rewards import (
+    RewardCalculator,
+    RewardConfig,
+    RewardNormalization,
+    braking_reserve_steps,
+    traction_reserve_steps,
+)
 from mtto.rl.state import State, StepResult, TerminationReason
 
 
@@ -111,9 +117,8 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
             vehicle=self.vehicle,
             track=self.track,
             task=task,
-            step_distance_m=step_distance,
             whole_distance_m=task.target_position_m - task.start_position_m,
-            srtsp_lookup=srtsp_lookup,
+            initial_min_operation_time_s=normalization.initial_min_operation_time_s,
         )
         self.reward_calculator = RewardCalculator(
             normalization,
@@ -125,9 +130,11 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         self.safety_truncation_buffer = safety_truncation_buffer
         self.reward_diagnostics_accumulator = reward_diagnostics_accumulator
         self.state = self.initial_state()
-        low = np.array([0, 0, -1, -1, -1, -1, 0, 0, -1, -1, 0, 0], dtype=np.float32)
-        high = np.ones(12, dtype=np.float32)
-        self.observation_space = gym.spaces.Box(low=low, high=high, dtype=np.float32)
+        self.observation_space = gym.spaces.Box(
+            low=np.asarray(ObservationBuilder.LOW, dtype=np.float32),
+            high=np.ones(ObservationBuilder.OBSERVATION_DIM, dtype=np.float32),
+            dtype=np.float32,
+        )
         self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
         self._observation_buffer: NDArray[np.float32] = np.empty(
             self.observation_space.shape, dtype=np.float32
@@ -164,6 +171,13 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         )
         upper_limit = float(upper)
         srtsp_limit = lookup_upper_speed(self.srtsp_lookup, s_m)
+        ahead_m = s_m + self.step_distance
+        lower_ahead, upper_ahead = dynamic_limits(
+            self.safeguard, ahead_m, sps.target_stopping_point_index
+        )
+        max_speed_ahead = min(
+            lookup_upper_speed(self.srtsp_lookup, ahead_m), float(upper_ahead)
+        )
         min_remaining = min_remaining_time_s(
             self.vehicle,
             self.track,
@@ -189,6 +203,18 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
             upper_limit_mps=upper_limit,
             srtsp_limit_mps=srtsp_limit,
             slack_time_s=schedule_time_s - t_s - min_remaining,
+            braking_reserve_steps=braking_reserve_steps(
+                v_mps,
+                min(srtsp_limit, upper_limit),
+                max_speed_ahead,
+                2.0 * self.vehicle.max_dec_abs * self.step_distance,
+            ),
+            traction_reserve_steps=traction_reserve_steps(
+                v_mps,
+                float(lower),
+                float(lower_ahead),
+                2.0 * self.vehicle.max_acc * self.step_distance,
+            ),
         )
 
     def initial_state(self) -> State:
@@ -218,10 +244,14 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
     def transition(
         self, state: State, commanded_acceleration_mps2: float
     ) -> StepResult:
+        # The step reaching the target lands on it; a train still moving there
+        # keeps running past it with full steps until it stops.
         remaining_distance_m = self.task.target_position_m - state.s_m
-        if remaining_distance_m <= 0.0:
-            raise ValueError("cannot advance a state at or beyond the task target")
-        step_distance_m = min(self.step_distance, remaining_distance_m)
+        step_distance_m = (
+            min(self.step_distance, remaining_distance_m)
+            if remaining_distance_m > 0.0
+            else self.step_distance
+        )
         motion = Motion(
             *run_distance(
                 state.v_mps, float(commanded_acceleration_mps2), step_distance_m

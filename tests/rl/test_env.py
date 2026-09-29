@@ -9,10 +9,8 @@ from gymnasium.utils.env_checker import (
     check_env,
 )
 
-from mtto.domain.dynamics import calc_levi_deceleration_scalar_numba
 from mtto.domain.energy import segment_energy
 from mtto.domain.kinematics import Motion
-from mtto.domain.line import get_slope_scalar_numba
 from mtto.domain.safeguard import build_safeguard
 from mtto.domain.scenario import Scenario, ScheduleChange, StopState, Task
 from mtto.domain.srtsp import (
@@ -28,7 +26,11 @@ from mtto.rl.diagnostics import (
 from mtto.rl.env import MTTOEnv
 from mtto.rl.evaluate import run_policy
 from mtto.rl.observation import ObservationBuilder
-from mtto.rl.rewards import RewardConfig
+from mtto.rl.rewards import (
+    PUNCTUALITY_POTENTIAL_SCALE,
+    RewardConfig,
+    safety_potential,
+)
 from mtto.rl.state import State, StepResult, TerminationReason
 from mtto.workflows.train import build_env_references
 from tests.golden.drive import build_env
@@ -242,43 +244,23 @@ def _build_env_like(
 
 def test_reset(mtto_env: MTTOEnv):
     obs, info = mtto_env.reset()
-    assert isinstance(obs, np.ndarray)
+    builder = mtto_env.observation_builder
+    state = mtto_env.state
     assert obs.dtype == np.float32
-    assert obs.shape == (12,)
-    np.testing.assert_allclose(obs[0], 1.0)  # remaining_distance
-    np.testing.assert_allclose(obs[1], 0.0)  # current_speed
-    np.testing.assert_allclose(obs[2], 0.0)  # current_acc
+    assert obs.shape == (ObservationBuilder.OBSERVATION_DIM,) == (11,)
+    assert mtto_env.observation_space.contains(obs)
+    np.testing.assert_allclose(obs[0], 0.0)  # route progress
+    np.testing.assert_allclose(obs[1], 1.0)  # log distance: the whole route
+    np.testing.assert_allclose(obs[2], 0.0)  # speed
+    np.testing.assert_allclose(obs[3], builder.normalize_acc_to_action(0.0))
     np.testing.assert_allclose(
-        obs[3],
-        mtto_env.observation_builder.normalize_acc_to_action(
-            mtto_env.observation_builder.calc_coasting_acc(mtto_env.state)
-        ),
-    )  # suggested_dec_normalized
-    np.testing.assert_allclose(obs[4], 1.0)  # remaining_schedule_time
-    np.testing.assert_allclose(
-        obs[5],
-        mtto_env.state.slack_time_s / mtto_env.state.schedule_time_s,
-    )  # time_redundancy
-    np.testing.assert_allclose(
-        obs[6],
-        mtto_env.state.max_speed_mps / mtto_env.vehicle.max_speed,
-    )  # current_max_speed
-    np.testing.assert_allclose(
-        obs[7],
-        mtto_env.state.lower_limit_mps / mtto_env.vehicle.max_speed,
-    )  # current_min_speed
-    np.testing.assert_allclose(obs[8], 0.0)  # current_slope
-    np.testing.assert_allclose(
-        obs[9],
-        mtto_env.observation_builder.get_lookahead_avg_slope(mtto_env.state.s_m)
-        / mtto_env.vehicle.max_slope_capacity,
-    )  # lookahead_avg_slope
-    np.testing.assert_allclose(
-        obs[10],
-        mtto_env.observation_builder.get_lookahead_avg_upper_speed(mtto_env.state.s_m)
-        / mtto_env.vehicle.max_speed,
-    )  # lookahead_avg_upper_speed
-    np.testing.assert_allclose(obs[11], 0.0)  # approach_progress
+        obs[4], state.max_speed_mps / builder.speed_scale_mps, rtol=1e-6
+    )
+    # The start is exactly on the linear slack reference.
+    np.testing.assert_allclose(obs[6], 0.0, atol=1e-6)
+    np.testing.assert_allclose(obs[7], builder.normalize_acc_to_action(0.0))
+    np.testing.assert_allclose(obs[8], 1.0)  # a stopped train has ample reserve
+    np.testing.assert_allclose(obs[10], -1.0)  # far from any stop
     assert info == {}
 
 
@@ -328,51 +310,76 @@ def test_observation_builder_denormalizes_actions(
     ) == pytest.approx(action)
 
 
-def test_suggested_dec_uses_coasting_acc_outside_final_approach(mtto_env: MTTOEnv):
-    _ = mtto_env.reset()
-    mtto_env.state = replace(mtto_env.state, v_mps=30.0, slope_permille=1.0)
-
-    obs = mtto_env.observation_builder.build(mtto_env.state)
-
-    coasting_dec = calc_levi_deceleration_scalar_numba(
-        mtto_env.state.v_mps,
-        mtto_env.state.slope_permille,
-        mtto_env.vehicle.mass,
-        mtto_env.vehicle.numoftrainsets,
+@pytest.mark.parametrize(
+    ("offset_m", "speed_mps", "expected_stopping_action", "log_distance_sign"),
+    [
+        # Before the target: the action that stops exactly on it.
+        (-20.0, 2.0, -0.1, 1.0),
+        # At or past the target while moving: full braking.
+        (0.0, 2.0, -1.0, 0.0),
+        (3.0, 1.0, -1.0, -1.0),
+        # Stopped: no braking needed.
+        (-20.0, 0.0, 0.0, 1.0),
+    ],
+)
+def test_observation_stopping_action_and_signed_distance(
+    mtto_env: MTTOEnv,
+    offset_m: float,
+    speed_mps: float,
+    expected_stopping_action: float,
+    log_distance_sign: float,
+) -> None:
+    state = replace(
+        mtto_env.initial_state(),
+        s_m=mtto_env.task.target_position_m + offset_m,
+        v_mps=speed_mps,
     )
-    expected_coasting_acc = float(
-        np.clip(
-            -coasting_dec,
-            mtto_env.vehicle.max_dec,
-            mtto_env.vehicle.max_acc,
+
+    obs = mtto_env.observation_builder.build(state)
+
+    assert mtto_env.observation_space.contains(obs)
+    # Unit accelerations make the action scale the physical scale here.
+    assert mtto_env.vehicle.max_acc == -mtto_env.vehicle.max_dec == 1.0
+    assert obs[7] == pytest.approx(expected_stopping_action)
+    assert np.sign(obs[1]) == log_distance_sign
+
+
+def test_observation_stop_error_separates_arrival_speeds(mtto_env: MTTOEnv) -> None:
+    base = replace(mtto_env.initial_state(), s_m=mtto_env.task.target_position_m)
+
+    def stop_feature(offset_m: float, speed_mps: float) -> float:
+        state = replace(base, s_m=base.s_m + offset_m, v_mps=speed_mps)
+        return float(mtto_env.observation_builder.build(state)[10])
+
+    # Arriving at the target: 0.4 m/s overruns 0.08 m, 1.2 m/s overruns 0.72 m.
+    slow, fast = stop_feature(0.0, 0.4), stop_feature(0.0, 1.2)
+    assert 0.0 < slow < fast
+    assert fast - slow > 0.2
+    # Spare braking distance before the target reads negative.
+    assert stop_feature(-20.0, 2.0) < 0.0
+
+
+def test_observation_time_features_track_punctuality_potential_and_slack(
+    mtto_env: MTTOEnv,
+) -> None:
+    env = _build_env_like(
+        mtto_env, reward_config=RewardConfig(enable_potential_punctuality=True)
+    )
+    state = env.initial_state()
+    calc = env.reward_calculator
+    features = []
+    for slack_s in (-200.0, -60.0, -10.0, 0.0, 10.0, 60.0, 200.0):
+        probe = replace(state, slack_time_s=slack_s)
+        obs = env.observation_builder.build(probe)
+        # Index 6 is the ratio the punctuality potential squares.
+        assert calc.potential_punctuality(probe, env.task) == pytest.approx(
+            -PUNCTUALITY_POTENTIAL_SCALE * float(obs[6]) ** 2
         )
-    )
-    np.testing.assert_allclose(
-        obs[3],
-        mtto_env.observation_builder.normalize_acc_to_action(expected_coasting_acc),
-    )
-
-
-def test_suggested_dec_uses_required_stop_dec_in_final_approach(mtto_env: MTTOEnv):
-    _ = mtto_env.reset()
-    mtto_env.state = replace(
-        mtto_env.state,
-        s_m=mtto_env.task.target_position_m - 1000.0,
-        v_mps=20.0,
-        slope_permille=1.0,
-    )
-
-    obs = mtto_env.observation_builder.build(mtto_env.state)
-
-    required_dec = -(mtto_env.state.v_mps**2) / (2.0 * 1000.0)
-    np.testing.assert_allclose(
-        obs[3],
-        mtto_env.observation_builder.normalize_acc_to_action(required_dec),
-    )
-    np.testing.assert_allclose(
-        obs[11],
-        mtto_env.observation_builder.calc_approach_progress(1000.0),
-    )  # approach_progress
+        features.append(float(obs[9]))
+    # Index 9 keeps the sign, stays monotone and does not saturate at 200 s.
+    assert features[3] == 0.0
+    assert np.all(np.diff(features) > 0.0)
+    assert -1.0 < features[0] and features[-1] < 1.0
 
 
 def test_lookup_upper_speed_or_zero_returns_zero_outside_lut(
@@ -393,73 +400,6 @@ def test_lookup_upper_speed_or_zero_returns_zero_outside_lut(
     assert lookup_upper_speed_or_zero(mtto_env.srtsp_lookup, 121.0) == pytest.approx(
         0.0
     )
-
-
-def test_lookahead_cache_matches_window_average(mtto_env: MTTOEnv) -> None:
-    _ = mtto_env.reset()
-    builder = mtto_env.observation_builder
-    step_index = 3
-    position_m = mtto_env.task.start_position_m + step_index * mtto_env.step_distance
-    offsets = np.linspace(
-        builder.step_distance_m,
-        builder.lookahead_distance_m,
-        builder.lookahead_num_samples,
-    )
-    expected_slope = np.mean(
-        [
-            get_slope_scalar_numba(
-                position_m + float(offset),
-                mtto_env.track.slopes,
-                mtto_env.track.slope_intervals,
-            )
-            for offset in offsets
-        ]
-    )
-    expected_upper_speed = np.mean(
-        [
-            lookup_upper_speed_or_zero(
-                mtto_env.srtsp_lookup, position_m + float(offset)
-            )
-            for offset in offsets
-        ]
-    )
-
-    np.testing.assert_allclose(
-        builder.get_lookahead_avg_slope(position_m), expected_slope
-    )
-    np.testing.assert_allclose(
-        builder.get_lookahead_avg_upper_speed(position_m), expected_upper_speed
-    )
-
-
-def test_lookahead_features_are_read_only_and_not_recomputed_during_build(
-    mtto_env: MTTOEnv,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _ = mtto_env.reset()
-    builder = mtto_env.observation_builder
-
-    def fail(*_args: object, **_kwargs: object) -> float:
-        raise AssertionError("lookahead feature was recomputed during build")
-
-    monkeypatch.setattr("mtto.rl.observation.get_slope_scalar_numba", fail)
-    monkeypatch.setattr(builder, "srtsp_lookup", fail)
-
-    observation = builder.build(mtto_env.state)
-
-    assert observation.shape == (12,)
-    assert builder._lookahead_avg_slope_by_step.flags.writeable is False
-    assert builder._lookahead_avg_upper_speed_by_step.flags.writeable is False
-
-
-@pytest.mark.parametrize("position_offset_m", (-1.0, 10**9))
-def test_lookahead_cache_rejects_out_of_route_position(
-    mtto_env: MTTOEnv,
-    position_offset_m: float,
-) -> None:
-    position_m = mtto_env.task.start_position_m + position_offset_m
-    with pytest.raises(ValueError, match="outside the task route"):
-        _ = mtto_env.observation_builder.get_lookahead_avg_slope(position_m)
 
 
 def test_cal_energy_consumption(mtto_env: MTTOEnv):
@@ -624,16 +564,10 @@ def test_step_failed_stop_terminates_with_fixed_penalty(
     assert terminated is True
     assert truncated is False
     current_state = mtto_env.state
-    expected_safety = mtto_env.reward_calculator.gamma * (
-        mtto_env.reward_calculator._potential_safety(
-            speed_mps=current_state.v_mps,
-            min_speed_mps=current_state.lower_limit_mps,
-            max_speed_mps=current_state.max_speed_mps,
-        )
-    ) - mtto_env.reward_calculator._potential_safety(
-        speed_mps=previous_state.v_mps,
-        min_speed_mps=previous_state.lower_limit_mps,
-        max_speed_mps=previous_state.max_speed_mps,
+    expected_safety = mtto_env.reward_calculator.gamma * safety_potential(
+        current_state.braking_reserve_steps, current_state.traction_reserve_steps
+    ) - safety_potential(
+        previous_state.braking_reserve_steps, previous_state.traction_reserve_steps
     )
     assert reward == pytest.approx(-10.0 + expected_safety)
     assert info["outcome"] == {"termination_reason": "STOPPED_SHORT"}
@@ -901,34 +835,55 @@ def test_transition_allows_success_on_required_transition_budget(
     assert transition.termination_reason is TerminationReason.STOPPED_IN_ZONE
 
 
-def test_transition_shortens_final_step_and_rejects_nonzero_terminal_speed(
+@pytest.mark.parametrize(
+    ("offset_zones", "offset_m", "next_speed", "travel_m", "expected"),
+    [
+        # Reaching the target while moving is no longer terminal: run on.
+        (0.0, -5.0, 3.0, None, None),
+        # An overrun that stops inside the stop zone is a successful stop.
+        (0.0, 0.0, 0.0, 0.2, TerminationReason.STOPPED_IN_ZONE),
+        # An overrun that stops beyond the stop zone fails.
+        (1.0, 0.0, 0.0, 0.5, TerminationReason.OVERRAN),
+        # Still moving beyond the stop zone can no longer end in a valid stop.
+        (1.0, -1.0, 2.0, None, TerminationReason.OVERRAN),
+    ],
+)
+def test_transition_lands_on_target_then_judges_overrun_at_stop(
     mtto_env: MTTOEnv,
     monkeypatch: pytest.MonkeyPatch,
+    offset_zones: float,
+    offset_m: float,
+    next_speed: float,
+    travel_m: float | None,
+    expected: TerminationReason | None,
 ) -> None:
     sim = mtto_env
-    remaining_distance_m = sim.step_distance / 2.0
+    target = sim.task.target_position_m
+    stop_zone_m = 30 * sim.task.max_stop_error_m
     state = replace(
-        sim.initial_state(),
-        s_m=(sim.task.target_position_m - remaining_distance_m),
-        v_mps=10.0,
-        stop_error_m=remaining_distance_m,
+        sim.initial_state(), s_m=target + offset_zones * stop_zone_m + offset_m
+    )
+    remaining = target - state.s_m
+    expected_distance = (
+        travel_m
+        if travel_m is not None
+        else (min(sim.step_distance, remaining) if remaining > 0 else sim.step_distance)
     )
 
     def _transition(
         speed_mps: float, acceleration_mps2: float, distance_m: float
     ) -> tuple[float, float, float]:
         del speed_mps, acceleration_mps2
-        return 10.0, distance_m, distance_m / 10.0
+        return next_speed, distance_m if travel_m is None else travel_m, 1.0
 
     def _build_state(**kwargs: object) -> State:
+        position = float(kwargs["s_m"])
         return replace(
             state,
-            s_m=float(kwargs["s_m"]),
-            v_mps=10.0,
-            t_s=float(kwargs["t_s"]),
-            propulsion_energy_kj=float(kwargs["propulsion_energy_kj"]),
+            s_m=position,
+            v_mps=float(kwargs["v_mps"]),
             step=int(kwargs["step"]),
-            stop_error_m=0.0,
+            stop_error_m=abs(target - position),
             lower_limit_mps=0.0,
             upper_limit_mps=100.0,
             srtsp_limit_mps=100.0,
@@ -939,18 +894,13 @@ def test_transition_shortens_final_step_and_rejects_nonzero_terminal_speed(
     monkeypatch.setattr(
         "mtto.rl.env.segment_energy", lambda *_args, **_kwargs: (0.0, 0.0)
     )
-    monkeypatch.setattr(
-        sim.sps,
-        "advance",
-        lambda *_args, **_kwargs: state.sps,
-    )
+    monkeypatch.setattr(sim.sps, "advance", lambda *_args, **_kwargs: state.sps)
     monkeypatch.setattr(sim, "_build_state", _build_state)
 
-    transition = sim.transition(state, 0.0)
+    transition = sim.transition(state, -1.0)
 
-    assert transition.motion.distance_m == pytest.approx(remaining_distance_m)
-    assert transition.next_state.s_m == pytest.approx(sim.task.target_position_m)
-    assert transition.termination_reason is TerminationReason.OVERRAN
+    assert transition.motion.distance_m == pytest.approx(expected_distance)
+    assert transition.termination_reason is expected
 
 
 def test_terminal_punctuality_reward_favors_smaller_time_error(
@@ -1071,7 +1021,7 @@ def test_observation_builder_returns_copy_when_out_is_none(
     assert obs2 is not builder._obs_buffer
     assert obs1 is not obs2
     np.testing.assert_array_equal(obs1, obs1_snapshot)
-    assert obs2[1] == pytest.approx(50.0 / mtto_env.vehicle.max_speed)
+    assert obs2[2] == pytest.approx(50.0 / builder.speed_scale_mps)
 
 
 def test_env_reset_and_step_return_observation_copies(mtto_env: MTTOEnv) -> None:
@@ -1198,7 +1148,10 @@ def test_schedule_change_not_applied_on_termination(
         if reason is TerminationReason.STOPPED_SHORT:
             return replace(state, v_mps=0.0)
         if reason is TerminationReason.OVERRAN:
-            return replace(state, s_m=env.task.target_position_m, v_mps=10.0)
+            past_zone_m = 30 * env.task.max_stop_error_m + 1.0
+            return replace(
+                state, s_m=env.task.target_position_m + past_zone_m, v_mps=10.0
+            )
         if reason is TerminationReason.UNDER_LOWER_LIMIT:
             return replace(state, lower_limit_mps=state.v_mps + 1.0)
         if reason is TerminationReason.OVER_UPPER_LIMIT:
@@ -1283,8 +1236,8 @@ def _advance_with_state(
         (0.0, 0.0, {}, TerminationReason.STOPPED_IN_ZONE),
         # 2. STOPPED_SHORT: train stopped short of stopping zone
         (-50.0, 0.0, {}, TerminationReason.STOPPED_SHORT),
-        # 3. OVERRAN: target position reached but train is not stopped
-        (0.0, 15.0, {}, TerminationReason.OVERRAN),
+        # 3. OVERRAN: ran more than the 9 m stop zone past the target
+        (10.0, 15.0, {}, TerminationReason.OVERRAN),
         # 4. UNDER_LOWER_LIMIT: train speed below lower limit
         (
             -5000.0,
@@ -1375,7 +1328,7 @@ def test_individual_termination_reasons(
         ),
         (
             "overran takes precedence over guard upper limit violation",
-            0.0,
+            10.0,
             60.0,
             {
                 "upper_limit_mps": 50.0,
@@ -1385,7 +1338,7 @@ def test_individual_termination_reasons(
         ),
         (
             "overran takes precedence over srtsp limit violation",
-            0.0,
+            10.0,
             55.0,
             {
                 "upper_limit_mps": 60.0,
@@ -1434,3 +1387,62 @@ def test_termination_priority_resolution(
 
     transition = _advance_with_state(env, base_state, monkeypatch)
     assert transition.termination_reason is expected_reason
+
+
+@pytest.mark.parametrize(
+    ("side", "speed_mps", "violates_next"),
+    [
+        # One 30 m step of full effort moves v^2 by 60 m^2/s^2.
+        ("upper", 14.0, False),
+        ("upper", 16.5, False),
+        ("upper", 17.5, True),
+        ("lower", 12.0, False),
+        ("lower", 11.0, True),
+    ],
+)
+def test_reserve_predicts_violation_under_full_braking_or_traction(
+    env,
+    monkeypatch: pytest.MonkeyPatch,
+    side: str,
+    speed_mps: float,
+    violates_next: bool,
+) -> None:
+    """Reserve <= 0 exactly when full effort cannot keep the next step inside."""
+    x0 = env.task.start_position_m + 1000.0
+    upper = side == "upper"
+
+    # Envelope tightens one step ahead: max 20 -> 15 m/s, or min 10 -> 14 m/s.
+    def _limits(_safeguard: object, position_m: float, _sp: int):
+        ahead = position_m - x0 >= env.step_distance / 2
+        if upper:
+            return 0.0, 15.0 if ahead else 20.0
+        return (14.0 if ahead else 10.0), 100.0
+
+    monkeypatch.setattr("mtto.rl.env.dynamic_limits", _limits)
+    monkeypatch.setattr("mtto.rl.env.lookup_upper_speed", lambda *_args: 100.0)
+    start = env.initial_state()
+    state = env._build_state(
+        s_m=x0,
+        v_mps=speed_mps,
+        commanded_acceleration_mps2=0.0,
+        t_s=0.0,
+        propulsion_energy_kj=0.0,
+        levitation_energy_kj=0.0,
+        step=0,
+        sps=start.sps,
+        schedule_time_s=start.schedule_time_s,
+        schedule_changed=False,
+    )
+    if upper:
+        reserve = state.braking_reserve_steps
+        acceleration = env.vehicle.max_dec
+        violation = TerminationReason.OVER_UPPER_LIMIT
+    else:
+        reserve = state.traction_reserve_steps
+        acceleration = env.vehicle.max_acc
+        violation = TerminationReason.UNDER_LOWER_LIMIT
+
+    result = env.transition(state, acceleration)
+
+    assert (reserve <= 0.0) is violates_next
+    assert (result.termination_reason is violation) is violates_next

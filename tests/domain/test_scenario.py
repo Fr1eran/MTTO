@@ -390,7 +390,7 @@ def sample_task() -> Task:
         # 四种状态常规用例
         (995.0, 0.005, StopState.STOPPED_IN_ZONE),  # 误差 5.0 <= 9.0, 速度 <= 0.01
         (980.0, 0.005, StopState.STOPPED_SHORT),  # 误差 20.0 > 9.0, 速度 <= 0.01
-        (1000.0, 2.0, StopState.OVERRAN),  # 误差 0 <= 1e-6, 速度 > 0.01
+        (1000.0, 2.0, StopState.MOVING),  # 带速到达目标点：继续运行，不再判失败
         (900.0, 2.0, StopState.MOVING),  # 误差 100 > 1e-6, 速度 > 0.01
         # 边界 1: 速度 0.01 阈值两侧 (误差 5.0 <= 9.0)
         (995.0, 0.01, StopState.STOPPED_IN_ZONE),  # speed <= 0.01
@@ -402,12 +402,11 @@ def sample_task() -> Task:
         (991.0, 0.005, StopState.STOPPED_IN_ZONE),  # 误差 = 9.0 <= 9.0
         (990.999, 0.005, StopState.STOPPED_SHORT),  # 误差 = 9.001 > 9.0
         (1009.0, 0.005, StopState.STOPPED_IN_ZONE),  # 误差 = 9.0 <= 9.0
-        (1009.001, 0.005, StopState.STOPPED_SHORT),  # 误差 = 9.001 > 9.0
-        # 边界 3: 误差 1e-6 两侧 (速度 > 0.01)
-        (1000.0 - 1e-6, 2.0, StopState.OVERRAN),  # 误差 = 1e-6 <= 1e-6
-        (1000.0 - 1.0001e-6, 2.0, StopState.MOVING),  # 误差 > 1e-6
-        (1000.0 + 1e-6, 2.0, StopState.OVERRAN),  # 误差 = 1e-6 <= 1e-6
-        (1000.0 + 1.0001e-6, 2.0, StopState.MOVING),  # 误差 > 1e-6
+        (1009.001, 0.005, StopState.OVERRAN),  # 越过目标点 9.001 > 9.0 后停车
+        # 边界 3: 越过目标点的距离 9.0 两侧 (速度 > 0.01)
+        (1005.0, 2.0, StopState.MOVING),  # 越过 5.0，仍可在停车区内停下
+        (1009.0, 2.0, StopState.MOVING),  # 越过 = 9.0
+        (1009.001, 2.0, StopState.OVERRAN),  # 越过 9.001 > 9.0，冲出停车区
     ],
 )
 def test_task_stop_state(

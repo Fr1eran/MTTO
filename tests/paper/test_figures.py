@@ -327,32 +327,6 @@ def test_plot_safety_speed_minimal_keeps_upper_and_lower_bounds(
     show_potential_function.plt.close(fig)
 
 
-def test_safety_speed_matches_runtime_reward_calculator_formula() -> None:
-    from mtto.rl.rewards import RewardCalculator
-
-    speed = np.asarray([8.0, 15.0, 24.0], dtype=np.float64)
-    min_speed = np.asarray([5.0, 5.0, 5.0], dtype=np.float64)
-    max_speed = np.asarray([25.0, 25.0, 25.0], dtype=np.float64)
-
-    potential = show_potential_function._potential_safety_speed(
-        speed,
-        min_speed,
-        max_speed,
-    )
-
-    assert np.all(potential <= 0.0)
-    for s, mi, ma in zip(speed, min_speed, max_speed, strict=True):
-        expected = RewardCalculator._potential_safety(
-            speed_mps=s, min_speed_mps=mi, max_speed_mps=ma
-        )
-        actual = show_potential_function._potential_safety_speed(
-            np.asarray([s], dtype=np.float64),
-            np.asarray([mi], dtype=np.float64),
-            np.asarray([ma], dtype=np.float64),
-        )[0]
-        assert np.isclose(expected, actual, atol=1e-12)
-
-
 def test_safety_speed_single_plot_has_boundary_legend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -493,14 +467,14 @@ def test_current_stopping_score_scalar_and_array():
     assert show_score.current_stopping_score(0.2) == 1.0
     assert show_score.current_stopping_score(0.3) == 1.0
 
-    # Outside dead zone: delta = 1.1 - 0.3 = 0.8 -> 1 / (1 + (0.8/0.8)^2) = 0.5
-    assert show_score.current_stopping_score(1.1) == pytest.approx(0.5)
+    # Outside dead zone: delta = 0.6 - 0.3 = 0.3 -> 1 / (1 + (0.3/0.3)^2) = 0.5
+    assert show_score.current_stopping_score(0.6) == pytest.approx(0.5)
 
     # Negative stop error is handled via absolute value
-    assert show_score.current_stopping_score(-1.1) == pytest.approx(0.5)
+    assert show_score.current_stopping_score(-0.6) == pytest.approx(0.5)
 
     # Array evaluation preserves shape and matches RewardCalculator
-    arr = np.array([[0.0, 0.3], [1.1, 1.9]])
+    arr = np.array([[0.0, 0.3], [0.6, 1.9]])
     res = show_score.current_stopping_score(arr)
     assert isinstance(res, np.ndarray)
     assert res.shape == (2, 2)
@@ -550,9 +524,9 @@ def test_custom_calculator_injection():
     assert (
         show_score.current_stopping_score(0.8, calculator=custom_calc, task=task) == 1.0
     )
-    # At 1.8, delta = 0.8 -> 0.5
+    # At 1.3, delta = 0.3 -> 0.5
     assert show_score.current_stopping_score(
-        1.8, calculator=custom_calc, task=task
+        1.3, calculator=custom_calc, task=task
     ) == pytest.approx(0.5)
 
 
@@ -561,8 +535,8 @@ def test_visualize_stopping_score_function():
     assert fig is not None
     ax = fig.axes[0]
     lines = ax.get_lines()
-    # Main curve line label includes beta=0.8
-    assert r"\frac{1}{1+(\max(0,x-x_1)/0.8)^2}" in lines[0].get_label()
+    # Main curve line label includes beta=0.3
+    assert r"\frac{1}{1+(\max(0,x-x_1)/0.3)^2}" in lines[0].get_label()
     # Vertical threshold line
     assert "x_1 = 0.3" in lines[1].get_label()
 

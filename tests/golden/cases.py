@@ -52,6 +52,8 @@ def _look_ahead(speed_ratio: float) -> Controller:
 
     def controller(env, state) -> float:
         remaining = env.task.target_position_m - state.s_m
+        if remaining <= 0.0:
+            return 0.0  # coast past the target until it overruns the stop zone
         target = min(
             speed_ratio * lookup_upper_speed(env.srtsp_lookup, state.s_m + 30.0),
             math.sqrt(1.6 * max(remaining - 2.0, 0.0)),

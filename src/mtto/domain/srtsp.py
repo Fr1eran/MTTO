@@ -20,6 +20,12 @@ class SrtspLookup:
     speed_mps: NDArray[np.float32]
 
 
+# 1 m keeps the braking curve near the target within ~0.3 m/s of the sampled
+# curve; 10 m under-estimated the limit at the target by 12% and let it reach
+# zero only 15 m past the target instead of 6 m.
+SRTSP_LOOKUP_STEP_M: float = 1.0
+
+
 def build_srtsp_lookup(pos_arr: NDArray, speed_arr: NDArray) -> SrtspLookup:
     pos = np.asarray(pos_arr, dtype=np.float64)
     speed = np.asarray(speed_arr, dtype=np.float64)
@@ -33,7 +39,7 @@ def build_srtsp_lookup(pos_arr: NDArray, speed_arr: NDArray) -> SrtspLookup:
         return SrtspLookup(float(pos[0]), 1.0, values)
     if pos[0] > pos[-1]:
         pos, speed = pos[::-1], speed[::-1]
-    step = 10.0
+    step = SRTSP_LOOKUP_STEP_M
     positions = (
         float(pos[0])
         + np.arange(int(np.ceil((pos[-1] - pos[0]) / step)) + 1, dtype=np.float64)

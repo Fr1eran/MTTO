@@ -47,9 +47,13 @@
 
 势函数塑形统一按 `gamma*Phi(next) - Phi(previous)` 计算，终止步继续使用观测到的下一状态势能（不显式归零）：
 
-- **安全势**：包络归一化的有界 Logistic 风险，`scale=0.5`（`SAFETY_POTENTIAL_SCALE`）、陡度 `kappa=8.0`（`SAFETY_POTENTIAL_STEEPNESS`），有效速度带宽 `span = max(v_max - v_min, 1.0 m/s)`；上下风险独立累加，`v_min <= 0` 时关闭下侧风险。
+- **安全势**：按制动（牵引）储备步数的二次合页，`Phi = -c_up*(1 - clip(k_up,0,H)/H)² - c_low*(1 - clip(k_low,0,H)/H)²`，`H=3`（`SAFETY_RESERVE_HORIZON_STEPS`）、`c_up=3`、`c_low=1`（`SAFETY_RESERVE_UPPER_SCALE`/`SAFETY_RESERVE_LOWER_SCALE`）。制动储备 `k_up = min((v_max² - v²)/(2*b*dx), (v_max'² - v²)/(2*b*dx) + 1)`，其中 `v_max'` 为前方一步 `x+dx` 处的上限、`b` 为最大制动减速度，停车时为 +inf；牵引储备 `k_low` 同理，只对大于 0 的下限计入。`k <= 0` 表示已越界或下一步无论如何都将越界；储备 `>= H` 时势能为 0（`mtto.rl.rewards.braking_reserve_steps`/`traction_reserve_steps`/`safety_potential`）。
 - **准点势**：`Phi = -K * e² / (e² + sigma²)`，`K=5`（`PUNCTUALITY_POTENTIAL_SCALE`）、`sigma=20 s`（`PUNCTUALITY_POTENTIAL_SIGMA_S`）；`e` 为实际剩余裕度与参考裕度之差，参考裕度按沿运行方向裁剪到 `[0,1]` 的剩余距离比例 `q` 线性插值：`b_ref = b0 * q`，`b0` 为全程静止起点的计划时间减最短运行时间。计划时间变化后以新计划更新全程参考线，不从变化点重锚。
-- **终止步奖励**（仅 `STOPPED_IN_ZONE` 终止时触发）：停站分 `stopping_score(e_x) = 1 / (1 + (max(0, |e_x| - max_stop_error_m) / 0.8)²)`；准点分 `punctuality_score(e_t) = exp(-|e_t| / 45)`；终端奖励 `terminal_stopping = 15 * stopping_score`，`terminal_punctuality = 5 * punctuality_score + 20 * stopping_score² * punctuality_score`（`mtto.rl.rewards.RewardCalculator`）。
+- **终止步奖励**（仅 `STOPPED_IN_ZONE` 终止时触发）：停站分 `stopping_score(e_x) = 1 / (1 + (max(0, |e_x| - max_stop_error_m) / 0.3)²)`；准点分 `punctuality_score(e_t) = exp(-|e_t| / 45)`；终端奖励 `terminal_stopping = 15 * stopping_score`，`terminal_punctuality = 5 * punctuality_score + 20 * stopping_score² * punctuality_score`（`mtto.rl.rewards.RewardCalculator`）。
+
+停站判定（`mtto.domain.scenario.Task.stop_state`）：停车（`|v| <= 0.01 m/s`）且 `|x - x_target| <= 30*max_stop_error_m` 为 `STOPPED_IN_ZONE`；列车带速到达目标点时不终止，按完整步长继续越过目标点，越过距离超过 `30*max_stop_error_m` 即为 `OVERRAN`；其余停车为 `STOPPED_SHORT`。到达目标点的那一步仍截短到恰好落在目标点上。
+
+智能体观测为 11 维（`mtto.rl.observation.ObservationBuilder`，`POLICY_IO_VERSION=2`）：全程进度、带符号对数距离（尺度 0.1 m）、速度、上一步加速度、速度上/下限、准点比值 `e/sqrt(e²+sigma²)`（准点势恰为 `-K*o6²`）、恰好停在目标点所需的加速度、制动储备 `clip(k_up,0,H)/H`、冗余时间对数编码（尺度 10 s）、全力制动下的预计停站误差 `v²/(2b) - d` 的对数编码（尺度 0.1 m）。速度按线路最高限速归一化。
 
 安全越界判定只在 `mtto.domain.safeguard`（动态双限速度防护，按节点）；算法的运行上限（SRTSP、静态允许速度域）属于算法约束，不进入质量判定。DP 使用实际任务起点至实际目标点、首尾速度均为零的最短运行时间曲线作为可达速度上界。所有方法的环境内部终止和违规截断均视为真实任务结束：外部时间上限截断映射为 `truncated=True`，其余终止原因映射为 `terminated`，失败终点不参与 PPO 的 bootstrap。
 

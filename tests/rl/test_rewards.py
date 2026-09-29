@@ -11,14 +11,20 @@ from mtto.rl.rewards import (
     LI_GOAL_REWARD_SCALE,
     PUNCTUALITY_POTENTIAL_SCALE,
     PUNCTUALITY_POTENTIAL_SIGMA_S,
+    SAFETY_RESERVE_HORIZON_STEPS,
+    SAFETY_RESERVE_LOWER_SCALE,
+    SAFETY_RESERVE_UPPER_SCALE,
     RewardCalculator,
     RewardConfig,
     RewardNormalization,
+    braking_reserve_steps,
     build_reward_config,
     punctuality_potential_from_error,
     resolve_reward_preset,
     reward_config_parameters,
     reward_preset_names,
+    safety_potential,
+    traction_reserve_steps,
 )
 from mtto.rl.state import (
     State,
@@ -38,6 +44,8 @@ def _state(
     acc: float = 0.0,
     schedule_time_s: float = 20.0,
     schedule_changed: bool = False,
+    braking_reserve: float = math.inf,
+    traction_reserve: float = math.inf,
 ) -> State:
     return State(
         s_m=position,
@@ -56,6 +64,8 @@ def _state(
         step=1,
         schedule_time_s=schedule_time_s,
         schedule_changed=schedule_changed,
+        braking_reserve_steps=braking_reserve,
+        traction_reserve_steps=traction_reserve,
     )
 
 
@@ -208,10 +218,8 @@ def test_dense_reward_includes_energy_comfort_and_survival(
     assert reward.energy == pytest.approx(-0.75)
     assert reward.comfort == pytest.approx(-2.0)
     assert reward.survival == pytest.approx(5.0)
-    distant_upper_potential = -1.0 / (1.0 + math.exp(8.0))
-    assert reward.safety == pytest.approx(
-        (calculator.gamma - 1.0) * distant_upper_potential
-    )
+    # Ample braking reserve: the hinge potential adds no interior bias.
+    assert reward.safety == 0.0
     assert reward.terminal_stopping == 0.0
     assert reward.terminal_punctuality == 0.0
 
@@ -275,8 +283,8 @@ def test_truncation_keeps_potential_shaping_but_excludes_dense_objectives(
 def test_safety_potential_uses_discounted_potential_difference(
     calculator: RewardCalculator, termination_reason: TerminationReason | None
 ) -> None:
-    previous = _state(speed=80.0, min_speed=10.0, max_speed=100.0)
-    current = _state(position=1.0, speed=95.0, min_speed=10.0, max_speed=100.0)
+    previous = _state(braking_reserve=2.0)
+    current = _state(position=1.0, braking_reserve=0.5)
     transition = _transition(
         previous,
         current,
@@ -287,37 +295,69 @@ def test_safety_potential_uses_discounted_potential_difference(
         termination_reason,
     )
     reward = calculator.calculate(*transition)
-    phi_previous = -0.5 * (
-        2.0 / (1.0 + math.exp(8.0 * 20.0 / 90.0))
-        + 2.0 / (1.0 + math.exp(8.0 * 70.0 / 90.0))
-    )
-    phi_current = -0.5 * (
-        2.0 / (1.0 + math.exp(8.0 * 5.0 / 90.0))
-        + 2.0 / (1.0 + math.exp(8.0 * 85.0 / 90.0))
-    )
+    horizon = SAFETY_RESERVE_HORIZON_STEPS
+    phi_previous = -SAFETY_RESERVE_UPPER_SCALE * (1.0 - 2.0 / horizon) ** 2
+    phi_current = -SAFETY_RESERVE_UPPER_SCALE * (1.0 - 0.5 / horizon) ** 2
     assert reward.safety == pytest.approx(calculator.gamma * phi_current - phi_previous)
+    assert reward.safety < 0.0
 
-    potential = calculator._potential_safety
-    assert potential(
-        speed_mps=15.0, min_speed_mps=10.0, max_speed_mps=20.0
-    ) == pytest.approx(
-        potential(speed_mps=60.0, min_speed_mps=10.0, max_speed_mps=110.0)
+
+@pytest.mark.parametrize(
+    ("braking_reserve", "traction_reserve", "expected"),
+    [
+        # Ample reserve on both sides: no shaping away from the envelope.
+        (math.inf, math.inf, 0.0),
+        (SAFETY_RESERVE_HORIZON_STEPS, 10.0, 0.0),
+        # Exhausted or overdrawn reserve saturates at the side's full weight.
+        (0.0, math.inf, -SAFETY_RESERVE_UPPER_SCALE),
+        (-5.0, math.inf, -SAFETY_RESERVE_UPPER_SCALE),
+        (math.inf, -1.0, -SAFETY_RESERVE_LOWER_SCALE),
+        (
+            SAFETY_RESERVE_HORIZON_STEPS / 2,
+            SAFETY_RESERVE_HORIZON_STEPS / 2,
+            -0.25 * (SAFETY_RESERVE_UPPER_SCALE + SAFETY_RESERVE_LOWER_SCALE),
+        ),
+    ],
+)
+def test_safety_potential_is_a_bounded_hinge(
+    braking_reserve: float, traction_reserve: float, expected: float
+) -> None:
+    assert safety_potential(braking_reserve, traction_reserve) == pytest.approx(
+        expected
     )
-    assert potential(
-        speed_mps=10.0, min_speed_mps=10.0, max_speed_mps=20.0
-    ) == pytest.approx(-0.5 * (1.0 + 2.0 / (1.0 + math.exp(8.0))))
-    assert potential(
-        speed_mps=10.0, min_speed_mps=0.0, max_speed_mps=10.0
-    ) == pytest.approx(-0.5)
-    assert potential(
-        speed_mps=0.0, min_speed_mps=0.0, max_speed_mps=0.0
-    ) == pytest.approx(-0.5)
-    assert potential(
-        speed_mps=10.25, min_speed_mps=10.0, max_speed_mps=10.5
-    ) == pytest.approx(-2.0 / (1.0 + math.exp(2.0)))
-    assert potential(
-        speed_mps=-1e6, min_speed_mps=10.0, max_speed_mps=20.0
-    ) == pytest.approx(-1.0)
+
+
+@pytest.mark.parametrize(
+    ("speed", "now", "ahead", "expected"),
+    [
+        # Stopped: nothing to brake.
+        (0.0, 0.0, 0.0, math.inf),
+        # The one-step-ahead limit binds: (15^2 - 14^2) / 20 + 1.
+        (14.0, 20.0, 15.0, 29.0 / 20.0 + 1.0),
+        # The current limit binds once already exceeded.
+        (21.0, 20.0, 30.0, (400.0 - 441.0) / 20.0),
+    ],
+)
+def test_braking_reserve_counts_current_and_one_step_ahead_limit(
+    speed: float, now: float, ahead: float, expected: float
+) -> None:
+    assert braking_reserve_steps(speed, now, ahead, 20.0) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
+    ("speed", "now", "ahead", "expected"),
+    [
+        # No positive lower limit: no traction constraint.
+        (5.0, 0.0, 0.0, math.inf),
+        # Only the one-step-ahead limit is positive: (11^2 - 12^2) / 20 + 1.
+        (11.0, 0.0, 12.0, -23.0 / 20.0 + 1.0),
+        (11.0, 10.0, 0.0, 21.0 / 20.0),
+    ],
+)
+def test_traction_reserve_only_counts_positive_lower_limits(
+    speed: float, now: float, ahead: float, expected: float
+) -> None:
+    assert traction_reserve_steps(speed, now, ahead, 20.0) == pytest.approx(expected)
 
 
 def test_terminal_stopping_is_rewarded_only_on_termination(
@@ -442,8 +482,10 @@ def test_reward_metadata_records_fixed_reward_magnitudes() -> None:
     assert pirs["energy_reward_scale"] == 15.0
     assert pirs["comfort_reward_scale"] == 20.0
     assert pirs["survival_reward_scale"] == 50.0
-    assert pirs["safety_potential_scale"] == 0.5
-    assert pirs["safety_potential_steepness"] == 8.0
+    assert pirs["safety_reserve_horizon_steps"] == 3.0
+    assert pirs["safety_reserve_upper_scale"] == 3.0
+    assert pirs["safety_reserve_lower_scale"] == 1.0
+    assert pirs["stopping_score_beta"] == 0.3
     assert pirs["goal_reward_scale"] == 1.0
     baseline = reward_config_parameters(build_reward_config("li2023_scaled"))
     assert baseline["reward_scheme"] == "li2023_scaled"

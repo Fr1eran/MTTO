@@ -34,6 +34,10 @@ class State:
     upper_limit_mps: float
     srtsp_limit_mps: float
     slack_time_s: float
+    # Steps of full braking (traction) left before the speed envelope, counting
+    # the current and the one-step-ahead limit; <= 0 means unavoidable.
+    braking_reserve_steps: float
+    traction_reserve_steps: float
 
     @property
     def max_speed_mps(self) -> float:

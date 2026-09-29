@@ -14,11 +14,14 @@ from numpy.typing import NDArray
 from mtto.rl.rewards import (
     PUNCTUALITY_POTENTIAL_SCALE,
     PUNCTUALITY_POTENTIAL_SIGMA_S,
-    SAFETY_POTENTIAL_SCALE,
-    SAFETY_POTENTIAL_STEEPNESS,
+    SAFETY_RESERVE_LOWER_SCALE,
+    SAFETY_RESERVE_UPPER_SCALE,
     RewardCalculator,
     RewardConfig,
+    braking_reserve_steps,
     punctuality_potential_from_error,
+    safety_potential,
+    traction_reserve_steps,
 )
 from mtto.workflows.train import build_env_references
 from paper.figures import load_paper_scenario, load_paper_task
@@ -42,6 +45,9 @@ SAFETY_POTENTIAL_CMAP = LinearSegmentedColormap.from_list(
     ],
 )
 SAFETY_POTENTIAL_CMAP.set_bad(color="white", alpha=1.0)
+# Paper step distance: the safety potential looks one step ahead.
+STEP_DISTANCE_M = 30.0
+SAFETY_POTENTIAL_VMIN = -(SAFETY_RESERVE_UPPER_SCALE + SAFETY_RESERVE_LOWER_SCALE)
 PUNCTUALITY_POTENTIAL_CMAP = LinearSegmentedColormap.from_list(
     "mtto_punctuality_penalty",
     [
@@ -81,36 +87,6 @@ class _PunctualityPotentialField:
     redundant_time_grid_s: np.ndarray
     reference_slack_s: np.ndarray
     potential: np.ndarray
-
-
-def _potential_safety_speed(
-    speed: NDArray[np.floating] | float,
-    min_speed: NDArray[np.floating] | float,
-    max_speed: NDArray[np.floating] | float,
-) -> NDArray[np.float64] | float:
-    span = np.maximum(max_speed - min_speed, 1.0)
-
-    upper_exponent = SAFETY_POTENTIAL_STEEPNESS * (max_speed - speed) / span
-    upper_tail = np.exp(-np.abs(upper_exponent))
-    upper_risk = np.where(
-        upper_exponent >= 0.0,
-        2.0 * upper_tail / (1.0 + upper_tail),
-        2.0 / (1.0 + upper_tail),
-    )
-
-    lower_exponent = SAFETY_POTENTIAL_STEEPNESS * (speed - min_speed) / span
-    lower_tail = np.exp(-np.abs(lower_exponent))
-    lower_risk = np.where(
-        min_speed > 0.0,
-        np.where(
-            lower_exponent >= 0.0,
-            2.0 * lower_tail / (1.0 + lower_tail),
-            2.0 / (1.0 + lower_tail),
-        ),
-        0.0,
-    )
-
-    return -SAFETY_POTENTIAL_SCALE * (upper_risk + lower_risk)
 
 
 def interp_with_constant_fill(
@@ -205,14 +181,35 @@ def _build_safety_potential_field(
 def _calculate_safety_potential(
     field: _SafetyPotentialField,
 ) -> np.ndarray:
-    """只在速度上下限约束内计算安全势函数。"""
-    safety_potential = np.full(field.position_grid.shape, np.nan)
-    safety_potential[field.feasible_mask] = _potential_safety_speed(
-        field.speed_grid_mps[field.feasible_mask],
-        field.min_speed_grid_mps[field.feasible_mask],
-        field.max_speed_grid_mps[field.feasible_mask],
+    """只在速度上下限约束内，按运行时的制动储备公式计算安全势函数。"""
+    vehicle = load_paper_scenario().vehicle
+    braking_per_step = 2.0 * vehicle.max_dec_abs * STEP_DISTANCE_M
+    traction_per_step = 2.0 * vehicle.max_acc * STEP_DISTANCE_M
+    ahead_m = field.pos_array + STEP_DISTANCE_M
+    shape = field.position_grid.shape
+    max_ahead_grid = np.broadcast_to(
+        np.interp(ahead_m, field.pos_array, field.max_speed_profile_mps), shape
     )
-    return safety_potential
+    min_ahead_grid = np.broadcast_to(
+        np.interp(ahead_m, field.pos_array, field.min_speed_profile_mps), shape
+    )
+
+    def potential(v: float, up: float, up_ahead: float, lo: float, lo_ahead: float):
+        return safety_potential(
+            braking_reserve_steps(v, up, up_ahead, braking_per_step),
+            traction_reserve_steps(v, lo, lo_ahead, traction_per_step),
+        )
+
+    mask = field.feasible_mask
+    values = np.full(shape, np.nan)
+    values[mask] = np.vectorize(potential, otypes=[np.float64])(
+        field.speed_grid_mps[mask],
+        field.max_speed_grid_mps[mask],
+        max_ahead_grid[mask],
+        field.min_speed_grid_mps[mask],
+        min_ahead_grid[mask],
+    )
+    return values
 
 
 def _build_punctuality_potential_field(
@@ -228,7 +225,7 @@ def _build_punctuality_potential_field(
         raise ValueError("schedule_time_s must be finite and positive")
     scenario = load_paper_scenario()
     task = load_paper_task(schedule_time_s=schedule_time_s)
-    _, normalization = build_env_references(scenario, task, 30.0)
+    _, normalization = build_env_references(scenario, task, STEP_DISTANCE_M)
     calculator = RewardCalculator(
         normalization,
         gamma=0.998,
@@ -351,7 +348,7 @@ def plot_safety_potential_heatmap_speed(*, minimal: bool = False) -> Figure:
         safety_potential,
         cmap=SAFETY_POTENTIAL_CMAP,
         shading="auto",
-        vmin=-1.0,
+        vmin=SAFETY_POTENTIAL_VMIN,
         vmax=0.0,
         rasterized=True,
     )
@@ -513,7 +510,7 @@ def plot_safety_punctuality_potentials(
         safety_potential,
         cmap=SAFETY_POTENTIAL_CMAP,
         shading="auto",
-        vmin=-1.0,
+        vmin=SAFETY_POTENTIAL_VMIN,
         vmax=0.0,
         rasterized=True,
     )

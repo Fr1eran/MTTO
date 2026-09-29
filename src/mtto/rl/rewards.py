@@ -7,18 +7,23 @@ from typing import Any, ClassVar
 import numpy as np
 from numpy.typing import NDArray
 
-from mtto.domain.scenario import Task
+from mtto.domain.scenario import STOPPED_SPEED_MPS, Task
 from mtto.rl.state import State, StepResult, TerminationReason
 
 ENERGY_REWARD_SCALE: float = 15.0
 COMFORT_REWARD_SCALE: float = 20.0
 SURVIVAL_REWARD_SCALE: float = 50.0
-SAFETY_POTENTIAL_SCALE: float = 0.5
-SAFETY_POTENTIAL_STEEPNESS: float = 8.0
+# Safety potential: quadratic hinge over the last SAFETY_RESERVE_HORIZON_STEPS
+# steps of full-braking (traction) reserve before the speed envelope.
+SAFETY_RESERVE_HORIZON_STEPS: float = 3.0
+SAFETY_RESERVE_UPPER_SCALE: float = 3.0
+SAFETY_RESERVE_LOWER_SCALE: float = 1.0
 PUNCTUALITY_POTENTIAL_SCALE: float = 5.0
 PUNCTUALITY_POTENTIAL_SIGMA_S: float = 20.0
 PUNCTUALITY_DECAY_TIME_S: float = 45.0
-STOPPING_SCORE_BETA: float = 0.8
+# Stopping score decays past the tolerance with this scale (m): 0.5 at a
+# 0.3 m excess, so overrunning the strict tolerance is no longer cheap.
+STOPPING_SCORE_BETA: float = 0.3
 
 # Floor on the step duration when a jerk is computed from a spatial step;
 # near-zero-duration stopping transitions would otherwise blow it up.
@@ -55,6 +60,73 @@ def punctuality_potential_from_error(
     if potential.ndim == 0:
         return float(potential)
     return np.asarray(potential, dtype=np.float64)
+
+
+def reference_punctuality_slack(
+    position_m: float,
+    schedule_time_s: float,
+    task: Task,
+    *,
+    initial_min_operation_time_s: float,
+) -> float:
+    """Global linear slack reference; never re-anchor at resets."""
+    fraction = min(
+        1.0,
+        max(
+            0.0,
+            (task.target_position_m - position_m)
+            / (task.target_position_m - task.start_position_m),
+        ),
+    )
+    return (schedule_time_s - initial_min_operation_time_s) * fraction
+
+
+def braking_reserve_steps(
+    speed_mps: float,
+    upper_now_mps: float,
+    upper_ahead_mps: float,
+    braking_per_step: float,
+) -> float:
+    """Full-braking steps left before the upper limit, now or one step ahead.
+
+    Kinematics are v'^2 = v^2 + 2 a dx, so the reserve is counted in v^2 with
+    ``braking_per_step = 2 * b * dx``; <= 0 means the state already exceeds
+    the limit or cannot avoid exceeding it next step. A stopped train has an
+    unbounded reserve.
+    """
+    if abs(speed_mps) <= STOPPED_SPEED_MPS:
+        return math.inf
+    speed_sq = speed_mps**2
+    return min(
+        (upper_now_mps**2 - speed_sq) / braking_per_step,
+        (upper_ahead_mps**2 - speed_sq) / braking_per_step + 1.0,
+    )
+
+
+def traction_reserve_steps(
+    speed_mps: float,
+    lower_now_mps: float,
+    lower_ahead_mps: float,
+    traction_per_step: float,
+) -> float:
+    """Full-traction steps left above the lower limit (only where it is > 0)."""
+    speed_sq = speed_mps**2
+    reserve = math.inf
+    if lower_now_mps > 0.0:
+        reserve = (speed_sq - lower_now_mps**2) / traction_per_step
+    if lower_ahead_mps > 0.0:
+        reserve = min(
+            reserve, (speed_sq - lower_ahead_mps**2) / traction_per_step + 1.0
+        )
+    return reserve
+
+
+def safety_potential(braking_reserve: float, traction_reserve: float) -> float:
+    """Quadratic hinge on the reserves: 0 when ample, saturates when exhausted."""
+    horizon = SAFETY_RESERVE_HORIZON_STEPS
+    upper = (1.0 - min(max(braking_reserve, 0.0), horizon) / horizon) ** 2
+    lower = (1.0 - min(max(traction_reserve, 0.0), horizon) / horizon) ** 2
+    return -SAFETY_RESERVE_UPPER_SCALE * upper - SAFETY_RESERVE_LOWER_SCALE * lower
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,16 +326,12 @@ class RewardCalculator:
     def reference_punctuality_slack(
         self, position_m: float, schedule_time_s: float, task: Task
     ) -> float:
-        """Global linear slack reference; never re-anchor at resets."""
-        fraction = min(
-            1.0,
-            max(
-                0.0,
-                (task.target_position_m - position_m)
-                / (task.target_position_m - task.start_position_m),
-            ),
+        return reference_punctuality_slack(
+            position_m,
+            schedule_time_s,
+            task,
+            initial_min_operation_time_s=self.initial_min_operation_time_s,
         )
-        return (schedule_time_s - self.initial_min_operation_time_s) * fraction
 
     def potential_punctuality(self, state: State, task: Task) -> float:
         if not self.reward_config.enable_potential_punctuality:
@@ -294,44 +362,11 @@ class RewardCalculator:
 
     def _reward_safety_potential(self, previous: State, result: StepResult) -> float:
         current = result.step_end_state
-        phi_previous = self._potential_safety(
-            speed_mps=previous.v_mps,
-            min_speed_mps=previous.lower_limit_mps,
-            max_speed_mps=previous.max_speed_mps,
+        return self.gamma * safety_potential(
+            current.braking_reserve_steps, current.traction_reserve_steps
+        ) - safety_potential(
+            previous.braking_reserve_steps, previous.traction_reserve_steps
         )
-        phi_current = self._potential_safety(
-            speed_mps=current.v_mps,
-            min_speed_mps=current.lower_limit_mps,
-            max_speed_mps=current.max_speed_mps,
-        )
-        return self.gamma * phi_current - phi_previous
-
-    @staticmethod
-    def _potential_safety(
-        *, speed_mps: float, min_speed_mps: float, max_speed_mps: float
-    ) -> float:
-        """Bounded Logistic risk at the two normalized envelope margins."""
-        span = max(max_speed_mps - min_speed_mps, 1.0)
-
-        upper_exponent = SAFETY_POTENTIAL_STEEPNESS * (max_speed_mps - speed_mps) / span
-        if upper_exponent >= 0.0:
-            upper_tail = math.exp(-upper_exponent)
-            upper_risk = 2.0 * upper_tail / (1.0 + upper_tail)
-        else:
-            upper_risk = 2.0 / (1.0 + math.exp(upper_exponent))
-
-        if min_speed_mps > 0.0:
-            lower_exponent = (
-                SAFETY_POTENTIAL_STEEPNESS * (speed_mps - min_speed_mps) / span
-            )
-            if lower_exponent >= 0.0:
-                lower_tail = math.exp(-lower_exponent)
-                lower_risk = 2.0 * lower_tail / (1.0 + lower_tail)
-            else:
-                lower_risk = 2.0 / (1.0 + math.exp(lower_exponent))
-        else:
-            lower_risk = 0.0
-        return -SAFETY_POTENTIAL_SCALE * (upper_risk + lower_risk)
 
 
 DEFAULT_REWARD_PRESET_NAME = "basic_safety_punctuality"
@@ -378,9 +413,11 @@ def reward_config_parameters(reward_config: RewardConfig) -> dict[str, Any]:
         "comfort_reward_scale": COMFORT_REWARD_SCALE,
         "enable_potential_safety": bool(reward_config.enable_potential_safety),
         "survival_reward_scale": SURVIVAL_REWARD_SCALE,
-        "safety_potential_scale": SAFETY_POTENTIAL_SCALE,
-        "safety_potential_steepness": SAFETY_POTENTIAL_STEEPNESS,
+        "safety_reserve_horizon_steps": SAFETY_RESERVE_HORIZON_STEPS,
+        "safety_reserve_upper_scale": SAFETY_RESERVE_UPPER_SCALE,
+        "safety_reserve_lower_scale": SAFETY_RESERVE_LOWER_SCALE,
         "enable_potential_punctuality": reward_config.enable_potential_punctuality,
+        "stopping_score_beta": STOPPING_SCORE_BETA,
         "punctuality_potential_scale": PUNCTUALITY_POTENTIAL_SCALE,
         "punctuality_potential_sigma_s": PUNCTUALITY_POTENTIAL_SIGMA_S,
         "potential_transition_formula": "gamma_phi_next_minus_phi_previous",

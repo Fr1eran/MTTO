@@ -5,6 +5,7 @@ from mtto.domain.dynamics import Vehicle
 from mtto.domain.energy import EnergyParams
 from mtto.domain.line import Line
 from mtto.domain.srtsp import (
+    SRTSP_LOOKUP_STEP_M,
     build_srtsp_curve,
     build_srtsp_lookup,
     interp_upper_speed,
@@ -266,7 +267,7 @@ def test_srtsp_lookup_queries(
     lookup = build_srtsp_lookup(np.asarray([0.0, 20.0]), np.asarray([4.0, 24.0]))
 
     assert lookup.pos_min_m == 0.0
-    assert lookup.step_m == 10.0
+    assert lookup.step_m == SRTSP_LOOKUP_STEP_M
     assert lookup.speed_mps.dtype == np.float32
     assert not lookup.speed_mps.flags.writeable
     assert lookup_upper_speed(lookup, position_m) == pytest.approx(expected_clamped)

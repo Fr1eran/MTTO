@@ -12,6 +12,9 @@ from mtto.domain.energy import EnergyParams
 from mtto.domain.line import Line
 from mtto.domain.safeguard import Safeguard
 
+# A train at or below this speed counts as stopped.
+STOPPED_SPEED_MPS: float = 0.01
+
 
 class StopState(Enum):
     STOPPED_IN_ZONE = "STOPPED_IN_ZONE"
@@ -109,14 +112,19 @@ class Task:
                 )
 
     def stop_state(self, position_m: float, speed_mps: float) -> StopState:
-        """Evaluate stop state according to stopping thresholds."""
-        stop_error = abs(self.target_position_m - position_m)
-        if abs(speed_mps) <= 0.01 and stop_error <= 30 * self.max_stop_error_m:
+        """Evaluate stop state according to stopping thresholds.
+
+        A train may run past the target; the stop is judged where it halts.
+        Overrunning the target by more than the stopping zone is final.
+        """
+        stop_zone_m = 30 * self.max_stop_error_m
+        stopped = abs(speed_mps) <= STOPPED_SPEED_MPS
+        if stopped and abs(self.target_position_m - position_m) <= stop_zone_m:
             return StopState.STOPPED_IN_ZONE
-        if abs(speed_mps) <= 0.01:
-            return StopState.STOPPED_SHORT
-        if stop_error <= 1e-6:
+        if position_m - self.target_position_m > stop_zone_m:
             return StopState.OVERRAN
+        if stopped:
+            return StopState.STOPPED_SHORT
         return StopState.MOVING
 
     def final_schedule_time(self, position_m: NDArray[np.float64]) -> float | None:
