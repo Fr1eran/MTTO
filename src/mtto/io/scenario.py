@@ -106,7 +106,7 @@ def load_tasks(spec_path: Path) -> dict[str, Task]:
             start_position_m=float(task_dict["start_position_m"]),
             target_position_m=float(task_dict["target_position_m"]),
             schedule_time_s=schedule_time_s,
-            max_acc_change=float(task_dict["max_acc_change"]),
+            max_jerk_mps3=float(task_dict["max_jerk_mps3"]),
             max_stop_error_m=float(task_dict["max_stop_error_m"]),
             max_arr_time_error_s=float(task_dict["max_arr_time_error_s"]),
             schedule_change=schedule_change,

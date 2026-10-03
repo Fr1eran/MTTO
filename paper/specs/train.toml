@@ -5,7 +5,7 @@
 ## PIRS preset and the first of the five paper seeds (11, 131, 239, 359, 443).
 [train]
 reward_preset = "basic_safety_punctuality"
-step_distance_m = 30.0
+step_time_s = 1.0
 gamma = 0.998
 budget_mode = "environment_steps"
 # training_episodes omitted: None in environment_steps mode

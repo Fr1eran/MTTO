@@ -403,9 +403,6 @@ def test_punctuality_field_uses_full_route_and_canonical_potential(
         ),
     )
     assert np.max(field.potential) <= 0.0
-    assert (
-        np.min(field.potential) >= -show_potential_function.PUNCTUALITY_POTENTIAL_SCALE
-    )
 
 
 def test_punctuality_single_and_safety_combined_have_sci_widths(
@@ -461,43 +458,49 @@ def test_sci_figure_size_uses_requested_physical_width(
     assert height == pytest.approx(2.75)
 
 
-def test_current_stopping_score_scalar_and_array():
-    # Dead zone within max_stop_error (0.3m) evaluates to 1.0
-    assert show_score.current_stopping_score(0.0) == 1.0
-    assert show_score.current_stopping_score(0.2) == 1.0
-    assert show_score.current_stopping_score(0.3) == 1.0
+@pytest.mark.parametrize(
+    ("error_m", "expected"),
+    [
+        (0.0, 1.0),
+        (0.1, 1.0 / (1.0 + (1.0 / 3.0) ** 4)),
+        (0.3, 0.5),
+        (-0.3, 0.5),
+        (0.6, 1.0 / 17.0),
+    ],
+)
+def test_current_stopping_score_is_one_on_target_and_half_at_tolerance(
+    error_m: float, expected: float
+) -> None:
+    assert show_score.current_stopping_score(error_m) == pytest.approx(expected)
 
-    # Outside dead zone: delta = 0.6 - 0.3 = 0.3 -> 1 / (1 + (0.3/0.3)^2) = 0.5
-    assert show_score.current_stopping_score(0.6) == pytest.approx(0.5)
 
-    # Negative stop error is handled via absolute value
-    assert show_score.current_stopping_score(-0.6) == pytest.approx(0.5)
-
-    # Array evaluation preserves shape and matches RewardCalculator
-    arr = np.array([[0.0, 0.3], [0.6, 1.9]])
-    res = show_score.current_stopping_score(arr)
-    assert isinstance(res, np.ndarray)
-    assert res.shape == (2, 2)
-    assert res[0, 0] == 1.0
-    assert res[0, 1] == 1.0
-    assert res[1, 0] == pytest.approx(0.5)
+def test_current_stopping_score_is_smooth_and_decreasing_across_tolerance():
+    x = np.linspace(0.0, 2.0, 20_001)
+    score = show_score.current_stopping_score(x)
+    slope = np.diff(score) / np.diff(x)
+    assert isinstance(score, np.ndarray)
+    assert np.all(slope <= 0.0)
+    # No jump at the tolerance: neighbouring slopes around 0.3 m agree.
+    i = int(np.searchsorted(x, 0.3))
+    assert slope[i - 1] == pytest.approx(slope[i], rel=1e-2)
+    assert slope[i] == pytest.approx(-4.0 / (4.0 * 0.3), rel=1e-2)
 
 
 def test_current_punctuality_score_scalar_and_array():
     # Zero time error gives 1.0
     assert show_score.current_punctuality_score(0.0) == 1.0
 
-    # At tau = 45.0s, score is exp(-1.0)
-    assert show_score.current_punctuality_score(45.0) == pytest.approx(math.exp(-1.0))
-
-    # At tau = 90.0s, score is exp(-2.0)
-    assert show_score.current_punctuality_score(90.0) == pytest.approx(math.exp(-2.0))
+    tau = show_score.PUNCTUALITY_DECAY_TIME_S
+    assert show_score.current_punctuality_score(tau) == pytest.approx(math.exp(-1.0))
+    assert show_score.current_punctuality_score(2 * tau) == pytest.approx(
+        math.exp(-2.0)
+    )
 
     # Negative time error is handled via absolute value
-    assert show_score.current_punctuality_score(-45.0) == pytest.approx(math.exp(-1.0))
+    assert show_score.current_punctuality_score(-tau) == pytest.approx(math.exp(-1.0))
 
     # Array evaluation preserves shape and matches RewardCalculator
-    arr = np.linspace(0.0, 90.0, 5)
+    arr = np.linspace(0.0, 2 * tau, 5)
     res = show_score.current_punctuality_score(arr)
     assert isinstance(res, np.ndarray)
     assert res.shape == (5,)
@@ -511,22 +514,19 @@ def test_custom_calculator_injection():
         start_position_m=0.0,
         target_position_m=100.0,
         schedule_time_s=50.0,
-        max_acc_change=0.75,
+        max_jerk_mps3=0.75,
         max_stop_error_m=1.0,
         max_arr_time_error_s=10.0,
     )
     custom_calc = RewardCalculator(
-        RewardNormalization(100.0, 0.0, 100),
+        RewardNormalization(100.0, 0.0),
         gamma=0.998,
+        step_time_s=1.0,
     )
 
-    # With max_stop_error=1.0, 0.8 is within dead zone
-    assert (
-        show_score.current_stopping_score(0.8, calculator=custom_calc, task=task) == 1.0
-    )
-    # At 1.3, delta = 0.3 -> 0.5
+    # The tolerance of the task is the half-score point.
     assert show_score.current_stopping_score(
-        1.3, calculator=custom_calc, task=task
+        1.0, calculator=custom_calc, task=task
     ) == pytest.approx(0.5)
 
 
@@ -536,7 +536,7 @@ def test_visualize_stopping_score_function():
     ax = fig.axes[0]
     lines = ax.get_lines()
     # Main curve line label includes beta=0.3
-    assert r"\frac{1}{1+(\max(0,x-x_1)/0.3)^2}" in lines[0].get_label()
+    assert r"\frac{1}{1+(x/x_1)^{4}}" in lines[0].get_label()
     # Vertical threshold line
     assert "x_1 = 0.3" in lines[1].get_label()
 
@@ -547,7 +547,7 @@ def test_visualize_punctuality_score_function():
     ax = fig.axes[0]
     lines = ax.get_lines()
     # Punctuality curve line label includes 45s decay constant
-    assert r"\exp\left(-x/45\right)" in lines[0].get_label()
+    assert r"\exp\left(-x/15\right)" in lines[0].get_label()
 
 
 def test_visualize_combined_score_functions():

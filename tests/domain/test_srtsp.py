@@ -252,13 +252,14 @@ def test_max_energy_and_min_operation_time_consistent(reference_context):
     assert 0.0 < partial_time < total_time
 
 
+# The two nodes define v^2 = 16 + 28 s, which the lookup reproduces exactly.
 @pytest.mark.parametrize(
     ("position_m", "expected_clamped", "expected_or_zero"),
     [
-        (5.0, 9.0, 9.0),
+        (5.0, 156.0**0.5, 156.0**0.5),
         (-1.0, 4.0, 0.0),
         (25.0, 24.0, 0.0),
-        (10.0, 14.0, 14.0),
+        (10.0, 296.0**0.5, 296.0**0.5),
     ],
 )
 def test_srtsp_lookup_queries(
@@ -274,6 +275,27 @@ def test_srtsp_lookup_queries(
     assert lookup_upper_speed_or_zero(lookup, position_m) == pytest.approx(
         expected_or_zero
     )
+
+
+@pytest.mark.parametrize(
+    ("v0_mps", "acceleration_mps2"),
+    [(0.0, 1.0), (10.0, 0.5), (60.0, -0.8)],
+)
+def test_srtsp_lookup_is_exact_on_constant_acceleration_curves(
+    v0_mps: float, acceleration_mps2: float
+) -> None:
+    # v = sqrt(v0^2 + 2 a s), sampled at sparse, uneven nodes as the solver does.
+    pos = np.asarray([0.0, 0.3, 7.7, 13.1, 20.0, 50.0])
+    speed = np.sqrt(v0_mps**2 + 2.0 * acceleration_mps2 * pos)
+    lookup = build_srtsp_lookup(pos, speed)
+    # Cell midpoints and positions inside the first (most concave) cell.
+    queries = np.concatenate((np.arange(0.5, 50.0, 1.0), [0.01, 0.1, 0.25]))
+
+    for position_m in queries:
+        expected = (v0_mps**2 + 2.0 * acceleration_mps2 * position_m) ** 0.5
+        assert lookup_upper_speed(lookup, position_m) == pytest.approx(
+            expected, rel=1e-6
+        )
 
 
 @pytest.mark.parametrize(

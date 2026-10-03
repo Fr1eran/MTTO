@@ -28,14 +28,15 @@ class State:
     schedule_time_s: float
     step: int
     schedule_changed: bool
-    slope_permille: float
+    slope_pct: float
     stop_error_m: float
     lower_limit_mps: float
     upper_limit_mps: float
     srtsp_limit_mps: float
     slack_time_s: float
-    # Steps of full braking (traction) left before the speed envelope, counting
-    # the current and the one-step-ahead limit; <= 0 means unavoidable.
+    # Control periods at the current speed before the full-braking (traction)
+    # margin to the speed envelope is used up, counting the current and the
+    # one-period-ahead limit; <= 0 means unavoidable.
     braking_reserve_steps: float
     traction_reserve_steps: float
 

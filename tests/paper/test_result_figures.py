@@ -56,7 +56,7 @@ _SMALL_DP_TASK = Task(
     start_position_m=135.0,
     target_position_m=335.0,
     schedule_time_s=40.0,
-    max_acc_change=0.75,
+    max_jerk_mps3=0.75,
     max_stop_error_m=0.3,
     max_arr_time_error_s=10.0,
 )

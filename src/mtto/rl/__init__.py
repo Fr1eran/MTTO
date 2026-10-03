@@ -1,13 +1,15 @@
 from .observation import ObservationBuilder
 from .rewards import (
-    COMFORT_REWARD_SCALE,
-    ENERGY_REWARD_SCALE,
+    COMFORT_REWARD_WEIGHT,
+    ENERGY_REWARD_WEIGHT,
+    PROGRESS_REWARD_SCALE,
     PUNCTUALITY_POTENTIAL_SCALE,
     PUNCTUALITY_POTENTIAL_SIGMA_S,
     SAFETY_RESERVE_HORIZON_STEPS,
     SAFETY_RESERVE_LOWER_SCALE,
     SAFETY_RESERVE_UPPER_SCALE,
-    SURVIVAL_REWARD_SCALE,
+    TERMINAL_REWARD_SCALE,
+    TRUNCATION_PENALTY,
     RewardBreakdown,
     RewardCalculator,
     RewardConfig,
@@ -20,14 +22,16 @@ from .rewards import (
 from .state import State, StepResult, TerminationReason
 
 __all__ = [
-    "COMFORT_REWARD_SCALE",
-    "ENERGY_REWARD_SCALE",
+    "COMFORT_REWARD_WEIGHT",
+    "ENERGY_REWARD_WEIGHT",
+    "TERMINAL_REWARD_SCALE",
+    "TRUNCATION_PENALTY",
     "PUNCTUALITY_POTENTIAL_SCALE",
     "PUNCTUALITY_POTENTIAL_SIGMA_S",
     "SAFETY_RESERVE_HORIZON_STEPS",
     "SAFETY_RESERVE_LOWER_SCALE",
     "SAFETY_RESERVE_UPPER_SCALE",
-    "SURVIVAL_REWARD_SCALE",
+    "PROGRESS_REWARD_SCALE",
     "punctuality_potential_from_error",
     "ObservationBuilder",
     "State",

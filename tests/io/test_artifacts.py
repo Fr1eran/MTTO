@@ -188,7 +188,7 @@ def _sample_run_record(
         start_position_m=0.0,
         target_position_m=100.0,
         schedule_time_s=14.0,
-        max_acc_change=0.75,
+        max_jerk_mps3=0.75,
         max_stop_error_m=0.3,
         max_arr_time_error_s=10.0,
         schedule_change=ScheduleChange(
@@ -315,7 +315,7 @@ def test_task_json_roundtrip(with_schedule_change: bool) -> None:
         start_position_m=10.0,
         target_position_m=120.0,
         schedule_time_s=20.0,
-        max_acc_change=0.75,
+        max_jerk_mps3=0.75,
         max_stop_error_m=0.3,
         max_arr_time_error_s=5.0,
         schedule_change=sc,

@@ -144,7 +144,8 @@ def _reward_artifact() -> RewardDiagnostics:
         episode_worker_rank=np.asarray([0, 0], dtype=np.int16),
         episode_index=np.asarray([0, 1], dtype=np.int64),
         episode_length=np.asarray([2, 2], dtype=np.int32),
-        episode_termination_reason=np.asarray([1, 5], dtype=np.int8),
+        # STOPPED_IN_ZONE and a lower-limit violation.
+        episode_termination_reason=np.asarray([1, 4], dtype=np.int8),
         episode_complete=np.asarray([True, True], dtype=np.bool_),
         episode_reward_sums=episode_rewards,
     )
@@ -232,6 +233,12 @@ def test_reward_component_analysis_uses_episode_and_transition_data():
     assert analysis["available"] is True
     assert analysis["transition_count"] == 4
     assert analysis["complete_episode_count"] == 2
+    groups = analysis["episode_groups"]
+    assert (
+        groups["stopped_in_zone"]["count"],
+        groups["under_lower_limit"]["count"],
+    ) == (1, 1)
+    assert groups["over_upper_limit"]["count"] == 0
     assert analysis["components"]["safety"]["nonzero_frequency"] == 1.0
     assert analysis["components"]["terminal_stopping"]["nonzero_frequency"] == 0.0
     correlation = analysis["transition_signal_correlation"]
@@ -682,7 +689,7 @@ def test_analyze_training_new_format_mode(tmp_path: Path):
     train_dir = tmp_path / "train_run"
     train_config = TrainConfig(
         reward_preset="basic_safety_punctuality",
-        step_distance_m=100.0,
+        step_time_s=1.0,
         gamma=0.998,
         budget_mode="environment_steps",
         training_episodes=None,

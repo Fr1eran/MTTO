@@ -131,8 +131,26 @@ def test_schedule_change_arrival_time(monkeypatch, scenario, task):
     ("position", "speed", "time", "expected"),
     [
         ([135.0], [0.0], [0.0], (0.0, 0.0, 0.0)),
-        ([135.0, 135.0], [0.0, 2.0], [0.0, 2.0], (1.0, 1.0, 100.0)),
-        ([135.0, 135.0, 135.0], [0.0, 2.0, 2.0], [0.0, 2.0, 3.0], (2.0, 1.0, 100.0)),
+        # ER% counts segments whose jerk |da| / dt exceeds 0.75 m/s^3.
+        # |da| = 1 over 2 s is a 0.5 m/s^3 jerk.
+        ([135.0, 135.0], [0.0, 2.0], [0.0, 2.0], (1.0, 1.0, 0.0)),
+        # Jerks 0.5 and 1.0 m/s^3.
+        ([135.0, 135.0, 135.0], [0.0, 2.0, 2.0], [0.0, 2.0, 3.0], (2.0, 1.0, 50.0)),
+        # The same |da| = 0.5, 1.5 over 1 s and 0.5 s: jerks 0.5 and 3.0 m/s^3.
+        (
+            [135.0, 135.25, 136.25],
+            [0.0, 0.5, 1.5],
+            [0.0, 1.0, 1.5],
+            (2.0, 1.25**0.5, 50.0),
+        ),
+        # A zero-duration segment is in neither the numerator nor the
+        # denominator of ER%; TAV and RMS still count it.
+        (
+            [135.0, 135.0, 137.0, 139.0],
+            [0.0, 0.0, 2.0, 2.0],
+            [0.0, 0.0, 2.0, 3.0],
+            (2.0, (2.0 / 3.0) ** 0.5, 50.0),
+        ),
     ],
 )
 def test_comfort_includes_zero_length_and_single_node(

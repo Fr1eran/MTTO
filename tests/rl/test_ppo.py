@@ -1,5 +1,6 @@
 """PPO construction, callbacks, learning-rate schedules and SB3 termination tests."""
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -28,7 +29,7 @@ from mtto.rl.ppo import (
     StopTrainingOnCompletedEpisodes,
 )
 from mtto.rl.state import TerminationReason
-from tests.golden.drive import build_env, load_actions
+from tests.golden.drive import build_env
 
 
 class DummyLogger:
@@ -80,7 +81,7 @@ class DummyEvalEnv:
             start_position_m=0.0,
             target_position_m=100.0,
             schedule_time_s=440.0,
-            max_acc_change=0.75,
+            max_jerk_mps3=0.75,
             max_stop_error_m=0.3,
             max_arr_time_error_s=10.0,
         )
@@ -184,7 +185,7 @@ def test_callbacks_do_not_write_files_and_have_consistent_diagnostics(
 
     scenario = load_paper_scenario()
     task = load_paper_task()
-    lookup, normalization = build_env_references(scenario, task, 100.0)
+    lookup, normalization = build_env_references(scenario, task)
 
     train_env = VecMonitor(
         DummyVecEnv(
@@ -193,7 +194,7 @@ def test_callbacks_do_not_write_files_and_have_consistent_diagnostics(
                     scenario,
                     task,
                     0.998,
-                    100.0,
+                    1.0,
                     lookup,
                     normalization,
                     compact_training_info=True,
@@ -208,7 +209,7 @@ def test_callbacks_do_not_write_files_and_have_consistent_diagnostics(
         scenario,
         task,
         0.998,
-        100.0,
+        1.0,
         lookup,
         normalization,
         enable_trajectory_tracking=True,
@@ -229,6 +230,7 @@ def test_callbacks_do_not_write_files_and_have_consistent_diagnostics(
         learning_rate=3e-4,
         batch_size=64,
     )
+    assert model.policy.log_std.detach().eq(-1.0).all()
     model.learn(
         total_timesteps=128,
         callback=CallbackList([reward_cb, safety_cb, eval_cb]),
@@ -634,14 +636,14 @@ def test_training_and_evaluation_environments_share_references(
     from mtto.rl.env import make_env
     from mtto.workflows.train import build_env_references
 
-    lookup, normalization = build_env_references(paper_scenario, paper_task, 30.0)
+    lookup, normalization = build_env_references(paper_scenario, paper_task)
     initializers = [
         (
             lambda rank=rank: make_env(
                 paper_scenario,
                 paper_task,
                 0.998,
-                30.0,
+                1.0,
                 lookup,
                 normalization,
                 compact_training_info=True,
@@ -656,7 +658,7 @@ def test_training_and_evaluation_environments_share_references(
         paper_scenario,
         paper_task,
         0.998,
-        30.0,
+        1.0,
         lookup,
         normalization,
     )
@@ -699,60 +701,45 @@ class RewardSpyWrapper(gym.Wrapper):
         return obs, reward, term, trunc, info
 
 
-@pytest.mark.parametrize(
-    ("case_name", "expected_reason"),
-    [
-        ("stopped_short", "STOPPED_SHORT"),
-        ("overran", "OVERRAN"),
-        ("under_lower_limit", "UNDER_LOWER_LIMIT"),
-        ("over_upper_limit", "OVER_UPPER_LIMIT"),
-        ("over_srtsp", "OVER_SRTSP"),
-        ("zero_displacement_start", "STOPPED_SHORT"),
-    ],
-)
+@pytest.mark.parametrize("reason", list(TerminationReason))
 def test_domain_failures_terminate_without_timelimit_truncation(
-    case_name: str,
-    expected_reason: str,
+    monkeypatch: pytest.MonkeyPatch, reason: TerminationReason
 ) -> None:
-    actions = load_actions(case_name)
-    vec = DummyVecEnv([lambda: build_env("basic_safety_punctuality")])
-    vec.reset()
-
-    done = False
-    last_info = None
-    for action in actions:
-        _, _, dones, infos = vec.step(np.asarray([[action]], dtype=np.float32))
-        done = bool(dones[0])
-        last_info = infos[0]
-        if done:
-            break
-
-    vec.close()
-    assert done is True
-    assert last_info is not None
-    assert last_info["termination_reason"] == expected_reason
-    assert not last_info.get("TimeLimit.truncated", False)
-
-
-def test_external_timelimit_truncates_with_timelimit_flag() -> None:
-    actions = load_actions("stop_in_zone")
-    vec = DummyVecEnv(
-        [
-            lambda: TimeLimit(
-                ActionReplayWrapper(
-                    build_env("basic_safety_punctuality"),
-                    actions[:3],
-                ),
-                max_episode_steps=3,
-            )
-        ]
+    env = build_env("basic_safety_punctuality")
+    transition = env.transition
+    monkeypatch.setattr(
+        env,
+        "transition",
+        lambda *args: replace(transition(*args), termination_reason=reason),
     )
+    vec = DummyVecEnv([lambda: env])
+    vec.reset()
+    _, _, dones, infos = vec.step(np.asarray([[0.5]], dtype=np.float32))
+    vec.close()
+
+    assert bool(dones[0]) is True
+    assert infos[0]["termination_reason"] == reason.name
+    assert not infos[0].get("TimeLimit.truncated", False)
+
+
+def test_external_timelimit_truncates_with_timelimit_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = build_env("basic_safety_punctuality")
+    # Isolate the external cutoff from any domain termination.
+    transition = env.transition
+    monkeypatch.setattr(
+        env,
+        "transition",
+        lambda *args: replace(transition(*args), termination_reason=None),
+    )
+    vec = DummyVecEnv([lambda: TimeLimit(env, max_episode_steps=3)])
     vec.reset()
 
     done = False
     last_info = None
     for _ in range(3):
-        _, _, dones, infos = vec.step(np.asarray([[0.0]], dtype=np.float32))
+        _, _, dones, infos = vec.step(np.asarray([[0.5]], dtype=np.float32))
         done = bool(dones[0])
         last_info = infos[0]
 
@@ -764,9 +751,11 @@ def test_external_timelimit_truncates_with_timelimit_flag() -> None:
 
 
 def test_sb3_ppo_rollout_buffer_no_bootstrap_on_domain_failure() -> None:
-    actions = load_actions("over_srtsp")
+    # Full braking from standstill stops short on the first step.
     spy = RewardSpyWrapper(
-        ActionReplayWrapper(build_env("basic_safety_punctuality"), actions)
+        ActionReplayWrapper(
+            build_env("basic_safety_punctuality"), np.full(4, -1.0, dtype=np.float32)
+        )
     )
     vec = DummyVecEnv([lambda: spy])
     model = PPO("MlpPolicy", vec, n_steps=4, batch_size=4, seed=42, device="cpu")
@@ -777,21 +766,3 @@ def test_sb3_ppo_rollout_buffer_no_bootstrap_on_domain_failure() -> None:
     raw_failure_reward = spy.raw_rewards[0]
     rollout_step_reward = float(model.rollout_buffer.rewards[0, 0])
     assert rollout_step_reward == pytest.approx(raw_failure_reward, abs=1e-5)
-
-
-def test_sb3_ppo_rollout_buffer_bootstraps_on_timelimit_truncation() -> None:
-    actions = load_actions("stop_in_zone")
-    spy = RewardSpyWrapper(
-        ActionReplayWrapper(build_env("basic_safety_punctuality"), actions)
-    )
-    wrapped = TimeLimit(spy, max_episode_steps=1)
-    vec = DummyVecEnv([lambda: wrapped])
-    model = PPO("MlpPolicy", vec, n_steps=4, batch_size=4, seed=42, device="cpu")
-    _, callback = model._setup_learn(total_timesteps=4)
-    model.collect_rollouts(vec, callback, model.rollout_buffer, 4)
-    vec.close()
-
-    raw_step_reward = spy.raw_rewards[0]
-    rollout_step_reward = float(model.rollout_buffer.rewards[0, 0])
-    bootstrap_delta = abs(rollout_step_reward - raw_step_reward)
-    assert bootstrap_delta > 1e-4

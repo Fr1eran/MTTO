@@ -46,9 +46,8 @@ def _assert_matches(
             run.total_reward, golden[f"{preset}.reward"].sum(), rtol=1e-7, atol=1e-10
         )
         commanded = golden[f"{preset}.step_acceleration_mps2"]
-        distance = golden[f"{preset}.step_distance_m"]
-        duration = golden[f"{preset}.step_duration_s"]
-        moving = (distance > 0) & (np.abs(commanded) >= 1e-6) & (duration > 0)
+        duration = golden[f"{preset}.step_time_s"]
+        moving = (np.abs(commanded) >= 1e-6) & (duration > 0)
         np.testing.assert_allclose(
             run.profile.segment_acceleration_mps2[moving],
             commanded[moving],

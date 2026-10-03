@@ -11,18 +11,22 @@ from mtto.rl.state import TerminationReason
 from mtto.workflows.train import build_env_references
 
 
-@pytest.fixture(scope="module")
-def env(paper_scenario, paper_task):
-    lookup, normalization = build_env_references(paper_scenario, paper_task, 30.0)
+def _make_env(scenario, task):
+    lookup, normalization = build_env_references(scenario, task)
     return make_env(
-        scenario=paper_scenario,
-        task=paper_task,
+        scenario=scenario,
+        task=task,
         gamma=0.998,
         srtsp_lookup=lookup,
         normalization=normalization,
-        step_distance=30.0,
+        step_time_s=1.0,
         reward_config=build_reward_config("basic_safety_punctuality"),
     )
+
+
+@pytest.fixture(scope="module")
+def env(paper_scenario, paper_task):
+    return _make_env(paper_scenario, paper_task)
 
 
 @pytest.mark.parametrize(
@@ -75,7 +79,7 @@ def test_acceleration_boundaries(env, actions, kind):
         ] == pytest.approx(levitation)
     else:
         result = env.transition(first.next_state, -1.0)
-        assert result.motion.distance_m < env.step_distance
+        assert result.motion.duration_s < env.step_time_s
         assert run.profile.speed_mps[-1] == 0.0
         np.testing.assert_allclose(
             run.profile.segment_acceleration_mps2[-1],

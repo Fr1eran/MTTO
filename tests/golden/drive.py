@@ -32,7 +32,7 @@ from .cases import (
     MAX_GENERATED_STEPS,
     REWARD_PRESETS,
     SCHEDULE_TIME_S,
-    STEP_DISTANCE_M,
+    STEP_TIME_S,
     DPCase,
     RLCase,
     ScheduleChangeCase,
@@ -78,14 +78,14 @@ def build_env(
                 ),
             ),
         )
-    srtsp_lookup, normalization = build_env_references(scenario, task, STEP_DISTANCE_M)
+    srtsp_lookup, normalization = build_env_references(scenario, task)
     return make_env(
         scenario=scenario,
         task=task,
         gamma=GAMMA,
         srtsp_lookup=srtsp_lookup,
         normalization=normalization,
-        step_distance=STEP_DISTANCE_M,
+        step_time_s=STEP_TIME_S,
         reward_config=build_reward_config(preset),
         enable_safety_truncation_tracking=True,
     )
@@ -98,7 +98,7 @@ def build_dp_optimizer(case: DPCase) -> VariableSpacingDPOptimizer:
         start_position_m=scenario_task.start_position_m,
         target_position_m=case.target_position_m,
         schedule_time_s=case.schedule_time_s,
-        max_acc_change=scenario_task.max_acc_change,
+        max_jerk_mps3=scenario_task.max_jerk_mps3,
         max_stop_error_m=scenario_task.max_stop_error_m,
         max_arr_time_error_s=scenario_task.max_arr_time_error_s,
     )
@@ -214,7 +214,7 @@ def _run_episode(
         "energy_kj": np.array([s.total_energy_kj for s in states]),
         "propulsion_energy_kj": propulsion,
         "levitation_energy_kj": levitation,
-        "slope_permille": np.array([s.slope_permille for s in states]),
+        "slope_pct": np.array([s.slope_pct for s in states]),
         "min_speed_mps": np.array([s.lower_limit_mps for s in states]),
         "max_speed_mps": np.array([s.max_speed_mps for s in states]),
         "guard_min_speed_mps": np.array([float(lo) for lo, _ in guard_min_max]),
@@ -233,8 +233,7 @@ def _run_episode(
         "step_acceleration_mps2": np.array(
             [t.commanded_acceleration_mps2 for t in transitions]
         ),
-        "step_distance_m": np.array([t.motion.distance_m for t in transitions]),
-        "step_duration_s": np.array([t.motion.duration_s for t in transitions]),
+        "step_time_s": np.array([t.motion.duration_s for t in transitions]),
         "step_energy_kj": np.array(
             [(t.propulsion_delta_kj + t.levitation_delta_kj) for t in transitions]
         ),

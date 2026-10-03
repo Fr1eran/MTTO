@@ -12,7 +12,6 @@ from matplotlib.lines import Line2D
 from numpy.typing import NDArray
 
 from mtto.rl.rewards import (
-    PUNCTUALITY_POTENTIAL_SCALE,
     PUNCTUALITY_POTENTIAL_SIGMA_S,
     SAFETY_RESERVE_LOWER_SCALE,
     SAFETY_RESERVE_UPPER_SCALE,
@@ -45,8 +44,8 @@ SAFETY_POTENTIAL_CMAP = LinearSegmentedColormap.from_list(
     ],
 )
 SAFETY_POTENTIAL_CMAP.set_bad(color="white", alpha=1.0)
-# Paper step distance: the safety potential looks one step ahead.
-STEP_DISTANCE_M = 30.0
+# Paper control period: the safety potential looks one control period ahead.
+STEP_TIME_S = 1.0
 SAFETY_POTENTIAL_VMIN = -(SAFETY_RESERVE_UPPER_SCALE + SAFETY_RESERVE_LOWER_SCALE)
 PUNCTUALITY_POTENTIAL_CMAP = LinearSegmentedColormap.from_list(
     "mtto_punctuality_penalty",
@@ -183,21 +182,20 @@ def _calculate_safety_potential(
 ) -> np.ndarray:
     """只在速度上下限约束内，按运行时的制动储备公式计算安全势函数。"""
     vehicle = load_paper_scenario().vehicle
-    braking_per_step = 2.0 * vehicle.max_dec_abs * STEP_DISTANCE_M
-    traction_per_step = 2.0 * vehicle.max_acc * STEP_DISTANCE_M
-    ahead_m = field.pos_array + STEP_DISTANCE_M
+    # Farthest position reachable within one control period, per grid point.
+    ahead_m = (
+        field.position_grid
+        + field.speed_grid_mps * STEP_TIME_S
+        + 0.5 * vehicle.max_acc * STEP_TIME_S**2
+    )
     shape = field.position_grid.shape
-    max_ahead_grid = np.broadcast_to(
-        np.interp(ahead_m, field.pos_array, field.max_speed_profile_mps), shape
-    )
-    min_ahead_grid = np.broadcast_to(
-        np.interp(ahead_m, field.pos_array, field.min_speed_profile_mps), shape
-    )
+    max_ahead_grid = np.interp(ahead_m, field.pos_array, field.max_speed_profile_mps)
+    min_ahead_grid = np.interp(ahead_m, field.pos_array, field.min_speed_profile_mps)
 
     def potential(v: float, up: float, up_ahead: float, lo: float, lo_ahead: float):
         return safety_potential(
-            braking_reserve_steps(v, up, up_ahead, braking_per_step),
-            traction_reserve_steps(v, lo, lo_ahead, traction_per_step),
+            braking_reserve_steps(v, up, up_ahead, vehicle.max_dec_abs, STEP_TIME_S),
+            traction_reserve_steps(v, lo, lo_ahead, vehicle.max_acc, STEP_TIME_S),
         )
 
     mask = field.feasible_mask
@@ -225,10 +223,11 @@ def _build_punctuality_potential_field(
         raise ValueError("schedule_time_s must be finite and positive")
     scenario = load_paper_scenario()
     task = load_paper_task(schedule_time_s=schedule_time_s)
-    _, normalization = build_env_references(scenario, task, STEP_DISTANCE_M)
+    _, normalization = build_env_references(scenario, task)
     calculator = RewardCalculator(
         normalization,
         gamma=0.998,
+        step_time_s=STEP_TIME_S,
         reward_config=RewardConfig(enable_potential_punctuality=True),
     )
     position_m = np.linspace(
@@ -275,7 +274,7 @@ def _draw_punctuality_potential(
         field.potential,
         cmap=PUNCTUALITY_POTENTIAL_CMAP,
         shading="auto",
-        vmin=-PUNCTUALITY_POTENTIAL_SCALE,
+        vmin=float(np.min(field.potential)),
         vmax=0.0,
         rasterized=True,
     )

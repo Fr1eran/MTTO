@@ -116,7 +116,7 @@ _TASK_KEYS = frozenset(
         "start_position_m",
         "target_position_m",
         "schedule_time_s",
-        "max_acc_change",
+        "max_jerk_mps3",
         "max_stop_error_m",
         "max_arr_time_error_s",
         "schedule_change",
@@ -427,8 +427,8 @@ def task_from_json(payload: dict[str, Any]) -> Task:
                 data["target_position_m"], "Task.target_position_m"
             ),
             schedule_time_s=schedule_time,
-            max_acc_change=_require_finite_float(
-                data["max_acc_change"], "Task.max_acc_change"
+            max_jerk_mps3=_require_finite_float(
+                data["max_jerk_mps3"], "Task.max_jerk_mps3"
             ),
             max_stop_error_m=_require_finite_float(
                 data["max_stop_error_m"], "Task.max_stop_error_m"

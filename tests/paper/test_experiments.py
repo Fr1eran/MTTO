@@ -14,14 +14,14 @@ import pytest
 from mtto.io.artifacts import read_completed_run
 from mtto.io.scenario import load_tasks
 from paper import analysis
-from paper.experiments import runner, schedule_change, step_distance
+from paper.experiments import runner, schedule_change, step_time
 from paper.experiments.method_ablation import summarize, write_summary
 from paper.experiments.spec import expand_matrix, load_experiment_spec
 from paper.plotting.ablation import (
     method_figures,
     require_clean,
     schedule_change_figure,
-    step_distance_figure,
+    step_time_figure,
 )
 
 
@@ -31,7 +31,7 @@ def small_spec(tmp_path_factory: pytest.TempPathFactory) -> Path:
     tasks = root / "tasks.toml"
     tasks.write_text(
         "[short]\nstart_position_m = 135.0\ntarget_position_m = 1135.0\n"
-        "schedule_time_s = 120.0\nmax_acc_change = 0.75\n"
+        "schedule_time_s = 120.0\nmax_jerk_mps3 = 0.75\n"
         "max_stop_error_m = 0.3\nmax_arr_time_error_s = 10.0\n",
         encoding="utf-8",
     )
@@ -43,7 +43,7 @@ def small_spec(tmp_path_factory: pytest.TempPathFactory) -> Path:
         f"line_dir = '{repo / 'paper/data/line'}'\n"
         f"tasks = '{tasks}'\ntask = 'short'\n"
         f"output_root = '{root / 'runs'}'\nseeds = [11]\n\n"
-        "[train]\nstep_distance_m = 100.0\ngamma = 0.998\n"
+        "[train]\nstep_time_s = 1.0\ngamma = 0.998\n"
         "budget_mode = 'environment_steps'\n"
         "training_rollouts = 1\nnum_envs = 1\nn_steps_per_env = 512\n"
         "evaluation_deterministic = true\nkeep_best = true\n"
@@ -257,47 +257,48 @@ def test_copied_constraint_assessment_matches_legacy(time_error: float) -> None:
     }
 
 
-def test_generic_variants_and_step_distance(
+def test_generic_variants_and_step_time(
     small_spec: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     source = small_spec.read_text(encoding="utf-8")
     prefix = source.split("[[variants]]")[0]
-    prefix = prefix.replace("name = 'method'", "name = 'step_distance'")
+    prefix = prefix.replace("name = 'method'", "name = 'step_time'")
     prefix = prefix.replace(
         "device = 'cpu'", "device = 'cpu'\nreward_preset = 'basic_safety_punctuality'"
     )
     prefix = prefix.replace(str(small_spec.parent / "runs"), str(tmp_path / "steps"))
     path = tmp_path / "step.toml"
     path.write_text(
-        prefix
-        + "[[variants]]\nid = '100p0'\nlabel = '100 m'\nstep_distance_m = 100.0\n\n"
-        "[[variants]]\nid = '50p0'\nlabel = '50 m'\nstep_distance_m = 50.0\n",
+        prefix + "[[variants]]\nid = '2p0'\nlabel = '2.0 s'\nstep_time_s = 2.0\n\n"
+        "[[variants]]\nid = '1p5'\nlabel = '1.5 s'\nstep_time_s = 1.5\n",
         encoding="utf-8",
     )
     spec = load_experiment_spec(path)
-    assert [planned.config.step_distance_m for planned in expand_matrix(spec)] == [
-        100.0,
-        50.0,
+    assert [planned.config.step_time_s for planned in expand_matrix(spec)] == [
+        2.0,
+        1.5,
     ]
     assert [planned.run_label for planned in expand_matrix(spec)] == [
-        "step_distance__100p0__seed0011",
-        "step_distance__50p0__seed0011",
+        "step_time__2p0__seed0011",
+        "step_time__1p5__seed0011",
     ]
     for bad in (
-        path.read_text().replace("step_distance_m = 50.0", "seed = 50"),
-        path.read_text().replace("step_distance_m = 50.0", "unknown = 50"),
+        path.read_text().replace("step_time_s = 1.5", "seed = 50"),
+        path.read_text().replace("step_time_s = 1.5", "unknown = 50"),
     ):
         invalid = tmp_path / "invalid_step.toml"
         invalid.write_text(bad)
         with pytest.raises(ValueError):
             load_experiment_spec(invalid)
     monkeypatch.setattr(runner, "git_state", lambda: ("test-commit", False))
-    results = step_distance.run(path)
+    results = step_time.run(path)
     assert len(results) == 2
-    summary = step_distance.summarize(spec, tuple(item.directory for item in results))
-    step_distance.write_summary(summary, tmp_path / "step_summary")
-    assert (tmp_path / "step_summary/step_distance_summary.json").exists()
-    assert "50 m" in (tmp_path / "step_summary/step_distance_table.md").read_text()
+    summary = step_time.summarize(spec, tuple(item.directory for item in results))
+    assert summary["matrix_id"] == "step_time"
+    assert [item["step_time_s"] for item in summary["variants"].values()] == [2.0, 1.5]
+    step_time.write_summary(summary, tmp_path / "step_summary")
+    assert (tmp_path / "step_summary/step_time_summary.json").exists()
+    assert "1.5 s" in (tmp_path / "step_summary/step_time_table.md").read_text()
     require_clean(tuple(item.directory for item in results))
     from paper.experiments.__main__ import main
 
@@ -306,7 +307,7 @@ def test_generic_variants_and_step_distance(
         "argv",
         [
             "paper.experiments",
-            "step_distance",
+            "step_time",
             "figures",
             "--spec",
             str(path),
@@ -315,7 +316,18 @@ def test_generic_variants_and_step_distance(
         ],
     )
     main()
-    assert (tmp_path / "step_figures/step_distance_learning_curves.pdf").exists()
+    assert (tmp_path / "step_figures/step_time_learning_curves.pdf").exists()
+
+
+def test_step_time_spec_expands_candidates_and_seeds() -> None:
+    spec = load_experiment_spec(Path("paper/specs/step_time.toml"))
+    planned = expand_matrix(spec)
+
+    assert spec.seeds == (11, 131, 239, 359, 443)
+    assert len(planned) == 4 * 5
+    assert [
+        (run.variant.id, run.config.step_time_s) for run in planned[:: len(spec.seeds)]
+    ] == [("0p5", 0.5), ("1p0", 1.0), ("1p5", 1.5), ("2p0", 2.0)]
 
 
 def test_schedule_change_evaluation_reuse_and_figures(
@@ -536,7 +548,7 @@ def test_formal_figure_axes_match_legacy(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     method_spec = load_experiment_spec(Path("paper/specs/method_ablation.toml"))
-    step_spec = load_experiment_spec(Path("paper/specs/step_distance.toml"))
+    step_spec = load_experiment_spec(Path("paper/specs/step_time.toml"))
     rollout_steps = 8 * 1024
     steps = [rollout * rollout_steps for rollout in range(12, 400, 12)]
     series = {"mean": [0.5] * len(steps), "std": [0.1] * len(steps)}
@@ -582,7 +594,7 @@ def test_formal_figure_axes_match_legacy(
     monkeypatch.setattr(plt, "close", figures.append)
     try:
         method_figures(method_summary, method_spec, tmp_path)
-        step_distance_figure(step_summary, step_spec, tmp_path)
+        step_time_figure(step_summary, step_spec, tmp_path)
     finally:
         monkeypatch.setattr(plt, "close", close)
         for figure in figures:

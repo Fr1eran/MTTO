@@ -91,13 +91,13 @@ domain     → numpy、numba、标准库
 
 ### 关键设计决定
 
-**共用运行机理，不设公共仿真层。** RL 的一步是 `kinematics.run_distance` 加 `energy.segment_energy`（能耗使用指令加速度）；DP 的一条边是 `kinematics.accel_between` 加加速度上下限检查与 `energy.segment_energy`。两者调用同一组函数，一致性由 `tests/test_kinematics.py` 检查。环境的状态转移仍由各算法自己实现，而不是抽出一个公共模拟器：这样将来加入按时间步离散的环境（`kinematics.run_time` 已提供）或 MORL 算法时，只需复用 `domain` 函数，不必迁就一个为现有算法设计的仿真接口。
+**共用运行机理，不设公共仿真层。** RL 的一步由 `kinematics.run_time` 以指令加速度匀变速推进一个控制周期 `step_time_s`（步内停车时截到停车时刻），再由 `energy.segment_energy` 计算能耗（使用指令加速度）；DP 的一条边是 `kinematics.accel_between` 加加速度上下限检查与 `energy.segment_energy`。RL 按时间离散、DP 按位移离散，两者调用同一组函数，同一段匀变速运动在两条路径上的能耗一致性由 `tests/domain/test_kinematics.py` 检查。环境的状态转移仍由各算法自己实现，而不是抽出一个公共模拟器：加入 MORL 等新算法时只需复用 `domain` 函数，不必迁就一个为现有算法设计的仿真接口。
 
 **速度曲线只有一种表示，质量评估只有一条路径。** RL 轨迹、DP 最优解与实测运营曲线都表示为 `SpeedProfile`（节点上的位置、速度、时间、牵引与悬浮累计能耗，以及段上的 Δv/Δt 加速度），统一交给 `evaluation.quality.assess`，得到 `QualityReport`：指标、动态双限审计、完成/精确停车/安全/准点/可行判定。择优排序（`selection_key`）也只基于它。论文中不同方法之间的对比因此建立在同一套口径上。
 
 **算法约束与质量判定分开。** 算法可以采用更严格的运行上限（RL 与 DP 使用 SRTSP 上限，DP 还使用静态允许速度域），它们只影响算法内部；质量判定中的“安全”只按动态双限速度防护，并且逐节点审计、记录全部越界。越界判定集中在 `domain/safeguard`，“是否停在允许停车区内”只由 `Task.stop_state` 回答。
 
-**终止语义显式化。** 回合结束时环境给出 `TerminationReason`（停区内停车、停车不足、越过终点、低于下限、高于动态双限上限、高于 SRTSP 上限，见 `rl/state.py`）。所有终止原因都映射为 Gym 的 `terminated`，失败终点不参与 PPO 的价值 bootstrap；`truncated` 只留给将来的时间上限。奖励分支、成功判定与训练诊断都直接按终止原因计算，不再从标志组合反推。
+**终止语义显式化。** 回合结束时环境给出 `TerminationReason`（停区内停车、停车不足、越过终点、低于下限、高于动态双限上限、高于 SRTSP 上限，见 `rl/state.py`）。全部映射为 Gym 的 `terminated`，失败终点不参与 PPO 的价值 bootstrap；回合不设截止时刻，晚点由准点势与终端准点评分约束。奖励分支、成功判定与训练诊断都直接按终止原因计算，不再从标志组合反推。
 
 **不可变配置与显式状态。** `Scenario`、`Task`、`ScheduleChange` 都是冻结 dataclass；计划运行时间与计划变更进入环境状态，而不是原地修改共享对象；每个派生量只在一处计算（例如 SRTSP 查找表与奖励归一化常数由 `workflows` 计算一次，传给所有并行环境）。
 
@@ -111,7 +111,7 @@ domain     → numpy、numba、标准库
 
 ### 正确性的保证方式
 
-- **golden 回归快照**（`tests/golden/`，`uv run pytest -m golden`）：固定动作序列下的 RL 轨迹，覆盖全部终止结局、全部奖励预设的逐步奖励与观测、计划变更的三种情形、DP 最优解，以及 RL/DP 用例的 `evaluation.quality.assess` 结果。离散量（终止原因、步数、停车点序号、质量判定的布尔结果）必须完全相等；连续量纯数值计算 `rtol=1e-9`，奖励与能耗 `rtol=1e-7`。快照是当前版本的回归基线，不是与重构前实现的对比；详见[Golden 回归快照](#golden-回归快照)。
+- **golden 回归快照**（`tests/golden/`，`uv run pytest -m golden`）：固定动作序列下的 RL 轨迹，覆盖除 `OVERRAN` 外的各类结束原因（1 s 控制周期下 `OVERRAN` 不可达，见 `paper/README.md` 第 2 节）、全部奖励预设的逐步奖励与观测、计划变更的三种情形、DP 最优解，以及 RL/DP 用例的 `evaluation.quality.assess` 结果。离散量（终止原因、步数、停车点序号、质量判定的布尔结果）必须完全相等；连续量纯数值计算 `rtol=1e-9`，奖励与能耗 `rtol=1e-7`。快照是当前版本的回归基线，不是与重构前实现的对比；详见[Golden 回归快照](#golden-回归快照)。
 - **依赖边界测试**：见上一节。
 - 固定随机种子时，CPU 上的训练逐位可复现。重构完成时评估链路与重构前逐位一致、训练过程除有意修复的终止语义（旧实现把领域失败当作截断）外逐位一致，此结论由当时的迁移基线验证；迁移基线已完成使命并随本次测试整理移除，不再是仓库内的自动化保证，仅留作历史记录。
 
@@ -122,19 +122,18 @@ domain     → numpy、numba、标准库
 | MORL 与其他 Pareto 解集算法 | `Task.schedule_time_s` 可为 `None`（可行判定随之不含到站时间）；奖励按分量返回 `RewardBreakdown`；`evaluation/quality.py` 与奖励无关 | 在 `rl/morl/` 或新的算法包中实现状态转移与目标定义；基于质量指标的 Pareto 分析放入 `evaluation/` |
 | 应用层 `app/`（UI、API） | 只调用 `workflows`；`workflows` 返回含 `SpeedProfile` 的结果对象、以回调报告进度；`Scenario`/`Task` 不可变；线路数据按路径读取 | 在 `workflows` 中增加取消机制，长任务放到独立进程，再决定服务框架与前端 |
 | 数据库 | 每个运行的 `run.json` 含完整配置与输入 | 按真实查询需求设计表结构 |
-| 按时间步离散的环境 | `kinematics.run_time` 已实现并测试 | 新环境调用 `run_time`；质量评估增加冲击率舒适度口径；终止原因增加时间上限并映射为 `truncated` |
 | 完整反向运行 | `Task` 构造时对反向运行显式报错 | 引入路线坐标变换，在构造 `Scenario` 时镜像数据 |
 
 ### 已知限制与推迟事项
 
 | 事项 | 触发条件 |
 | --- | --- |
-| RL 只在步末检查动态双限，步内越界可能漏检 | 质量审计显示漏检有实际影响时 |
+| RL 只在每个控制周期末检查动态双限与 SRTSP 上限，周期内越界可能漏检 | 质量审计显示漏检有实际影响时 |
 | 能耗内核在牵引/制动切换附近不连续（加速度相差约 1e-13 时牵引能耗可相差约 0.09 kJ） | 需要能耗数值连续（如基于梯度的优化）或排查能耗异常时 |
 | DP 状态图缓存使用 pickle，只应读取可信目录 | 缓存目录需要接收外部文件时 |
 | 训练没有中途 checkpoint，中断的运行整体重跑 | 单次训练耗时长到无法接受重跑时 |
 | 运营标准（停车误差、准点阈值等）与 `Task` 放在一起 | 需要多套运营标准时 |
-| 反向运行、按时间步离散的环境、MORL、应用层 | 见上一节 |
+| 反向运行、MORL、应用层 | 见上一节 |
 
 ## 安装
 
@@ -220,7 +219,7 @@ uv run mtto analyze-training \
 
 ## 论文实验与图表
 
-`paper/` 下的仿真实验（空间步长消融、方法消融、DP/PIRS/实际运行三方对比、计划时间变化鲁棒性）及其结果复用规则详见 [`paper/README.md`](paper/README.md)。
+`paper/` 下的仿真实验（控制周期步长消融、方法消融、DP/PIRS/实际运行三方对比、计划时间变化鲁棒性）及其结果复用规则详见 [`paper/README.md`](paper/README.md)。
 
 ## 测试与代码检查
 

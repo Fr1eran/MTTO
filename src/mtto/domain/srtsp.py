@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -20,9 +21,11 @@ class SrtspLookup:
     speed_mps: NDArray[np.float32]
 
 
-# 1 m keeps the braking curve near the target within ~0.3 m/s of the sampled
-# curve; 10 m under-estimated the limit at the target by 12% and let it reach
-# zero only 15 m past the target instead of 6 m.
+# The table is resampled and read by interpolating v^2 linearly, which is exact
+# on constant-acceleration (traction or braking) segments, where v^2 is linear
+# in position; interpolating v itself under-estimates these concave curves, so
+# a train starting from rest at full traction exceeded the limit within the
+# first metre. The 1 m step only bounds the error at acceleration changes.
 SRTSP_LOOKUP_STEP_M: float = 1.0
 
 
@@ -45,14 +48,16 @@ def build_srtsp_lookup(pos_arr: NDArray, speed_arr: NDArray) -> SrtspLookup:
         + np.arange(int(np.ceil((pos[-1] - pos[0]) / step)) + 1, dtype=np.float64)
         * step
     )
-    values = np.interp(
-        positions,
-        pos,
-        speed,
-        left=float(speed[0]),
-        right=float(speed[-1]),
-    )
-    values = np.maximum(values, 0.0).astype(np.float32)
+    speed_sq = np.maximum(speed, 0.0) ** 2
+    values = np.sqrt(
+        np.interp(
+            positions,
+            pos,
+            speed_sq,
+            left=float(speed_sq[0]),
+            right=float(speed_sq[-1]),
+        )
+    ).astype(np.float32)
     values.flags.writeable = False
     return SrtspLookup(float(pos[0]), step, values)
 
@@ -68,7 +73,9 @@ def lookup_upper_speed(lookup: SrtspLookup, position_m: float) -> float:
         return float(values[-1])
     index0 = int(index)
     ratio = index - index0
-    return float(values[index0] + (values[index0 + 1] - values[index0]) * ratio)
+    v0_sq = float(values[index0]) ** 2
+    v1_sq = float(values[index0 + 1]) ** 2
+    return math.sqrt(v0_sq + (v1_sq - v0_sq) * ratio)
 
 
 def lookup_upper_speed_or_zero(lookup: SrtspLookup, position_m: float) -> float:

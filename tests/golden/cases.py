@@ -12,14 +12,13 @@ from dataclasses import dataclass
 from mtto.domain.srtsp import lookup_upper_speed
 
 SCHEDULE_TIME_S = 465.0
-STEP_DISTANCE_M = 30.0
+STEP_TIME_S = 1.0
 GAMMA = 0.998
 REWARD_PRESETS = (
     "basic",
     "basic_safety",
     "basic_punctuality",
     "basic_safety_punctuality",
-    "li2023_scaled",
 )
 ACTION_GENERATION_PRESET = "basic_safety_punctuality"
 MAX_GENERATED_STEPS = 3000
@@ -27,38 +26,70 @@ MAX_GENERATED_STEPS = 3000
 Controller = Callable[[object, object], float]
 
 
+def _action(env, acceleration_mps2: float) -> float:
+    """Action commanding the given acceleration, clipped to the vehicle's range."""
+    return env.observation_builder.normalize_acc_to_action(acceleration_mps2)
+
+
+def _reach_m(env, state) -> float:
+    """Farthest distance the train can cover within one control period."""
+    dt = env.step_time_s
+    return state.v_mps * dt + 0.5 * env.vehicle.max_acc * dt * dt
+
+
+def _track(env, state, target_mps: float) -> float:
+    """Action reaching ``target_mps`` at the end of one control period."""
+    return _action(env, (target_mps - state.v_mps) / env.step_time_s)
+
+
 def _stopper(stop_offset_m: float, *, speed_ratio: float = 0.9) -> Controller:
-    """Track a fraction of the SRTSP look-ahead limit, then brake to a point."""
+    """Track a fraction of the SRTSP look-ahead limit, then brake to a point.
+
+    The final braking uses observation o7's definition, -v^2 / (2 d), with d
+    measured to the stop point, which stops on it exactly.
+    """
 
     def controller(env, state) -> float:
         remaining = env.task.target_position_m - state.s_m
         braking_distance = remaining - stop_offset_m
         speed = state.v_mps
         if braking_distance <= 0.0:
-            return -1.0
+            return _action(env, env.vehicle.max_dec)
         if speed * speed / (2.0 * braking_distance) >= 0.6:
-            return -speed * speed / (2.0 * braking_distance)
+            return _action(env, -speed * speed / (2.0 * braking_distance))
         target = min(
-            speed_ratio * lookup_upper_speed(env.srtsp_lookup, state.s_m + 30.0),
+            speed_ratio
+            * lookup_upper_speed(env.srtsp_lookup, state.s_m + _reach_m(env, state)),
             0.98 * math.sqrt(1.2 * braking_distance),
         )
-        return (target**2 - speed**2) / (2.0 * min(30.0, remaining))
+        return _track(env, state, target)
 
     return controller
 
 
-def _look_ahead(speed_ratio: float) -> Controller:
-    """Track a fraction of the SRTSP look-ahead limit without a final stop."""
+def _overrun(speed_ratio: float) -> Controller:
+    """Run past the target with speed until the SRTSP tail cuts it off.
+
+    It tracks a fraction of the SRTSP look-ahead limit, then the limit itself
+    close to the target; past the target, or once one period of full traction
+    could carry the train beyond the stop zone, it takes full traction. With
+    control periods up to 1.5 s the SRTSP tail (zero about 7 m past the
+    target) ends the run before the 9 m stop zone is exceeded, so the case
+    ends in OVER_SRTSP rather than OVERRAN.
+    """
 
     def controller(env, state) -> float:
-        remaining = env.task.target_position_m - state.s_m
-        if remaining <= 0.0:
-            return 0.0  # coast past the target until it overruns the stop zone
-        target = min(
-            speed_ratio * lookup_upper_speed(env.srtsp_lookup, state.s_m + 30.0),
-            math.sqrt(1.6 * max(remaining - 2.0, 0.0)),
+        target_m = env.task.target_position_m
+        stop_zone_end_m = target_m + 30 * env.task.max_stop_error_m
+        if state.s_m >= target_m or state.s_m + _reach_m(env, state) > stop_zone_end_m:
+            return _action(env, env.vehicle.max_acc)
+        ratio = speed_ratio if target_m - state.s_m > 50.0 else 1.0
+        return _track(
+            env,
+            state,
+            ratio
+            * lookup_upper_speed(env.srtsp_lookup, state.s_m + _reach_m(env, state)),
         )
-        return (target**2 - state.v_mps**2) / (2.0 * min(30.0, remaining))
 
     return controller
 
@@ -67,10 +98,10 @@ def _hold(speed_mps: float) -> Controller:
     """Cruise slowly so that no stopping-point step is ever requested."""
 
     def controller(env, state) -> float:
-        target = min(
-            speed_mps, 0.9 * lookup_upper_speed(env.srtsp_lookup, state.s_m + 30.0)
+        look_ahead = lookup_upper_speed(
+            env.srtsp_lookup, state.s_m + _reach_m(env, state)
         )
-        return (target**2 - state.v_mps**2) / 60.0
+        return _track(env, state, min(speed_mps, 0.9 * look_ahead))
 
     return controller
 
@@ -81,7 +112,19 @@ def _brake_after(position_m: float) -> Controller:
     def controller(env, state) -> float:
         if state.s_m < position_m:
             return cruise(env, state)
-        return -1.0
+        return _action(env, env.vehicle.max_dec)
+
+    return controller
+
+
+def _accelerate_over_srtsp(position_m: float) -> Controller:
+    """Track the SRTSP limit, then accelerate through it at full traction."""
+    cruise = _stopper(0.1)
+
+    def controller(env, state) -> float:
+        if state.s_m < position_m:
+            return cruise(env, state)
+        return _action(env, env.vehicle.max_acc)
 
     return controller
 
@@ -92,7 +135,7 @@ def _with_coasting_window(first_step: int) -> Controller:
     window = (0.0, 5e-7, -5e-7, 0.0, 2e-6, -2e-6)
 
     def controller(env, state) -> float:
-        offset = state.step_count - first_step
+        offset = state.step - first_step
         if 0 <= offset < len(window):
             return window[offset]
         return cruise(env, state)
@@ -128,17 +171,16 @@ class DPCase:
 RL_CASES = (
     RLCase("stop_in_zone", "STOPPED_IN_ZONE", _stopper(0.1)),
     RLCase("stopped_short", "STOPPED_SHORT", _stopper(40.0)),
-    RLCase("overran", "OVERRAN", _look_ahead(0.9)),
-    RLCase("overran_and_over_limit", "OVERRAN", _look_ahead(0.95)),
+    RLCase("overrun_srtsp_tail", "OVER_SRTSP", _overrun(0.9)),
     RLCase("under_lower_limit", "UNDER_LOWER_LIMIT", _brake_after(8000.0)),
-    RLCase("over_upper_limit", "OVER_UPPER_LIMIT", _hold(8.0)),
-    RLCase("over_srtsp", "OVER_SRTSP", lambda env, state: 1.0),
+    RLCase("over_upper_limit", "OVER_UPPER_LIMIT", _hold(3.0)),
+    RLCase("over_srtsp", "OVER_SRTSP", _accelerate_over_srtsp(27900.0)),
     RLCase("zero_displacement_start", "STOPPED_SHORT", lambda env, state: -1.0),
     RLCase("coasting_threshold", "STOPPED_IN_ZONE", _with_coasting_window(40)),
 )
 
 # Terminal trigger: inside the final transition of ``stop_in_zone``
-# (29265.0 m -> 29269.946 m), so the episode ends before the change applies.
+# (29269.943 m -> 29269.946 m), so the episode ends before the change applies.
 SCHEDULE_CHANGE_CASES = (
     ScheduleChangeCase(
         "schedule_change_at_start", "stop_in_zone", 135.0, 30.0, "reset"
@@ -154,7 +196,7 @@ SCHEDULE_CHANGE_CASES = (
         "en_route",
     ),
     ScheduleChangeCase(
-        "schedule_change_terminal_step", "stop_in_zone", 29267.0, 30.0, "never"
+        "schedule_change_terminal_step", "stop_in_zone", 29269.945, 30.0, "never"
     ),
 )
 

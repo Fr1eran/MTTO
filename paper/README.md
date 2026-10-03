@@ -1,6 +1,6 @@
 # 高速磁浮速度曲线优化：论文仿真实验指南
 
-本手册描述论文全套仿真实验：空间步长消融、方法消融、DP/PIRS/实际运行三方对比、计划时间变化鲁棒性。核心强化学习方法称为物理先验奖励塑形（Physics-Informed Reward Shaping, PIRS），内部标识为 `ppo_pirs`。所有命令均从项目根目录执行，统一通过 `uv run` 使用项目虚拟环境；论文相关依赖（matplotlib、pandas、openpyxl）随 `dev` 依赖组一并安装（见 `uv sync`）。
+本手册描述论文全套仿真实验：控制周期步长消融、方法消融、DP/PIRS/实际运行三方对比、计划时间变化鲁棒性。核心强化学习方法称为物理先验奖励塑形（Physics-Informed Reward Shaping, PIRS），内部标识为 `ppo_pirs`。所有命令均从项目根目录执行，统一通过 `uv run` 使用项目虚拟环境；论文相关依赖（matplotlib、pandas、openpyxl）随 `dev` 依赖组一并安装（见 `uv sync`）。
 
 实验编排代码位于 `paper/experiments/`（`spec.py` 解析 `paper/specs/*.toml` 并展开实验矩阵，`runner.py` 负责调用 `mtto.workflows` 并处理中断恢复与结果复用），命令行入口为 `python -m paper.experiments`。出图脚本位于 `paper/figures/`。第 4 节描述结果复用规则；不熟悉该机制时，重新运行下列命令是安全的——已完成且未过期的结果会被自动复用而不是重新计算。
 
@@ -8,7 +8,7 @@
 
 完整仿真实验分为四部分：
 
-1. 空间步长消融（第 5 节）：确定后续实验使用的控制步长。
+1. 控制周期步长消融（第 5 节）：确定后续实验使用的控制周期 `step_time_s`。
 2. 方法消融（第 6 节）：对比 PPO、PPO+Safety、PPO+Punctuality 和 PPO+PIRS。
 3. DP、PIRS 与实际运行结果对比（第 7 节）。
 4. 计划时间变化鲁棒性验证（第 8 节）。
@@ -17,8 +17,8 @@
 | --- | --- | --- |
 | 场景 | 上海高速磁浮示范线下行场景（龙阳路 → 浦东国际机场） | `paper/specs/scenario.toml`、`paper/specs/tasks.toml` 的 `longyang_to_airport` |
 | 名义计划运行时间 | `465 s` | `paper/specs/tasks.toml` |
-| 步长候选 | `10, 30, 50, 100 m` | `paper/specs/step_distance.toml` 的 `[[variants]]` |
-| 随机种子 | `11, 131, 239, 359, 443` | `paper/specs/method_ablation.toml`、`step_distance.toml` 的 `seeds` |
+| 控制周期候选 | `0.5, 1.0, 1.5, 2.0 s` | `paper/specs/step_time.toml` 的 `[[variants]]` |
+| 随机种子 | `11, 131, 239, 359, 443` | `paper/specs/method_ablation.toml`、`step_time.toml` 的 `seeds` |
 | 步长/方法消融预算 | 每组 `400` 个 PPO rollout，即 `num_envs(8) * n_steps_per_env(1024) * 400 = 3,276,800` 个环境状态转移 | `[train]` 表的 `training_rollouts/num_envs/n_steps_per_env` |
 | 周期评估间隔 | 每 `12` 个 rollout 一次确定性独立评估轨迹，rollout 12–396（共 33 个点） | `[train]` 表的 `evaluation_interval_rollouts` |
 | 精确停站 | `abs(stop_error_m) <= max_stop_error_m`（`0.3 m`） | `paper/specs/tasks.toml`、`evaluation/quality.py` |
@@ -43,19 +43,27 @@
 | `ppo_punctuality` | `basic_punctuality` | PPO+Punctuality |
 | `ppo_pirs` | `basic_safety_punctuality` | PPO+PIRS |
 
-（代码中还定义了第五个预设 `li2023_scaled`，用于叠加 Li et al. (2023) 基线曲线，见 `paper/figures/speed_profile_comparison.py` 的 `--baseline-rl`；论文四组核心方法消融不使用它。）
-
 势函数塑形统一按 `gamma*Phi(next) - Phi(previous)` 计算，终止步继续使用观测到的下一状态势能（不显式归零）：
 
-- **安全势**：按制动（牵引）储备步数的二次合页，`Phi = -c_up*(1 - clip(k_up,0,H)/H)² - c_low*(1 - clip(k_low,0,H)/H)²`，`H=3`（`SAFETY_RESERVE_HORIZON_STEPS`）、`c_up=3`、`c_low=1`（`SAFETY_RESERVE_UPPER_SCALE`/`SAFETY_RESERVE_LOWER_SCALE`）。制动储备 `k_up = min((v_max² - v²)/(2*b*dx), (v_max'² - v²)/(2*b*dx) + 1)`，其中 `v_max'` 为前方一步 `x+dx` 处的上限、`b` 为最大制动减速度，停车时为 +inf；牵引储备 `k_low` 同理，只对大于 0 的下限计入。`k <= 0` 表示已越界或下一步无论如何都将越界；储备 `>= H` 时势能为 0（`mtto.rl.rewards.braking_reserve_steps`/`traction_reserve_steps`/`safety_potential`）。
-- **准点势**：`Phi = -K * e² / (e² + sigma²)`，`K=5`（`PUNCTUALITY_POTENTIAL_SCALE`）、`sigma=20 s`（`PUNCTUALITY_POTENTIAL_SIGMA_S`）；`e` 为实际剩余裕度与参考裕度之差，参考裕度按沿运行方向裁剪到 `[0,1]` 的剩余距离比例 `q` 线性插值：`b_ref = b0 * q`，`b0` 为全程静止起点的计划时间减最短运行时间。计划时间变化后以新计划更新全程参考线，不从变化点重锚。
-- **终止步奖励**（仅 `STOPPED_IN_ZONE` 终止时触发）：停站分 `stopping_score(e_x) = 1 / (1 + (max(0, |e_x| - max_stop_error_m) / 0.3)²)`；准点分 `punctuality_score(e_t) = exp(-|e_t| / 45)`；终端奖励 `terminal_stopping = 15 * stopping_score`，`terminal_punctuality = 5 * punctuality_score + 20 * stopping_score² * punctuality_score`（`mtto.rl.rewards.RewardCalculator`）。
+- **安全势**：按制动（牵引）储备的二次合页，`Phi = -c_up*(1 - clip(k_up,0,H)/H)² - c_low*(1 - clip(k_low,0,H)/H)²`，`H=3`（`SAFETY_RESERVE_HORIZON_STEPS`）、`c_up=3`、`c_low=1`（`SAFETY_RESERVE_UPPER_SCALE`/`SAFETY_RESERVE_LOWER_SCALE`）。储备按控制周期计量：以当前速度再运行多少个控制周期，就会耗尽全力制动（牵引）的距离余量。制动储备 `k_up = min((v_max² - v²)/(2*b*ds_eff), (v_max'² - v²)/(2*b*ds_eff) + 1)`，`ds_eff = v*dt + ½*b*dt²`（二次项只用于避免低速时分母趋零），其中 `dt = step_time_s`、`b` 为最大制动减速度、`v_max'` 为一个控制周期内最远可达位置 `x + v*dt + ½*a_max*dt²` 处的上限，停车时为 +inf；牵引储备 `k_low` 同理（用 `a_max` 代替 `b`），只对大于 0 的下限计入。`k <= 0` 表示已越界或下一个控制周期无论如何都将越界；储备 `>= H` 时势能为 0（`mtto.rl.rewards.braking_reserve_steps`/`traction_reserve_steps`/`safety_potential`）。
+- **准点势**：伪 Huber 形式 `Phi = -2K * (sqrt(e² + sigma²) - sigma) / sigma`，零附近为 `-K*e²/sigma²`，远离零时线性、每偏离 1 s 代价 `2K/sigma = 0.5`，不饱和，使落后时刻表的每一秒都有代价；`K=5`（`PUNCTUALITY_POTENTIAL_SCALE`）、`sigma=20 s`（`PUNCTUALITY_POTENTIAL_SIGMA_S`）；`e` 为实际剩余裕度与参考裕度之差，参考裕度按沿运行方向裁剪到 `[0,1]` 的剩余距离比例 `q` 线性插值：`b_ref = b0 * q`，`b0` 为全程静止起点的计划时间减最短运行时间。计划时间变化后以新计划更新全程参考线，不从变化点重锚。
+- **逐步奖励**（记 `P = PROGRESS_REWARD_SCALE = 50`、`L` 为任务里程、`d = |x_target - x|` 为到目标点的距离、`Δs` 为本步位移、`dt = step_time_s`）：进度为主导项，能耗与舒适为按距离计量的惩罚。
+  - 进度（带符号）：`P*(d - d')/L`。朝目标运行为正，越过目标点后继续前进时 `d` 增大，进度为负；从起点到目标点累计为 `P`。成功停站这一步照常计入，失败终止步不计入。
+  - 能耗（只计牵引）：`-0.4*P*ΔE_prop/(e_peak*L)`（`ENERGY_REWARD_WEIGHT = 0.4`），`e_peak` 为 `RewardNormalization.peak_propulsion_kj_per_m`，由 `workflows.train.build_env_references` 数值求得：在任务区间内出现的每个坡度值上、对 `v ∈ [0.5, v_max]`（步长 0.5 m/s）以 `a_max` 运行 0.1 s，取牵引能耗除以位移的最大值（本线路约 433 kJ/m，出现在 `v ≈ 139 m/s`、`a = 1`；从静止起步的 0.1 s 步只走 5 mm，其每米损耗是离散化假象，不计入网格）。因此任意一步都有 `ΔE_prop <= e_peak*Δs`，即能耗项不低于 `-0.4*P*Δs/L`（由 `tests/rl/test_reward_properties.py` 在 `dt ∈ {0.5, 1, 2}` 的真实步上验证）。**悬浮能耗不进入奖励**：它与时间成正比，低速时每米悬浮能耗发散（`v = 1 m/s` 时约 213–320 kJ/m），会破坏“每步为正”，且准点到达时几乎与策略无关；状态与评价指标中的悬浮能耗照常累计。
+  - 舒适：`-W*|Δa|*(1+ρ²)`（`COMFORT_REWARD_WEIGHT = W = 0.2`），`ρ = |Δa|/dt/j_max`，`j_max` 为 `Task.max_jerk_mps3`（`0.75 m/s³`），`Δa/dt` 按名义控制周期计冲击率。按每 m/s² 加速度变化计价，一次行程的舒适代价为 `W` 乘总变差 TAV，与控制周期和变化发生的位置无关；乘子 `(1+ρ²)` 使冲击率达阈值时单位变化的代价翻倍、超过阈值后三次增长，鼓励把大的变化拆成多个小变化。`W=0.2` 取在能耗换舒适的交换率分界（约 0.19 奖励/TAV 单位）附近：`log_std_init=-1` 下 10 个种子（两个独立种子集）TAV 由 8.19 降到 4.93，能耗 805→800 kWh（p=0.63），20/20 严格可行；`W=0.4` 时 TAV 4.03 但能耗 +32 kWh，`W=0.8` 出现失败种子。去掉 `(1+ρ²)` 的纯 `|Δa|`（`W=0.2`）TAV 为 6.18，说明该乘子确有作用。
+  - 因此非终止的朝目标一步满足 `进度 + 能耗 >= 0.6*进度 > 0`：能耗永远不会抵消进度；舒适项与进度无关，不受此约束，加速度变化大的一步可以净亏。
+- **终止步奖励**（仅 `STOPPED_IN_ZONE` 终止时触发）：停站分 `stopping_score(e_x) = 1 / (1 + (|e_x| / max_stop_error_m)⁴)`（`STOPPING_SCORE_POWER = 4`：处处光滑、单调，目标点处为 1，容差处恰为 1/2，远端按幂律衰减）；准点分 `punctuality_score(e_t) = exp(-|e_t| / 15)`；终端奖励 `terminal_stopping = 100 * 0.3 * stopping_score`，`terminal_punctuality = 100 * 0.7 * stopping_score * punctuality_score`（`TERMINAL_REWARD_SCALE = 100`），合计 `100*S_stop*(0.3 + 0.7*S_punc)`（`mtto.rl.rewards.RewardCalculator`）。
+- **截断惩罚**：所有失败终止（`UNDER_LOWER_LIMIT`、`OVER_UPPER_LIMIT`、`OVER_SRTSP`、`STOPPED_SHORT`、`OVERRAN`）的该步只返回常数 `TRUNCATION_PENALTY = -80`（大于进度总量 `P`）加安全势与准点势的塑形项。
 
-停站判定（`mtto.domain.scenario.Task.stop_state`）：停车（`|v| <= 0.01 m/s`）且 `|x - x_target| <= 30*max_stop_error_m` 为 `STOPPED_IN_ZONE`；列车带速到达目标点时不终止，按完整步长继续越过目标点，越过距离超过 `30*max_stop_error_m` 即为 `OVERRAN`；其余停车为 `STOPPED_SHORT`。到达目标点的那一步仍截短到恰好落在目标点上。
+环境每步以指令加速度匀变速推进一个控制周期 `step_time_s`（`mtto.domain.kinematics.run_time`），步内停车时截到停车时刻，时间只累加实际时长；不对到达目标点的那一步做截短，精确停车由连续动作给出（观测 o7 即恰好停在目标点所需的加速度）。
 
-智能体观测为 11 维（`mtto.rl.observation.ObservationBuilder`，`POLICY_IO_VERSION=2`）：全程进度、带符号对数距离（尺度 0.1 m）、速度、上一步加速度、速度上/下限、准点比值 `e/sqrt(e²+sigma²)`（准点势恰为 `-K*o6²`）、恰好停在目标点所需的加速度、制动储备 `clip(k_up,0,H)/H`、冗余时间对数编码（尺度 10 s）、全力制动下的预计停站误差 `v²/(2b) - d` 的对数编码（尺度 0.1 m）。速度按线路最高限速归一化。
+停站判定（`mtto.domain.scenario.Task.stop_state`）：停车（`|v| <= 0.01 m/s`）且 `|x - x_target| <= 30*max_stop_error_m` 为 `STOPPED_IN_ZONE`；列车带速到达目标点时不终止，继续越过目标点，越过距离超过 `30*max_stop_error_m` 即为 `OVERRAN`；其余停车为 `STOPPED_SHORT`。控制周期不超过 1.5 s 时，带速越过目标点的列车总会先被 SRTSP 上限曲线的尾段（在目标点后约 7 m 处降到 0）以 `OVER_SRTSP` 终止，来不及越过 9 m 的停车区，因此 `OVERRAN` 只在更长的控制周期下出现。结束原因的优先级为停站判定 → 控制周期末的速度越限。回合不设截止时刻：晚点只由不饱和的准点势与终端准点评分约束，严格可行（`|e_t| <= max_arr_time_error_s`）仍在质量评估中判定。按截止时刻截断并自举时，慢速运行到截止会成为无惩罚的出口；按失败终止时，“太慢”与“快但进站失败”同为 −80，二者都妨碍学习。
 
-安全越界判定只在 `mtto.domain.safeguard`（动态双限速度防护，按节点）；算法的运行上限（SRTSP、静态允许速度域）属于算法约束，不进入质量判定。DP 使用实际任务起点至实际目标点、首尾速度均为零的最短运行时间曲线作为可达速度上界。所有方法的环境内部终止和违规截断均视为真实任务结束：外部时间上限截断映射为 `truncated=True`，其余终止原因映射为 `terminated`，失败终点不参与 PPO 的 bootstrap。
+智能体观测为 13 维（`mtto.rl.observation.ObservationBuilder`，`POLICY_IO_VERSION=3`）：o0 全程进度、o1 带符号对数距离（尺度 0.1 m）、o2 速度、o3 上一步加速度、o4/o5 速度上/下限、o6 准点比值 `e/sqrt(e²+sigma²)`、o7 恰好停在目标点所需的加速度、o8 制动储备 `clip(k_up,0,H)/H`、o9 冗余时间对数编码（尺度 10 s）、o10 全力制动下的预计停站误差 `v²/(2b) - d` 的对数编码（尺度 0.1 m）、o11 坡度 `clip(i/i_max,-1,1)`（上坡为正，`i_max` 为车辆爬坡能力 `max_slope_capacity`）、o12 牵引储备 `clip(k_low,0,H)/H`。速度按线路最高限速归一化。
+
+安全越界判定只在 `mtto.domain.safeguard`（动态双限速度防护，按节点）；算法的运行上限（SRTSP、静态允许速度域）属于算法约束，不进入质量判定。RL 的 SRTSP 上限曲线自轨道原点 0 m 静止起算至目标点后 `20*max_stop_error_m`，任务起点静止出发的列车始终在其下方；查找表间隔 1 m，格内按 `v²` 线性插值（匀加速与制动段上精确）。DP 使用实际任务起点至实际目标点、首尾速度均为零的最短运行时间曲线作为可达速度上界。所有方法的环境内部终止均视为真实任务结束，映射为 `terminated`，失败终点不参与 PPO 的 bootstrap；只有外部时间上限映射为 `truncated=True`。
+
+质量评估（`mtto.evaluation.quality.assess`）的舒适度指标：TAV 为逐段加速度变化量 `|Δa|` 之和，RMS 为其均方根，ER% 为逐段冲击率 `|Δa|/Δt` 超过 `max_jerk_mps3` 的段数占比（`Δt = 0` 的段不计入分子与分母）。
 
 “最好结果”按以下口径执行（`mtto.evaluation.quality.selection_key`/`best_update_reason`，由 `ScheduledPolicyEvaluationCallback` 在训练期周期评估中维护）：
 
@@ -70,7 +78,7 @@
 | 用途 | 命令 |
 | --- | --- |
 | 单次 RL 训练/评估/DP/训练分析 | `uv run mtto {train,evaluate,dp,analyze-training} ...`（见项目根 `README.md`） |
-| 步长/方法消融（训练矩阵） | `uv run python -m paper.experiments {step_distance,method_ablation} {run,summarize,figures} [--spec ...] [--output ...]` |
+| 步长/方法消融（训练矩阵） | `uv run python -m paper.experiments {step_time,method_ablation} {run,summarize,figures} [--spec ...] [--output ...]` |
 | 计划时间变化鲁棒性（评估矩阵） | `uv run python -m paper.experiments schedule_change {run,summarize,figures} [--spec ...] [--output ...]` |
 | 实测运营数据重标定 | `uv run python -m paper.real_operation [--output-file ...]` |
 | 环境、势函数、评分函数说明图 | `uv run python -m paper.figures.{env_data,potential_function,score_function}` |
@@ -80,7 +88,7 @@
 
 所有出图脚本支持 `--no-show`（保存不弹窗）与大多数支持 `--output-dir`（固定文件名，见各脚本 `--help`）；`min_operation_time_curve`（交互式最短运行时间曲线计算器，键盘输入起点重新计算）与 `real_operation_data`（打印实测曲线统计并展示三张图）没有命令行参数，始终调用 `plt.show()`；在无显示环境下用 `MPLBACKEND=Agg` 运行会跳过弹窗但仍完整执行其余逻辑。
 
-`run`/`summarize`/`figures` 的 `--spec` 默认分别为 `paper/specs/step_distance.toml`、`paper/specs/method_ablation.toml`、`paper/specs/schedule_change.toml`；`run` 不需要 `--output`（训练/评估产物写入 spec 的 `output_root`），`summarize`/`figures` 需要 `--output <目录>`（汇总 JSON、Markdown 表格、PDF 图表写入该目录，可以是任意路径，不必与 `output_root` 相同）。
+`run`/`summarize`/`figures` 的 `--spec` 默认分别为 `paper/specs/step_time.toml`、`paper/specs/method_ablation.toml`、`paper/specs/schedule_change.toml`；`run` 不需要 `--output`（训练/评估产物写入 spec 的 `output_root`），`summarize`/`figures` 需要 `--output <目录>`（汇总 JSON、Markdown 表格、PDF 图表写入该目录，可以是任意路径，不必与 `output_root` 相同）。
 
 ## 4. 结果复用与 `paper.json`
 
@@ -100,38 +108,38 @@ git_commit, dirty   # 运行开始时的溯源信息
 
 `mtto dp` 是独立的一次性运行（`FileExistsError` 拒绝覆盖已存在的输出目录），不经过 `paper/experiments` 的复用层；第 7 节的 DP 运行需要人工为每次实验选择新的输出目录。
 
-## 5. 空间步长消融（论文实验一）
+## 5. 控制周期步长消融（论文实验一）
 
-比较 `10/30/50/100 m × 5 seeds`，所有运行固定使用完整 PIRS 奖励（`paper/specs/step_distance.toml`）。
+比较 `step_time_s = 0.5/1.0/1.5/2.0 s × 5 seeds`，所有运行固定使用完整 PIRS 奖励（`paper/specs/step_time.toml`）。候选上限取停车点步进延时 `step_delay_s = 2 s`。
 
 ```bash
-# 训练（自动跳过已完成且可复用的运行；矩阵定义见 paper/specs/step_distance.toml）
-uv run python -m paper.experiments step_distance run
+# 训练（自动跳过已完成且可复用的运行；矩阵定义见 paper/specs/step_time.toml）
+uv run python -m paper.experiments step_time run
 
 # 汇总数值与表格（不检查 dirty）
-uv run python -m paper.experiments step_distance summarize \
-  --output output/paper_experiment/01_step_distance/latest
+uv run python -m paper.experiments step_time summarize \
+  --output output/paper_experiment/01_step_time/latest
 
-# 出图（要求全部运行 dirty=false，或当前工作区处于 dirty 状态）
-uv run python -m paper.experiments step_distance figures \
-  --output output/paper_experiment/01_step_distance/latest
+# 出图（要求全部运行 dirty=false，见第 4 节）
+uv run python -m paper.experiments step_time figures \
+  --output output/paper_experiment/01_step_time/latest
 ```
 
 论文输出（写入 `--output` 目录）：
 
-- `step_distance_learning_curves.pdf`：1×2 子图：(a) 行程完成率；(b) 周期独立评估可行率（feasible rate）。
-- `step_distance_table.md`：步长、严格可行率（百分比与分子/分母）、绝对停站误差、绝对时间误差、轨迹能耗（kWh）、舒适度 TAV，5 个种子的均值 ± 样本标准差。
-- `step_distance_summary.json`：各步长各种子的原始指标、严格可行数与严格可行率，以及最终选定步长（`recommended_step_distance`，选择规则：严格可行数最多 → 平均里程完成率最高 → 可行轨迹平均能耗最低 → 可行轨迹平均舒适度最低 → 较小步长）与比较键。
+- `step_time_learning_curves.pdf`：1×2 子图：(a) 行程完成率；(b) 周期独立评估可行率（feasible rate）；`1.0 s` 曲线加粗。
+- `step_time_table.md`：控制周期、严格可行率（百分比与分子/分母）、绝对停站误差、绝对时间误差、轨迹能耗（kWh）、舒适度 TAV，5 个种子的均值 ± 样本标准差。
+- `step_time_summary.json`：各控制周期各种子的原始指标、严格可行数与严格可行率，以及最终选定控制周期（`recommended_step_time_s`，选择规则：严格可行数最多 → 平均里程完成率最高 → 可行轨迹平均能耗最低 → 可行轨迹平均舒适度最低 → 较小控制周期）与比较键。
 
-训练运行写入 `paper/specs/step_distance.toml` 的 `output_root`（`output/paper_experiment/01_step_distance/`），每个矩阵单元一个 `<name>__<variant>__seed<seed:04d>__<NN>` 子目录（例如 `step_distance__30p0__seed0011__01`）。方法消融（第 6 节）使用本节 `step_distance_summary.json` 中的 `recommended_step_distance` 作为其空间步长，查看方式：
+训练运行写入 `paper/specs/step_time.toml` 的 `output_root`（`output/paper_experiment/01_step_time/`），每个矩阵单元一个 `<name>__<variant>__seed<seed:04d>__<NN>` 子目录（例如 `step_time__1p0__seed0011__01`）。方法消融（第 6 节）使用本节 `step_time_summary.json` 中的 `recommended_step_time_s` 作为其控制周期，查看方式：
 
 ```bash
-uv run python -c "import json; print(json.load(open('output/paper_experiment/01_step_distance/latest/step_distance_summary.json'))['recommended_step_distance'])"
+uv run python -c "import json; print(json.load(open('output/paper_experiment/01_step_time/latest/step_time_summary.json'))['recommended_step_time_s'])"
 ```
 
-该值为 `null`（上面的命令会打印 Python 的 `None`）表示四组步长本轮均无严格可行轨迹，不能确定推荐步长；此时不应据此运行方法消融。
+该值为 `null`（上面的命令会打印 Python 的 `None`）表示四组控制周期本轮均无严格可行轨迹，不能确定推荐值；此时不应据此运行方法消融。
 
-方法消融的 `paper/specs/method_ablation.toml` 中 `[train].step_distance_m` 取步长消融的推荐步长（论文正式实验为 `30 m`）；若重新运行步长消融得到不同的推荐值，先把该字段改为推荐值，再运行方法消融（第 6 节）。
+方法消融的 `paper/specs/method_ablation.toml` 中 `[train].step_time_s` 取步长消融的推荐值（当前为 `1.0 s`）；若重新运行步长消融得到不同的推荐值，先把该字段改为推荐值，再运行方法消融（第 6 节）。
 
 ## 6. 方法消融（论文实验二）
 
@@ -230,7 +238,7 @@ uv run python -m paper.experiments schedule_change figures \
 
 | 实验 | 训练/评估产物 | 汇总与图表 |
 | --- | --- | --- |
-| 空间步长消融 | `paper/specs/step_distance.toml` 的 `output_root`（`output/paper_experiment/01_step_distance/`） | `step_distance {summarize,figures} --output <目录>` |
+| 控制周期步长消融 | `paper/specs/step_time.toml` 的 `output_root`（`output/paper_experiment/01_step_time/`） | `step_time {summarize,figures} --output <目录>` |
 | 方法消融 | `paper/specs/method_ablation.toml` 的 `output_root`（`output/paper_experiment/02_method_ablation/`） | `method_ablation {summarize,figures} --output <目录>` |
 | DP/PIRS/实际对比 | 由 `mtto dp --output-dir` 手工指定（实测曲线现场计算，无需单独产物） | `paper.figures.speed_profile_comparison --output-dir <目录>` |
 | 计划时间变化鲁棒性 | `paper/specs/schedule_change.toml` 的 `output_root`（`output/paper_experiment/04_schedule_time_change/`） | `schedule_change {summarize,figures} --output <目录>` |
@@ -239,10 +247,10 @@ uv run python -m paper.experiments schedule_change figures \
 ## 10. 测试与验收
 
 ```bash
-uv run pytest                             # 默认跳过标记为 slow 的用例
-uv run pytest -m slow                     # 含 DP golden 等耗时用例
+uv run pytest                             # 默认跳过标记为 slow、golden 的用例
+uv run pytest -m golden                   # 与 output/golden/ 中录制的回归快照比对
 uv run ruff check src tests paper
 uv run ruff format --check src tests paper
 ```
 
-`tests/golden/` 存放冻结的数值快照（DP 最优解、固定动作序列下的 RL 轨迹与逐步奖励、计划变更情形等），不得随意改动其中的数据；更新 golden 快照须在提交说明中写明原因、附差异摘要，并递增 `pyproject.toml` 中的 `project.version`。
+`tests/golden/` 存放用例定义与冻结的固定动作序列（`actions/*.npy`），回归快照（DP 最优解、固定动作序列下的 RL 轨迹与逐步奖励、计划变更情形等）由 `uv run python -m tests.golden.record` 录制到 `output/golden/`，详见项目根 `README.md` 的“Golden 回归快照”；有意改变计算逻辑时须在提交说明中写明原因、附差异摘要，递增 `pyproject.toml` 中的 `project.version` 并重新录制。

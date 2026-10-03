@@ -214,8 +214,15 @@ def assess(profile: SpeedProfile, scenario: Scenario, task: Task) -> QualityRepo
         delta = np.abs(np.diff(acceleration, prepend=0.0))
         comfort_tav = float(np.sum(delta))
         comfort_rms = float(np.sqrt(np.sum(delta**2) / delta.size))
-        comfort_exceedance = float(
-            np.count_nonzero(delta > task.max_acc_change) / delta.size * 100
+        # Jerk per segment; zero-duration segments count in neither the
+        # numerator nor the denominator.
+        duration = np.diff(profile.time_s)
+        moving = duration > 0
+        jerk = delta[moving] / duration[moving]
+        comfort_exceedance = (
+            float(np.count_nonzero(jerk > task.max_jerk_mps3) / moving.sum() * 100)
+            if moving.any()
+            else 0.0
         )
     else:
         comfort_tav = comfort_rms = comfort_exceedance = 0.0

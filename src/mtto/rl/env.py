@@ -1,4 +1,4 @@
-"""Distance-step RL environment and Gym adapter."""
+"""Time-step RL environment and Gym adapter."""
 
 import math
 from dataclasses import dataclass
@@ -10,7 +10,7 @@ from numpy.typing import NDArray
 
 from mtto.domain.dynamics import Vehicle
 from mtto.domain.energy import segment_energy
-from mtto.domain.kinematics import Motion, run_distance
+from mtto.domain.kinematics import Motion, run_time
 from mtto.domain.line import Line, get_slope_scalar_numba
 from mtto.domain.safeguard import (
     SPS,
@@ -84,7 +84,7 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         scenario: Scenario,
         task: Task,
         gamma: float,
-        step_distance: float,
+        step_time_s: float,
         srtsp_lookup: SrtspLookup,
         normalization: RewardNormalization,
         compact_training_info: bool = False,
@@ -102,9 +102,9 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         self.safeguard: Safeguard = scenario.safeguard
         self.task = task
         self.gamma = gamma
-        self.step_distance = float(step_distance)
-        if not math.isfinite(self.step_distance) or self.step_distance <= 0.0:
-            raise ValueError("step_distance_m must be finite and positive")
+        self.step_time_s = float(step_time_s)
+        if not math.isfinite(self.step_time_s) or self.step_time_s <= 0.0:
+            raise ValueError("step_time_s must be finite and positive")
         self.srtsp_lookup = srtsp_lookup
         self.normalization = normalization
         self.sps = SPS(
@@ -124,7 +124,7 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
             normalization,
             gamma=gamma,
             reward_config=reward_config,
-            train_mass_kg=float(self.vehicle.mass) * 1000.0,
+            step_time_s=self.step_time_s,
         )
         self.reward_config = self.reward_calculator.reward_config
         self.safety_truncation_buffer = safety_truncation_buffer
@@ -171,7 +171,9 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
         )
         upper_limit = float(upper)
         srtsp_limit = lookup_upper_speed(self.srtsp_lookup, s_m)
-        ahead_m = s_m + self.step_distance
+        # Farthest position reachable within one control period.
+        dt = self.step_time_s
+        ahead_m = s_m + v_mps * dt + 0.5 * self.vehicle.max_acc * dt**2
         lower_ahead, upper_ahead = dynamic_limits(
             self.safeguard, ahead_m, sps.target_stopping_point_index
         )
@@ -197,7 +199,7 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
             schedule_time_s=float(schedule_time_s),
             step=step,
             schedule_changed=bool(schedule_changed),
-            slope_permille=slope,
+            slope_pct=slope,
             stop_error_m=abs(self.task.target_position_m - s_m),
             lower_limit_mps=float(lower),
             upper_limit_mps=upper_limit,
@@ -207,13 +209,15 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
                 v_mps,
                 min(srtsp_limit, upper_limit),
                 max_speed_ahead,
-                2.0 * self.vehicle.max_dec_abs * self.step_distance,
+                self.vehicle.max_dec_abs,
+                self.step_time_s,
             ),
             traction_reserve_steps=traction_reserve_steps(
                 v_mps,
                 float(lower),
                 float(lower_ahead),
-                2.0 * self.vehicle.max_acc * self.step_distance,
+                self.vehicle.max_acc,
+                self.step_time_s,
             ),
         )
 
@@ -244,18 +248,8 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
     def transition(
         self, state: State, commanded_acceleration_mps2: float
     ) -> StepResult:
-        # The step reaching the target lands on it; a train still moving there
-        # keeps running past it with full steps until it stops.
-        remaining_distance_m = self.task.target_position_m - state.s_m
-        step_distance_m = (
-            min(self.step_distance, remaining_distance_m)
-            if remaining_distance_m > 0.0
-            else self.step_distance
-        )
         motion = Motion(
-            *run_distance(
-                state.v_mps, float(commanded_acceleration_mps2), step_distance_m
-            )
+            *run_time(state.v_mps, float(commanded_acceleration_mps2), self.step_time_s)
         )
         propulsion, levitation = segment_energy(
             self.scenario.energy,
@@ -428,7 +422,7 @@ class MTTOEnv(gym.Env[np.ndarray, np.ndarray]):
             )
             self._comfort_tav += delta_acc
             self._comfort_sum_sq_delta_acc += delta_acc**2
-            if delta_acc > self.task.max_acc_change:
+            if delta_acc / self.step_time_s > self.task.max_jerk_mps3:
                 self._comfort_exceedance_count += 1
         self._record_trajectory()
         info: dict[str, object]
@@ -477,7 +471,7 @@ def make_env(
     scenario: Scenario,
     task: Task,
     gamma: float,
-    step_distance: float,
+    step_time_s: float,
     srtsp_lookup: SrtspLookup,
     normalization: RewardNormalization,
     compact_training_info: bool = False,
@@ -497,7 +491,7 @@ def make_env(
         scenario=scenario,
         task=task,
         gamma=gamma,
-        step_distance=step_distance,
+        step_time_s=step_time_s,
         srtsp_lookup=srtsp_lookup,
         normalization=normalization,
         compact_training_info=compact_training_info,

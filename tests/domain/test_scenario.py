@@ -53,7 +53,7 @@ def test_task_valid():
         start_position_m=100.0,
         target_position_m=1000.0,
         schedule_time_s=400.0,
-        max_acc_change=0.75,
+        max_jerk_mps3=0.75,
         max_stop_error_m=0.3,
         max_arr_time_error_s=10.0,
         schedule_change=ScheduleChange(500.0, 450.0),
@@ -67,7 +67,7 @@ def test_task_valid_none_schedule_time():
         start_position_m=100.0,
         target_position_m=1000.0,
         schedule_time_s=None,
-        max_acc_change=0.75,
+        max_jerk_mps3=0.75,
         max_stop_error_m=0.3,
         max_arr_time_error_s=10.0,
         schedule_change=None,
@@ -118,9 +118,9 @@ def test_task_valid_none_schedule_time():
         # schedule_time_s 非正
         (100.0, 1000.0, 0.0, 0.75, 0.3, 10.0, None, "positive or None"),
         (100.0, 1000.0, -10.0, 0.75, 0.3, 10.0, None, "positive or None"),
-        # max_acc_change 非正
-        (100.0, 1000.0, 400.0, 0.0, 0.3, 10.0, None, "max_acc_change"),
-        (100.0, 1000.0, 400.0, -0.5, 0.3, 10.0, None, "max_acc_change"),
+        # max_jerk_mps3 非正
+        (100.0, 1000.0, 400.0, 0.0, 0.3, 10.0, None, "max_jerk_mps3"),
+        (100.0, 1000.0, 400.0, -0.5, 0.3, 10.0, None, "max_jerk_mps3"),
         # max_stop_error_m 非正
         (100.0, 1000.0, 400.0, 0.75, 0.0, 10.0, None, "max_stop_error_m"),
         (100.0, 1000.0, 400.0, 0.75, -0.1, 10.0, None, "max_stop_error_m"),
@@ -187,7 +187,7 @@ def test_task_invalid(
             start_position_m=start,
             target_position_m=target,
             schedule_time_s=sched_time,
-            max_acc_change=max_acc,
+            max_jerk_mps3=max_acc,
             max_stop_error_m=max_stop,
             max_arr_time_error_s=max_arr,
             schedule_change=change,
@@ -378,7 +378,7 @@ def sample_task() -> Task:
         start_position_m=0.0,
         target_position_m=1000.0,
         schedule_time_s=100.0,
-        max_acc_change=0.75,
+        max_jerk_mps3=0.75,
         max_stop_error_m=0.3,  # 30 * 0.3 = 9.0
         max_arr_time_error_s=10.0,
     )
@@ -425,7 +425,7 @@ def test_final_schedule_time_no_schedule_time():
         start_position_m=0.0,
         target_position_m=1000.0,
         schedule_time_s=None,
-        max_acc_change=0.75,
+        max_jerk_mps3=0.75,
         max_stop_error_m=0.3,
         max_arr_time_error_s=10.0,
     )
@@ -440,7 +440,7 @@ def test_final_schedule_time_no_schedule_change():
         start_position_m=0.0,
         target_position_m=1000.0,
         schedule_time_s=100.0,
-        max_acc_change=0.75,
+        max_jerk_mps3=0.75,
         max_stop_error_m=0.3,
         max_arr_time_error_s=10.0,
         schedule_change=None,
@@ -456,7 +456,7 @@ def test_final_schedule_time_start_trigger():
         start_position_m=0.0,
         target_position_m=1000.0,
         schedule_time_s=100.0,
-        max_acc_change=0.75,
+        max_jerk_mps3=0.75,
         max_stop_error_m=0.3,
         max_arr_time_error_s=10.0,
         schedule_change=ScheduleChange(
@@ -475,7 +475,7 @@ def test_final_schedule_time_non_end_node_reached():
         start_position_m=0.0,
         target_position_m=1000.0,
         schedule_time_s=100.0,
-        max_acc_change=0.75,
+        max_jerk_mps3=0.75,
         max_stop_error_m=0.3,
         max_arr_time_error_s=10.0,
         schedule_change=ScheduleChange(
@@ -496,7 +496,7 @@ def test_final_schedule_time_only_at_end_node_not_effective():
         start_position_m=0.0,
         target_position_m=1000.0,
         schedule_time_s=100.0,
-        max_acc_change=0.75,
+        max_jerk_mps3=0.75,
         max_stop_error_m=0.3,
         max_arr_time_error_s=10.0,
         schedule_change=ScheduleChange(
@@ -512,7 +512,7 @@ def test_final_schedule_time_not_reached():
         start_position_m=0.0,
         target_position_m=1000.0,
         schedule_time_s=100.0,
-        max_acc_change=0.75,
+        max_jerk_mps3=0.75,
         max_stop_error_m=0.3,
         max_arr_time_error_s=10.0,
         schedule_change=ScheduleChange(
@@ -541,6 +541,19 @@ def loaded_scenario():
 def loaded_tasks():
     spec_path = Path("paper/specs/tasks.toml")
     return load_tasks(spec_path)
+
+
+def test_paper_tasks_use_the_jerk_threshold(loaded_tasks, tmp_path: Path):
+    assert loaded_tasks["longyang_to_airport"].max_jerk_mps3 == 0.75
+    # A specification still carrying the former per-step acceleration-change
+    # key under its old name lacks the jerk threshold and is rejected.
+    legacy = Path("paper/specs/tasks.toml").read_text(encoding="utf-8")
+    legacy_path = tmp_path / "legacy_tasks.toml"
+    legacy_path.write_text(
+        legacy.replace("max_jerk_mps3", "max_acceleration_change"), encoding="utf-8"
+    )
+    with pytest.raises(KeyError, match="max_jerk_mps3"):
+        load_tasks(legacy_path)
 
 
 def test_safeguard_curves_reproducibility():

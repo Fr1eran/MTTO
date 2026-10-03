@@ -196,7 +196,7 @@ def _diagnostics_with_interleaved_workers() -> RewardDiagnostics:
     reward_sums = np.zeros((3, len(REWARD_NAMES)), dtype=np.float64)
     reward_sums[:, -1] = [30.0, 20.0, 10.0]
     return RewardDiagnostics(
-        schema_version=np.asarray([5], dtype=np.int16),
+        schema_version=np.asarray([REWARD_DIAGNOSTICS_SCHEMA_VERSION], dtype=np.int16),
         reward_names=np.asarray(REWARD_NAMES),
         rollout_end_step=np.asarray([20], dtype=np.int64),
         rollout_transition_count=np.asarray([60], dtype=np.int64),

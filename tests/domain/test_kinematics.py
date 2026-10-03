@@ -1,11 +1,9 @@
-import math
-
 import numpy as np
 import pytest
 
 from mtto.domain.dynamics import Vehicle
 from mtto.domain.energy import EnergyParams, segment_energy
-from mtto.domain.kinematics import accel_between, run_distance, run_time
+from mtto.domain.kinematics import accel_between, run_time
 from mtto.domain.line import Line
 from mtto.domain.safeguard import Safeguard, SafeguardParams, StaticRegion
 from mtto.domain.srtsp import build_srtsp_curve
@@ -48,17 +46,17 @@ def physics_context() -> tuple[EnergyParams, Vehicle, Line]:
 
 
 @pytest.mark.parametrize(
-    ("s", "v0", "a", "ds"),
+    ("s", "v0", "a", "dt"),
     [
         # 加速
-        (100.0, 10.0, 0.5, 30.0),
-        (250.0, 15.0, 0.8, 50.0),
+        (100.0, 10.0, 0.5, 1.0),
+        (250.0, 15.0, 0.8, 2.0),
         # 减速（正常行进不提前停车）
-        (200.0, 20.0, -0.4, 25.0),
-        (600.0, 25.0, -0.6, 40.0),
+        (200.0, 20.0, -0.4, 1.5),
+        (600.0, 25.0, -0.6, 2.0),
         # 较小但大于阈值的加速度
-        (300.0, 12.0, 0.01, 35.0),
-        (400.0, 18.0, -0.01, 30.0),
+        (300.0, 12.0, 0.01, 0.5),
+        (400.0, 18.0, -0.01, 1.0),
     ],
 )
 def test_dp_edge_and_rl_step_consistency(
@@ -66,12 +64,12 @@ def test_dp_edge_and_rl_step_consistency(
     s: float,
     v0: float,
     a: float,
-    ds: float,
+    dt: float,
 ) -> None:
     energy_params, vehicle, line = physics_context
 
     # 1. RL 单步运动学
-    v1, d, t = run_distance(v0, a, ds)
+    v1, d, t = run_time(v0, a, dt)
 
     # 2. DP 边反算加速度与时长
     a_inferred, t_inferred = accel_between(v0, v1, d)
@@ -105,41 +103,6 @@ def test_dp_edge_and_rl_step_consistency(
 
     assert e_rl[0] == pytest.approx(e_dp[0], rel=1e-9)
     assert e_rl[1] == pytest.approx(e_dp[1], rel=1e-9)
-
-
-@pytest.mark.parametrize(
-    ("v0", "a", "ds"),
-    [
-        # 加速
-        (10.0, 1.0, 30.0),
-        (5.0, 0.3, 50.0),
-        # 减速（不提前停车）
-        (20.0, -0.5, 30.0),
-        (15.0, -0.8, 20.0),
-        # 提前停止
-        (10.0, -2.0, 30.0),
-        (8.0, -1.0, 50.0),
-        # 惰行 (|a| < 1e-6)
-        (12.0, 0.0, 24.0),
-        (15.0, 1e-7, 30.0),
-        (20.0, -1e-8, 40.0),
-        # 零位移步
-        (0.0, 0.0, 0.0),
-        (10.0, 0.0, 0.0),
-        (0.0, -1.0, 10.0),
-    ],
-)
-def test_run_time_and_run_distance_consistency(
-    v0: float,
-    a: float,
-    ds: float,
-) -> None:
-    v1_dist, d_dist, t_dist = run_distance(v0, a, ds)
-    v1_time, d_time, t_time = run_time(v0, a, t_dist)
-
-    assert v1_time == pytest.approx(v1_dist, rel=1e-9, abs=1e-9)
-    assert d_time == pytest.approx(d_dist, rel=1e-9, abs=1e-9)
-    assert t_time == pytest.approx(t_dist, rel=1e-9, abs=1e-9)
 
 
 def _make_dummy_safeguard() -> Safeguard:
@@ -179,27 +142,31 @@ def _make_dummy_safeguard() -> Safeguard:
 
 
 @pytest.mark.parametrize(
-    ("begin_speed", "acceleration", "distance", "expected"),
+    ("begin_speed", "acceleration", "dt", "expected"),
     [
-        (10.0, 0.0, 30.0, (10.0, 30.0, 3.0)),
-        (0.0, 0.0, 30.0, (0.0, 0.0, 0.0)),
-        (10.0, 1.0, 30.0, (math.sqrt(160.0), 30.0, math.sqrt(160.0) - 10.0)),
+        # 惰行 (|a| < 1e-6)
+        (10.0, 0.0, 3.0, (10.0, 30.0, 3.0)),
+        (15.0, 1e-7, 2.0, (15.0, 30.0, 2.0)),
+        # 静止且不牵引：零位移步
+        (0.0, 0.0, 1.0, (0.0, 0.0, 0.0)),
+        (0.0, -1.0, 1.0, (0.0, 0.0, 0.0)),
+        # 从静止起步
+        (0.0, 1.0, 2.0, (2.0, 2.0, 2.0)),
+        # 加速、未停车的减速
+        (10.0, 1.0, 2.0, (12.0, 22.0, 2.0)),
+        (20.0, -0.5, 1.5, (19.25, 29.4375, 1.5)),
+        # 步内停车：截到停车时刻，停车点为 v^2 / (2|a|)
         (10.0, -2.0, 30.0, (0.0, 25.0, 5.0)),
+        (8.0, -1.0, 8.0, (0.0, 32.0, 8.0)),
     ],
 )
-def test_run_distance(
+def test_run_time(
     begin_speed: float,
     acceleration: float,
-    distance: float,
+    dt: float,
     expected: tuple[float, float, float],
 ) -> None:
-    actual = run_distance(
-        begin_speed,
-        acceleration,
-        distance,
-    )
-
-    assert actual == pytest.approx(expected)
+    assert run_time(begin_speed, acceleration, dt) == pytest.approx(expected)
 
 
 @pytest.mark.parametrize(

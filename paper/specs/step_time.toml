@@ -1,10 +1,10 @@
 [experiment]
-name = "step_distance"
+name = "step_time"
 scenario = "paper/specs/scenario.toml"
 line_dir = "paper/data/line"
 tasks = "paper/specs/tasks.toml"
 task = "longyang_to_airport"
-output_root = "output/paper_experiment/01_step_distance"
+output_root = "output/paper_experiment/01_step_time"
 seeds = [11, 131, 239, 359, 443]
 
 [train]
@@ -21,21 +21,21 @@ safety_truncation_bin_size_m = 5000.0
 device = "cpu"
 
 [[variants]]
-id = "10p0"
-label = "10 m"
-step_distance_m = 10.0
+id = "0p5"
+label = "0.5 s"
+step_time_s = 0.5
 
 [[variants]]
-id = "30p0"
-label = "30 m"
-step_distance_m = 30.0
+id = "1p0"
+label = "1.0 s"
+step_time_s = 1.0
 
 [[variants]]
-id = "50p0"
-label = "50 m"
-step_distance_m = 50.0
+id = "1p5"
+label = "1.5 s"
+step_time_s = 1.5
 
 [[variants]]
-id = "100p0"
-label = "100 m"
-step_distance_m = 100.0
+id = "2p0"
+label = "2.0 s"
+step_time_s = 2.0

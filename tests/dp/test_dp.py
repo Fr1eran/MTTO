@@ -167,7 +167,7 @@ def test_dp_upper_curve_uses_operational_stepper_task_parameters(
         start_position_m=135.0,
         target_position_m=29270.0,
         schedule_time_s=465.0,
-        max_acc_change=0.75,
+        max_jerk_mps3=0.75,
         max_stop_error_m=0.3,
         max_arr_time_error_s=10.0,
     )
@@ -197,7 +197,7 @@ def test_dp_optimize_uses_task_absolute_time_limit(
         start_position_m=0.0,
         target_position_m=20.0,
         schedule_time_s=20.0,
-        max_acc_change=0.75,
+        max_jerk_mps3=0.75,
         max_stop_error_m=0.3,
         max_arr_time_error_s=10.0,
     )
@@ -277,7 +277,7 @@ def test_dp_optimize_expands_lambda_and_returns_closest_candidate(
         start_position_m=0.0,
         target_position_m=20.0,
         schedule_time_s=20.0,
-        max_acc_change=0.75,
+        max_jerk_mps3=0.75,
         max_stop_error_m=0.3,
         max_arr_time_error_s=0.1,
     )
@@ -361,7 +361,7 @@ def test_dp_optimize_passes_nonzero_endpoint_states_to_inner_solver(
         start_position_m=0.0,
         target_position_m=20.0,
         schedule_time_s=10.0,
-        max_acc_change=0.75,
+        max_jerk_mps3=0.75,
         max_stop_error_m=0.3,
         max_arr_time_error_s=10.0,
     )
@@ -433,7 +433,7 @@ def test_dp_optimize_rejects_endpoint_speed_off_grid() -> None:
         start_position_m=0.0,
         target_position_m=20.0,
         schedule_time_s=10.0,
-        max_acc_change=0.75,
+        max_jerk_mps3=0.75,
         max_stop_error_m=0.3,
         max_arr_time_error_s=10.0,
     )
@@ -586,7 +586,7 @@ def test_dp_optimize_returns_valid_speed_profile(
         start_position_m=135.0,
         target_position_m=335.0,
         schedule_time_s=40.0,
-        max_acc_change=0.75,
+        max_jerk_mps3=0.75,
         max_stop_error_m=0.3,
         max_arr_time_error_s=10.0,
     )

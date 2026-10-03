@@ -28,6 +28,9 @@ from mtto.rl.state import TerminationReason
 
 DEFAULT_BATCH_SIZE: Final[int] = 512
 DEFAULT_N_EPOCHS: Final[int] = 8
+# Initial policy std exp(-1) = 0.37 m/s^2: the unit-std start spends the first
+# rollouts in a high-energy plateau and converges two to three times later.
+DEFAULT_LOG_STD_INIT: Final[float] = -1.0
 DEFAULT_DEVICE: Final[str] = "cpu"
 DEFAULT_EVALUATION_INTERVAL_ROLLOUTS: Final[int] = 12
 
@@ -148,6 +151,7 @@ def build_ppo(
         tensorboard_log=tensorboard_log,
         policy_kwargs=dict(
             net_arch=dict(pi=[64, 64], vf=[64, 64]),
+            log_std_init=DEFAULT_LOG_STD_INIT,
         ),
     )
 

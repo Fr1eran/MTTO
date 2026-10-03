@@ -14,6 +14,7 @@ from numpy.typing import NDArray
 from mtto.domain.scenario import Task
 from mtto.rl.rewards import RewardCalculator, RewardNormalization
 from paper.figures import load_paper_task
+from paper.figures.potential_function import STEP_TIME_S
 from paper.plotting.style import (
     VIS_HARD_LIMIT_RED,
     VIS_SAFE_BLUE,
@@ -43,7 +44,7 @@ def create_default_reward_calculator(
         start_position_m=0.0,
         target_position_m=100.0,
         schedule_time_s=100.0 if schedule_time_s is None else schedule_time_s,
-        max_acc_change=paper_task.max_acc_change,
+        max_jerk_mps3=paper_task.max_jerk_mps3,
         max_stop_error_m=(
             paper_task.max_stop_error_m
             if max_stop_error_m is None
@@ -56,11 +57,10 @@ def create_default_reward_calculator(
         ),
     )
     normalization = RewardNormalization(
-        max_energy_consumption_kj=100.0,
+        peak_propulsion_kj_per_m=100.0,
         initial_min_operation_time_s=0.0,
-        required_episode_steps=100,
     )
-    return RewardCalculator(normalization, gamma=0.998), task
+    return RewardCalculator(normalization, gamma=0.998, step_time_s=STEP_TIME_S), task
 
 
 DEFAULT_CALCULATOR, DEFAULT_TASK = create_default_reward_calculator()
@@ -69,7 +69,7 @@ MAX_TIME_ERROR_S = DEFAULT_TASK.max_arr_time_error_s
 STOPPING_ERROR_MAX_M = 10.0
 PUNCTUALITY_ERROR_MAX_S = 140.0
 PUNCTUALITY_DECAY_TIME_S = RewardCalculator.PUNCTUALITY_DECAY_TIME_S
-STOPPING_SCORE_BETA = RewardCalculator.STOPPING_SCORE_BETA
+STOPPING_SCORE_POWER = RewardCalculator.STOPPING_SCORE_POWER
 
 
 def current_stopping_score(
@@ -133,7 +133,7 @@ def visualize_stopping_score_function(
     _ = ax_score.plot(
         x_values,
         rewards,
-        label=rf"$f_s(x)=\frac{{1}}{{1+(\max(0,x-x_1)/{calc.STOPPING_SCORE_BETA})^2}}$",
+        label=rf"$f_s(x)=\frac{{1}}{{1+(x/x_1)^{{{calc.STOPPING_SCORE_POWER:g}}}}}$",
         color=VIS_SAFE_BLUE,
         linewidth=1.8,
     )

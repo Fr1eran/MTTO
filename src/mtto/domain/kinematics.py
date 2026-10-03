@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from typing import NamedTuple
 
 import numpy as np
@@ -10,7 +9,6 @@ from numpy.typing import NDArray
 __all__ = [
     "Motion",
     "accel_between",
-    "run_distance",
     "run_time",
     "segment_acceleration",
 ]
@@ -33,38 +31,6 @@ def segment_acceleration(
 
 
 @njit(cache=True)
-def run_distance(v0: float, a: float, ds: float) -> tuple[float, float, float]:
-    """Advance one RL-style constant-acceleration distance step.
-
-    Returns ``(next_speed_mps, actual_distance_m, duration_s)``.  A braking
-    step that would pass below zero speed is shortened to its stopping point.
-    """
-    acc_tolerance = 1e-6
-    speed_tolerance = 1e-6
-
-    if abs(a) < acc_tolerance:
-        next_speed_mps = v0
-        if next_speed_mps < speed_tolerance:
-            return 0.0, 0.0, 0.0
-        return (
-            next_speed_mps,
-            ds,
-            ds / next_speed_mps,
-        )
-
-    next_speed_squared = v0 * v0 + 2.0 * a * ds
-    actual_distance_m = ds
-    if next_speed_squared < speed_tolerance:
-        next_speed_mps = 0.0
-        actual_distance_m = -(v0 * v0) / (2.0 * a)
-    else:
-        next_speed_mps = math.sqrt(next_speed_squared)
-
-    duration_s = (next_speed_mps - v0) / a
-    return next_speed_mps, actual_distance_m, duration_s
-
-
-@njit(cache=True)
 def accel_between(v0: float, v1: float, ds: float) -> tuple[float, float]:
     """Infer constant acceleration and duration from a DP-style edge.
 
@@ -83,7 +49,11 @@ def accel_between(v0: float, v1: float, ds: float) -> tuple[float, float]:
 
 @njit(cache=True)
 def run_time(v0: float, a: float, dt: float) -> tuple[float, float, float]:
-    """以速度 v0、加速度 a 运行时间 dt，返回 (末速度, 距离, 时长)。"""
+    """Advance one RL-style constant-acceleration time step.
+
+    Returns ``(next_speed_mps, actual_distance_m, duration_s)``.  A braking
+    step that would pass below zero speed is shortened to its stopping time.
+    """
     acc_tolerance = 1e-6
     speed_tolerance = 1e-6
 

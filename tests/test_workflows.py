@@ -55,14 +55,14 @@ def _make_dummy_reward_diagnostics(
             "comfort",
             "terminal_stopping",
             "terminal_punctuality",
-            "survival",
+            "progress",
             "truncation",
             "punctuality_shaping",
             "total",
         ]
     )
     return RewardDiagnostics(
-        schema_version=np.asarray([5], dtype=np.int16),
+        schema_version=np.asarray([8], dtype=np.int16),
         reward_names=reward_names,
         rollout_end_step=np.arange(1, n_rollouts + 1, dtype=np.int64) * 16,
         rollout_transition_count=np.full(n_rollouts, 16, dtype=np.int64),
@@ -122,7 +122,7 @@ def test_train_workflow_environment_steps(tmp_path: Path) -> None:
     out_dir = tmp_path / "run_env_steps"
     config = TrainConfig(
         reward_preset="basic_safety_punctuality",
-        step_distance_m=100.0,
+        step_time_s=1.0,
         gamma=0.998,
         budget_mode="environment_steps",
         training_episodes=None,
@@ -201,7 +201,7 @@ def test_train_workflow_completed_episodes(tmp_path: Path) -> None:
     out_dir = tmp_path / "run_episodes"
     config = TrainConfig(
         reward_preset="basic_safety_punctuality",
-        step_distance_m=1000.0,
+        step_time_s=1.0,
         gamma=0.998,
         budget_mode="completed_episodes",
         training_episodes=2,
@@ -240,7 +240,7 @@ def test_train_and_evaluate_fail_if_output_dir_exists(tmp_path: Path) -> None:
 
     train_config = TrainConfig(
         reward_preset="basic_safety_punctuality",
-        step_distance_m=100.0,
+        step_time_s=1.0,
         gamma=0.998,
         budget_mode="environment_steps",
         training_episodes=None,
@@ -277,7 +277,7 @@ def test_train_and_evaluate_do_not_create_output_dir_on_validation_failure(
 
     valid_train_config = TrainConfig(
         reward_preset="basic_safety_punctuality",
-        step_distance_m=100.0,
+        step_time_s=1.0,
         gamma=0.998,
         budget_mode="environment_steps",
         training_episodes=None,
@@ -313,6 +313,14 @@ def test_train_and_evaluate_do_not_create_output_dir_on_validation_failure(
     with pytest.raises(ValueError, match="Unknown budget_mode"):
         train(scenario, task, bad_budget, fail_dir_3)
     assert not fail_dir_3.exists()
+
+    # 4. train: 控制周期非正或非有限时校验失败，不创建输出目录
+    for step_time_s in (0.0, -1.0, float("nan"), float("inf")):
+        fail_dir_4 = tmp_path / "train_fail_step_time"
+        bad_step = replace(valid_train_config, step_time_s=step_time_s)
+        with pytest.raises(ValueError, match="step_time_s must be finite and positive"):
+            train(scenario, task, bad_step, fail_dir_4)
+        assert not fail_dir_4.exists()
 
     # 准备基础源运行以供 evaluate 校验测试
     source_train_dir = tmp_path / "source_train_for_eval_failure_tests"
@@ -359,7 +367,7 @@ def test_evaluate_workflow(tmp_path: Path) -> None:
     train_dir = tmp_path / "source_train"
     train_config = TrainConfig(
         reward_preset="basic_safety_punctuality",
-        step_distance_m=100.0,
+        step_time_s=1.0,
         gamma=0.998,
         budget_mode="environment_steps",
         training_episodes=None,
@@ -435,7 +443,7 @@ def test_train_progress_callback(tmp_path: Path) -> None:
     out_dir = tmp_path / "run_progress"
     config = TrainConfig(
         reward_preset="basic_safety_punctuality",
-        step_distance_m=100.0,
+        step_time_s=1.0,
         gamma=0.998,
         budget_mode="environment_steps",
         training_episodes=None,
@@ -537,32 +545,33 @@ def test_evaluations_roundtrip_and_strict_checks(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("route_dist", "episodes", "num_envs", "step_dist", "rollout_steps"),
+    ("episodes", "num_envs", "step_time_s", "time_limit_s", "rollout_steps"),
     [
-        (29845.0, 7000, 8, 30.0, 8192),
-        (29845.0, 7001, 8, 30.0, 8192),
-        (29845.0, 5000, 8, 30.0, 8192),
-        (29845.0, 7000, 8, 10.0, 8192),
-        (29845.0, 7000, 8, 100.0, 8192),
-        (10000.0, 100, 4, 25.0, 1024),
+        (7000, 8, 1.0, 475.0, 8192),
+        (7001, 8, 1.0, 475.0, 8192),
+        (5000, 8, 0.5, 475.0, 8192),
+        # A non-integer number of control periods rounds up.
+        (7000, 8, 1.5, 475.0, 8192),
+        (7000, 8, 2.0, 495.0, 8192),
+        (100, 4, 0.3, 100.0, 1024),
     ],
 )
 def test_derive_training_budget_equivalence(
-    route_dist: float,
     episodes: int,
     num_envs: int,
-    step_dist: float,
+    step_time_s: float,
+    time_limit_s: float,
     rollout_steps: int,
 ) -> None:
     effective, max_steps, total_timesteps = derive_training_budget(
-        route_distance_m=route_dist,
         training_episodes=episodes,
         num_envs=num_envs,
-        step_distance_m=step_dist,
+        step_time_s=step_time_s,
+        episode_time_limit_s=time_limit_s,
         rollout_steps_per_update=rollout_steps,
     )
     expected_effective = math.ceil(episodes / num_envs) * num_envs
-    expected_max_steps = math.ceil(route_dist / step_dist)
+    expected_max_steps = math.ceil(time_limit_s / step_time_s)
     expected_total = (
         math.ceil(expected_effective * expected_max_steps / rollout_steps)
         * rollout_steps
@@ -575,19 +584,17 @@ def test_derive_training_budget_equivalence(
 @pytest.mark.parametrize(
     ("kwargs", "match"),
     [
-        (
-            {"route_distance_m": 0.0},
-            "route_distance_m must be finite and positive",
-        ),
-        (
-            {"route_distance_m": float("nan")},
-            "route_distance_m must be finite and positive",
-        ),
         ({"training_episodes": 0}, "training_episodes must be positive"),
         ({"num_envs": 0}, "num_envs must be positive"),
+        ({"step_time_s": 0.0}, "step_time_s must be finite and positive"),
+        ({"step_time_s": float("nan")}, "step_time_s must be finite and positive"),
         (
-            {"step_distance_m": 0.0},
-            "step_distance_m must be finite and positive",
+            {"episode_time_limit_s": -1.0},
+            "episode_time_limit_s must be finite and positive",
+        ),
+        (
+            {"episode_time_limit_s": float("inf")},
+            "episode_time_limit_s must be finite and positive",
         ),
         ({"rollout_steps_per_update": 0}, "rollout_steps_per_update must be positive"),
     ],
@@ -596,10 +603,10 @@ def test_derive_training_budget_rejects_invalid_inputs(
     kwargs: dict[str, float | int], match: str
 ) -> None:
     base_kwargs: dict[str, float | int] = {
-        "route_distance_m": 29845.0,
         "training_episodes": 7000,
         "num_envs": 8,
-        "step_distance_m": 30.0,
+        "step_time_s": 1.0,
+        "episode_time_limit_s": 475.0,
         "rollout_steps_per_update": 8192,
     }
     with pytest.raises(ValueError, match=match):
@@ -609,13 +616,11 @@ def test_derive_training_budget_rejects_invalid_inputs(
 def test_build_env_references_consistency() -> None:
     scenario = load_paper_scenario()
     task = load_paper_task()
-    lookup, normalization = build_env_references(scenario, task, 30.0)
-    assert normalization.max_energy_consumption_kj > 0.0
+    lookup, normalization = build_env_references(scenario, task)
+    assert normalization.peak_propulsion_kj_per_m > 0.0
     assert normalization.initial_min_operation_time_s > 0.0
-    assert normalization.required_episode_steps == math.ceil(
-        (task.target_position_m - task.start_position_m) / 30.0
-    )
-    assert lookup.pos_min_m == task.start_position_m
+    # The upper curve starts from rest at the track origin.
+    assert lookup.pos_min_m == 0.0
     assert lookup.speed_mps.size > 0
 
 
@@ -625,7 +630,7 @@ def test_solve_dp_workflow(tmp_path: Path) -> None:
         start_position_m=135.0,
         target_position_m=335.0,
         schedule_time_s=40.0,
-        max_acc_change=0.75,
+        max_jerk_mps3=0.75,
         max_stop_error_m=0.3,
         max_arr_time_error_s=10.0,
     )
@@ -690,7 +695,7 @@ def test_solve_dp_directory_already_exists_and_validation_failure(
         start_position_m=135.0,
         target_position_m=335.0,
         schedule_time_s=40.0,
-        max_acc_change=0.75,
+        max_jerk_mps3=0.75,
         max_stop_error_m=0.3,
         max_arr_time_error_s=10.0,
     )
@@ -731,7 +736,7 @@ def test_solve_dp_cache_dir_behavior(
         start_position_m=135.0,
         target_position_m=335.0,
         schedule_time_s=40.0,
-        max_acc_change=0.75,
+        max_jerk_mps3=0.75,
         max_stop_error_m=0.3,
         max_arr_time_error_s=10.0,
     )
@@ -798,7 +803,7 @@ def test_dp_serial_vs_parallel_precompute_equivalence(tmp_path: Path) -> None:
         start_position_m=135.0,
         target_position_m=335.0,
         schedule_time_s=40.0,
-        max_acc_change=0.75,
+        max_jerk_mps3=0.75,
         max_stop_error_m=0.3,
         max_arr_time_error_s=10.0,
     )

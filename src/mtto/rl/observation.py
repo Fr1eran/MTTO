@@ -16,7 +16,7 @@ from mtto.rl.rewards import (
 )
 from mtto.rl.state import State
 
-POLICY_IO_VERSION: Final[int] = 2
+POLICY_IO_VERSION: Final[int] = 3
 
 # Scales of the signed-log features.
 STOP_SYMLOG_SCALE_M: Final[float] = 0.1
@@ -31,17 +31,18 @@ def _symlog(value: float, scale: float, limit: float) -> float:
 
 
 class ObservationBuilder:
-    """Build the 11-dimensional observation.
+    """Build the 13-dimensional observation.
 
     0 route progress, 1 signed log distance to the target (negative past it),
     2 speed, 3 previous acceleration, 4 upper speed limit, 5 lower speed limit,
-    6 punctuality ratio e / hypot(e, sigma) (the punctuality potential is
-    -K * o6^2), 7 acceleration that stops exactly on the target, 8 braking
-    reserve, 9 signed log slack time, 10 stop error left by full braking.
+    6 punctuality ratio e / hypot(e, sigma), 7 acceleration that stops
+    exactly on the target, 8 braking reserve, 9 signed log slack time, 10 stop
+    error left by full braking, 11 slope over the vehicle's slope capacity
+    (uphill positive), 12 traction reserve.
     """
 
-    OBSERVATION_DIM: int = 11
-    LOW: Final[tuple[float, ...]] = (0, -1, 0, -1, 0, 0, -1, -1, 0, -1, -1)
+    OBSERVATION_DIM: int = 13
+    LOW: Final[tuple[float, ...]] = (0, -1, 0, -1, 0, 0, -1, -1, 0, -1, -1, -1, 0)
 
     def __init__(
         self,
@@ -107,6 +108,10 @@ class ObservationBuilder:
         target[10] = _symlog(
             stop_error_m, STOP_SYMLOG_SCALE_M, STOP_ERROR_SYMLOG_LIMIT_M
         )
+        target[11] = min(
+            1.0, max(-1.0, state.slope_pct / self.vehicle.max_slope_capacity)
+        )
+        target[12] = min(horizon, max(0.0, state.traction_reserve_steps)) / horizon
         # The internal buffer is scratch storage only.  Returning it would
         # expose a mutable array that the next build() call overwrites.
         return target.copy() if uses_internal_buffer else target

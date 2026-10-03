@@ -60,7 +60,7 @@ class Task:
     start_position_m: float
     target_position_m: float
     schedule_time_s: float | None
-    max_acc_change: float
+    max_jerk_mps3: float
     max_stop_error_m: float
     max_arr_time_error_s: float
     schedule_change: ScheduleChange | None = None
@@ -69,7 +69,7 @@ class Task:
         numeric_values = [
             self.start_position_m,
             self.target_position_m,
-            self.max_acc_change,
+            self.max_jerk_mps3,
             self.max_stop_error_m,
             self.max_arr_time_error_s,
         ]
@@ -86,9 +86,9 @@ class Task:
             raise ValueError(
                 f"schedule_time_s must be positive or None, got {self.schedule_time_s}"
             )
-        if self.max_acc_change <= 0.0:
+        if self.max_jerk_mps3 <= 0.0:
             raise ValueError(
-                f"max_acc_change must be positive, got {self.max_acc_change}"
+                f"max_jerk_mps3 must be positive, got {self.max_jerk_mps3}"
             )
         if self.max_stop_error_m <= 0.0:
             raise ValueError(

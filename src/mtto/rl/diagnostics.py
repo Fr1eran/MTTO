@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from mtto.evaluation.quality import QualityReport
     from mtto.rl.evaluate import RLRun
 
-REWARD_DIAGNOSTICS_SCHEMA_VERSION: Final[int] = 5
+REWARD_DIAGNOSTICS_SCHEMA_VERSION: Final[int] = 8
 _SUPPORTED_SCHEMA_VERSIONS: Final[frozenset[int]] = frozenset(
     {REWARD_DIAGNOSTICS_SCHEMA_VERSION}
 )
@@ -26,7 +26,7 @@ REWARD_NAMES: Final[tuple[str, ...]] = (
     "comfort",
     "terminal_stopping",
     "terminal_punctuality",
-    "survival",
+    "progress",
     "truncation",
     "punctuality_shaping",
     "total",

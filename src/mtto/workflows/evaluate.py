@@ -101,18 +101,18 @@ def evaluate(
     out_dir.mkdir(parents=True, exist_ok=False)
 
     src_config = source_run.record.config
-    step_distance_m = float(src_config["step_distance_m"])
+    step_time_s = float(src_config["step_time_s"])
     gamma = float(src_config["gamma"])
     reward_preset = str(src_config["reward_preset"])
     reward_config = build_reward_config(reward_preset)
 
-    srtsp_lookup, normalization = build_env_references(scenario, task, step_distance_m)
+    srtsp_lookup, normalization = build_env_references(scenario, task)
 
     env = make_env(
         scenario=scenario,
         task=task,
         gamma=gamma,
-        step_distance=step_distance_m,
+        step_time_s=step_time_s,
         srtsp_lookup=srtsp_lookup,
         normalization=normalization,
         compact_training_info=False,

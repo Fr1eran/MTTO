@@ -11,17 +11,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
+import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 import mtto
+from mtto.domain.energy import segment_energy
+from mtto.domain.kinematics import run_time
 from mtto.domain.scenario import Scenario, Task
 from mtto.domain.speed_profile import SpeedProfile
 from mtto.domain.srtsp import (
     SrtspLookup,
     build_srtsp_lookup,
-    max_energy_and_min_operation_time,
     min_operation_time_curve,
     min_remaining_time_s,
 )
@@ -72,7 +74,7 @@ __all__ = [
 @dataclass(frozen=True, slots=True)
 class TrainConfig:
     reward_preset: str
-    step_distance_m: float
+    step_time_s: float
     gamma: float
     budget_mode: Literal["completed_episodes", "environment_steps"]
     training_episodes: int | None
@@ -114,7 +116,7 @@ class TrainResult:
 
 
 def build_env_references(
-    scenario: Scenario, task: Task, step_distance_m: float
+    scenario: Scenario, task: Task
 ) -> tuple[SrtspLookup, RewardNormalization]:
     """Compute task-level SRTSP lookup and reward normalization once."""
     if task.schedule_time_s is None:
@@ -122,27 +124,45 @@ def build_env_references(
     vehicle = scenario.vehicle
     line = scenario.line
     factor = scenario.safeguard.params.factor
+    # The upper curve accelerates from rest at the track origin, so a train
+    # leaving the task start from rest always stays below it.
     profile_pos, profile_speed = min_operation_time_curve(
         vehicle=vehicle,
         track=line,
         factor=factor,
-        begin_pos=task.start_position_m,
+        begin_pos=0.0,
         begin_speed=0.0,
         end_pos=task.target_position_m + task.max_stop_error_m * 20,
         end_speed=0.0,
     )
     lookup = build_srtsp_lookup(profile_pos, profile_speed)
-    mec, lec, _ = max_energy_and_min_operation_time(
-        vehicle=vehicle,
-        track=line,
-        factor=factor,
-        energy=scenario.energy,
-        begin_pos=task.start_position_m,
-        begin_speed=0.0,
-        end_pos=task.target_position_m,
-        end_speed=0.0,
-        distance=task.target_position_m - task.start_position_m,
-    )
+    # Peak traction energy per metre: full acceleration over a short step from
+    # every moving speed (a 0.1 s step from rest covers only 5 mm and its
+    # per-metre loss is a discretisation artefact), at the start of the task
+    # and after each slope breakpoint inside it (the step energy uses the
+    # slope at its start point only).
+    breakpoints = line.slope_intervals[
+        (line.slope_intervals > task.start_position_m)
+        & (line.slope_intervals < task.target_position_m)
+    ]
+    peak_propulsion_kj_per_m = 0.0
+    for begin_pos in (task.start_position_m, *breakpoints):
+        for speed in np.arange(0.5, vehicle.max_speed + 0.25, 0.5):
+            _, distance, duration = run_time(float(speed), vehicle.max_acc, 0.1)
+            propulsion, _ = segment_energy(
+                scenario.energy,
+                vehicle,
+                line,
+                begin_pos=float(begin_pos),
+                begin_speed=float(speed),
+                acc=vehicle.max_acc,
+                distance=distance,
+                direction=1,
+                operation_time=duration,
+            )
+            peak_propulsion_kj_per_m = max(
+                peak_propulsion_kj_per_m, propulsion / distance
+            )
     min_remaining = min_remaining_time_s(
         vehicle, line, factor, task.start_position_m, 0.0, task.target_position_m
     )
@@ -150,38 +170,33 @@ def build_env_references(
         task.schedule_time_s - 0.0 - min_remaining
     )
     return lookup, RewardNormalization(
-        max_energy_consumption_kj=float(mec + lec),
+        peak_propulsion_kj_per_m=peak_propulsion_kj_per_m,
         initial_min_operation_time_s=initial_min_operation_time_s,
-        required_episode_steps=math.ceil(
-            (task.target_position_m - task.start_position_m) / step_distance_m
-        ),
     )
 
 
 def derive_training_budget(
     *,
-    route_distance_m: float,
     training_episodes: int,
     num_envs: int,
-    step_distance_m: float,
+    step_time_s: float,
+    episode_time_limit_s: float,
     rollout_steps_per_update: int,
 ) -> tuple[int, int, int]:
     """Resolve the effective episode target, max episode steps, and timestep ceiling."""
-    route_distance = float(route_distance_m)
-    if not math.isfinite(route_distance) or route_distance <= 0.0:
-        raise ValueError("route_distance_m must be finite and positive")
     if training_episodes <= 0:
         raise ValueError("training_episodes must be positive")
     if num_envs <= 0:
         raise ValueError("num_envs must be positive")
-    step_distance = float(step_distance_m)
-    if not math.isfinite(step_distance) or step_distance <= 0.0:
-        raise ValueError("step_distance_m must be finite and positive")
+    if not math.isfinite(step_time_s) or step_time_s <= 0.0:
+        raise ValueError("step_time_s must be finite and positive")
+    if not math.isfinite(episode_time_limit_s) or episode_time_limit_s <= 0.0:
+        raise ValueError("episode_time_limit_s must be finite and positive")
     if rollout_steps_per_update <= 0:
         raise ValueError("rollout_steps_per_update must be positive")
 
     effective_training_episodes = math.ceil(training_episodes / num_envs) * num_envs
-    max_episode_steps = math.ceil(route_distance / step_distance)
+    max_episode_steps = math.ceil(episode_time_limit_s / step_time_s)
     raw_total_timesteps = effective_training_episodes * max_episode_steps
     derived_total_timesteps = (
         math.ceil(raw_total_timesteps / rollout_steps_per_update)
@@ -217,8 +232,8 @@ def train(
         raise ValueError("num_envs must be positive")
     if config.n_steps_per_env <= 0:
         raise ValueError("n_steps_per_env must be positive")
-    if not math.isfinite(config.step_distance_m) or config.step_distance_m <= 0.0:
-        raise ValueError("step_distance_m must be finite and positive")
+    if not math.isfinite(config.step_time_s) or config.step_time_s <= 0.0:
+        raise ValueError("step_time_s must be finite and positive")
     if not math.isfinite(config.gamma) or config.gamma <= 0.0:
         raise ValueError("gamma must be finite and positive")
     if (
@@ -245,9 +260,7 @@ def train(
     out_dir.mkdir(parents=True, exist_ok=False)
 
     reward_config = build_reward_config(config.reward_preset)
-    srtsp_lookup, normalization = build_env_references(
-        scenario, task, config.step_distance_m
-    )
+    srtsp_lookup, normalization = build_env_references(scenario, task)
 
     if config.seed is not None:
         set_random_seed(
@@ -262,12 +275,18 @@ def train(
 
     if config.budget_mode == "completed_episodes":
         assert config.training_episodes is not None
-        route_distance_m = task.target_position_m - task.start_position_m
+        # Episodes have no time limit; the strict deadline of the latest
+        # schedule only sizes the timestep ceiling of the episode budget.
+        latest_schedule_time_s = task.schedule_time_s
+        if task.schedule_change is not None:
+            latest_schedule_time_s = max(
+                latest_schedule_time_s, task.schedule_change.new_schedule_time_s
+            )
         effective_training_episodes, _, total_timesteps = derive_training_budget(
-            route_distance_m=route_distance_m,
             training_episodes=config.training_episodes,
             num_envs=config.num_envs,
-            step_distance_m=config.step_distance_m,
+            step_time_s=config.step_time_s,
+            episode_time_limit_s=latest_schedule_time_s + task.max_arr_time_error_s,
             rollout_steps_per_update=rollout_steps_per_update,
         )
         episode_progress = CompletedEpisodeProgress(effective_training_episodes)
@@ -284,7 +303,7 @@ def train(
                 scenario=scenario,
                 task=task,
                 gamma=config.gamma,
-                step_distance=config.step_distance_m,
+                step_time_s=config.step_time_s,
                 srtsp_lookup=srtsp_lookup,
                 normalization=normalization,
                 compact_training_info=True,
@@ -325,7 +344,7 @@ def train(
         scenario=scenario,
         task=task,
         gamma=config.gamma,
-        step_distance=config.step_distance_m,
+        step_time_s=config.step_time_s,
         srtsp_lookup=srtsp_lookup,
         normalization=normalization,
         compact_training_info=False,
@@ -429,7 +448,7 @@ def train(
         scenario=scenario,
         task=task,
         gamma=config.gamma,
-        step_distance=config.step_distance_m,
+        step_time_s=config.step_time_s,
         srtsp_lookup=srtsp_lookup,
         normalization=normalization,
         compact_training_info=False,

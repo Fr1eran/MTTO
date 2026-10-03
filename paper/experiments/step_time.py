@@ -1,4 +1,4 @@
-"""Spatial control-step ablation from completed training artifacts."""
+"""Temporal control-step ablation from completed training artifacts."""
 
 from __future__ import annotations
 
@@ -19,11 +19,11 @@ def run(spec_path: str | Path) -> tuple[RunResult, ...]:
 
 def summarize(spec: ExperimentSpec, run_dirs: tuple[Path, ...]) -> dict[str, object]:
     if len(run_dirs) != len(spec.variants) * len(spec.seeds):
-        raise ValueError("Step-distance matrix is incomplete")
+        raise ValueError("Step-time matrix is incomplete")
     variants = {}
     curves = {}
     rows = [
-        "| Step distance | Strict feasibility rate | Stop error (m) | Time error (s) "
+        "| Step time | Strict feasibility rate | Stop error (m) | Time error (s) "
         "| Total energy (kWh) | Cumulative acceleration variation (m/s²) |",
         "| --- | --- | --- | --- | --- | --- |",
     ]
@@ -70,7 +70,7 @@ def summarize(spec: ExperimentSpec, run_dirs: tuple[Path, ...]) -> dict[str, obj
         data = {
             "variant_id": variant.id,
             "label": variant.label,
-            "step_distance": float(completed[0].record.config["step_distance_m"]),
+            "step_time_s": float(completed[0].record.config["step_time_s"]),
             "feasible_count": len(feasible),
             "feasible_rate": len(feasible) / len(seed_data),
             "safe_count": sum(item["safe"] for item in seed_data),
@@ -144,19 +144,19 @@ def summarize(spec: ExperimentSpec, run_dirs: tuple[Path, ...]) -> dict[str, obj
                 item["mean_feasible_comfort"]
                 if item["mean_feasible_comfort"] is not None
                 else float("inf"),
-                item["step_distance"],
+                item["step_time_s"],
             ),
         )
-        recommended = ordered[0]["step_distance"]
-        status = f"推荐步长: {recommended:g} m"
+        recommended = ordered[0]["step_time_s"]
+        status = f"推荐步长: {recommended:g} s"
     rows.append(
         "\n*Note: Early failures affect energy and errors; interpret them with strict "
         "feasibility. Cumulative acceleration variation is "
         r"$\sum_t |a_t-a_{t-1}|$ (m/s²).*"
     )
     return {
-        "matrix_id": "step_distance",
-        "recommended_step_distance": recommended,
+        "matrix_id": "step_time",
+        "recommended_step_time_s": recommended,
         "selection_status": status,
         "variants": variants,
         "curves": curves,
@@ -166,7 +166,7 @@ def summarize(spec: ExperimentSpec, run_dirs: tuple[Path, ...]) -> dict[str, obj
 
 def write_summary(summary: dict[str, object], output: Path) -> None:
     output.mkdir(parents=True, exist_ok=True)
-    (output / "step_distance_summary.json").write_text(
+    (output / "step_time_summary.json").write_text(
         json.dumps(
             {key: value for key, value in summary.items() if key != "table"},
             ensure_ascii=False,
@@ -176,4 +176,4 @@ def write_summary(summary: dict[str, object], output: Path) -> None:
         + "\n",
         encoding="utf-8",
     )
-    (output / "step_distance_table.md").write_text(summary["table"], encoding="utf-8")
+    (output / "step_time_table.md").write_text(summary["table"], encoding="utf-8")

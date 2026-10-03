@@ -86,7 +86,7 @@ def test_cli_dp_e2e(tmp_path: Path) -> None:
 start_position_m = 135.0
 target_position_m = 335.0
 schedule_time_s = 40.0
-max_acc_change = 0.75
+max_jerk_mps3 = 0.75
 max_stop_error_m = 0.3
 max_arr_time_error_s = 10.0
 """
@@ -141,7 +141,7 @@ def test_cli_train_eval_analyze_e2e(tmp_path: Path) -> None:
 start_position_m = 135.0
 target_position_m = 335.0
 schedule_time_s = 40.0
-max_acc_change = 0.75
+max_jerk_mps3 = 0.75
 max_stop_error_m = 0.3
 max_arr_time_error_s = 10.0
 """
@@ -151,7 +151,7 @@ max_arr_time_error_s = 10.0
     train_content = """
 [train]
 reward_preset = "basic"
-step_distance_m = 50.0
+step_time_s = 1.0
 gamma = 0.99
 budget_mode = "environment_steps"
 training_rollouts = 1
@@ -243,7 +243,7 @@ def test_cli_errors(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
 start_position_m = 135.0
 target_position_m = 335.0
 schedule_time_s = 40.0
-max_acc_change = 0.75
+max_jerk_mps3 = 0.75
 max_stop_error_m = 0.3
 max_arr_time_error_s = 10.0
 """
@@ -378,6 +378,49 @@ unexpected_key = 123
     _, err = capsys.readouterr()
     assert "Error:" in err
     assert "unexpected_key" in err
+
+    # 5. Train config without a positive control period -> exit code 1
+    train_content = """
+[train]
+reward_preset = "basic"
+gamma = 0.99
+budget_mode = "environment_steps"
+training_rollouts = 1
+num_envs = 1
+n_steps_per_env = 512
+evaluation_deterministic = true
+keep_best = true
+safety_truncation_bin_size_m = 50.0
+device = "cpu"
+"""
+    for step_line, message in (
+        ("", "Missing required config key in [train]: step_time_s"),
+        ("step_time_s = 0.0\n", "step_time_s must be finite and positive"),
+    ):
+        train_config_file = tmp_path / "train_step_time.toml"
+        train_config_file.write_text(train_content + step_line, encoding="utf-8")
+        output_dir = tmp_path / "train_step_time_out"
+        ret = main(
+            [
+                "train",
+                "--scenario",
+                "paper/specs/scenario.toml",
+                "--line-dir",
+                "paper/data/line",
+                "--tasks",
+                str(tasks_file),
+                "--task",
+                "small_task",
+                "--config",
+                str(train_config_file),
+                "--output-dir",
+                str(output_dir),
+            ]
+        )
+        assert ret == 1
+        _, err = capsys.readouterr()
+        assert message in err
+        assert not output_dir.exists()
 
 
 def test_cli_analyze_training_requires_config(tmp_path: Path) -> None:

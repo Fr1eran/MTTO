@@ -257,7 +257,7 @@ def method_figures(
     return training_path, metrics_path
 
 
-def step_distance_figure(
+def step_time_figure(
     summary: dict[str, object], spec: ExperimentSpec, output: Path
 ) -> Path:
     apply_sci_curve_style()
@@ -282,7 +282,7 @@ def step_distance_figure(
                 variant["label"],
                 STEP_COLORS[index % 4],
                 style,
-                highlight=variant_id == "30p0",
+                highlight=variant_id == "1p0",
                 markevery=3,
                 clip=(0.0, 1.0) if key == "feasible" else None,
             )
@@ -314,7 +314,7 @@ def step_distance_figure(
     apply_sci_figure_layout(
         fig, columns=2, height_in=3.0, left=0.10, bottom=0.19, top=0.90, wspace=0.24
     )
-    path = output / "step_distance_learning_curves.pdf"
+    path = output / "step_time_learning_curves.pdf"
     fig.savefig(path)
     plt.close(fig)
     return path

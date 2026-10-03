@@ -8,7 +8,7 @@ output_root = "output/paper_experiment/02_method_ablation"
 seeds = [11, 131, 239, 359, 443]
 
 [train]
-step_distance_m = 30.0
+step_time_s = 1.0
 gamma = 0.998
 budget_mode = "environment_steps"
 # training_episodes omitted: None in environment_steps mode

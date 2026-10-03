@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from paper.experiments import method_ablation, schedule_change, step_distance
+from paper.experiments import method_ablation, schedule_change, step_time
 from paper.experiments.runner import completed_matrix
 from paper.experiments.spec import load_experiment_spec
 
@@ -15,7 +15,7 @@ def main() -> None:
     experiments = parser.add_subparsers(dest="experiment", required=True)
     defaults = {
         "method_ablation": "paper/specs/method_ablation.toml",
-        "step_distance": "paper/specs/step_distance.toml",
+        "step_time": "paper/specs/step_time.toml",
         "schedule_change": "paper/specs/schedule_change.toml",
     }
     for name, default_spec in defaults.items():
@@ -48,9 +48,7 @@ def main() -> None:
             scenario, _ = schedule_change.planned_evaluations(spec)
             schedule_change_figure(summary, scenario, args.output)
     else:
-        module = (
-            method_ablation if args.experiment == "method_ablation" else step_distance
-        )
+        module = method_ablation if args.experiment == "method_ablation" else step_time
         if args.action == "run":
             results = module.run(args.spec)
             for result in results:
@@ -65,14 +63,14 @@ def main() -> None:
             from paper.plotting.ablation import (
                 method_figures,
                 require_clean,
-                step_distance_figure,
+                step_time_figure,
             )
 
             require_clean(run_dirs)
             if args.experiment == "method_ablation":
                 method_figures(summary, spec, args.output)
             else:
-                step_distance_figure(summary, spec, args.output)
+                step_time_figure(summary, spec, args.output)
     print(f"{args.action} written to {args.output}")
 
 
