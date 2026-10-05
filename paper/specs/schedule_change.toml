@@ -1,9 +1,14 @@
 [experiment]
 source_spec = "paper/specs/method_ablation.toml"
-source_variant = "ppo_pirs"
-candidate_sources = ["best", "final"]
+# The representative PPO+PIRS policy of this ablation (the strictly feasible
+# final policy with the lowest energy) is evaluated.
+# Nominal DP run of the 465 s comparison (`mtto dp --config paper/specs/dp.toml`);
+# DP re-solves from its state at the change point with the same configuration.
+dp_run = "output/paper_experiment/03_dp_actual_comparison/latest/dp"
 delta_times_s = [0.0, 30.0, -30.0]
 # change_distance_m is the absolute track position (m) at which the schedule
 # change triggers, not a distance relative to the task's start position.
 change_distance_m = 8000.0
+# Repetitions of each recomputation-time measurement (medians are reported).
+timing_repeats = 3
 output_root = "output/paper_experiment/04_schedule_time_change"

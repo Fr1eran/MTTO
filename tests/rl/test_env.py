@@ -1,5 +1,6 @@
 """MTTOEnv construction, transitions, schedule changes and termination reasons."""
 
+import dataclasses
 import math
 from dataclasses import replace
 from typing import TypedDict, Unpack
@@ -30,6 +31,7 @@ from mtto.rl.observation import ObservationBuilder
 from mtto.rl.rewards import (
     PUNCTUALITY_POTENTIAL_SIGMA_S,
     TRUNCATION_PENALTY,
+    RewardCalculator,
     RewardConfig,
     safety_potential,
 )
@@ -1103,6 +1105,47 @@ def test_schedule_change_mid_run_crossing(base_components, delta_time_s):
     following = env.transition(result.next_state, 0.5)
     assert following.next_state.schedule_time_s == pytest.approx(440.0 + delta_time_s)
     assert following.next_state.schedule_changed is True
+
+
+@pytest.mark.parametrize("trigger_offset_m", [None, MOVING_OFFSET_M + 1.0])
+def test_cached_potentials_match_uncached_rewards(mtto_env, trigger_offset_m):
+    start = mtto_env.task.start_position_m
+    task = replace(
+        mtto_env.task,
+        schedule_change=(
+            None
+            if trigger_offset_m is None
+            else ScheduleChange(start + trigger_offset_m, 460.0)
+        ),
+    )
+    env = _build_env_like(
+        mtto_env,
+        task=task,
+        reward_config=RewardConfig(enable_potential_punctuality=True),
+    )
+    calc = env.reward_calculator
+    accelerations = [0.5, 0.3, 0.0, -0.2, 0.4]
+    schedule_changed = False
+    # The first episode crosses the trigger; the second starts after a reset.
+    for state in (_moving_state(env), env.initial_state()):
+        for step in range(40):
+            result = env.transition(state, accelerations[step % len(accelerations)])
+            cached = calc.calculate(state, result, env.task)
+            # A new calculator has nothing cached and recomputes both potentials.
+            uncached = RewardCalculator(
+                env.normalization,
+                gamma=calc.gamma,
+                step_time_s=calc.step_time_s,
+                reward_config=calc.reward_config,
+            ).calculate(state, result, env.task)
+            assert dataclasses.astuple(cached) == pytest.approx(
+                dataclasses.astuple(uncached)
+            )
+            schedule_changed |= result.next_state.schedule_changed
+            state = result.next_state
+            if result.termination_reason is not None:
+                break
+    assert schedule_changed is (trigger_offset_m is not None)
 
 
 @pytest.mark.parametrize("reason", list(TerminationReason))

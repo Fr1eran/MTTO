@@ -33,6 +33,9 @@ DEFAULT_N_EPOCHS: Final[int] = 8
 DEFAULT_LOG_STD_INIT: Final[float] = -1.0
 DEFAULT_DEVICE: Final[str] = "cpu"
 DEFAULT_EVALUATION_INTERVAL_ROLLOUTS: Final[int] = 12
+# The networks are small: one torch thread trains about 2.4x faster than the
+# default eight, whose synchronisation outweighs the parallel work.
+TORCH_NUM_THREADS: Final[int] = 1
 
 LEARNING_RATE_SCHEDULE_ID: Final[str] = "cosine_completed_episodes_v1"
 STEP_LEARNING_RATE_SCHEDULE_ID: Final[str] = "cosine_environment_steps_v1"

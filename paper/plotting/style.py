@@ -10,6 +10,11 @@ from matplotlib.font_manager import fontManager
 MM_PER_INCH = 25.4
 SCI_SINGLE_COLUMN_WIDTH_IN = 85.0 / MM_PER_INCH
 SCI_DOUBLE_COLUMN_WIDTH_IN = 170.0 / MM_PER_INCH
+# Interact text width (34 pc = 408 TeX pt): paper figures are drawn at this
+# width and included at \linewidth, so their fonts print at the set size.
+PAPER_TEXT_WIDTH_IN = 408.0 / 72.27
+PAPER_LEGEND_FONT_SIZE = 8.0
+PAPER_AXIS_FONT_SIZE = 10.0
 SCI_EXPORT_DPI = 1200.0
 SCI_EXPORT_SUFFIX = ".pdf"
 PROJECT_PRIMARY_FONT = "Arial"
@@ -84,18 +89,20 @@ COMMERCIAL_FONT_FALLBACKS: dict[str, tuple[str, ...]] = {
 DEFAULT_FONT_CANDIDATES: tuple[str, ...] = CHINESE_FONT_CANDIDATES
 
 
-def sci_column_width_in(columns: Literal[1, 2]) -> float:
-    """Return the standard 85 mm / 170 mm SCI column width in inches."""
+def sci_column_width_in(columns: Literal[1, 2, "text"]) -> float:
+    """Return the 85 mm / 170 mm SCI column width or the paper text width."""
     if columns == 1:
         return SCI_SINGLE_COLUMN_WIDTH_IN
     if columns == 2:
         return SCI_DOUBLE_COLUMN_WIDTH_IN
+    if columns == "text":
+        return PAPER_TEXT_WIDTH_IN
     raise ValueError(f"columns must be 1 or 2, got {columns!r}")
 
 
 def sci_figure_size(
     *,
-    columns: Literal[1, 2],
+    columns: Literal[1, 2, "text"],
     height_in: float,
 ) -> tuple[float, float]:
     """Build a fixed physical figure size for manuscript-ready graphics."""
@@ -107,7 +114,7 @@ def sci_figure_size(
 def apply_sci_figure_layout(
     fig: plt.Figure,
     *,
-    columns: Literal[1, 2],
+    columns: Literal[1, 2, "text"],
     height_in: float,
     left: float = 0.12,
     right: float = 0.98,
@@ -362,6 +369,20 @@ def apply_sci_curve_style(
         tick_font_size=tick_font_size,
         legend_font_size=legend_font_size,
         figure_dpi=figure_dpi,
+    )
+
+
+def apply_paper_style() -> dict[str, float | str | tuple[str, ...] | None]:
+    """Paper figure fonts: 8 pt legends, 10 pt axis labels, ticks and titles."""
+    return set_global_plot_style(
+        font_preset="sci",
+        preferred_font=PROJECT_PRIMARY_FONT,
+        title_font_size=PAPER_AXIS_FONT_SIZE,
+        axis_label_font_size=PAPER_AXIS_FONT_SIZE,
+        tick_font_size=PAPER_AXIS_FONT_SIZE,
+        legend_font_size=PAPER_LEGEND_FONT_SIZE,
+        figure_dpi=150.0,
+        unicode_minus=True,
     )
 
 

@@ -19,10 +19,10 @@ from paper.plotting.style import (
     VIS_HARD_LIMIT_RED,
     VIS_SAFE_BLUE,
     add_panel_label,
+    apply_paper_style,
     apply_sci_figure_layout,
     apply_sci_grid,
     save_sci_figure,
-    set_global_plot_style,
 )
 
 FIGURE_FILENAMES = {
@@ -66,8 +66,8 @@ def create_default_reward_calculator(
 DEFAULT_CALCULATOR, DEFAULT_TASK = create_default_reward_calculator()
 MAX_STOP_ERROR_M = DEFAULT_TASK.max_stop_error_m
 MAX_TIME_ERROR_S = DEFAULT_TASK.max_arr_time_error_s
-STOPPING_ERROR_MAX_M = 10.0
-PUNCTUALITY_ERROR_MAX_S = 140.0
+STOPPING_ERROR_MAX_M = 1.0
+PUNCTUALITY_ERROR_MAX_S = 60.0
 PUNCTUALITY_DECAY_TIME_S = RewardCalculator.PUNCTUALITY_DECAY_TIME_S
 STOPPING_SCORE_POWER = RewardCalculator.STOPPING_SCORE_POWER
 
@@ -151,7 +151,7 @@ def visualize_stopping_score_function(
     apply_sci_grid(ax_score)
     _ = ax_score.legend(loc="upper right", fontsize=11, frameon=False)
 
-    _ = ax_score.set_xlabel(r"$|\Delta x|\ (\mathrm{m})$", fontsize=12)
+    _ = ax_score.set_xlabel(r"$e_x$ (m)", fontsize=12)
     _ = ax_score.set_xlim(0, STOPPING_ERROR_MAX_M)
 
     apply_sci_figure_layout(fig, columns=1, height_in=2.6)
@@ -189,7 +189,7 @@ def visualize_punctuality_score_function(
     apply_sci_grid(ax_score)
     _ = ax_score.legend(loc="upper right", fontsize=11, frameon=False)
 
-    _ = ax_score.set_xlabel(r"$|\Delta t|\ (\mathrm{s})$", fontsize=12)
+    _ = ax_score.set_xlabel(r"$e_t$ (s)", fontsize=12)
 
     apply_sci_figure_layout(fig, columns=1, height_in=2.6)
     return fig
@@ -211,7 +211,7 @@ def visualize_combined_score_functions(
     ax1.plot(
         x_stop,
         current_stopping_score(x_stop, calculator=calc),
-        label=r"$f_{\mathrm{S}}(|\Delta x|)$",
+        label=r"$f_{\mathrm{S}}(e_x)$",
         color=VIS_SAFE_BLUE,
         linewidth=1.8,
     )
@@ -220,12 +220,12 @@ def visualize_combined_score_functions(
         color=VIS_HARD_LIMIT_RED,
         linestyle="--",
         linewidth=1.2,
-        label=rf"$\epsilon_x = {max_stop_error_m}\,\mathrm{{m}}$",
+        label=rf"$\varepsilon_x = {max_stop_error_m}\,\mathrm{{m}}$",
     )
     apply_sci_grid(ax1)
     ax1.set_xlim(0.0, STOPPING_ERROR_MAX_M)
     ax1.set_ylim(0.0, 1.15)
-    ax1.set_xlabel(r"$|\Delta x|\ (\mathrm{m})$")
+    ax1.set_xlabel(r"$e_x$ (m)")
     ax1.set_ylabel("Stopping score")
     ax1.legend(loc="upper right", frameon=False)
     add_panel_label(ax1, "(a)")
@@ -236,7 +236,7 @@ def visualize_combined_score_functions(
     ax2.plot(
         x_punct,
         current_punctuality_score(x_punct, calculator=calc),
-        label=r"$f_{\mathrm{T}}(|\Delta t|)$",
+        label=r"$f_{\mathrm{T}}(e_t)$",
         color=VIS_SAFE_BLUE,
         linewidth=1.8,
     )
@@ -245,24 +245,25 @@ def visualize_combined_score_functions(
         color=VIS_HARD_LIMIT_RED,
         linestyle="--",
         linewidth=1.2,
-        label=rf"$\epsilon_t = {max_time_error_s:.0f}\,\mathrm{{s}}$",
+        label=rf"$\varepsilon_t = {max_time_error_s:.0f}\,\mathrm{{s}}$",
     )
     apply_sci_grid(ax2)
     ax2.set_xlim(0, PUNCTUALITY_ERROR_MAX_S)
     ax2.set_ylim(0.0, 1.15)
-    ax2.set_xlabel(r"$|\Delta t|\ (\mathrm{s})$")
+    ax2.set_xlabel(r"$e_t$ (s)")
     ax2.set_ylabel("Punctuality score")
     ax2.legend(loc="upper right", frameon=False)
     add_panel_label(ax2, "(b)")
 
     apply_sci_figure_layout(
         fig,
-        columns=2,
-        height_in=3.0,
+        columns="text",
+        height_in=2.5,
         left=0.10,
-        bottom=0.18,
-        top=0.95,
-        wspace=0.30,
+        right=0.98,
+        bottom=0.19,
+        top=0.96,
+        wspace=0.32,
     )
     return fig
 
@@ -304,15 +305,7 @@ def save_compact_figure(
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    _ = set_global_plot_style(
-        font_preset="sci",
-        preferred_font="Arial",
-        title_font_size=8.0,
-        axis_label_font_size=8.0,
-        tick_font_size=8.0,
-        legend_font_size=8.0,
-        figure_dpi=150.0,
-    )
+    _ = apply_paper_style()
     visualizers = {
         "combined": visualize_combined_score_functions,
         "stopping": visualize_stopping_score_function,

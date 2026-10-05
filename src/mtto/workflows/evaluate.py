@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+import torch
 from stable_baselines3 import PPO
 
 import mtto
@@ -29,6 +30,7 @@ from mtto.io.artifacts import (
 from mtto.rl.env import make_env
 from mtto.rl.evaluate import run_policy
 from mtto.rl.observation import POLICY_IO_VERSION
+from mtto.rl.ppo import TORCH_NUM_THREADS
 from mtto.rl.rewards import build_reward_config
 from mtto.workflows.train import build_env_references
 
@@ -120,6 +122,7 @@ def evaluate(
         reward_config=reward_config,
     )
 
+    torch.set_num_threads(TORCH_NUM_THREADS)
     model = PPO.load(str(policy_file), device=config.device)
     try:
         run = run_policy(model, env, deterministic=config.deterministic)

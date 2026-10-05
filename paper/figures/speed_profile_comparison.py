@@ -29,7 +29,7 @@ from paper.plotting.style import (
     VIS_PPO_GRAY,
     VIS_PROPOSED_ORANGE,
     add_panel_label,
-    apply_sci_curve_style,
+    apply_paper_style,
     apply_sci_figure_layout,
     apply_sci_grid,
     save_sci_figure,
@@ -229,12 +229,12 @@ def _finalize_comparison_figure(
     )
     apply_sci_figure_layout(
         figure,
-        columns=2,
-        height_in=5.5,
-        left=0.11,
-        right=0.96,
-        bottom=0.10,
-        top=0.92,
+        columns="text",
+        height_in=5.2,
+        left=0.13,
+        right=0.98,
+        bottom=0.09,
+        top=0.93,
         hspace=0.30,
     )
 
@@ -460,7 +460,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     print("\nTrajectory comparison metrics:")
     print(format_comparison_table(metrics_by_label))
 
-    apply_sci_curve_style()
+    apply_paper_style()
     fig, (ax_speed, ax_acc, ax_energy) = _create_comparison_axes()
     safeguard = None if args.no_safeguard else margin_safeguard
 

@@ -8,18 +8,20 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
+from matplotlib.ticker import FuncFormatter
 
 from mtto.domain.scenario import Scenario
 from mtto.io.artifacts import read_completed_run
+from mtto.io.scenario import load_scenario, load_tasks
 from paper.experiments.spec import ExperimentSpec
 from paper.plotting.profiles import (
     DANGER_VIEW_LAYERS,
     render_safeguard,
 )
 from paper.plotting.style import (
+    PAPER_LEGEND_FONT_SIZE,
     SCI_LINE_WIDTH,
     SCI_SERIES_LINE_STYLES,
-    VIS_ACTUAL_PURPLE,
     VIS_DP_BLACK,
     VIS_DSPL_MAGENTA,
     VIS_HARD_LIMIT_RED,
@@ -27,14 +29,17 @@ from paper.plotting.style import (
     VIS_PROPOSED_ORANGE,
     VIS_SAFE_BLUE,
     add_panel_label,
-    apply_sci_curve_style,
+    apply_paper_style,
     apply_sci_figure_layout,
     apply_sci_grid,
     sci_tint_color,
 )
 
 METHOD_COLORS = (VIS_PPO_GRAY, VIS_SAFE_BLUE, VIS_DSPL_MAGENTA, VIS_PROPOSED_ORANGE)
-STEP_COLORS = (VIS_PPO_GRAY, VIS_PROPOSED_ORANGE, VIS_SAFE_BLUE, VIS_ACTUAL_PURPLE)
+# Zoom windows of the representative-profile figure: departure acceleration
+# through the first ASA transitions, and the station approach.
+DEPARTURE_ZOOM_M = 6000.0
+ARRIVAL_ZOOM_M = 4000.0
 
 
 def require_clean(run_dirs: tuple[Path, ...]) -> None:
@@ -97,7 +102,7 @@ def _format_transition_axis(axis: plt.Axes) -> None:
 def method_figures(
     summary: dict[str, object], spec: ExperimentSpec, output: Path
 ) -> tuple[Path, Path]:
-    apply_sci_curve_style()
+    apply_paper_style()
     output.mkdir(parents=True, exist_ok=True)
     methods = summary["methods"]
     labels = summary["method_labels"]
@@ -146,7 +151,7 @@ def method_figures(
         training_inset_start = 0.5 * inset_end
     inset.set_xlim(training_inset_start, inset_end)
     inset.set_ylim(0, 5)
-    inset.tick_params(labelsize=7)
+    inset.tick_params(labelsize=PAPER_LEGEND_FONT_SIZE)
     apply_sci_grid(inset)
     _format_transition_axis(inset)
     for axis, ylabel, panel in zip(
@@ -171,150 +176,96 @@ def method_figures(
         bbox_to_anchor=(0.5, 1.02),
     )
     apply_sci_figure_layout(
-        fig, columns=2, height_in=2.85, left=0.11, bottom=0.18, top=0.90, wspace=0.24
+        fig,
+        columns="text",
+        height_in=2.9,
+        left=0.11,
+        right=0.98,
+        bottom=0.17,
+        top=0.89,
+        wspace=0.30,
     )
     training_path = output / "method_training_curves.pdf"
     fig.savefig(training_path)
     plt.close(fig)
 
-    fig, axes = plt.subplots(2, 2)
-    panels = (
-        (axes[0, 0], "stop_error_m", "Absolute stop error (m)"),
-        (axes[0, 1], "time_error_s", "Absolute time error (s)"),
-        (axes[1, 0], "total_energy_j", "Trajectory energy (kWh)"),
-        (axes[1, 1], "comfort_tav", "Cumulative acceleration variation (m/s²)"),
+    profiles_path = representative_profiles_figure(summary, spec, output)
+    return training_path, profiles_path
+
+
+def representative_profiles_figure(
+    summary: dict[str, object], spec: ExperimentSpec, output: Path
+) -> Path:
+    """Overlay the representative speed profile of every ablation variant."""
+    apply_paper_style()
+    output.mkdir(parents=True, exist_ok=True)
+    scenario = load_scenario(spec.scenario, spec.line_dir)
+    task = load_tasks(spec.tasks)[spec.task]
+    methods = summary["methods"]
+    labels = summary["method_labels"]
+    profiles = []
+    for method in methods:
+        profiles.append(
+            read_completed_run(
+                Path(summary["representative_policies"][method]["run_dir"])
+            ).payload.profile
+        )
+    fig = plt.figure()
+    grid = fig.add_gridspec(2, 2, height_ratios=(1.25, 1.0))
+    overview = fig.add_subplot(grid[0, :])
+    departure = fig.add_subplot(grid[1, 0])
+    arrival = fig.add_subplot(grid[1, 1])
+    windows = (
+        (overview, (task.start_position_m, task.target_position_m)),
+        (
+            departure,
+            (task.start_position_m, task.start_position_m + DEPARTURE_ZOOM_M),
+        ),
+        (arrival, (task.target_position_m - ARRIVAL_ZOOM_M, task.target_position_m)),
     )
-    for panel_index, (axis, key, ylabel) in enumerate(panels):
-        for index, method in enumerate(methods):
-            curve = summary["evaluation_curves"][method]
-            _plot_bands(
-                axis,
-                np.asarray(curve["training_steps"], dtype=float),
-                curve[key],
-                labels[method],
-                METHOD_COLORS[index % 4],
-                SCI_SERIES_LINE_STYLES[index % len(SCI_SERIES_LINE_STYLES)],
-                highlight=method == "ppo_pirs",
+    for panel_index, (axis, (left, right)) in enumerate(windows):
+        render_safeguard(scenario.safeguard, ax=axis, layers=DANGER_VIEW_LAYERS)
+        top = 0.0
+        for index, (method, profile) in enumerate(zip(methods, profiles, strict=True)):
+            speed = profile.speed_mps * 3.6
+            axis.plot(
+                profile.position_m,
+                speed,
+                color=METHOD_COLORS[index % 4],
+                linestyle=SCI_SERIES_LINE_STYLES[index % 4]["linestyle"],
+                linewidth=SCI_LINE_WIDTH + (0.4 if method == "ppo_pirs" else 0.0),
+                label=labels[method],
             )
-        axis.set(xlabel="Environment transitions", ylabel=ylabel)
-        axis.set_xlim(0, axis_end)
-        _format_transition_axis(axis)
-        axis.set_ylim(bottom=0)
+            inside = (profile.position_m >= left) & (profile.position_m <= right)
+            if np.any(inside):
+                top = max(top, float(np.max(speed[inside])))
+        axis.set_xlim(left, right)
+        axis.set_ylim(0.0, top * 1.15 if top > 0.0 else None)
+        axis.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x / 1000:g}"))
+        axis.set(xlabel="Position (km)", ylabel="Speed (km/h)")
         apply_sci_grid(axis)
         add_panel_label(ax=axis, label=f"({chr(97 + panel_index)})")
-    axes[0, 0].axhline(0.3, color="#666666", linestyle="--", linewidth=0.8)
-    axes[0, 1].axhline(10.0, color="#666666", linestyle="--", linewidth=0.8)
-    for axis, key, upper in (
-        (axes[0, 0], "stop_error_m", 1.5),
-        (axes[0, 1], "time_error_s", 30.0),
-    ):
-        inset = axis.inset_axes((0.50, 0.48, 0.46, 0.46))
-        for index, method in enumerate(methods):
-            curve = summary["evaluation_curves"][method]
-            x = np.asarray(curve["training_steps"], dtype=float)
-            _plot_bands(
-                inset,
-                x,
-                curve[key],
-                "_nolegend_",
-                METHOD_COLORS[index % 4],
-                SCI_SERIES_LINE_STYLES[index % len(SCI_SERIES_LINE_STYLES)],
-                highlight=method == "ppo_pirs",
-            )
-        evaluation_inset_start = 0.75 * axis_end
-        if evaluation_inset_start >= inset_end:
-            evaluation_inset_start = 0.5 * inset_end
-        inset.set_xlim(evaluation_inset_start, inset_end)
-        inset.set_ylim(0, upper)
-        inset.axhline(
-            0.3 if key == "stop_error_m" else 10.0,
-            color="#666666",
-            linestyle="--",
-            linewidth=0.8,
-        )
-        inset.tick_params(labelsize=7)
-        apply_sci_grid(inset)
-        _format_transition_axis(inset)
+    handles, legend_labels = overview.get_legend_handles_labels()
     fig.legend(
-        *axes[0, 0].get_legend_handles_labels(),
+        handles,
+        legend_labels,
         loc="upper center",
-        ncol=4,
+        ncol=len(methods),
         frameon=False,
+        bbox_to_anchor=(0.5, 1.0),
     )
     apply_sci_figure_layout(
         fig,
-        columns=2,
-        height_in=4.6,
+        columns="text",
+        height_in=4.9,
         left=0.11,
-        bottom=0.12,
-        top=0.92,
+        right=0.98,
+        bottom=0.10,
+        top=0.89,
         wspace=0.30,
-        hspace=0.32,
+        hspace=0.40,
     )
-    metrics_path = output / "method_trajectory_metrics.pdf"
-    fig.savefig(metrics_path)
-    plt.close(fig)
-    return training_path, metrics_path
-
-
-def step_time_figure(
-    summary: dict[str, object], spec: ExperimentSpec, output: Path
-) -> Path:
-    apply_sci_curve_style()
-    output.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(1, 2)
-    axis_end = (
-        spec.train["training_rollouts"]
-        * spec.train["num_envs"]
-        * spec.train["n_steps_per_env"]
-    )
-    for axis in axes:
-        axis.set_box_aspect(3 / 4)
-    for index, (variant_id, variant) in enumerate(summary["variants"].items()):
-        curve = summary["curves"][variant_id]
-        x = np.asarray(curve["training_steps"], dtype=float)
-        style = SCI_SERIES_LINE_STYLES[index % len(SCI_SERIES_LINE_STYLES)]
-        for axis, key in zip(axes, ("route_completion_ratio", "feasible"), strict=True):
-            _plot_bands(
-                axis,
-                x,
-                curve[key],
-                variant["label"],
-                STEP_COLORS[index % 4],
-                style,
-                highlight=variant_id == "1p0",
-                markevery=3,
-                clip=(0.0, 1.0) if key == "feasible" else None,
-            )
-    for axis, ylabel, panel in zip(
-        axes,
-        ("Route completion ratio", "Strict feasibility rate"),
-        ("(a)", "(b)"),
-        strict=True,
-    ):
-        axis.set(
-            xlabel="Environment transitions",
-            ylabel=ylabel,
-            xlim=(0, axis_end),
-            ylim=(0.0, 1.0) if panel == "(a)" else (-0.03, 1.03),
-        )
-        _format_transition_axis(axis)
-        apply_sci_grid(axis)
-        add_panel_label(ax=axis, label=panel)
-    fig.legend(
-        *axes[0].get_legend_handles_labels(),
-        loc="upper center",
-        bbox_to_anchor=(0.5, 1),
-        ncol=min(4, len(summary["variants"])),
-        borderaxespad=0,
-        handlelength=1.8,
-        columnspacing=1.2,
-        frameon=False,
-    )
-    apply_sci_figure_layout(
-        fig, columns=2, height_in=3.0, left=0.10, bottom=0.19, top=0.90, wspace=0.24
-    )
-    path = output / "step_time_learning_curves.pdf"
+    path = output / "method_representative_profiles.pdf"
     fig.savefig(path)
     plt.close(fig)
     return path
@@ -323,107 +274,94 @@ def step_time_figure(
 def schedule_change_figure(
     summary: dict[str, object], scenario: Scenario, output: Path
 ) -> Path:
-    apply_sci_curve_style()
+    """Speed profiles after the schedule change: PPO-PIRS solid, DP dashed."""
+    apply_paper_style()
     output.mkdir(parents=True, exist_ok=True)
     fig, axis = plt.subplots()
     render_safeguard(scenario.safeguard, ax=axis, layers=DANGER_VIEW_LAYERS)
-    original_profile = None
-    trigger = None
-    positions = []
-    speeds = []
-    case_handles = []
-    case_labels = []
-    for case in sorted(
-        summary["cases"],
-        key=lambda item: (
-            item["case"]["delta_time_s"] < 0,
-            item["case"]["delta_time_s"] != 0,
-            abs(item["case"]["delta_time_s"]),
-        ),
-    ):
-        delta = case["case"]["delta_time_s"]
-        completed = read_completed_run(Path(case["run_dir"]))
-        profile = completed.payload.profile
-        if delta == 0:
-            original_profile = profile
-        else:
-            trigger_position = completed.record.task["schedule_change"][
-                "trigger_position_m"
-            ]
-            reached = profile.position_m[profile.position_m >= trigger_position]
-            if reached.size:
-                trigger = float(reached[0])
-        label = (
-            "Original" if delta == 0 else f"{'+' if delta > 0 else '−'}{abs(delta):g} s"
-        )
-        color = (
+    case_colors = {}
+    # Each case also gets a marker (offset along the line) so the figure reads
+    # in greyscale; PPO-PIRS markers are filled, DP markers hollow.
+    case_markers = {0: ("o", 0.0), 1: ("^", 0.027), -1: ("v", 0.053)}
+    extent = [np.inf, -np.inf]
+    for entry in summary["entries"]:
+        delta = entry["case"]["delta_time_s"]
+        color = case_colors.setdefault(
+            delta,
             VIS_DP_BLACK
             if delta == 0
             else VIS_PROPOSED_ORANGE
             if delta > 0
-            else VIS_ACTUAL_PURPLE
+            else VIS_SAFE_BLUE,
         )
-        (handle,) = axis.plot(
+        profile = read_completed_run(Path(entry["run_dir"])).payload.profile
+        extent = [
+            min(extent[0], float(profile.position_m[0])),
+            max(extent[1], float(profile.position_m[-1])),
+        ]
+        marker, offset = case_markers[int(np.sign(delta))]
+        axis.plot(
             profile.position_m,
             profile.speed_mps * 3.6,
             color=color,
-            linestyle="--" if delta < 0 else "-",
-            linewidth=1.7 if delta == 0 else 1.5,
+            linestyle="-" if entry["method"] == "PPO-PIRS" else "--",
+            linewidth=SCI_LINE_WIDTH,
+            marker=marker,
+            markersize=4.5,
+            markevery=(offset, 0.08),
+            markerfacecolor=color if entry["method"] == "PPO-PIRS" else "white",
+            markeredgecolor=color,
         )
-        case_handles.append(handle)
-        case_labels.append(label)
-        positions.append(np.asarray(profile.position_m, dtype=float))
-        speeds.append(np.asarray(profile.speed_mps, dtype=float) * 3.6)
-    trigger_handle = None
-    if trigger is not None and original_profile is not None:
-        axis.scatter(
-            [trigger],
-            [
-                np.interp(
-                    trigger,
-                    original_profile.position_m,
-                    original_profile.speed_mps * 3.6,
-                )
-            ],
-            marker="*",
-            s=80,
-            color=VIS_HARD_LIMIT_RED,
-            zorder=8,
-        )
-        trigger_handle = Line2D(
-            [],
-            [],
-            marker="*",
-            markersize=9,
-            color=VIS_HARD_LIMIT_RED,
-            linestyle="None",
-        )
-    if positions:
-        position_min = min(float(np.nanmin(position)) for position in positions)
-        position_max = max(float(np.nanmax(position)) for position in positions)
-        margin = max((position_max - position_min) * 0.03, 1.0)
-        axis.set_xlim(position_min - margin, position_max + margin)
-    if speeds:
-        curve_max = max(float(np.nanmax(speed)) for speed in speeds)
-        limit_max = float(np.nanmax(scenario.safeguard.speed_limits) * 3.6)
-        axis.set_ylim(0.0, max(curve_max, limit_max) * 1.08)
-    axis.set(xlabel="Position (m)", ylabel="Speed (km/h)")
+    axis.axvline(
+        summary["change_distance_m"],
+        color=VIS_HARD_LIMIT_RED,
+        linestyle=":",
+        linewidth=1.0,
+    )
+    axis.set_xlim(*extent)
+    axis.set_ylim(0.0, float(np.nanmax(scenario.safeguard.speed_limits) * 3.6) * 1.08)
+    axis.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x / 1000:g}"))
+    axis.set(xlabel="Position (km)", ylabel="Speed (km/h)")
     apply_sci_grid(axis)
-    if trigger_handle is not None:
-        case_handles.append(trigger_handle)
-        case_labels.append("Schedule change")
+    handles = [
+        *(
+            Line2D(
+                [],
+                [],
+                color=color,
+                linewidth=SCI_LINE_WIDTH,
+                marker=case_markers[int(np.sign(delta))][0],
+                markersize=4.5,
+            )
+            for delta, color in case_colors.items()
+        ),
+        Line2D([], [], color="#555555", linestyle="-", linewidth=SCI_LINE_WIDTH),
+        Line2D([], [], color="#555555", linestyle="--", linewidth=SCI_LINE_WIDTH),
+        Line2D([], [], color=VIS_HARD_LIMIT_RED, linestyle=":", linewidth=1.0),
+    ]
+    labels = [
+        *(
+            "Unchanged"
+            if delta == 0
+            else f"{'+' if delta > 0 else '−'}{abs(delta):g} s"
+            for delta in case_colors
+        ),
+        "PPO-PIRS",
+        "DP",
+        "Timetable change",
+    ]
     fig.legend(
-        case_handles,
-        case_labels,
+        handles,
+        labels,
         loc="upper center",
         bbox_to_anchor=(0.5, 0.995),
-        ncol=4,
+        ncol=len(labels),
         frameon=False,
         handlelength=2.0,
         columnspacing=0.8,
     )
     apply_sci_figure_layout(
-        fig, columns=2, height_in=3.8, left=0.09, right=0.97, bottom=0.15, top=0.88
+        fig, columns="text", height_in=3.4, left=0.11, right=0.98, bottom=0.14, top=0.88
     )
     path = output / "schedule_time_change_comparison.pdf"
     fig.savefig(path)

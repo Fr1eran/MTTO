@@ -251,7 +251,7 @@ def render_safeguard(
                 ax=ax,
                 above_curves_list=min_padded,
                 below_curves_list=max_padded,
-                label="Dangerous speed region",
+                label="Speed restricted zone",
                 color="#FFBABA",
                 alpha=1.0,
             )

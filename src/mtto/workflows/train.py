@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Literal
 
 import numpy as np
+import torch
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.vec_env import DummyVecEnv
@@ -45,6 +46,7 @@ from mtto.rl.env import MTTOEnv, make_env
 from mtto.rl.evaluate import run_policy
 from mtto.rl.observation import POLICY_IO_VERSION
 from mtto.rl.ppo import (
+    TORCH_NUM_THREADS,
     CompletedEpisodeProgress,
     RewardDiagnosticsCallback,
     SafetyTruncationHistogramCallback,
@@ -257,6 +259,7 @@ def train(
     else:
         raise ValueError(f"Unknown budget_mode: {config.budget_mode}")
 
+    torch.set_num_threads(TORCH_NUM_THREADS)
     out_dir.mkdir(parents=True, exist_ok=False)
 
     reward_config = build_reward_config(config.reward_preset)

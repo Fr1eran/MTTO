@@ -24,10 +24,12 @@ from mtto.rl.rewards import (
     braking_reserve_steps,
     build_reward_config,
     punctuality_potential_from_error,
+    punctuality_potential_from_error_array,
     resolve_reward_preset,
     reward_config_parameters,
     reward_preset_names,
     safety_potential,
+    safety_potential_array,
     traction_reserve_steps,
 )
 from mtto.rl.state import (
@@ -189,23 +191,20 @@ def test_external_sampling_cut_keeps_next_potential(punctuality_calculator):
     )
 
 
-def test_punctuality_potential_can_be_disabled(punctuality_calculator):
-    calc = punctuality_calculator
-    state = replace(_state(position=100), slack_time_s=500.0)
-    assert calc.potential_punctuality(state, TASK) < 0.0
-    calc.reward_config = replace(calc.reward_config, enable_potential_punctuality=False)
-    assert calc.potential_punctuality(state, TASK) == 0
-
-
 def test_punctuality_potential_is_quadratic_near_zero_and_linear_far_away() -> None:
     k, sigma = PUNCTUALITY_POTENTIAL_SCALE, PUNCTUALITY_POTENTIAL_SIGMA_S
     errors = np.asarray([-400.0, -20.0, 0.0, 20.0, 400.0])
-    potential = punctuality_potential_from_error(errors)
+    potential = punctuality_potential_from_error_array(errors)
 
-    assert isinstance(potential, np.ndarray)
     np.testing.assert_allclose(potential, potential[::-1])
     assert potential[2] == pytest.approx(0.0)
     assert np.all(np.diff(potential[:3]) > 0.0)
+    # The scalar (reward) form agrees with the array (plotting) form.
+    np.testing.assert_allclose(
+        [punctuality_potential_from_error(error) for error in errors.tolist()],
+        potential,
+        rtol=1e-15,
+    )
     # Near zero it matches -K e^2 / sigma^2.
     assert punctuality_potential_from_error(0.5) == pytest.approx(
         -k * 0.25 / sigma**2, rel=1e-3
@@ -337,6 +336,10 @@ def test_safety_potential_is_a_bounded_hinge(
     assert safety_potential(braking_reserve, traction_reserve) == pytest.approx(
         expected
     )
+    # The array (plotting) form agrees with the scalar (reward) form.
+    assert safety_potential_array(
+        np.asarray([braking_reserve]), np.asarray([traction_reserve])
+    )[0] == pytest.approx(expected)
 
 
 # With full effort 1 m/s^2, one control period moves v^2 by

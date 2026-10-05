@@ -10,34 +10,85 @@ import numpy as np
 from mtto.evaluation.quality import selection_key
 from mtto.io.artifacts import read_completed_run
 from mtto.rl.state import TerminationReason
-from paper.analysis import aggregate_matrix, align_exact
+from paper.analysis import aggregate_matrix
 from paper.experiments.runner import RunResult, execute_matrix
 from paper.experiments.spec import ExperimentSpec, load_experiment_spec
 
+# Late-stage window for the feasible-evaluation ratio: the last quarter of the
+# training budget, matching the last period of the training-process table.
+LATE_STAGE_START_FRACTION = 0.75
+POLICY_SOURCES = ("best", "final")
+TRAJECTORY_METRICS = ("stop_error_m", "time_error_s", "total_energy_kwh", "comfort_tav")
+PERFORMANCE_NOTE = (
+    "\n\n*Note: Best is the checkpoint kept by periodic evaluation; final is the "
+    "policy at the end of training; both are evaluated deterministically. Values "
+    "are mean ± sample standard deviation across independent training runs. The "
+    "strict feasibility rate counts all runs; stop error, Δt, energy and cumulative "
+    "acceleration variation count only policies that reached the target (— if none "
+    "did). Late-stage feasible evaluations and first feasible evaluation describe "
+    "the training process and are given in the best row only: the former is the "
+    "share of periodic deterministic evaluations in the last quarter of training "
+    "that are strictly feasible, the latter the share of the training budget used "
+    "when the first strictly feasible evaluation occurred, over runs that had one. "
+    "Δt is the actual minus the planned running time (positive = late).*"
+)
 
-def run(spec_path: str | Path) -> tuple[RunResult, ...]:
+
+def _mean_std(series: list[float]) -> dict[str, float] | None:
+    if not series:
+        return None
+    mean, std, _ = aggregate_matrix(np.asarray(series, dtype=float).reshape(-1, 1))
+    return {"mean": float(mean[0]), "std": float(std[0])}
+
+
+def _cell(value: dict[str, float] | None, scale: float, digits: int, sign: str) -> str:
+    if value is None:
+        return "—"
+    return (
+        f"{scale * value['mean']:{sign}.{digits}f} ± {scale * value['std']:.{digits}f}"
+    )
+
+
+def representative_index(
+    metrics: list[dict[str, object]], seeds: tuple[int, ...]
+) -> int:
+    """Strictly feasible with the lowest energy first, then the selection fallback.
+
+    Callers pass final-policy metrics: the best checkpoint is the lowest-energy
+    feasible evaluation and so leans towards arriving late within the tolerance.
+    """
+    return max(
+        range(len(seeds)),
+        key=lambda item: (metrics[item]["selection_comparison_key"], -seeds[item]),
+    )
+
+
+def run(spec_path: str | Path, workers: int = 1) -> tuple[RunResult, ...]:
     """Execute the full matrix described by a TOML file."""
-    return execute_matrix(load_experiment_spec(spec_path))
+    return execute_matrix(load_experiment_spec(spec_path), workers)
 
 
 def summarize(spec: ExperimentSpec, run_dirs: tuple[Path, ...]) -> dict[str, object]:
-    """Summarize best-policy quality and training diagnostics across seeds."""
+    """Summarize best- and final-policy quality and training diagnostics."""
     runs = [read_completed_run(path) for path in run_dirs]
     expected = len(spec.variants) * len(spec.seeds)
     if len(runs) != expected:
         raise ValueError(f"Expected {expected} run directories, got {len(runs)}")
     raw: dict[str, list[dict[str, object]]] = {}
+    raw_final: dict[str, list[dict[str, object]]] = {}
     performance: dict[str, dict[str, object]] = {}
     training: dict[str, dict[str, object]] = {}
     feasible: dict[str, dict[str, object]] = {}
-    curves: dict[str, dict[str, object]] = {}
+    representatives: dict[str, dict[str, object]] = {}
     training_curves: dict[str, dict[str, object]] = {}
     performance_rows = [
         "# Method Ablation Performance Table",
         "",
-        "| Method | Strict feasibility rate | Stop error (m) | Time error (s) | "
+        "| Method | Policy | Strict feasibility rate | "
+        "Late-stage feasible evaluations | "
+        "First feasible evaluation (% of budget) | Stop error (m) | Δt (s) | "
         "Total energy (kWh) | Cumulative acceleration variation (m/s²) |",
-        "| --- | --- | --- | --- | --- | --- |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     training_rows = [
         "# Method Ablation Training Process Table",
@@ -48,86 +99,105 @@ def summarize(spec: ExperimentSpec, run_dirs: tuple[Path, ...]) -> dict[str, obj
         "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     rollout_steps = spec.train["num_envs"] * spec.train["n_steps_per_env"]
+    total_steps = spec.train["training_rollouts"] * rollout_steps
+    late_start_step = LATE_STAGE_START_FRACTION * total_steps
     periods = tuple(
         (start, min(start + 99, spec.train["training_rollouts"]))
         for start in range(1, spec.train["training_rollouts"] + 1, 100)
     )
     for index, method in enumerate(spec.variants):
         group = runs[index * len(spec.seeds) : (index + 1) * len(spec.seeds)]
-        metrics = []
+        by_source: dict[str, list[dict[str, object]]] = {
+            source: [] for source in POLICY_SOURCES
+        }
         for seed, completed in zip(spec.seeds, group, strict=True):
-            quality = (completed.payload.best or completed.payload).quality
-            item = {
-                "run_id": completed.record.run_id,
-                "seed": seed,
-                "stop_error_m": abs(quality.metrics.stop_error_m),
-                "time_error_s": abs(quality.metrics.arrival_time_error_s),
-                "total_energy_kwh": quality.metrics.total_energy_kj / 3600.0,
-                "comfort_tav": quality.metrics.comfort_tav_mps2,
-                "success": quality.completed,
-                "safe": quality.safe,
-                "feasible": quality.feasible,
-                "selection_comparison_key": list(selection_key(quality)),
+            payloads = {
+                "best": completed.payload.best or completed.payload,
+                "final": completed.payload,
             }
-            metrics.append(item)
+            for source, payload in payloads.items():
+                quality = payload.quality
+                by_source[source].append(
+                    {
+                        "run_id": completed.record.run_id,
+                        "seed": seed,
+                        "stop_error_m": abs(quality.metrics.stop_error_m),
+                        "time_error_s": quality.metrics.arrival_time_error_s,
+                        "abs_time_error_s": abs(quality.metrics.arrival_time_error_s),
+                        "total_energy_kwh": quality.metrics.total_energy_kj / 3600.0,
+                        "comfort_tav": quality.metrics.comfort_tav_mps2,
+                        "success": quality.completed,
+                        "safe": quality.safe,
+                        "feasible": quality.feasible,
+                        "selection_comparison_key": list(selection_key(quality)),
+                    }
+                )
+        metrics = by_source["best"]
         raw[method.id] = metrics
+        raw_final[method.id] = by_source["final"]
         count = sum(item["feasible"] for item in metrics)
         feasible[method.id] = {
             "feasible_count": count,
             "total_runs": len(metrics),
             "feasible_rate": count / len(metrics),
         }
-        values = {}
-        for key in ("stop_error_m", "time_error_s", "total_energy_kwh", "comfort_tav"):
-            series = np.asarray([item[key] for item in metrics], dtype=float)
-            mean, std, _ = aggregate_matrix(series[:, None])
-            values[key] = {
-                "mean": float(mean[0]),
-                "std": float(std[0]),
+        late_rates = []
+        first_feasible = []
+        for completed in group:
+            history = completed.payload.evaluations
+            late = history.feasible[history.training_steps > late_start_step]
+            if late.size:
+                late_rates.append(float(np.mean(late)))
+            feasible_steps = history.training_steps[history.feasible]
+            if feasible_steps.size:
+                first_feasible.append(float(feasible_steps.min()) / total_steps)
+        values: dict[str, object] = {
+            "late_feasible_rate": _mean_std(late_rates),
+            "first_feasible_progress": _mean_std(first_feasible),
+        }
+        for source, items in by_source.items():
+            arrived = [item for item in items if item["success"]]
+            source_count = sum(item["feasible"] for item in items)
+            values[source] = {
+                "feasible_count": source_count,
+                **{
+                    key: _mean_std([item[key] for item in arrived])
+                    for key in TRAJECTORY_METRICS
+                },
             }
-        performance[method.id] = values
-        histories = [completed.payload.evaluations for completed in group]
-        axis = np.unique(
-            np.concatenate([history.training_steps for history in histories])
-        ).astype(float)
-        curve_data = {"training_steps": axis.tolist()}
-        for key, transform in (
-            ("stop_error_m", np.abs),
-            ("time_error_s", np.abs),
-            ("total_energy_j", lambda value: value / 3_600_000.0),
-            ("comfort_tav", lambda value: value),
-        ):
-            matrix = np.stack(
+            process = (
                 [
-                    align_exact(
-                        axis,
-                        history.training_steps.astype(float),
-                        transform(getattr(history, key)),
+                    _cell(values["late_feasible_rate"], 100.0, 1, ""),
+                    _cell(values["first_feasible_progress"], 100.0, 1, ""),
+                ]
+                if source == "best"
+                else ["", ""]
+            )
+            cells = [
+                method.label if source == "best" else "",
+                source.capitalize(),
+                f"{100 * source_count / len(items):.1f}% ({source_count}/{len(items)})",
+                *process,
+                *(
+                    _cell(values[source][key], 1.0, digits, sign)
+                    for key, digits, sign in (
+                        ("stop_error_m", 3, ""),
+                        ("time_error_s", 2, "+"),
+                        ("total_energy_kwh", 1, ""),
+                        ("comfort_tav", 3, ""),
                     )
-                    for history in histories
-                ]
-            )
-            mean, std, count_by_step = aggregate_matrix(matrix)
-            curve_data[key] = {
-                "mean": mean.tolist(),
-                "std": std.tolist(),
-                "count": count_by_step.tolist(),
-            }
-        curves[method.id] = curve_data
-        performance_rows.append(
-            "| "
-            + " | ".join(
-                [
-                    method.label,
-                    f"{100 * count / len(metrics):.1f}% ({count}/{len(metrics)})",
-                    *(
-                        f"{values[key]['mean']:.6f} ± {values[key]['std']:.6f}"
-                        for key in values
-                    ),
-                ]
-            )
-            + " |"
-        )
+                ),
+            ]
+            performance_rows.append("| " + " | ".join(cells) + " |")
+        performance[method.id] = values
+        index_in_group = representative_index(by_source["final"], spec.seeds)
+        run_dir = run_dirs[index * len(spec.seeds) + index_in_group]
+        representatives[method.id] = {
+            "variant_id": method.id,
+            **by_source["final"][index_in_group],
+            "run_dir": str(run_dir),
+            "model_path": str(run_dir / "policy.zip"),
+        }
         period_data = {}
         for start, end in periods:
             seed_counts = []
@@ -287,14 +357,14 @@ def summarize(spec: ExperimentSpec, run_dirs: tuple[Path, ...]) -> dict[str, obj
                     metric: current[metric] - baseline[metric]
                     for metric in (
                         "stop_error_m",
-                        "time_error_s",
+                        "abs_time_error_s",
                         "total_energy_kwh",
                         "comfort_tav",
                     )
                 }
             for metric in (
                 "stop_error_m",
-                "time_error_s",
+                "abs_time_error_s",
                 "total_energy_kwh",
                 "comfort_tav",
             ):
@@ -313,28 +383,6 @@ def summarize(spec: ExperimentSpec, run_dirs: tuple[Path, ...]) -> dict[str, obj
                 "mean": {metric: data["mean"] for metric, data in differences.items()},
                 "std": {metric: data["std"] for metric, data in differences.items()},
             }
-    representative = None
-    if "ppo_pirs" in raw:
-        index = max(
-            range(len(spec.seeds)),
-            key=lambda item: (
-                raw["ppo_pirs"][item]["selection_comparison_key"],
-                -spec.seeds[item],
-            ),
-        )
-        item = raw["ppo_pirs"][index]
-        run_dir = run_dirs[
-            next(i for i, method in enumerate(spec.variants) if method.id == "ppo_pirs")
-            * len(spec.seeds)
-            + index
-        ]
-        representative = {
-            "variant_id": "ppo_pirs",
-            **item,
-            "model_path": str(run_dir / "best" / "policy.zip")
-            if (run_dir / "best" / "policy.zip").exists()
-            else str(run_dir / "policy.zip"),
-        }
     return {
         "budget_mode": spec.train["budget_mode"],
         "training_rollouts": spec.train["training_rollouts"],
@@ -344,14 +392,15 @@ def summarize(spec: ExperimentSpec, run_dirs: tuple[Path, ...]) -> dict[str, obj
         "method_labels": {method.id: method.label for method in spec.variants},
         "feasible_summary": feasible,
         "raw_seed_metrics": raw,
+        "raw_seed_metrics_final": raw_final,
         "paired_differences": paired,
-        "representative_policy": representative,
+        "representative_policies": representatives,
+        "representative_policy": representatives.get("ppo_pirs"),
         "performance": performance,
-        "evaluation_curves": curves,
         "training_curves": training_curves,
         "training": training,
         "training_table": "\n".join(training_rows) + "\n",
-        "performance_table": "\n".join(performance_rows) + "\n",
+        "performance_table": "\n".join(performance_rows) + PERFORMANCE_NOTE + "\n",
     }
 
 

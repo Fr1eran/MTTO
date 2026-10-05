@@ -1,6 +1,6 @@
 # 高速磁浮速度曲线优化：论文仿真实验指南
 
-本手册描述论文全套仿真实验：控制周期步长消融、方法消融、DP/PIRS/实际运行三方对比、计划时间变化鲁棒性。核心强化学习方法称为物理先验奖励塑形（Physics-Informed Reward Shaping, PIRS），内部标识为 `ppo_pirs`。所有命令均从项目根目录执行，统一通过 `uv run` 使用项目虚拟环境；论文相关依赖（matplotlib、pandas、openpyxl）随 `dev` 依赖组一并安装（见 `uv sync`）。
+本手册描述论文全套仿真实验：控制周期步长消融、方法消融、DP/PIRS/实际运行三方对比、途中计划时分变更。核心强化学习方法称为物理先验奖励塑形（Physics-Informed Reward Shaping, PIRS），内部标识为 `ppo_pirs`。所有命令均从项目根目录执行，统一通过 `uv run` 使用项目虚拟环境；论文相关依赖（matplotlib、pandas、openpyxl）随 `dev` 依赖组一并安装（见 `uv sync`）。
 
 实验编排代码位于 `paper/experiments/`（`spec.py` 解析 `paper/specs/*.toml` 并展开实验矩阵，`runner.py` 负责调用 `mtto.workflows` 并处理中断恢复与结果复用），命令行入口为 `python -m paper.experiments`。出图脚本位于 `paper/figures/`。第 4 节描述结果复用规则；不熟悉该机制时，重新运行下列命令是安全的——已完成且未过期的结果会被自动复用而不是重新计算。
 
@@ -11,7 +11,7 @@
 1. 控制周期步长消融（第 5 节）：确定后续实验使用的控制周期 `step_time_s`。
 2. 方法消融（第 6 节）：对比 PPO、PPO+Safety、PPO+Punctuality 和 PPO+PIRS。
 3. DP、PIRS 与实际运行结果对比（第 7 节）。
-4. 计划时间变化鲁棒性验证（第 8 节）。
+4. 途中计划时分变更：PIRS 代表策略推理与 DP 重新求解的轨迹指标和重新计算耗时对比（第 8 节）。
 
 | 项目 | 固定值 | 定义位置 |
 | --- | --- | --- |
@@ -67,19 +67,20 @@
 
 “最好结果”按以下口径执行（`mtto.evaluation.quality.selection_key`/`best_update_reason`，由 `ScheduledPolicyEvaluationCallback` 在训练期周期评估中维护）：
 
-- 每个随机种子使用训练期 `best/` 检查点，不用 `final/`（训练结束时的最终策略）替代消融性能结果。
+- 消融性能表与控制周期表对每个随机种子同时报告训练期 `best/` 检查点与训练结束时的 final 策略（运行目录顶层），两行并列。
 - 择优优先级：严格可行（安全、成功、精确停站且准点）轨迹优先于所有不可行轨迹；严格可行轨迹之间优先选择总能耗更低者；尚无严格可行轨迹时，依次按“安全且成功”、停站精度、准点性、时间误差绝对值和能耗回退。
 - 消融学习曲线使用全部 5 个随机种子：先对单种子做 5 点尾随滑动平均，再计算多种子均值与样本标准差带（ddof=1）。
-- 消融性能表对 5 个种子的 `best/` 评估指标报告均值 ± 样本标准差（ddof=1），包含全部 5 个种子，不挑选单个种子的最优数值。
-- 三方轨迹对比使用方法消融选定的代表性 PPO+PIRS `best/` 策略。
+- 消融性能表对 5 个种子的 best 与 final 评估指标分别报告均值 ± 样本标准差（ddof=1），包含全部 5 个种子，不挑选单个种子的最优数值。
+- 代表策略取各种子 final 策略中严格可行且能耗最低者（无可行者按 `selection_key` 回退），不用 `best/`：best 是可行评估中能耗最低者，倾向于在时分容限内晚到。三方轨迹对比与途中时分变更始终使用 PPO+PIRS 的代表策略。
 
 ## 3. 命令入口一览
 
 | 用途 | 命令 |
 | --- | --- |
 | 单次 RL 训练/评估/DP/训练分析 | `uv run mtto {train,evaluate,dp,analyze-training} ...`（见项目根 `README.md`） |
-| 步长/方法消融（训练矩阵） | `uv run python -m paper.experiments {step_time,method_ablation} {run,summarize,figures} [--spec ...] [--output ...]` |
-| 计划时间变化鲁棒性（评估矩阵） | `uv run python -m paper.experiments schedule_change {run,summarize,figures} [--spec ...] [--output ...]` |
+| 步长消融（训练矩阵，只出表） | `uv run python -m paper.experiments step_time {run,summarize} [--spec ...] [--workers N] [--output ...]` |
+| 方法消融（训练矩阵） | `uv run python -m paper.experiments method_ablation {run,summarize,figures} [--spec ...] [--workers N] [--output ...]` |
+| 途中计划时分变更（评估 + DP 重新求解） | `uv run python -m paper.experiments schedule_change {run,summarize,figures} [--spec ...] [--output ...]` |
 | 实测运营数据重标定 | `uv run python -m paper.real_operation [--output-file ...]` |
 | 环境、势函数、评分函数说明图 | `uv run python -m paper.figures.{env_data,potential_function,score_function}` |
 | DP/RL 单条轨迹可视化 | `uv run python -m paper.figures.{dp_result,rl_result} --dp-run/--rl-run <目录>` |
@@ -89,6 +90,8 @@
 所有出图脚本支持 `--no-show`（保存不弹窗）与大多数支持 `--output-dir`（固定文件名，见各脚本 `--help`）；`min_operation_time_curve`（交互式最短运行时间曲线计算器，键盘输入起点重新计算）与 `real_operation_data`（打印实测曲线统计并展示三张图）没有命令行参数，始终调用 `plt.show()`；在无显示环境下用 `MPLBACKEND=Agg` 运行会跳过弹窗但仍完整执行其余逻辑。
 
 `run`/`summarize`/`figures` 的 `--spec` 默认分别为 `paper/specs/step_time.toml`、`paper/specs/method_ablation.toml`、`paper/specs/schedule_change.toml`；`run` 不需要 `--output`（训练/评估产物写入 spec 的 `output_root`），`summarize`/`figures` 需要 `--output <目录>`（汇总 JSON、Markdown 表格、PDF 图表写入该目录，可以是任意路径，不必与 `output_root` 相同）。
+
+**训练矩阵的并行执行**：`step_time run` 与 `method_ablation run` 把需要训练的矩阵单元交给一个固定大小的进程池（`--workers N`，默认 CPU 核数 − 2），空闲进程依次领取下一个单元，进程数与种子数、变体数无关；`--workers 1` 在当前进程内依次训练。每次训练只用一个 torch 线程（`mtto.rl.ppo.TORCH_NUM_THREADS`），结果与由哪个进程、在何时训练无关，并行与依次执行的产物逐位一致；`--workers` 不进入 `reuse_key`。中断的残留目录、编号分配与 `paper.json` 都在主进程中处理（第 4 节规则不变）。不要同时启动多个实验命令，也不要在训练时并行运行 DP 等其他多进程任务。
 
 ## 4. 结果复用与 `paper.json`
 
@@ -116,20 +119,15 @@ git_commit, dirty   # 运行开始时的溯源信息
 # 训练（自动跳过已完成且可复用的运行；矩阵定义见 paper/specs/step_time.toml）
 uv run python -m paper.experiments step_time run
 
-# 汇总数值与表格（不检查 dirty）
+# 汇总数值与表格（本实验不出图）
 uv run python -m paper.experiments step_time summarize \
-  --output output/paper_experiment/01_step_time/latest
-
-# 出图（要求全部运行 dirty=false，见第 4 节）
-uv run python -m paper.experiments step_time figures \
   --output output/paper_experiment/01_step_time/latest
 ```
 
 论文输出（写入 `--output` 目录）：
 
-- `step_time_learning_curves.pdf`：1×2 子图：(a) 行程完成率；(b) 周期独立评估可行率（feasible rate）；`1.0 s` 曲线加粗。
-- `step_time_table.md`：控制周期、严格可行率（百分比与分子/分母）、绝对停站误差、绝对时间误差、轨迹能耗（kWh）、舒适度 TAV，5 个种子的均值 ± 样本标准差。
-- `step_time_summary.json`：各控制周期各种子的原始指标、严格可行数与严格可行率，以及最终选定控制周期（`recommended_step_time_s`，选择规则：严格可行数最多 → 平均里程完成率最高 → 可行轨迹平均能耗最低 → 可行轨迹平均舒适度最低 → 较小控制周期）与比较键。
+- `step_time_table.md`：每个控制周期两行，分别为“Best”（训练期 `best/` 检查点）与“Final”（训练结束时的策略，即运行目录顶层的确定性评估），列为严格可行率（百分比与分子/分母）、绝对停站误差、有符号时间误差 Δt、轨迹能耗（kWh）、舒适度 TAV。严格可行率按全部种子计算；其余指标为到站策略的均值 ± 样本标准差（无到站策略时为“—”）。
+- `step_time_summary.json`：各控制周期 `best`/`final` 两组的逐种子原始指标、严格可行数与严格可行率、到站数，训练后期（最后 25% 预算）可行评估比例、best→final 能耗漂移，以及最终选定控制周期（`recommended_step_time_s`）与选择过程（`reference_energy_kwh`、`energy_margin_kwh`、`equivalent`、`excluded`）。选择规则（`select_step_time`）分三层：① 可靠性门槛——所有种子的 best 与 final 策略均严格可行，且后期可行评估比例均值 ≥ 0.9；② 能耗——final 策略平均能耗与最低者之差不超过各候选 final 能耗跨种子标准差的合并值（均方根）即视为等价（不用 best：best 检查点是可行评估中能耗最低者，倾向于利用时分容限晚到，其能耗混入了时间误差）；③ 收敛稳定性——等价者中取 final 策略能耗跨种子标准差最小者，再比较平均能耗漂移，最后取较小控制周期。
 
 训练运行写入 `paper/specs/step_time.toml` 的 `output_root`（`output/paper_experiment/01_step_time/`），每个矩阵单元一个 `<name>__<variant>__seed<seed:04d>__<NN>` 子目录（例如 `step_time__1p0__seed0011__01`）。方法消融（第 6 节）使用本节 `step_time_summary.json` 中的 `recommended_step_time_s` 作为其控制周期，查看方式：
 
@@ -158,10 +156,10 @@ uv run python -m paper.experiments method_ablation figures \
 论文输出（写入 `--output` 目录）：
 
 - `method_training_curves.pdf`：1×2 子图：(a) 训练过程近 12 rollouts（98,304 transitions）每万步速度违规次数；(b) 训练到达率。
-- `method_trajectory_metrics.pdf`：2×2 子图：绝对停站误差、绝对时间误差、轨迹总能耗（kWh）和舒适度 TAV，含 rollout 300–396 局部放大图与阈值虚线（停站 0.3 m，准点 10 s）。
+- `method_representative_profiles.pdf`：四个变体代表策略的速度—位置曲线叠加（背景为防护曲线与危险域）：(a) 全程；(b) 出发后 6 km；(c) 进站前 4 km。每个变体的代表策略按与第 7 节相同的规则选取：各种子 final 策略中严格可行且能耗最低者，无可行者按 `selection_key` 回退。
 - `method_training_table.md`：四个训练时期（1–100、101–200、201–300、301–400 rollouts）各方法的违规率与到达率均值 ± 样本标准差。
-- `method_performance_table.md`：各方法 5 种子 `best/` 轨迹的严格可行率、停站误差、时间误差、总能耗（kWh）、舒适度 TAV 均值 ± 样本标准差。
-- `summary.json`：原始种子指标、代表策略信息等派生数据（不含表格文本）。
+- `method_performance_table.md`：每个方法分 best（`best/` 检查点）与 final（训练结束时的策略）两行，列出严格可行率（全部种子）以及到站策略的停站误差、有符号时间误差 Δt、总能耗（kWh）、舒适度 TAV；训练后期可行评估比例（最后四分之一训练预算内周期评估严格可行的比例）与首次可行评估进度（首次出现严格可行评估时已用训练预算的比例，只统计出现过的种子）属于训练过程，只列在 best 行。均为均值 ± 样本标准差（无到站时为“—”）。`summary.json` 的 `performance` 按 `best`/`final` 分组，`raw_seed_metrics_final` 为 final 策略的逐种子指标；配对差值基于 best；代表策略基于 final（见第 2 节）。
+- `summary.json`：原始种子指标、各变体代表策略（`representative_policies`，其中 `ppo_pirs` 另存为 `representative_policy`）等派生数据（不含表格文本）。
 
 训练运行写入 `paper/specs/method_ablation.toml` 的 `output_root`（`output/paper_experiment/02_method_ablation/`）。第 7 节从本节 `summarize` 写出的 `summary.json` 中取代表性 PPO+PIRS 运行目录（控制台运行 `run` 时也会打印每个运行目录，但代表性运行的选定要看 `summary.json` 的 `representative_policy`）。
 
@@ -180,15 +178,11 @@ uv run mtto dp \
   --output-dir "$DP_DIR"
 
 # 2) 从方法消融汇总（第 6 节 summarize 产物）取代表性 PPO+PIRS 运行目录：
-#    representative_policy.model_path 是策略文件路径（.../<运行目录>/best/policy.zip
-#    或没有 best/ 时的 .../<运行目录>/policy.zip），运行目录是它的上一级（best/ 存在时再上一级）。
+#    representative_policy.run_dir 是代表 final 策略所在的运行目录。
 RL_MODEL_DIR=$(uv run python -c "
 import json
-from pathlib import Path
 data = json.load(open('output/paper_experiment/02_method_ablation/latest/summary.json'))
-model_path = Path(data['representative_policy']['model_path'])
-run_dir = model_path.parent.parent if model_path.parent.name == 'best' else model_path.parent
-print(run_dir)
+print(data['representative_policy']['run_dir'])
 ")
 echo "代表运行目录: $RL_MODEL_DIR"
 
@@ -196,7 +190,7 @@ echo "代表运行目录: $RL_MODEL_DIR"
 #    paper.real_operation.real_operation_profile 现场计算，不需要预先转换文件
 uv run python -m paper.figures.speed_profile_comparison \
   --dp-run "$DP_DIR" \
-  --rl-run "$RL_MODEL_DIR" --rl-best \
+  --rl-run "$RL_MODEL_DIR" \
   --output-dir output/paper_experiment/03_dp_actual_comparison/latest \
   --no-show
 ```
@@ -212,9 +206,15 @@ uv run python -m paper.figures.speed_profile_comparison \
 
 `paper.figures.speed_profile_comparison` 还支持 `--baseline-rl LABEL=DIR`（可重复，最多 3 个）叠加额外 RL 基线曲线；`paper.figures.dp_redundancy_error` 与 `paper.figures.sps_compliance --analysis-mode compare` 可对同一 DP/RL 运行目录做冗余运行时间误差分析与停车点步进（SPS）合规性分析。
 
-## 8. 计划时间变化鲁棒性（论文实验四）
+## 8. 途中计划时分变更（论文实验四）
 
-`paper/specs/schedule_change.toml` 从方法消融（`source_spec`）中读取 `source_variant`（`ppo_pirs`）的 5 个种子的 `best/` 和 `final/`，共 10 个候选策略；每个候选运行 `delta_times_s` 中列出的每种计划时间变化（默认 `[0.0, 30.0, -30.0]`，即 `Original`、`Plus 30s`、`Minus 30s`），在线路位置 `change_distance_m`（绝对位置，默认 `8000.0` m）处触发变化。运行本节前，方法消融（第 6 节）必须已产生完整的 20 组运行。
+`paper/specs/schedule_change.toml` 定义本实验：
+
+- **RL**：从方法消融（`source_spec`）中按第 6 节的代表策略规则选出 PPO+PIRS 的代表 final 策略（变体固定，spec 中不再配置）（与第 7 节为同一策略，不做跨工况挑选），对 `delta_times_s` 中的每种变化（默认 `[0.0, 30.0, -30.0]`）在绝对线路位置 `change_distance_m`（默认 `8000.0` m）处改变计划时分并做确定性评估。评估经过第 4 节的复用层。
+- **DP**：读取第 7 节的标称 DP 运行（`dp_run`），取其轨迹上第一个不早于变化位置的网格节点的位置、速度和已用时间，以“新计划时分 − 已用时间”为剩余计划时分、用同一 DP 配置（取自该运行的 `run.json`）从该节点重新求解至终点，与变化前的标称段拼接成全程轨迹并评估。
+- **重新计算耗时**：RL 为从变化位置起逐步构建观测、策略推理并在仿真器中推进至停站的挂钟时间，另记单步推理均值；DP 为从变化节点重新求解的挂钟时间（含转移图构建与 λ 二分），另记同一求解器实例复用内存中转移图时只做 λ 二分的耗时。每项重复 `timing_repeats` 次（默认 3），汇总取中位数；DP 预计算模式与进程数、PyTorch 线程数一并写入表注。策略加载与环境构建不计入耗时。
+
+运行本节前，方法消融（第 6 节）必须已产生完整运行，且第 7 节的 DP 运行已位于 `dp_run`。
 
 ```bash
 uv run python -m paper.experiments schedule_change run
@@ -228,20 +228,20 @@ uv run python -m paper.experiments schedule_change figures \
 
 论文输出（写入 `--output` 目录）：
 
-- `schedule_time_change_comparison.pdf`：各计划时间下的速度—位置曲线，标记计划变化位置，仅绘制根据跨工况严格可行性、安全、完成、停站/准点误差和能耗选出的最稳健候选。
-- `schedule_time_change_table.md`：计划变化、最终时间误差 (s)、停站误差 (m)、轨迹能耗 (kWh)、舒适度 TAV (m/s²)。
-- `schedule_time_change_summary.json`：逐候选、逐工况原始指标（能耗为 `total_energy_j`，展示时按 `/ 3,600,000` 换算为 kWh）与最终排名。
+- `schedule_time_change_comparison.pdf`：各工况的速度—位置曲线，颜色区分工况，PPO-PIRS 实线、DP 虚线，竖线标出计划变化位置。
+- `schedule_time_change_table.md`：工况 × 方法，列为是否满足停站/准点容限、相对新计划的有符号 Δt、停站误差、全程能耗（kWh）、舒适度 TAV、重新计算耗时。
+- `schedule_time_change_summary.json`：逐工况、逐方法的指标与耗时、代表策略与变化节点信息。
 
-评估运行写入 `paper/specs/schedule_change.toml` 的 `output_root`（`output/paper_experiment/04_schedule_time_change/`），同样经过第 4 节的复用与 `dirty` 规则（评估的 `reuse_key` 额外绑定被评估策略 `policy.zip` 的 SHA-256）。
+产物位置：RL 评估写入 `output_root` 下的 `schedule_change__<variant>__<工况>__NN/`（评估的 `reuse_key` 额外绑定被评估策略 `policy.zip` 的 SHA-256）；DP 重新求解与耗时写入 `output_root/replan__<键>/`（`dp__<工况>/` 为拼接后的 DP 运行，`timing.json` 为耗时与溯源信息，最后写入，作为完成标记）。`replan` 的键绑定场景哈希、策略 SHA-256、标称 DP 的 `run_id`、工况、变化位置、重复次数与 `mtto` 版本；键相同且 `timing.json` 存在时复用，键变化时写入新目录、不删除旧目录。`figures` 同样拒绝 `timing.json` 中 `dirty=true` 的结果。
 
 ## 9. 输出位置一览
 
 | 实验 | 训练/评估产物 | 汇总与图表 |
 | --- | --- | --- |
-| 控制周期步长消融 | `paper/specs/step_time.toml` 的 `output_root`（`output/paper_experiment/01_step_time/`） | `step_time {summarize,figures} --output <目录>` |
+| 控制周期步长消融 | `paper/specs/step_time.toml` 的 `output_root`（`output/paper_experiment/01_step_time/`） | `step_time summarize --output <目录>` |
 | 方法消融 | `paper/specs/method_ablation.toml` 的 `output_root`（`output/paper_experiment/02_method_ablation/`） | `method_ablation {summarize,figures} --output <目录>` |
 | DP/PIRS/实际对比 | 由 `mtto dp --output-dir` 手工指定（实测曲线现场计算，无需单独产物） | `paper.figures.speed_profile_comparison --output-dir <目录>` |
-| 计划时间变化鲁棒性 | `paper/specs/schedule_change.toml` 的 `output_root`（`output/paper_experiment/04_schedule_time_change/`） | `schedule_change {summarize,figures} --output <目录>` |
+| 途中计划时分变更 | `paper/specs/schedule_change.toml` 的 `output_root`（`output/paper_experiment/04_schedule_time_change/`，含 `replan__<键>/`） | `schedule_change {summarize,figures} --output <目录>` |
 | 环境、势函数、评分函数说明图 | 不适用（不读运行产物） | `paper.figures.{env_data,potential_function,score_function} --output-dir <目录>` |
 
 ## 10. 测试与验收

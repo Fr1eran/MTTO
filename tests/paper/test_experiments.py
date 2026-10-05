@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import zipfile
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -11,17 +12,26 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
-from mtto.io.artifacts import read_completed_run
-from mtto.io.scenario import load_tasks
+from mtto.dp.solver import VariableSpacingDPOptimizer
+from mtto.evaluation.quality import assess
+from mtto.io.artifacts import (
+    RunKind,
+    RunPayload,
+    RunRecord,
+    read_completed_run,
+    task_to_json,
+    write_run,
+)
+from mtto.io.scenario import load_scenario, load_tasks
+from mtto.workflows.dp import DPConfig
 from paper import analysis
 from paper.experiments import runner, schedule_change, step_time
 from paper.experiments.method_ablation import summarize, write_summary
 from paper.experiments.spec import expand_matrix, load_experiment_spec
+from paper.plotting import ablation
 from paper.plotting.ablation import (
     method_figures,
     require_clean,
-    schedule_change_figure,
-    step_time_figure,
 )
 
 
@@ -99,6 +109,27 @@ def test_io_error_does_not_discard_run(
     assert (run_dir / "run.json").exists()
 
 
+def test_process_pool_matches_serial_training(
+    small_spec: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(runner, "git_state", lambda: ("test-commit", True))
+    spec = load_experiment_spec(small_spec)
+    serial = runner.execute_matrix(replace(spec, output_root=tmp_path / "serial"), 1)
+    pooled_spec = replace(spec, output_root=tmp_path / "pooled")
+    pooled = runner.execute_matrix(pooled_spec, 2)
+    assert [item.directory.name for item in pooled] == [
+        item.directory.name for item in serial
+    ]
+    assert not any(item.reused for item in (*serial, *pooled))
+    for left, right in zip(serial, pooled, strict=True):
+        with (
+            zipfile.ZipFile(left.directory / "policy.zip") as first,
+            zipfile.ZipFile(right.directory / "policy.zip") as second,
+        ):
+            assert first.read("policy.pth") == second.read("policy.pth")
+    assert all(item.reused for item in runner.execute_matrix(pooled_spec, 2))
+
+
 def test_run_reuse_recovery_and_summary(
     small_spec: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -137,6 +168,30 @@ def test_run_reuse_recovery_and_summary(
     assert written["raw_seed_metrics"]["ppo"][0]["stop_error_m"] == abs(
         (payload.best or payload).quality.metrics.stop_error_m
     )
+    assert written["raw_seed_metrics"]["ppo"][0]["time_error_s"] == (
+        (payload.best or payload).quality.metrics.arrival_time_error_s
+    )
+    assert set(written["representative_policies"]) == {"ppo", "ppo_safety"}
+    # Without periodic evaluations there is no late-stage feasibility ratio.
+    assert written["performance"]["ppo"]["late_feasible_rate"] is None
+    assert written["performance"]["ppo"]["first_feasible_progress"] is None
+    assert written["raw_seed_metrics_final"]["ppo"][0]["time_error_s"] == (
+        payload.quality.metrics.arrival_time_error_s
+    )
+    # Trajectory metrics average only policies of each source that reached the target.
+    for method in ("ppo", "ppo_safety"):
+        for source, raw_key in (
+            ("best", "raw_seed_metrics"),
+            ("final", "raw_seed_metrics_final"),
+        ):
+            arrived = [item for item in written[raw_key][method] if item["success"]]
+            energy = written["performance"][method][source]["total_energy_kwh"]
+            if arrived:
+                assert energy["mean"] == pytest.approx(
+                    np.mean([item["total_energy_kwh"] for item in arrived])
+                )
+            else:
+                assert energy is None
     performance_table = tmp_path / "summary/method_performance_table.md"
     assert "PPO+Safety" in performance_table.read_text()
 
@@ -299,24 +354,87 @@ def test_generic_variants_and_step_time(
     step_time.write_summary(summary, tmp_path / "step_summary")
     assert (tmp_path / "step_summary/step_time_summary.json").exists()
     assert "1.5 s" in (tmp_path / "step_summary/step_time_table.md").read_text()
-    require_clean(tuple(item.directory for item in results))
-    from paper.experiments.__main__ import main
+    table = (tmp_path / "step_summary/step_time_table.md").read_text()
+    assert "| Policy |" in table
+    assert table.count("| Best |") == table.count("| Final |") == 2
+    for variant, result in zip(summary["variants"].values(), results, strict=True):
+        payload = read_completed_run(result.directory).payload
+        final = variant["final"]["per_seed"][0]
+        assert final["time_error_s"] == payload.quality.metrics.arrival_time_error_s
+        assert final["feasible"] == payload.quality.feasible
+        assert variant["final"]["arrived_count"] == int(payload.quality.completed)
+        if not payload.quality.completed:
+            assert variant["final"]["metrics"]["energy_kwh"] is None
 
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "paper.experiments",
-            "step_time",
-            "figures",
-            "--spec",
-            str(path),
-            "--output",
-            str(tmp_path / "step_figures"),
-        ],
-    )
-    main()
-    assert (tmp_path / "step_figures/step_time_learning_curves.pdf").exists()
+
+def _step_variant(
+    step: float,
+    best_energy: tuple[float, float],
+    final_energy_std: float,
+    drift: float,
+    feasible: int = 5,
+    late: float = 1.0,
+) -> dict[str, object]:
+    def source(energy: dict[str, float]) -> dict[str, object]:
+        return {
+            "feasible_count": feasible,
+            "per_seed": [{}] * 5,
+            "metrics": {"energy_kwh": energy},
+        }
+
+    return {
+        "variant_id": f"{step:g}",
+        "step_time_s": step,
+        "late_feasible_rate": late,
+        "energy_drift_kwh": {"mean": drift, "std": 0.0},
+        "best": source({"mean": best_energy[0], "std": best_energy[1]}),
+        "final": source({"mean": best_energy[0] + drift, "std": final_energy_std}),
+    }
+
+
+@pytest.mark.parametrize(
+    ("variants", "expected", "excluded"),
+    [
+        # The lowest best-checkpoint energy (1.5 s) does not survive at the end of
+        # training; final energies within the pooled spread defer to stability,
+        # and an unreliable period is gated out despite its low energy.
+        (
+            [
+                _step_variant(0.5, (800.0, 100.0), 170.0, 40.0, feasible=4, late=0.8),
+                _step_variant(1.0, (854.3, 18.4), 7.3, 13.3),
+                _step_variant(1.5, (834.7, 23.0), 36.5, 61.0),
+                _step_variant(2.0, (851.4, 22.2), 13.8, 28.8),
+            ],
+            1.0,
+            {
+                "0.5": "best policy not feasible in every run",
+                "1.5": "final-policy energy outside margin",
+            },
+        ),
+        # A clearly lower energy wins even with a less stable final policy.
+        (
+            [
+                _step_variant(1.0, (900.0, 5.0), 2.0, 1.0),
+                _step_variant(2.0, (850.0, 5.0), 30.0, 20.0),
+            ],
+            2.0,
+            {"1": "final-policy energy outside margin"},
+        ),
+        (
+            [_step_variant(1.0, (850.0, 5.0), 2.0, 1.0, late=0.5)],
+            None,
+            {"1": "late-stage feasible share below gate"},
+        ),
+    ],
+)
+def test_step_time_selection_rule(
+    variants: list[dict[str, object]],
+    expected: float | None,
+    excluded: dict[str, str],
+) -> None:
+    selection = step_time.select_step_time(variants)
+    assert selection["recommended_step_time_s"] == expected
+    assert selection["excluded"] == excluded
 
 
 def test_step_time_spec_expands_candidates_and_seeds() -> None:
@@ -333,9 +451,20 @@ def test_step_time_spec_expands_candidates_and_seeds() -> None:
 def test_schedule_change_evaluation_reuse_and_figures(
     small_spec: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    # DP has no feasible trajectory for the 1 km task, so use a shorter one.
+    tasks = tmp_path / "tasks.toml"
+    tasks.write_text(
+        (small_spec.parent / "tasks.toml")
+        .read_text(encoding="utf-8")
+        .replace("target_position_m = 1135.0", "target_position_m = 535.0")
+        .replace("schedule_time_s = 120.0", "schedule_time_s = 60.0"),
+        encoding="utf-8",
+    )
     source = small_spec.read_text(encoding="utf-8")
-    source = source.split("[[variants]]")[0].replace(
-        str(small_spec.parent / "runs"), str(tmp_path / "methods")
+    source = (
+        source.split("[[variants]]")[0]
+        .replace(str(small_spec.parent / "runs"), str(tmp_path / "methods"))
+        .replace(str(small_spec.parent / "tasks.toml"), str(tasks))
     )
     source = source.replace(
         "training_rollouts = 1",
@@ -369,38 +498,89 @@ def test_schedule_change_evaluation_reuse_and_figures(
     )
     main()
     assert (tmp_path / "cli_figures/method_training_curves.pdf").exists()
-    assert (tmp_path / "cli_figures/method_trajectory_metrics.pdf").exists()
+    assert (tmp_path / "cli_figures/method_representative_profiles.pdf").exists()
+
+    scenario = load_scenario(method_spec.scenario, method_spec.line_dir)
+    task = load_tasks(method_spec.tasks)[method_spec.task]
+    dp_config = DPConfig(
+        delta_speed=1.0,
+        stage_division="uniform",
+        uniform_step_size=50.0,
+        sub_stage_count=30,
+        max_outer_iterations=100,
+        precompute_mode="serial",
+        precompute_workers=None,
+        precompute_chunk_size=None,
+    )
+    nominal = VariableSpacingDPOptimizer(
+        scenario=scenario,
+        task=task,
+        cache_dir=None,
+        delta_speed=dp_config.delta_speed,
+        uniform_step_size=dp_config.uniform_step_size,
+        precompute_mode="serial",
+        show_precompute_progress=False,
+    ).optimize(task.start_position_m, 0.0, task.target_position_m, 0.0, 60.0)
+    dp_dir = tmp_path / "dp"
+    write_run(
+        dp_dir,
+        RunRecord(
+            run_id="nominal-dp",
+            kind=RunKind.DP_SOLVE,
+            config=asdict(dp_config),
+            scenario_hash=scenario.scenario_hash,
+            task=task_to_json(task),
+            policy_io_version=None,
+            mtto_version="test",
+            created_at="2026-10-04T00:00:00+00:00",
+        ),
+        RunPayload(profile=nominal, quality=assess(nominal, scenario, task)),
+    )
+    # The change triggers at the start position so that the barely trained
+    # policy always reaches it.
     case_spec = tmp_path / "schedule.toml"
     case_spec.write_text(
         "[experiment]\n"
-        f"source_spec = '{method_path}'\nsource_variant = 'ppo_pirs'\n"
-        "candidate_sources = ['best', 'final']\ndelta_times_s = [0.0, 30.0]\n"
-        f"change_distance_m = 500.0\noutput_root = '{tmp_path / 'schedule'}'\n"
+        f"source_spec = '{method_path}'\n"
+        f"dp_run = '{dp_dir}'\ndelta_times_s = [0.0, 30.0]\n"
+        "change_distance_m = 135.0\ntiming_repeats = 1\n"
+        f"output_root = '{tmp_path / 'schedule'}'\n"
     )
     spec = schedule_change.load_schedule_spec(case_spec)
-    first = schedule_change.run(case_spec)
-    assert len(first) == 4 and all(not item.reused for item in first)
-    for item in first:
-        completed = read_completed_run(item.directory)
-        paper = json.loads((item.directory / "paper.json").read_text())
-        policy_file = training[0].directory / (
-            "best/policy.zip" if item.planned.config.use_best else "policy.zip"
-        )
-        assert paper["reuse_key"] == runner.reuse_key(
-            completed.record, runner.file_sha256(policy_file)
-        )
-        if "plus_30p0s" in item.planned.run_label:
-            assert completed.record.task["schedule_change"] == {
-                "trigger_position_m": 500.0,
-                "new_schedule_time_s": 150.0,
-            }
-    again = schedule_change.run(case_spec)
+    evaluations, replan_dir, reused = schedule_change.run(case_spec)
+    assert len(evaluations) == 2 and not reused
+    assert not any(item.planned.config.use_best for item in evaluations)
+    plus = read_completed_run(evaluations[1].directory)
+    assert plus.record.task["schedule_change"] == {
+        "trigger_position_m": 135.0,
+        "new_schedule_time_s": 90.0,
+    }
+    replanned = read_completed_run(replan_dir / "dp__plus_30p0s")
+    assert replanned.record.config["remaining_schedule_time_s"] == pytest.approx(90.0)
+    assert replanned.payload.quality.metrics.arrival_time_error_s == pytest.approx(
+        replanned.payload.profile.time_s[-1] - 90.0
+    )
+    again, again_dir, again_reused = schedule_change.run(case_spec)
     assert all(item.reused for item in again)
-    summary = schedule_change.summarize(spec, tuple(item.directory for item in again))
+    assert again_reused and again_dir == replan_dir
+
+    run_dirs, found_dir = schedule_change.completed_runs(spec)
+    assert found_dir == replan_dir
+    summary = schedule_change.summarize(spec, run_dirs, replan_dir)
+    pairs = [(entry["case"]["token"], entry["method"]) for entry in summary["entries"]]
+    assert pairs == [
+        ("original", "PPO-PIRS"),
+        ("original", "DP"),
+        ("plus_30p0s", "PPO-PIRS"),
+        ("plus_30p0s", "DP"),
+    ]
+    assert all(entry["recompute_time_s"] > 0.0 for entry in summary["entries"])
     schedule_change.write_summary(summary, tmp_path / "schedule_summary")
-    assert summary["candidate_count"] == 2
-    assert (tmp_path / "schedule_summary/schedule_time_change_table.md").exists()
-    require_clean(tuple(item.directory for item in first))
+    assert (
+        "Recomputation time"
+        in (tmp_path / "schedule_summary/schedule_time_change_table.md").read_text()
+    )
+    require_clean(run_dirs)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -418,108 +598,32 @@ def test_schedule_change_evaluation_reuse_and_figures(
     assert (
         tmp_path / "cli_schedule_figures/schedule_time_change_comparison.pdf"
     ).exists()
-    figures = []
-    close = plt.close
-    monkeypatch.setattr(plt, "close", figures.append)
-    try:
-        scenario, _ = schedule_change.planned_evaluations(spec)
-        schedule_change_figure(summary, scenario, tmp_path / "schedule_axis")
-    finally:
-        monkeypatch.setattr(plt, "close", close)
-        for figure in figures:
-            close(figure)
-    profiles = [
-        read_completed_run(Path(case["run_dir"])).payload.profile
-        for case in summary["cases"]
-    ]
-    left = min(float(np.min(profile.position_m)) for profile in profiles)
-    right = max(float(np.max(profile.position_m)) for profile in profiles)
-    margin = max((right - left) * 0.03, 1.0)
-    assert figures[0].axes[0].get_xlim() == pytest.approx(
-        (left - margin, right + margin)
-    )
-    dirty_path = first[0].directory / "paper.json"
-    paper = json.loads(dirty_path.read_text())
-    paper["dirty"] = True
-    dirty_path.write_text(json.dumps(paper))
-    with pytest.raises(ValueError, match=first[0].directory.name):
-        require_clean(tuple(item.directory for item in first))
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "paper.experiments",
-            "schedule_change",
-            "figures",
-            "--spec",
-            str(case_spec),
-            "--output",
-            str(tmp_path / "dirty_figures"),
-        ],
-    )
-    with pytest.raises(ValueError, match=first[0].directory.name):
+
+    timing_path = replan_dir / "timing.json"
+    timing = json.loads(timing_path.read_text())
+    timing["dirty"] = True
+    timing_path.write_text(json.dumps(timing))
+    with pytest.raises(ValueError, match=replan_dir.name):
         main()
-    paper["dirty"] = False
-    dirty_path.write_text(json.dumps(paper))
+
     policy = training[0].directory / "policy.zip"
     policy.write_bytes(policy.read_bytes() + b"changed")
-    changed = schedule_change.run(case_spec)
-    assert sum(not item.reused for item in changed) == 2
-    assert all(
-        item.directory.name.endswith("__02") for item in changed if not item.reused
-    )
-    assert all(item.directory.exists() for item in first)
+    changed, changed_dir, changed_reused = schedule_change.run(case_spec)
+    assert all(not item.reused for item in changed)
+    assert not changed_reused and changed_dir != replan_dir
+    assert replan_dir.exists()
 
 
-def test_schedule_change_case_and_rank_order() -> None:
+def test_schedule_change_defaults_and_case_tokens() -> None:
     defaults = schedule_change.load_schedule_spec(
         Path("paper/specs/schedule_change.toml")
     )
-    assert defaults.candidate_sources == ("best", "final")
     assert defaults.delta_times_s == (0.0, 30.0, -30.0)
     assert defaults.change_distance_m == 8000.0
     assert [
         schedule_change.build_schedule_change_case(delta).token
         for delta in (0, 30, -30)
     ] == ["original", "plus_30p0s", "minus_30p0s"]
-    case = schedule_change.CaseResult(
-        case=schedule_change.build_schedule_change_case(0),
-        feasible=True,
-        safe=True,
-        success=True,
-        precise_arrival=True,
-        punctual_arrival=True,
-        safety_violation_count=0,
-        min_safety_margin_mps=1.0,
-        stop_error_m=0.1,
-        abs_time_error_s=1.0,
-        time_error_s=1.0,
-        total_energy_j=200_000.0,
-        total_energy_kj=200.0,
-        total_reward=1.0,
-        comfort_tav=0.2,
-        run_dir="run",
-        schedule_change_triggered=False,
-    )
-    failed = replace(
-        case, feasible=False, punctual_arrival=False, total_energy_j=50_000.0
-    )
-    assert schedule_change.build_candidate_rank_key((case,)) > (
-        schedule_change.build_candidate_rank_key((failed,))
-    )
-    worse_error = replace(case, stop_error_m=0.3, total_energy_j=50_000.0)
-    assert schedule_change.build_candidate_rank_key((case, case)) > (
-        schedule_change.build_candidate_rank_key((case, worse_error))
-    )
-    rank = schedule_change.build_candidate_rank_key((case,))
-    tied = [
-        schedule_change.CandidateEvaluation("final", "b", 11, "final", (case,), rank),
-        schedule_change.CandidateEvaluation("best-b", "b", 11, "best", (case,), rank),
-        schedule_change.CandidateEvaluation("best-a", "a", 11, "best", (case,), rank),
-    ]
-    assert [
-        item.candidate_id for item in schedule_change.rank_candidate_evaluations(tied)
-    ] == ["best-a", "best-b", "final"]
 
 
 def test_schedule_change_trigger_position_is_absolute() -> None:
@@ -548,7 +652,6 @@ def test_formal_figure_axes_match_legacy(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     method_spec = load_experiment_spec(Path("paper/specs/method_ablation.toml"))
-    step_spec = load_experiment_spec(Path("paper/specs/step_time.toml"))
     rollout_steps = 8 * 1024
     steps = [rollout * rollout_steps for rollout in range(12, 400, 12)]
     series = {"mean": [0.5] * len(steps), "std": [0.1] * len(steps)}
@@ -565,53 +668,29 @@ def test_formal_figure_axes_match_legacy(
             }
             for variant in method_spec.variants
         },
-        "evaluation_curves": {
-            variant.id: {
-                "training_steps": steps,
-                **dict.fromkeys(
-                    ("stop_error_m", "time_error_s", "total_energy_j", "comfort_tav"),
-                    series,
-                ),
-            }
-            for variant in method_spec.variants
-        },
-    }
-    step_summary = {
-        "variants": {
-            variant.id: {"label": variant.label} for variant in step_spec.variants
-        },
-        "curves": {
-            variant.id: {
-                "training_steps": steps,
-                "route_completion_ratio": series,
-                "feasible": series,
-            }
-            for variant in step_spec.variants
-        },
     }
     figures = []
     close = plt.close
     monkeypatch.setattr(plt, "close", figures.append)
+    # The representative-profile figure reads run artifacts; it is covered by
+    # the schedule-change integration test.
+    monkeypatch.setattr(
+        ablation, "representative_profiles_figure", lambda *_: tmp_path / "unused"
+    )
     try:
         method_figures(method_summary, method_spec, tmp_path)
-        step_time_figure(step_summary, step_spec, tmp_path)
     finally:
         monkeypatch.setattr(plt, "close", close)
         for figure in figures:
             close(figure)
-    assert len(figures) == 3
+    assert len(figures) == 1
     axis_end = 400 * rollout_steps
     inset_end = 396 * rollout_steps
-    training, metrics, distance = figures
+    (training,) = figures
     assert [axis.get_xlim() for axis in training.axes] == [(0, axis_end)] * 2
     assert training.axes[0].child_axes[0].get_xlim() == (
         200 * rollout_steps,
         inset_end,
     )
-    assert [axis.get_xlim() for axis in metrics.axes] == [(0, axis_end)] * 4
-    assert [axis.child_axes[0].get_xlim() for axis in metrics.axes[:2]] == [
-        (300 * rollout_steps, inset_end),
-    ] * 2
-    assert [axis.get_xlim() for axis in distance.axes] == [(0, axis_end)] * 2
-    for axis in (*training.axes, *metrics.axes, *distance.axes):
+    for axis in training.axes:
         assert axis.xaxis.get_major_formatter()._powerlimits == (6, 6)

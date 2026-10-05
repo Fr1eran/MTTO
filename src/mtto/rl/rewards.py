@@ -40,23 +40,29 @@ PUNCTUALITY_DECAY_TIME_S: float = 15.0
 STOPPING_SCORE_POWER: float = 4.0
 
 
-def punctuality_potential_from_error(
-    error_s: float | NDArray[np.floating],
-) -> float | NDArray[np.float64]:
-    """Evaluate the punctuality potential from a slack error.
+def punctuality_potential_from_error(error_s: float) -> float:
+    """Evaluate the punctuality potential from a slack error (reward path).
 
     Pseudo-Huber: ``-K * e^2 / sigma^2`` near zero and linear, with slope
     ``2K / sigma`` per second, far from it. It does not saturate, so every
     further second behind (or ahead of) the timetable keeps costing.
     """
-    error = np.asarray(error_s, dtype=np.float64)
     sigma = PUNCTUALITY_POTENTIAL_SIGMA_S
-    potential = (
-        -2.0 * PUNCTUALITY_POTENTIAL_SCALE * (np.hypot(error, sigma) - sigma) / sigma
+    return (
+        -2.0
+        * PUNCTUALITY_POTENTIAL_SCALE
+        * (math.hypot(error_s, sigma) - sigma)
+        / sigma
     )
-    if potential.ndim == 0:
-        return float(potential)
-    return np.asarray(potential, dtype=np.float64)
+
+
+def punctuality_potential_from_error_array(
+    error_s: NDArray[np.floating],
+) -> NDArray[np.float64]:
+    """Array form of :func:`punctuality_potential_from_error` for plotting."""
+    sigma = PUNCTUALITY_POTENTIAL_SIGMA_S
+    error = np.asarray(error_s, dtype=np.float64)
+    return -2.0 * PUNCTUALITY_POTENTIAL_SCALE * (np.hypot(error, sigma) - sigma) / sigma
 
 
 def reference_punctuality_slack(
@@ -145,6 +151,16 @@ def safety_potential(braking_reserve: float, traction_reserve: float) -> float:
     return -SAFETY_RESERVE_UPPER_SCALE * upper - SAFETY_RESERVE_LOWER_SCALE * lower
 
 
+def safety_potential_array(
+    braking_reserve: NDArray[np.floating], traction_reserve: NDArray[np.floating]
+) -> NDArray[np.float64]:
+    """Array form of :func:`safety_potential` for plotting."""
+    horizon = SAFETY_RESERVE_HORIZON_STEPS
+    upper = (1.0 - np.clip(braking_reserve, 0.0, horizon) / horizon) ** 2
+    lower = (1.0 - np.clip(traction_reserve, 0.0, horizon) / horizon) ** 2
+    return -SAFETY_RESERVE_UPPER_SCALE * upper - SAFETY_RESERVE_LOWER_SCALE * lower
+
+
 @dataclass(frozen=True, slots=True)
 class RewardConfig:
     """Selects which reward terms are active; all magnitudes are fixed."""
@@ -212,15 +228,40 @@ class RewardCalculator:
                 "punctuality shaping requires a finite initial minimum time "
                 "and positive distance"
             )
+        # Potentials (punctuality, safety) of the last step's end state, keyed
+        # by object identity: the next step usually starts from that very
+        # object, while a reset or a schedule change hands over a new one.
+        self._cached_state: State | None = None
+        self._cached_potentials: tuple[float, float] = (0.0, 0.0)
 
     def calculate(
         self, previous: State, result: StepResult, task: Task
     ) -> RewardBreakdown:
         state = result.step_end_state
-        punctuality_shaping = self.reward_punctuality_potential(previous, result, task)
+        config = self.reward_config
+        if previous is self._cached_state:
+            previous_punctuality, previous_safety = self._cached_potentials
+        else:
+            previous_punctuality = self.potential_punctuality(previous, task)
+            previous_safety = (
+                self.potential_safety(previous)
+                if config.enable_potential_safety
+                else 0.0
+            )
+        next_punctuality = self.potential_punctuality(state, task)
+        next_safety = (
+            self.potential_safety(state) if config.enable_potential_safety else 0.0
+        )
+        self._cached_state = state
+        self._cached_potentials = (next_punctuality, next_safety)
+        punctuality_shaping = (
+            self.gamma * next_punctuality - previous_punctuality
+            if config.enable_potential_punctuality
+            else 0.0
+        )
         safety = (
-            self._reward_safety_potential(previous, result)
-            if self.reward_config.enable_potential_safety
+            self.gamma * next_safety - previous_safety
+            if config.enable_potential_safety
             else 0.0
         )
         if result.termination_reason not in (
@@ -325,13 +366,15 @@ class RewardCalculator:
         time_error = abs(schedule_time_s - operation_time_s)
         return math.exp(-time_error / self.PUNCTUALITY_DECAY_TIME_S)
 
-    def _reward_safety_potential(self, previous: State, result: StepResult) -> float:
-        current = result.step_end_state
-        return self.gamma * safety_potential(
-            current.braking_reserve_steps, current.traction_reserve_steps
-        ) - safety_potential(
-            previous.braking_reserve_steps, previous.traction_reserve_steps
+    def potential_safety(self, state: State) -> float:
+        return safety_potential(
+            state.braking_reserve_steps, state.traction_reserve_steps
         )
+
+    def _reward_safety_potential(self, previous: State, result: StepResult) -> float:
+        return self.gamma * self.potential_safety(
+            result.step_end_state
+        ) - self.potential_safety(previous)
 
 
 DEFAULT_REWARD_PRESET_NAME = "basic_safety_punctuality"

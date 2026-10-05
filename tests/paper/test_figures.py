@@ -398,7 +398,7 @@ def test_punctuality_field_uses_full_route_and_canonical_potential(
     assert field.position_m[-1] == pytest.approx(29270.046)
     np.testing.assert_allclose(
         field.potential,
-        show_potential_function.punctuality_potential_from_error(
+        show_potential_function.punctuality_potential_from_error_array(
             field.redundant_time_grid_s - field.reference_slack_s[np.newaxis, :]
         ),
     )
@@ -415,15 +415,17 @@ def test_punctuality_single_and_safety_combined_have_sci_widths(
     combined = show_potential_function.plot_safety_punctuality_potentials(minimal=False)
 
     assert single.get_size_inches()[0] == pytest.approx(85.0 / 25.4)
-    assert combined.get_size_inches()[0] == pytest.approx(170.0 / 25.4)
+    assert combined.get_size_inches()[0] == pytest.approx(408.0 / 72.27)
     assert len(single.axes) == 2
+    # Two panels and their colour bars; the zooms are insets of panel (a).
+    ax_safety, ax_punctuality = combined.axes[:2]
     assert len(combined.axes) == 4
-    assert [text.get_text() for text in combined.axes[0].texts] == ["(a)"]
-    assert [text.get_text() for text in combined.axes[1].texts] == ["(b)"]
-    assert combined.axes[0].get_ylabel() == "Speed (km/h)"
-    assert combined.axes[2].get_title() == ""
-    assert combined.axes[3].get_title() == ""
-    assert combined.axes[1].get_ylabel() == "Redundant operation time (s)"
+    assert [text.get_text() for text in ax_safety.texts] == ["(a)"]
+    assert [text.get_text() for text in ax_punctuality.texts] == ["(b)"]
+    assert len(ax_safety.child_axes) == 2
+    assert ax_safety.get_ylabel() == "Speed (km/h)"
+    assert all(axis.get_xlabel() == "Position (km)" for axis in combined.axes[:2])
+    assert combined.axes[1].get_ylabel() == r"Theoretical time margin $\rho$ (s)"
     safety_mesh = combined.axes[0].collections[0]
     punctuality_mesh = combined.axes[1].collections[0]
     assert safety_mesh.cmap.name == "mtto_safety_penalty"

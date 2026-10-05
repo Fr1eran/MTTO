@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 import os
 import re
 import shutil
@@ -11,6 +12,7 @@ import subprocess
 import tempfile
 import uuid
 from collections.abc import Callable
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,7 +37,7 @@ from mtto.workflows import (
     train as train_workflow,
 )
 from mtto.workflows.evaluate import EvaluateConfig, evaluation_record_config
-from mtto.workflows.train import training_record_config
+from mtto.workflows.train import TrainConfig, training_record_config
 from paper.experiments.spec import ExperimentSpec, PlannedRun, expand_matrix
 
 PAPER_JSON = "paper.json"
@@ -162,15 +164,14 @@ def _expected_key(planned: PlannedRun, scenario_hash: str, task: dict) -> str:
     )
 
 
-def _execute_one(
+def _find_reusable(
     output_root: Path,
     run_label: str,
     expected: str,
-    provenance: tuple[str, bool],
-    execute: Callable[[Path], object],
+    dirty: bool,
     source_dir: Path | None = None,
-) -> tuple[Path, bool, CompletedRun]:
-    commit, dirty = provenance
+) -> tuple[Path | None, int]:
+    """Delete interrupted runs of one label; return a reusable run and max number."""
     pattern = re.compile(rf"{re.escape(run_label)}__(\d{{2}})$")
     existing = []
     for path in output_root.iterdir():
@@ -208,10 +209,13 @@ def _execute_one(
             and (dirty or not paper["dirty"])
         ):
             reusable = path
-    if reusable is not None:
-        return reusable, True, read_completed_run(reusable)
-    path = output_root / f"{run_label}__{max_number + 1:02d}"
-    execute(path)
+    return reusable, max_number
+
+
+def _record_completed(
+    path: Path, provenance: tuple[str, bool], source_dir: Path | None = None
+) -> CompletedRun:
+    commit, dirty = provenance
     completed = read_completed_run(path)
     _write_paper(
         path / PAPER_JSON,
@@ -221,7 +225,25 @@ def _execute_one(
             "dirty": dirty,
         },
     )
-    return path, False, completed
+    return completed
+
+
+def _execute_one(
+    output_root: Path,
+    run_label: str,
+    expected: str,
+    provenance: tuple[str, bool],
+    execute: Callable[[Path], object],
+    source_dir: Path | None = None,
+) -> tuple[Path, bool, CompletedRun]:
+    reusable, max_number = _find_reusable(
+        output_root, run_label, expected, provenance[1], source_dir
+    )
+    if reusable is not None:
+        return reusable, True, read_completed_run(reusable)
+    path = output_root / f"{run_label}__{max_number + 1:02d}"
+    execute(path)
+    return path, False, _record_completed(path, provenance, source_dir)
 
 
 def completed_matrix(spec: ExperimentSpec) -> tuple[Path, ...]:
@@ -256,29 +278,78 @@ def completed_matrix(spec: ExperimentSpec) -> tuple[Path, ...]:
     return tuple(directories)
 
 
-def execute_matrix(spec: ExperimentSpec) -> tuple[RunResult, ...]:
-    """Delete only interrupted matching directories and reuse complete results."""
-    commit, dirty = git_state()
+def _train_planned(spec: ExperimentSpec, config: TrainConfig, output: Path) -> None:
+    """Train one matrix cell; module level so that a process pool can run it."""
     scenario = load_scenario(spec.scenario, spec.line_dir)
     task = load_tasks(spec.tasks)[spec.task]
+    train_workflow.train(scenario, task, config, output, run_id=str(uuid.uuid4()))
+
+
+def _require_budget(completed: CompletedRun, path: Path) -> None:
+    if not completed.payload.result.training.target_reached:
+        raise ExperimentStopped(f"Training budget not reached: {path}")
+
+
+def execute_matrix(spec: ExperimentSpec, workers: int = 1) -> tuple[RunResult, ...]:
+    """Reuse complete results and train the rest on a pool of ``workers`` processes.
+
+    Interrupted directories are deleted and run directories are numbered in this
+    process, so workers never race on a label. Each training uses one torch
+    thread, and a run does not depend on which worker trains it or when.
+    """
+    provenance = git_state()
+    scenario = load_scenario(spec.scenario, spec.line_dir)
+    task = task_to_json(load_tasks(spec.tasks)[spec.task])
     spec.output_root.mkdir(parents=True, exist_ok=True)
-    results = []
-    for planned in expand_matrix(spec):
-        expected = _expected_key(planned, scenario.scenario_hash, task_to_json(task))
-        path, reused, completed = _execute_one(
-            spec.output_root,
-            planned.run_label,
-            expected,
-            (commit, dirty),
-            lambda output, planned=planned: train_workflow.train(
-                scenario, task, planned.config, output, run_id=str(uuid.uuid4())
-            ),
+    planned_runs = expand_matrix(spec)
+    directories: dict[str, Path] = {}
+    pending: list[tuple[PlannedRun, Path]] = []
+    for planned in planned_runs:
+        expected = _expected_key(planned, scenario.scenario_hash, task)
+        reusable, max_number = _find_reusable(
+            spec.output_root, planned.run_label, expected, provenance[1]
         )
-        training = completed.payload.result.training
-        if not training.target_reached:
-            raise ExperimentStopped(f"Training budget not reached: {path}")
-        results.append(RunResult(planned=planned, directory=path, reused=reused))
-    return tuple(results)
+        if reusable is None:
+            path = spec.output_root / f"{planned.run_label}__{max_number + 1:02d}"
+            pending.append((planned, path))
+        else:
+            _require_budget(read_completed_run(reusable), reusable)
+            path = reusable
+        directories[planned.run_label] = path
+
+    def finish(index: int, path: Path) -> None:
+        _require_budget(_record_completed(path, provenance), path)
+        print(f"trained {index}/{len(pending)}: {path}", flush=True)
+
+    if workers == 1 or len(pending) <= 1:
+        for index, (planned, path) in enumerate(pending, start=1):
+            _train_planned(spec, planned.config, path)
+            finish(index, path)
+    else:
+        with ProcessPoolExecutor(
+            max_workers=min(workers, len(pending)),
+            mp_context=multiprocessing.get_context("spawn"),
+        ) as executor:
+            futures = {
+                executor.submit(_train_planned, spec, planned.config, path): path
+                for planned, path in pending
+            }
+            try:
+                for index, future in enumerate(as_completed(futures), start=1):
+                    future.result()
+                    finish(index, futures[future])
+            except BaseException:
+                executor.shutdown(cancel_futures=True)
+                raise
+    pending_labels = {planned.run_label for planned, _ in pending}
+    return tuple(
+        RunResult(
+            planned=planned,
+            directory=directories[planned.run_label],
+            reused=planned.run_label not in pending_labels,
+        )
+        for planned in planned_runs
+    )
 
 
 def execute_evaluations(

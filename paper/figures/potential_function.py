@@ -18,15 +18,16 @@ from mtto.rl.rewards import (
     RewardCalculator,
     RewardConfig,
     braking_reserve_steps,
-    punctuality_potential_from_error,
-    safety_potential,
+    punctuality_potential_from_error_array,
+    safety_potential_array,
     traction_reserve_steps,
 )
 from mtto.workflows.train import build_env_references
 from paper.figures import load_paper_scenario, load_paper_task
 from paper.plotting.style import (
+    PAPER_LEGEND_FONT_SIZE,
     add_panel_label,
-    apply_sci_curve_style,
+    apply_paper_style,
     apply_sci_grid,
     save_sci_figure,
     sci_figure_size,
@@ -109,8 +110,14 @@ def _build_safety_potential_field(
     *,
     position_points: int = 1200,
     speed_points: int = 800,
+    position_window_m: tuple[float, float] | None = None,
+    speed_window_mps: tuple[float, float] | None = None,
 ) -> _SafetyPotentialField:
-    """构造第 7 个辅助停车区内安全势函数的状态域。"""
+    """构造第 7 个辅助停车区内安全势函数的状态域。
+
+    The speed profiles always span the whole stopping area, so the one-period
+    look-ahead stays exact; the optional windows only restrict the grid.
+    """
     scenario = load_paper_scenario()
     min_curves_list = scenario.safeguard.min_curves
     max_curves_list = scenario.safeguard.max_curves
@@ -153,14 +160,23 @@ def _build_safety_potential_field(
         np.minimum(track_speed_profile_mps, safeguard_max_profile_mps),
         0.0,
     )
-    speed_array_mps = np.linspace(
+    speed_low, speed_high = speed_window_mps or (
         0.0,
         float(np.max(max_speed_profile_mps)),
-        speed_points,
     )
-    position_grid, speed_grid_mps = np.meshgrid(pos_array, speed_array_mps)
-    min_speed_grid_mps = np.broadcast_to(min_speed_profile_mps, position_grid.shape)
-    max_speed_grid_mps = np.broadcast_to(max_speed_profile_mps, position_grid.shape)
+    speed_array_mps = np.linspace(speed_low, speed_high, speed_points)
+    in_window = np.ones(pos_array.shape, dtype=bool)
+    if position_window_m is not None:
+        in_window = (pos_array >= position_window_m[0]) & (
+            pos_array <= position_window_m[1]
+        )
+    position_grid, speed_grid_mps = np.meshgrid(pos_array[in_window], speed_array_mps)
+    min_speed_grid_mps = np.broadcast_to(
+        min_speed_profile_mps[in_window], position_grid.shape
+    )
+    max_speed_grid_mps = np.broadcast_to(
+        max_speed_profile_mps[in_window], position_grid.shape
+    )
     feasible_mask = (speed_grid_mps >= min_speed_grid_mps) & (
         speed_grid_mps <= max_speed_grid_mps
     )
@@ -192,21 +208,24 @@ def _calculate_safety_potential(
     max_ahead_grid = np.interp(ahead_m, field.pos_array, field.max_speed_profile_mps)
     min_ahead_grid = np.interp(ahead_m, field.pos_array, field.min_speed_profile_mps)
 
-    def potential(v: float, up: float, up_ahead: float, lo: float, lo_ahead: float):
-        return safety_potential(
-            braking_reserve_steps(v, up, up_ahead, vehicle.max_dec_abs, STEP_TIME_S),
-            traction_reserve_steps(v, lo, lo_ahead, vehicle.max_acc, STEP_TIME_S),
-        )
-
     mask = field.feasible_mask
-    values = np.full(shape, np.nan)
-    values[mask] = np.vectorize(potential, otypes=[np.float64])(
-        field.speed_grid_mps[mask],
+    speed = field.speed_grid_mps[mask]
+    braking = np.vectorize(braking_reserve_steps, otypes=[np.float64])(
+        speed,
         field.max_speed_grid_mps[mask],
         max_ahead_grid[mask],
+        vehicle.max_dec_abs,
+        STEP_TIME_S,
+    )
+    traction = np.vectorize(traction_reserve_steps, otypes=[np.float64])(
+        speed,
         field.min_speed_grid_mps[mask],
         min_ahead_grid[mask],
+        vehicle.max_acc,
+        STEP_TIME_S,
     )
+    values = np.full(shape, np.nan)
+    values[mask] = safety_potential_array(braking, traction)
     return values
 
 
@@ -252,8 +271,7 @@ def _build_punctuality_potential_field(
     )
     position_grid_m, redundant_time_grid_s = np.meshgrid(position_m, redundant_time_s)
     error_s = redundant_time_grid_s - reference_slack_s[np.newaxis, :]
-    potential = punctuality_potential_from_error(error_s)
-    assert isinstance(potential, np.ndarray)
+    potential = punctuality_potential_from_error_array(error_s)
     return _PunctualityPotentialField(
         position_m=position_m,
         redundant_time_s=redundant_time_s,
@@ -269,7 +287,7 @@ def _draw_punctuality_potential(
     field: _PunctualityPotentialField,
 ) -> tuple[object, Line2D]:
     mesh = ax.pcolormesh(
-        field.position_grid_m,
+        field.position_grid_m / 1000.0,
         field.redundant_time_grid_s,
         field.potential,
         cmap=PUNCTUALITY_POTENTIAL_CMAP,
@@ -279,15 +297,29 @@ def _draw_punctuality_potential(
         rasterized=True,
     )
     reference_line = ax.plot(
-        field.position_m,
+        field.position_m / 1000.0,
         field.reference_slack_s,
         color="black",
         linestyle="--",
         linewidth=1.4,
     )[0]
-    ax.set_xlim(field.position_m[0], field.position_m[-1])
+    ax.set_xlim(field.position_m[0] / 1000.0, field.position_m[-1] / 1000.0)
     ax.set_ylim(field.redundant_time_s[0], field.redundant_time_s[-1])
     return mesh, reference_line
+
+
+def _draw_safety_potential(ax: Axes, field: _SafetyPotentialField) -> object:
+    """Colour the safety potential over position (km) and speed (km/h)."""
+    return ax.pcolormesh(
+        field.position_grid / 1000.0,
+        field.speed_grid_mps * 3.6,
+        _calculate_safety_potential(field),
+        cmap=SAFETY_POTENTIAL_CMAP,
+        shading="auto",
+        vmin=SAFETY_POTENTIAL_VMIN,
+        vmax=0.0,
+        rasterized=True,
+    )
 
 
 def _plot_safety_boundaries(
@@ -296,18 +328,18 @@ def _plot_safety_boundaries(
 ) -> tuple[Line2D, Line2D]:
     """绘制安全势函数使用的速度上下边界。"""
     min_speed_line = ax.plot(
-        field.pos_array,
+        field.pos_array / 1000.0,
         field.min_speed_profile_mps * 3.6,
         color="tab:blue",
         linewidth=1.2,
     )[0]
     max_speed_line = ax.plot(
-        field.pos_array,
+        field.pos_array / 1000.0,
         field.max_speed_profile_mps * 3.6,
         color="tab:red",
         linewidth=1.2,
     )[0]
-    _ = ax.set_xlim(field.pos_array[0], field.pos_array[-1])
+    _ = ax.set_xlim(field.pos_array[0] / 1000.0, field.pos_array[-1] / 1000.0)
     _ = ax.set_ylim(0.0, field.speed_array_mps[-1] * 3.6)
     return min_speed_line, max_speed_line
 
@@ -339,25 +371,15 @@ def _apply_transparent_background(fig: Figure) -> None:
 def plot_safety_potential_heatmap_speed(*, minimal: bool = False) -> Figure:
     """以第 7 个辅助停车区绘制与联合图一致的安全势函数。"""
     field = _build_safety_potential_field()
-    safety_potential = _calculate_safety_potential(field)
     fig, ax = plt.subplots(figsize=sci_figure_size(columns=1, height_in=2.7))
-    safety_mesh = ax.pcolormesh(
-        field.position_grid,
-        field.speed_grid_mps * 3.6,
-        safety_potential,
-        cmap=SAFETY_POTENTIAL_CMAP,
-        shading="auto",
-        vmin=SAFETY_POTENTIAL_VMIN,
-        vmax=0.0,
-        rasterized=True,
-    )
+    safety_mesh = _draw_safety_potential(ax, field)
     min_speed_line, max_speed_line = _plot_safety_boundaries(ax, field)
 
     if minimal:
         _apply_minimal_axis_style(ax)
     else:
         fig.subplots_adjust(top=0.85, bottom=0.13, left=0.13, right=0.88)
-        _ = ax.set_xlabel("Position (m)")
+        _ = ax.set_xlabel("Position (km)")
         _ = ax.set_ylabel("Speed (km/h)")
         apply_sci_grid(ax)
         _ = fig.legend(
@@ -471,8 +493,8 @@ def plot_punctuality_potential(
     else:
         fig.subplots_adjust(top=0.85, bottom=0.17, left=0.18, right=0.88)
         ax.set(
-            xlabel="Position (m)",
-            ylabel="Redundant operation time (s)",
+            xlabel="Position (km)",
+            ylabel=r"Theoretical time margin $\rho$ (s)",
         )
         apply_sci_grid(ax)
         fig.legend(
@@ -487,57 +509,89 @@ def plot_punctuality_potential(
     return fig
 
 
+# Zoom windows of the paper figure (positions in m, speeds in km/h): one
+# position stretch, once near the maximum and once near the minimum speed curve.
+ZOOM_POSITION_WINDOW_M = (13_800.0, 14_300.0)
+ZOOM_UPPER_SPEED_WINDOW_KMH = (290.0, 350.0)
+ZOOM_LOWER_SPEED_WINDOW_KMH = (90.0, 150.0)
+# Inset placement in axes fractions of panel (a): the upper zoom sits in the
+# empty corner above the maximum speed curve, the lower zoom in the zero-potential
+# interior between the curves.
+ZOOM_UPPER_INSET_BOUNDS = (0.69, 0.61, 0.28, 0.36)
+ZOOM_LOWER_INSET_BOUNDS = (0.07, 0.38, 0.29, 0.38)
+
+
 def plot_safety_punctuality_potentials(
     *,
     schedule_time_s: float | None = None,
     minimal: bool = False,
 ) -> Figure:
-    """Plot safety and punctuality potentials as a double-column comparison."""
+    """Safety potential over one stopping area with two zoom insets (a) above the
+    punctuality potential over the whole route (b)."""
     safety_field = _build_safety_potential_field()
-    safety_potential = _calculate_safety_potential(safety_field)
     punctuality_field = _build_punctuality_potential_field(
         schedule_time_s=schedule_time_s
     )
     fig, (ax_safety, ax_punctuality) = plt.subplots(
-        1,
         2,
-        figsize=sci_figure_size(columns=2, height_in=2.45),
+        1,
+        figsize=sci_figure_size(columns="text", height_in=5.4),
+        gridspec_kw={"height_ratios": (1.35, 1.0)},
     )
-    safety_mesh = ax_safety.pcolormesh(
-        safety_field.position_grid,
-        safety_field.speed_grid_mps * 3.6,
-        safety_potential,
-        cmap=SAFETY_POTENTIAL_CMAP,
-        shading="auto",
-        vmin=SAFETY_POTENTIAL_VMIN,
-        vmax=0.0,
-        rasterized=True,
-    )
+    safety_mesh = _draw_safety_potential(ax_safety, safety_field)
     min_speed_line, max_speed_line = _plot_safety_boundaries(ax_safety, safety_field)
     punctuality_mesh, reference_line = _draw_punctuality_potential(
         ax_punctuality, punctuality_field
     )
-    if minimal:
-        _apply_minimal_axis_style(ax_safety)
-        _apply_minimal_axis_style(ax_punctuality)
-    else:
-        fig.subplots_adjust(top=0.87, bottom=0.20, left=0.095, right=0.945, wspace=0.55)
-        ax_safety.set(xlabel="Position (m)", ylabel="Speed (km/h)")
-        ax_punctuality.set(xlabel="Position (m)", ylabel="Redundant operation time (s)")
-        for axis in (ax_safety, ax_punctuality):
-            apply_sci_grid(axis)
-        fig.legend(
-            (min_speed_line, max_speed_line, reference_line),
-            (r"$v_{\min}(x)$", r"$v_{\max}(x)$", r"$\rho_{\mathrm{ref}}$"),
-            loc="upper center",
-            ncols=3,
-            frameon=False,
-            bbox_to_anchor=(0.5, 0.99),
+    position_window_km = tuple(value / 1000.0 for value in ZOOM_POSITION_WINDOW_M)
+    for bounds, speed_window in (
+        (ZOOM_UPPER_INSET_BOUNDS, ZOOM_UPPER_SPEED_WINDOW_KMH),
+        (ZOOM_LOWER_INSET_BOUNDS, ZOOM_LOWER_SPEED_WINDOW_KMH),
+    ):
+        inset = ax_safety.inset_axes(bounds)
+        field = _build_safety_potential_field(
+            position_points=20_000,
+            speed_points=300,
+            position_window_m=ZOOM_POSITION_WINDOW_M,
+            speed_window_mps=(speed_window[0] / 3.6, speed_window[1] / 3.6),
         )
-        _ = fig.colorbar(safety_mesh, ax=ax_safety, pad=0.02, fraction=0.046)
-        _ = fig.colorbar(punctuality_mesh, ax=ax_punctuality, pad=0.02, fraction=0.046)
-    for panel_label, axis in (("(a)", ax_safety), ("(b)", ax_punctuality)):
-        add_panel_label(axis, panel_label)
+        _draw_safety_potential(inset, field)
+        _plot_safety_boundaries(inset, field)
+        inset.set_xlim(*position_window_km)
+        inset.set_ylim(*speed_window)
+        inset.tick_params(labelsize=PAPER_LEGEND_FONT_SIZE)
+        ax_safety.indicate_inset_zoom(inset, edgecolor="black", linewidth=0.8)
+    if minimal:
+        for axis in fig.axes:
+            _apply_minimal_axis_style(axis)
+    else:
+        fig.subplots_adjust(top=0.985, bottom=0.08, left=0.12, right=0.89, hspace=0.30)
+        ax_safety.set(xlabel="Position (km)", ylabel="Speed (km/h)")
+        ax_punctuality.set(
+            xlabel="Position (km)", ylabel=r"Theoretical time margin $\rho$ (s)"
+        )
+        for axis in fig.axes:
+            apply_sci_grid(axis)
+        ax_safety.legend(
+            (min_speed_line, max_speed_line),
+            (r"$v_{\min}(x)$", r"$v_{\max}(x)$"),
+            loc="lower left",
+            frameon=False,
+        )
+        ax_punctuality.legend(
+            (reference_line,),
+            (r"$\rho_{\mathrm{ref}}$",),
+            loc="upper right",
+            frameon=False,
+        )
+        safety_bar = fig.colorbar(safety_mesh, ax=ax_safety, pad=0.02, fraction=0.04)
+        safety_bar.set_label(r"$\Phi_{\mathrm{safety}}$")
+        punctuality_bar = fig.colorbar(
+            punctuality_mesh, ax=ax_punctuality, pad=0.02, fraction=0.04
+        )
+        punctuality_bar.set_label(r"$\Phi_{\mathrm{punct}}$")
+        add_panel_label(ax_safety, "(a)")
+        add_panel_label(ax_punctuality, "(b)")
     _apply_transparent_background(fig)
     return fig
 
@@ -572,7 +626,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
 
-    apply_sci_curve_style()
+    apply_paper_style()
     figure = _resolve_plotter(
         cli_args.plot_type,
         minimal=cli_args.minimal,

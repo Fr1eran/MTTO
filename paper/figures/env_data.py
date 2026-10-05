@@ -6,6 +6,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.figure import Figure
+from matplotlib.ticker import FuncFormatter
 from numpy.typing import NDArray
 
 from mtto.domain.safeguard import Safeguard
@@ -19,10 +20,10 @@ from paper.plotting.style import (
     VIS_ACCEL_CREAM,
     VIS_ASA_MINT,
     VIS_STATION_LAVENDER,
+    apply_paper_style,
     apply_sci_figure_layout,
     apply_sci_grid,
     save_sci_figure,
-    set_global_plot_style,
 )
 
 FIGURE_FILENAMES = {
@@ -79,15 +80,7 @@ def parse_args():
 
 
 def set_plot_style():
-    _ = set_global_plot_style(
-        font_preset="sci",
-        preferred_font="Arial",
-        title_font_size=8.0,
-        axis_label_font_size=8.0,
-        tick_font_size=8.0,
-        legend_font_size=8.0,
-        figure_dpi=150.0,
-    )
+    _ = apply_paper_style()
 
 
 def load_track_environment_data() -> TrackEnvironmentData:
@@ -205,15 +198,19 @@ def create_overview_figure(data: TrackEnvironmentData) -> Figure:
     )
     apply_sci_figure_layout(
         fig,
-        columns=2,
-        height_in=4.0,
-        left=0.09,
-        right=0.96,
+        columns="text",
+        height_in=3.6,
+        left=0.12,
+        right=0.98,
         bottom=0.13,
-        top=0.84,
-        hspace=0.18,
+        top=0.86,
+        hspace=0.15,
     )
-    render_safeguard(data.safeguard, ax=ax1, layers=FULL_CURVE_VIEW_LAYERS)
+    render_safeguard(
+        data.safeguard,
+        ax=ax1,
+        layers=("speed_limit", "min_curve_full", "max_curve_full"),
+    )
     _draw_infrastructure_hlines(ax1, data, exclude_last_asa=False)
 
     ax1.set_xlim((0.0, 30000.0))
@@ -225,11 +222,9 @@ def create_overview_figure(data: TrackEnvironmentData) -> Figure:
     legend_items = [
         "Track speed limit",
         "Maximum speed curve",
-        "Safe levitation curve",
-        "Auxiliary stopping area",
-        "Safe braking curve",
-        "Station",
         "Minimum speed curve",
+        "Auxiliary stopping area",
+        "Station",
         "Acceleration zone",
     ]
     missing_labels = [
@@ -248,7 +243,7 @@ def create_overview_figure(data: TrackEnvironmentData) -> Figure:
         ordered_labels,
         loc="lower center",
         bbox_to_anchor=(0.5, 1.0),
-        ncol=4,
+        ncol=3,
         frameon=False,
         columnspacing=1.0,
         handlelength=2.1,
@@ -263,13 +258,13 @@ def create_overview_figure(data: TrackEnvironmentData) -> Figure:
         linewidth=1.0,
         fill=True,
         alpha=1.0,
-        label="Slope",
     )
     ax2.axhline(y=0, color="black", linewidth=0.5, linestyle="--")
     ax2.set_xlim((0.0, 30000.0))
-    ax2.set_xlabel("Position (m)")
-    ax2.set_ylabel("Slope (‰)")
-    ax2.legend(frameon=False)
+    ax2.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x / 1000:g}"))
+    ax2.set_xlabel("Position (km)")
+    ax2.set_ylabel("Gradient (‰)")
+    ax2.set_ylim(top=0.6)
     apply_sci_grid(ax2)
     _ = ax1.text(
         0.02,
