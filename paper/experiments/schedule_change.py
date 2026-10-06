@@ -62,7 +62,7 @@ from paper.experiments.spec import ROOT, expand_matrix, load_experiment_spec
 
 # Section 5.3 always evaluates a policy trained with the full PIRS reward.
 SOURCE_VARIANT = "ppo_pirs"
-RL_LABEL = "PPO-PIRS"
+RL_LABEL = "Proposed"
 DP_LABEL = "DP"
 TIMING_JSON = "timing.json"
 SPEC_KEYS = {
@@ -507,7 +507,7 @@ def summarize(
     rows.append(
         "\n*Note: The schedule changes at "
         f"{spec.change_distance_m / 1000.0:g} km; Δt is measured against the new "
-        "schedule (positive = late) and energy covers the whole run. PPO-PIRS time "
+        "schedule (positive = late) and energy covers the whole run. Proposed-policy time "
         "is the wall time of observation building, policy inference and simulator "
         "transitions from the change point to the stop (mean inference time per "
         "step in parentheses). DP time is re-solving from the state of its nominal "

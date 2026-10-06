@@ -337,13 +337,14 @@ def test_safety_speed_single_plot_has_boundary_legend(
     ax, colorbar_axis = fig.axes
 
     assert len(ax.lines) == 2
-    assert len(fig.legends) == 1
-    assert [text.get_text() for text in fig.legends[0].get_texts()] == [
+    legend = ax.get_legend()
+    assert legend is not None
+    assert [text.get_text() for text in legend.get_texts()] == [
         r"$v_{\min}(x)$",
         r"$v_{\max}(x)$",
     ]
     assert colorbar_axis.get_position().x0 > ax.get_position().x1
-    assert colorbar_axis.get_ylabel() == ""
+    assert colorbar_axis.get_ylabel() == r"$\Phi_{\mathrm{safety}}$"
     show_potential_function.plt.close(fig)
 
 
@@ -414,14 +415,16 @@ def test_punctuality_single_and_safety_combined_have_sci_widths(
     single = show_potential_function.plot_punctuality_potential(minimal=False)
     combined = show_potential_function.plot_safety_punctuality_potentials(minimal=False)
 
-    assert single.get_size_inches()[0] == pytest.approx(85.0 / 25.4)
+    assert single.get_size_inches()[0] == pytest.approx(408.0 / 72.27)
     assert combined.get_size_inches()[0] == pytest.approx(408.0 / 72.27)
     assert len(single.axes) == 2
     # Two panels and their colour bars; the zooms are insets of panel (a).
     ax_safety, ax_punctuality = combined.axes[:2]
     assert len(combined.axes) == 4
     assert [text.get_text() for text in ax_safety.texts] == ["(a)"]
-    assert [text.get_text() for text in ax_punctuality.texts] == ["(b)"]
+    assert [
+        text.get_text() for text in ax_punctuality.texts if text.get_text() == "(b)"
+    ] == ["(b)"]
     assert len(ax_safety.child_axes) == 2
     assert ax_safety.get_ylabel() == "Speed (km/h)"
     assert all(axis.get_xlabel() == "Position (km)" for axis in combined.axes[:2])

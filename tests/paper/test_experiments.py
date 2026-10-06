@@ -569,9 +569,9 @@ def test_schedule_change_evaluation_reuse_and_figures(
     summary = schedule_change.summarize(spec, run_dirs, replan_dir)
     pairs = [(entry["case"]["token"], entry["method"]) for entry in summary["entries"]]
     assert pairs == [
-        ("original", "PPO-PIRS"),
+        ("original", schedule_change.RL_LABEL),
         ("original", "DP"),
-        ("plus_30p0s", "PPO-PIRS"),
+        ("plus_30p0s", schedule_change.RL_LABEL),
         ("plus_30p0s", "DP"),
     ]
     assert all(entry["recompute_time_s"] > 0.0 for entry in summary["entries"])

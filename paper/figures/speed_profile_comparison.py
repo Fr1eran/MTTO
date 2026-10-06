@@ -39,8 +39,8 @@ from paper.real_operation import real_operation_profile
 FIGURE_FILENAME = "dp_rl_actual_comparison.pdf"
 VIS_BASELINE_GREEN = "#009E73"
 DP_LABEL = "DP"
-PROPOSED_LABEL = "PPO-PIRS (proposed)"
-ACTUAL_LABEL = "Recorded operation"
+PROPOSED_LABEL = "Proposed"
+ACTUAL_LABEL = "Actual"
 _DP_STYLE = (VIS_DP_BLACK, "-")
 _PROPOSED_STYLE = (VIS_PROPOSED_ORANGE, "--")
 _ACTUAL_STYLE = (VIS_ACTUAL_PURPLE, (0, (3, 1, 1, 1, 1, 1)))
@@ -148,7 +148,7 @@ def format_comparison_table(
         ("Stop error (m)", lambda label, m: f"{m.stop_error_m:.3f}"),
         ("Total energy (kWh)", lambda label, m: f"{m.total_energy_kwh:.3f}"),
         (
-            "Energy saving vs recorded (%)",
+            "Energy saving vs actual (%)",
             lambda label, m: _relative(label, m, actual_energy, ACTUAL_LABEL),
         ),
         (
@@ -195,7 +195,7 @@ def format_comparison_table(
         "(positive = late). ^a marks energy figures obtained while violating the "
         "stop/time tolerance; they are not energy savings. The speed-limit margin "
         "is the minimum of (line limit x safety factor - speed) while moving. "
-        "Recorded operation acceleration calculation differs "
+        "Actual operating profile acceleration calculation differs "
         "(estimated by differencing discrete operational data) and is not "
         "directly comparable with DP/RL. The cumulative acceleration variation "
         r"formula is $\sum_t |a_t - a_{t-1}|$, with unit $\mathrm{m/s^2}$.*"

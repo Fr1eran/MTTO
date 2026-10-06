@@ -274,14 +274,14 @@ def representative_profiles_figure(
 def schedule_change_figure(
     summary: dict[str, object], scenario: Scenario, output: Path
 ) -> Path:
-    """Speed profiles after the schedule change: PPO-PIRS solid, DP dashed."""
+    """Speed profiles after the schedule change: the RL policy solid, DP dashed."""
     apply_paper_style()
     output.mkdir(parents=True, exist_ok=True)
     fig, axis = plt.subplots()
     render_safeguard(scenario.safeguard, ax=axis, layers=DANGER_VIEW_LAYERS)
     case_colors = {}
     # Each case also gets a marker (offset along the line) so the figure reads
-    # in greyscale; PPO-PIRS markers are filled, DP markers hollow.
+    # in greyscale; RL markers are filled, DP markers hollow.
     case_markers = {0: ("o", 0.0), 1: ("^", 0.027), -1: ("v", 0.053)}
     extent = [np.inf, -np.inf]
     for entry in summary["entries"]:
@@ -304,12 +304,12 @@ def schedule_change_figure(
             profile.position_m,
             profile.speed_mps * 3.6,
             color=color,
-            linestyle="-" if entry["method"] == "PPO-PIRS" else "--",
+            linestyle="--" if entry["method"] == "DP" else "-",
             linewidth=SCI_LINE_WIDTH,
             marker=marker,
             markersize=4.5,
             markevery=(offset, 0.08),
-            markerfacecolor=color if entry["method"] == "PPO-PIRS" else "white",
+            markerfacecolor="white" if entry["method"] == "DP" else color,
             markeredgecolor=color,
         )
     axis.axvline(
@@ -346,7 +346,7 @@ def schedule_change_figure(
             else f"{'+' if delta > 0 else '−'}{abs(delta):g} s"
             for delta in case_colors
         ),
-        "PPO-PIRS",
+        next(e["method"] for e in summary["entries"] if e["method"] != "DP"),
         "DP",
         "Timetable change",
     ]

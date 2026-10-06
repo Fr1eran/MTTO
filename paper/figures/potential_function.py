@@ -13,7 +13,6 @@ from numpy.typing import NDArray
 
 from mtto.rl.rewards import (
     PUNCTUALITY_POTENTIAL_SIGMA_S,
-    SAFETY_RESERVE_LOWER_SCALE,
     SAFETY_RESERVE_UPPER_SCALE,
     RewardCalculator,
     RewardConfig,
@@ -47,15 +46,17 @@ SAFETY_POTENTIAL_CMAP = LinearSegmentedColormap.from_list(
 SAFETY_POTENTIAL_CMAP.set_bad(color="white", alpha=1.0)
 # Paper control period: the safety potential looks one control period ahead.
 STEP_TIME_S = 1.0
-SAFETY_POTENTIAL_VMIN = -(SAFETY_RESERVE_UPPER_SCALE + SAFETY_RESERVE_LOWER_SCALE)
+# The maximum penalty attainable along any trajectory is max(K_u, K_l) = 3.0,
+# as upper and lower boundaries cannot be approached simultaneously.
+SAFETY_POTENTIAL_VMIN = -float(SAFETY_RESERVE_UPPER_SCALE)
 PUNCTUALITY_POTENTIAL_CMAP = LinearSegmentedColormap.from_list(
     "mtto_punctuality_penalty",
     [
-        (0.00, "#005596"),
-        (0.35, "#1B8FD1"),
-        (0.65, "#68AFD5"),
-        (0.85, "#BCE0F0"),
-        (0.96, "#F0F8FC"),
+        (0.00, "#004B87"),
+        (0.30, "#1270AE"),
+        (0.60, "#4298CB"),
+        (0.80, "#8AC5E6"),
+        (0.92, "#CDE7F5"),
         (1.00, "#FFFFFF"),
     ],
 )
@@ -368,35 +369,84 @@ def _apply_transparent_background(fig: Figure) -> None:
                 pane.set_edgecolor((1.0, 1.0, 1.0, 1.0))
 
 
+# Zoom windows of the paper figure (positions in m, speeds in km/h): one
+# position stretch, once near the maximum and once near the minimum speed curve.
+ZOOM_POSITION_WINDOW_M = (13_800.0, 14_300.0)
+ZOOM_UPPER_SPEED_WINDOW_KMH = (290.0, 350.0)
+ZOOM_LOWER_SPEED_WINDOW_KMH = (90.0, 150.0)
+# Inset placement in axes fractions of panel (a): the upper zoom sits in the
+# empty corner above the maximum speed curve, the lower zoom in the zero-potential
+# interior between the curves.
+ZOOM_UPPER_INSET_BOUNDS = (0.69, 0.61, 0.28, 0.36)
+ZOOM_LOWER_INSET_BOUNDS = (0.07, 0.38, 0.29, 0.38)
+
+
 def plot_safety_potential_heatmap_speed(*, minimal: bool = False) -> Figure:
-    """以第 7 个辅助停车区绘制与联合图一致的安全势函数。"""
+    """以第 7 个辅助停车区绘制独立安全势函数（含放大插图）。"""
     field = _build_safety_potential_field()
-    fig, ax = plt.subplots(figsize=sci_figure_size(columns=1, height_in=2.7))
+    fig, ax = plt.subplots(figsize=sci_figure_size(columns="text", height_in=3.1))
     safety_mesh = _draw_safety_potential(ax, field)
     min_speed_line, max_speed_line = _plot_safety_boundaries(ax, field)
+
+    position_window_km = tuple(value / 1000.0 for value in ZOOM_POSITION_WINDOW_M)
+    for bounds, speed_window, zoom_label, label_pos in (
+        (
+            ZOOM_UPPER_INSET_BOUNDS,
+            ZOOM_UPPER_SPEED_WINDOW_KMH,
+            r"Zoom: $v_{\max}$",
+            (0.06, 0.16),
+        ),
+        (
+            ZOOM_LOWER_INSET_BOUNDS,
+            ZOOM_LOWER_SPEED_WINDOW_KMH,
+            r"Zoom: $v_{\min}$",
+            (0.06, 0.82),
+        ),
+    ):
+        inset = ax.inset_axes(bounds)
+        field_inset = _build_safety_potential_field(
+            position_points=20_000,
+            speed_points=300,
+            position_window_m=ZOOM_POSITION_WINDOW_M,
+            speed_window_mps=(speed_window[0] / 3.6, speed_window[1] / 3.6),
+        )
+        _draw_safety_potential(inset, field_inset)
+        _plot_safety_boundaries(inset, field_inset)
+        inset.set_xlim(*position_window_km)
+        inset.set_ylim(*speed_window)
+        inset.tick_params(labelsize=PAPER_LEGEND_FONT_SIZE)
+        if not minimal:
+            inset.text(
+                label_pos[0],
+                label_pos[1],
+                zoom_label,
+                transform=inset.transAxes,
+                fontsize=PAPER_LEGEND_FONT_SIZE,
+                va="baseline",
+            )
+            ax.indicate_inset_zoom(inset, edgecolor="gray")
 
     if minimal:
         _apply_minimal_axis_style(ax)
     else:
-        fig.subplots_adjust(top=0.85, bottom=0.13, left=0.13, right=0.88)
-        _ = ax.set_xlabel("Position (km)")
-        _ = ax.set_ylabel("Speed (km/h)")
+        fig.subplots_adjust(top=0.96, bottom=0.15, left=0.12, right=0.90)
+        ax.set_xlabel("Position (km)")
+        ax.set_ylabel("Speed (km/h)")
         apply_sci_grid(ax)
-        _ = fig.legend(
+        ax.legend(
             (min_speed_line, max_speed_line),
             (r"$v_{\min}(x)$", r"$v_{\max}(x)$"),
-            loc="upper center",
-            ncols=2,
+            loc="lower left",
             frameon=False,
-            bbox_to_anchor=(0.5, 0.925),
         )
-        _ = fig.colorbar(
+        safety_bar = fig.colorbar(
             safety_mesh,
             ax=ax,
             orientation="vertical",
             pad=0.02,
-            fraction=0.046,
+            fraction=0.04,
         )
+        safety_bar.set_label(r"$\Phi_{\mathrm{safety}}$")
 
     _apply_transparent_background(fig)
     return fig
@@ -406,6 +456,7 @@ PLOT_TYPE_CHOICES: tuple[str, ...] = (
     "punctuality",
     "safety-punctuality",
     "safety",
+    "all",
 )
 FIGURE_FILENAMES = {
     "punctuality": "punctuality_potential.pdf",
@@ -486,39 +537,27 @@ def plot_punctuality_potential(
 ) -> Figure:
     """Plot the runtime punctuality potential over the complete route."""
     field = _build_punctuality_potential_field(schedule_time_s=schedule_time_s)
-    fig, ax = plt.subplots(figsize=sci_figure_size(columns=1, height_in=2.8))
+    fig, ax = plt.subplots(figsize=sci_figure_size(columns="text", height_in=2.5))
     mesh, reference_line = _draw_punctuality_potential(ax, field)
     if minimal:
         _apply_minimal_axis_style(ax)
     else:
-        fig.subplots_adjust(top=0.85, bottom=0.17, left=0.18, right=0.88)
+        fig.subplots_adjust(top=0.96, bottom=0.18, left=0.12, right=0.90)
         ax.set(
             xlabel="Position (km)",
             ylabel=r"Theoretical time margin $\rho$ (s)",
         )
         apply_sci_grid(ax)
-        fig.legend(
+        ax.legend(
             (reference_line,),
             (r"$\rho_{\mathrm{ref}}$",),
-            loc="upper center",
+            loc="upper right",
             frameon=False,
-            bbox_to_anchor=(0.5, 0.94),
         )
-        _ = fig.colorbar(mesh, ax=ax, pad=0.03, fraction=0.06)
+        punctuality_bar = fig.colorbar(mesh, ax=ax, pad=0.02, fraction=0.04)
+        punctuality_bar.set_label(r"$\Phi_{\mathrm{punct}}$")
     _apply_transparent_background(fig)
     return fig
-
-
-# Zoom windows of the paper figure (positions in m, speeds in km/h): one
-# position stretch, once near the maximum and once near the minimum speed curve.
-ZOOM_POSITION_WINDOW_M = (13_800.0, 14_300.0)
-ZOOM_UPPER_SPEED_WINDOW_KMH = (290.0, 350.0)
-ZOOM_LOWER_SPEED_WINDOW_KMH = (90.0, 150.0)
-# Inset placement in axes fractions of panel (a): the upper zoom sits in the
-# empty corner above the maximum speed curve, the lower zoom in the zero-potential
-# interior between the curves.
-ZOOM_UPPER_INSET_BOUNDS = (0.69, 0.61, 0.28, 0.36)
-ZOOM_LOWER_INSET_BOUNDS = (0.07, 0.38, 0.29, 0.38)
 
 
 def plot_safety_punctuality_potentials(
@@ -544,9 +583,19 @@ def plot_safety_punctuality_potentials(
         ax_punctuality, punctuality_field
     )
     position_window_km = tuple(value / 1000.0 for value in ZOOM_POSITION_WINDOW_M)
-    for bounds, speed_window in (
-        (ZOOM_UPPER_INSET_BOUNDS, ZOOM_UPPER_SPEED_WINDOW_KMH),
-        (ZOOM_LOWER_INSET_BOUNDS, ZOOM_LOWER_SPEED_WINDOW_KMH),
+    for bounds, speed_window, zoom_label, label_pos in (
+        (
+            ZOOM_UPPER_INSET_BOUNDS,
+            ZOOM_UPPER_SPEED_WINDOW_KMH,
+            r"Zoom: $v_{\max}$",
+            (0.06, 0.16),
+        ),
+        (
+            ZOOM_LOWER_INSET_BOUNDS,
+            ZOOM_LOWER_SPEED_WINDOW_KMH,
+            r"Zoom: $v_{\min}$",
+            (0.06, 0.82),
+        ),
     ):
         inset = ax_safety.inset_axes(bounds)
         field = _build_safety_potential_field(
@@ -560,6 +609,21 @@ def plot_safety_punctuality_potentials(
         inset.set_xlim(*position_window_km)
         inset.set_ylim(*speed_window)
         inset.tick_params(labelsize=PAPER_LEGEND_FONT_SIZE)
+        if not minimal:
+            inset.text(
+                label_pos[0],
+                label_pos[1],
+                zoom_label,
+                transform=inset.transAxes,
+                fontsize=PAPER_LEGEND_FONT_SIZE,
+                verticalalignment="center",
+                bbox=dict(
+                    boxstyle="square,pad=0.2",
+                    facecolor="white",
+                    edgecolor="none",
+                    alpha=0.85,
+                ),
+            )
         ax_safety.indicate_inset_zoom(inset, edgecolor="black", linewidth=0.8)
     if minimal:
         for axis in fig.axes:
@@ -627,23 +691,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(str(exc))
 
     apply_paper_style()
-    figure = _resolve_plotter(
-        cli_args.plot_type,
-        minimal=cli_args.minimal,
-        schedule_time_s=cli_args.schedule_time_s,
-    )()
+    plot_types = (
+        ["safety", "punctuality"]
+        if cli_args.plot_type == "all"
+        else [cli_args.plot_type]
+    )
 
-    if cli_args.output_dir is not None:
-        output_path = _save_compact_figure(
-            figure,
-            cli_args.output_dir,
-            plot_type=cli_args.plot_type,
+    for ptype in plot_types:
+        figure = _resolve_plotter(
+            ptype,
             minimal=cli_args.minimal,
-        )
-        print(f"图像已保存: {output_path}")
+            schedule_time_s=cli_args.schedule_time_s,
+        )()
 
-    if not cli_args.no_show:
-        plt.show()
+        if cli_args.output_dir is not None:
+            output_path = _save_compact_figure(
+                figure,
+                cli_args.output_dir,
+                plot_type=ptype,
+                minimal=cli_args.minimal,
+            )
+            print(f"图像已保存: {output_path}")
+
+        if not cli_args.no_show:
+            plt.show()
+        plt.close(figure)
     return 0
 
 

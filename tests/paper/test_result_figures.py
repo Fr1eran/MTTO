@@ -256,7 +256,7 @@ def test_comparison_table_formatting_flags_outside_tolerance() -> None:
             ),
         ),
         (
-            "Recorded operation",
+            speed_profile_comparison.ACTUAL_LABEL,
             speed_profile_comparison.ProfileMetrics(
                 time_error_s=4.6,
                 stop_error_m=0.0,
@@ -273,7 +273,7 @@ def test_comparison_table_formatting_flags_outside_tolerance() -> None:
     assert "Within stop/time tolerance" in table
     assert "55.00^a" in table  # (200 - 90) / 200 outside tolerance
     assert "-10.00^a" in table  # (90 - 100) / 100 outside tolerance
-    assert "50.00 " in table  # DP vs recorded, within tolerance
+    assert "50.00 " in table  # DP vs actual, within tolerance
     assert "Min. margin to line speed limit (km/h)" in table
 
 
@@ -578,10 +578,10 @@ def test_speed_profile_comparison_execution(
     table_file = out_dir / "dp_rl_actual_comparison_table.md"
     assert table_file.is_file()
     content = table_file.read_text(encoding="utf-8")
-    assert "PPO-PIRS (proposed)" in content
+    assert speed_profile_comparison.PROPOSED_LABEL in content
     assert "DP" in content
     assert "PPO-Best" in content
-    assert "Recorded operation" in content
+    assert "| Actual " in content
     assert "Total energy (kWh)" in content
 
 
